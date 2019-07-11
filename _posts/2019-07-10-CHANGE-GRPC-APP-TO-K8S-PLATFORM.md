@@ -1,13 +1,15 @@
 ---
 layout:     post
-title:      将GRPC型应用移植上K8S的收获
-subtitle:   WWDC 2018 Keynote 全记录
-date:       2018-06-05
-author:     BY
-header-img: img/post-bg-cook.jpg
+title:      将GRPC型服务移植到K8S上的收获
+subtitle:   k8s入门记录
+date:       2019-07-11
+author:     pandaychen
+header-img: 
 catalog: true
 tags:
-    - iOS
+    - kubernetes
+    - GRPC
+    - loadbalance
 ---
 
 ## 前言
