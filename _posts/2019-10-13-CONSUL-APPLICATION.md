@@ -1,7 +1,7 @@
 ---
 layout:     post
-title:      GRPC+Consul服务治理的那些事
-subtitle:   使用Consul构建高可用的后端服务
+title:      Consul服务治理的那些事
+subtitle:   使用GRPC+Consul构建高可用的后端服务
 date:       2019-10-12
 author:     pandaychen
 catalog: true
@@ -11,7 +11,7 @@ tags:
     - GRPC
 ---
 
-业余时间利用GRPC+CONSUL实现的服务发现一个项目[grpclb2consul](https://github.com/pandaychen/grpclb2consul/)。这篇文章，总结下我在开发和Consul使用过程中的一些经验<br>
+    业余时间利用GRPC+CONSUL实现的服务发现一个项目[grpclb2consul](https://github.com/pandaychen/grpclb2consul/)。这篇文章，总结下我在开发和Consul使用过程中的一些经验<br>
 
 ##  Consul介绍
 
@@ -63,7 +63,7 @@ Consul支持开箱即用的多数据中心.这意味着用户不需要担心需�
 ###	集群架构与节点类型
 首先Consul支持多数据中心，在上图中有两个数据中心（DataCenter1个DataCenter2），他们通过Internet互联，同时请注意为了提高通信效率，只有Server节点才加入跨数据中心的通信。
 
-在单个数据中心中，Consul分为Client和Server两种节点（<font color=red>所有的节点也被称为Agent</font>），Server节点保存数据，Client负责健康检查（healthy check）及转发数据请求到Server；
+在单个数据中心中，Consul分为Client和Server两种节点（所有的节点也被称为Agent），Server节点保存数据，Client负责健康检查（healthy check）及转发数据请求到Server；
 
 在Consul集群中，Server节点是一定需要的，Client节点可以不需要；
 
@@ -73,8 +73,8 @@ Consul支持开箱即用的多数据中心.这意味着用户不需要担心需�
 
 跨数据中心的gossip协议也同时使用TCP和UDP通信，端口使用8302。
 
-###	数据读写的流程（和ETCD类似）
-集群内数据的读写请求既可以直接发到Server，也可以通过Client使用RPC转发到Server，请求最终会到达Leader节点，在允许数据轻微陈旧的情况下，读请求也可以在普通的Server节点完成，集群内数据的读写和复制都是通过TCP的8300端口完成。
+###	数据读写的流程
+集群内数据的读写请求既可以直接发到Server，也可以通过Client使用RPC转发到Server，请求最终会到达Leader节点，在允许数据轻微陈旧的情况下，读请求也可以在普通的Server节点完成，集群内数据的读写和复制都是通过TCP的8300端口完成。（和ETCD类似的流程）
 
 ##	Consul服务发现原理
 下面这张图基本描述了服务发现的完整流程，一个可以在现网中集群部署的方式（简单）：<br>
@@ -92,9 +92,15 @@ Consul支持开箱即用的多数据中心.这意味着用户不需要担心需�
 ## Consul-Docker部署
 
 Consul的docker镜像基于alpine构建的，进入容器的时候需要指定/bin/bash
+
+首先拉取镜像：
 ```
 docker pull consul      #拉取镜像
-先启动第一个Docker
+```
+
+先启动第一个Docker：
+
+```
 #启动第1个Server节点，集群要求要有3个Server，将容器8500端口映射到主机8900端口，同时开启管理界面
 docker run -d --name=consul_1 -p 8900:8500 -e CONSUL_BIND_INTERFACE=eth0 consul agent --server=true --bootstrap-expect=3 --client=0.0.0.0 -ui
 ```
@@ -126,16 +132,16 @@ docker run -d --name=consul_4 -e CONSUL_BIND_INTERFACE=eth0 consul agent --serve
 ##  Consul服务发现测试
 
 ### 服务注册
-Consul通用的注册方式，JSON配置文件，需要在配置文件中指定两个重要信息，一是服务的IP和端口，二是健康检查的方法，尤其要注意健康检查，这个在Consul实现服务注册时特别重要，一旦健康检查服务失败，服务会被标记为下线。<br>
+Consul通用的注册方式，JSON配置文件，需要在配置文件中指定两个重要信息，一是服务的IP和端口，二是健康检查的方法，尤其要注意健康检查，这个在Consul实现服务注册时特别重要，一旦健康检查服务失败，服务会被标记为下线。这个地方需要注意，我在另外一篇文章中详细说。<br>
 
-设置GRPC健康检查方式为TTL，Consul-Agent地址设置为http://172.17.0.2:8500，运行GRPC-Server：
+在测试服务端[server.go](https://github.com/pandaychen/grpclb2consul/blob/master/example/server.go)中，设置GRPC健康检查方式为TTL，Consul-Agent地址设置为http://172.17.0.2:8500，运行GRPC-Server：
 ![image](https://s2.ax1x.com/2019/10/18/KVCUvq.png)
 
 查看WEB，健康检查通过，服务启动成功：
 ![image](https://s2.ax1x.com/2019/10/18/KVCDVU.png)
 
 ### 服务发现
-客户端设置Consul-Agent地址为http://172.17.0.3:8500，注意这里和Server设置的不一样（当然也可以一样），运行GRPC-Client:
+在测试客户端[client.go](https://github.com/pandaychen/grpclb2consul/blob/master/example/client.go)中，设置Consul-Agent地址为http://172.17.0.3:8500，注意这里和Server设置的不一样（当然也可以一样），运行GRPC-Client:
 ![image](https://s2.ax1x.com/2019/10/18/KVCfr6.png)
 
 ##  后记
