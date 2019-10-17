@@ -4,7 +4,6 @@ title:      Consul的那些事
 subtitle:   使用Consul构建高可用的后端服务
 date:       2019-10-12
 author:     pandaychen
-header-img: 
 catalog: true
 tags:
     - Consul
