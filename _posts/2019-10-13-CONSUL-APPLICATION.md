@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      Consul的那些事
+title:      GRPC+Consul服务治理的那些事
 subtitle:   使用Consul构建高可用的后端服务
 date:       2019-10-12
 author:     pandaychen
@@ -11,12 +11,11 @@ tags:
     - GRPC
 ---
 
-##  Consul的那些事
-业余时间利用GRPC+CONSUL实现的服务发现一个项目(grpclb2consul)[https://github.com/pandaychen/grpclb2consul/]。这篇文章，总结下我在开发和Consul使用过程中的一些经验<br>
+业余时间利用GRPC+CONSUL实现的服务发现一个项目[grpclb2consul](https://github.com/pandaychen/grpclb2consul/)。这篇文章，总结下我在开发和Consul使用过程中的一些经验<br>
 
 ##  Consul介绍
 
-目前我使用到的Consul功能，服务发现与注册（含健康检查）/分布式KeyValue存储/配置中心/DNS/分布式锁<br>
+目前我使用到的Consul功能，服务发现与注册（含健康检查）/分布式KeyValue存储/配置中心/DNS/分布式锁,总而言之，只有理解了Consul的设计思路，才能熟练的应用它。（Consul应用思路和Etcd真的很不一样）<br>
 
 Consul和Etcd的功能是有重叠的（有很多文章都有对二者进行比较），不过Etcd仅仅是一个CP的KV存储，而Consul更像是一个微服务开发的完整套件。Consul的官网介绍：<br>
 
@@ -78,5 +77,70 @@ Consul支持开箱即用的多数据中心.这意味着用户不需要担心需�
 集群内数据的读写请求既可以直接发到Server，也可以通过Client使用RPC转发到Server，请求最终会到达Leader节点，在允许数据轻微陈旧的情况下，读请求也可以在普通的Server节点完成，集群内数据的读写和复制都是通过TCP的8300端口完成。
 
 ##	Consul服务发现原理
-下面这张图基本描述了服务发现的完整流程
-![image](consul2.png)
+下面这张图基本描述了服务发现的完整流程，一个可以在现网中集群部署的方式（简单）：<br>
+
+![image](https://s2.ax1x.com/2019/10/17/KEqC8O.png)
+
+
+
+首先需要有一个正常的Consul集群，有Server，有Leader。这里在服务器Server1、Server2、Server3上分别部署了Consul Server，假设他们选举了Server2上的Consul Server节点为Leader。这些服务器上最好只部署Consul程序，以尽量维护Consul Server的稳定。
+
+然后在服务器Server4和Server5上通过Consul Client分别注册Service A、B、C，这里每个Service分别部署在了两个服务器上，这样可以避免Service的单点问题。服务注册到Consul可以通过HTTP API（8500端口）的方式，也可以通过Consul配置文件的方式。Consul Client可以认为是无状态的，它将注册信息通过RPC转发到Consul Server，服务信息保存在Server的各个节点中，并且通过Raft实现了强一致性。
+
+最后在服务器Server6中Program D需要访问Service B，这时候Program D首先访问本机Consul Client提供的HTTP API，本机Client会将请求转发到Consul Server，Consul Server查询到Service B当前的信息返回，最终Program D拿到了Service B的所有部署的IP和端口，然后就可以选择Service B的其中一个部署并向其发起请求了。如果服务发现采用的是DNS方式，则Program D中直接使用Service B的服务发现域名，域名解析请求首先到达本机DNS代理，然后转发到本机Consul Client，本机Client会将请求转发到Consul Server，Consul Server查询到Service B当前的信息返回，最终Program D拿到了Service B的某个部署的IP和端口。
+
+## Consul-Docker部署
+
+Consul的docker镜像基于alpine构建的，进入容器的时候需要指定/bin/bash
+```
+docker pull consul      #拉取镜像
+先启动第一个Docker
+#启动第1个Server节点，集群要求要有3个Server，将容器8500端口映射到主机8900端口，同时开启管理界面
+docker run -d --name=consul_1 -p 8900:8500 -e CONSUL_BIND_INTERFACE=eth0 consul agent --server=true --bootstrap-expect=3 --client=0.0.0.0 -ui
+```
+使用docker exec -ti 7efe(容器ID)  /bin/sh进入容器查看下容器的内网IP:172.17.0.2，以此IP为Server节点将其他Consul-Node加入并构建集群：
+![image](https://s2.ax1x.com/2019/10/17/KELqB9.png)
+
+```
+#启动第2个Server节点，并加入集群
+docker run -d --name=consul_2 -e CONSUL_BIND_INTERFACE=eth0 consul agent --server=true --client=0.0.0.0 --join 172.17.0.2
+ 
+#启动第3个Server节点，并加入集群
+docker run -d --name=consul_3 -e CONSUL_BIND_INTERFACE=eth0 consul agent --server=true --client=0.0.0.0 --join 172.17.0.2
+ 
+#启动第4个Client节点，并加入集群
+docker run -d --name=consul_4 -e CONSUL_BIND_INTERFACE=eth0 consul agent --server=false --client=0.0.0.0 --join 172.17.0.2
+```
+
+集群搭建完成后，我们在容器中执行consul members，查看集群的组成信息，我们的集群中，启动4个Consul Agent，3个Server（会选举出一个leader），1个Client。
+![image](https://s2.ax1x.com/2019/10/17/KEO5VA.png)
+
+这些Consul节点在Docker的容器内是互通的，他们通过桥接的模式通信。但是如果主机要访问容器内的网络，需要做端口映射。在启动第一个容器时，将Consul的8500端口映射到了主机的8900端口，这样就可以方便的通过主机的浏览器查看集群信息。
+
+
+##  Consul的WEB-UI
+根据上一步的暴露的UI端口8900，打开主页，能看到我们的集群中节点信息，共计4个节点。
+![image](https://s2.ax1x.com/2019/10/17/KEjXAs.png)
+
+
+##  Consul服务发现测试
+
+### 服务注册
+Consul通用的注册方式，JSON配置文件，需要在配置文件中指定两个重要信息，一是服务的IP和端口，二是健康检查的方法，尤其要注意健康检查，这个在Consul实现服务注册时特别重要，一旦健康检查服务失败，服务会被标记为下线。<br>
+
+设置GRPC健康检查方式为TTL，Consul-Agent地址设置为http://172.17.0.2:8500，运行GRPC-Server：
+![image](https://s2.ax1x.com/2019/10/18/KVCUvq.png)
+
+查看WEB，健康检查通过，服务启动成功：
+![image](https://s2.ax1x.com/2019/10/18/KVCDVU.png)
+
+### 服务发现
+客户端设置Consul-Agent地址为http://172.17.0.3:8500，注意这里和Server设置的不一样（当然也可以一样），运行GRPC-Client:
+![image](https://s2.ax1x.com/2019/10/18/KVCfr6.png)
+
+##  后记
+至此，一个GRPC+Consul的可用框架就搭建完成了。后面我还会写一篇文章，介绍Consul服务注册的详细方法、Consul与Etcd的比较。<br>
+
+
+
+
