@@ -8,12 +8,11 @@ header-img:
 catalog: true
 tags:
     - Consul
-    - Service Discovery
     - Loadbalance
     - GRPC
 ---
 
-#  Consul的那些事
+##  Consul的那些事
 业余时间利用GRPC+CONSUL实现的服务发现一个项目(grpclb2consul)[https://github.com/pandaychen/grpclb2consul/]。这篇文章，总结下我在开发和Consul使用过程中的一些经验<br>
 
 ##  Consul介绍
