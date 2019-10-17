@@ -11,7 +11,7 @@ tags:
     - GRPC
 ---
 
-    业余时间利用GRPC+CONSUL实现的服务发现一个项目[grpclb2consul](https://github.com/pandaychen/grpclb2consul/)。这篇文章，总结下我在开发和Consul使用过程中的一些经验<br>
+业余时间利用GRPC+CONSUL实现的服务发现一个项目[grpclb2consul](https://github.com/pandaychen/grpclb2consul/)。这篇文章，总结下我在开发和Consul使用过程中的一些经验<br>
 
 ##  Consul介绍
 
