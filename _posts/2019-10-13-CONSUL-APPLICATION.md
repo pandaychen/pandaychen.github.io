@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      Consul服务治理的那些事
+title:      Consul服务治理的那些事(一)
 subtitle:   使用GRPC+Consul构建高可用的后端服务
 date:       2019-10-12
 author:     pandaychen
@@ -11,7 +11,7 @@ tags:
     - GRPC
 ---
 
-业余时间利用GRPC+CONSUL实现的服务发现一个项目[grpclb2consul](https://github.com/pandaychen/grpclb2consul/)。这篇文章，总结下我在开发和Consul使用过程中的一些经验<br>
+业余时间利用GRPC+Consul实现的服务发现一个项目[grpclb2consul](https://github.com/pandaychen/grpclb2consul/)。这篇文章，总结下我在开发和Consul使用过程中的一些经验<br>
 
 ##  Consul介绍
 
@@ -39,7 +39,7 @@ Consul支持开箱即用的多数据中心.这意味着用户不需要担心需�
 短连接调用，连接的建立有开销，一旦调用路径增加，性能和时延的问题都会凸显
 
 -   可用性较差<br>
-靠DNS来做LoadBalance，是存在风险的，一旦其中一个后端故障又没有机器剔除后端的话，不幸调度到失败节点上，服务就可用，当然我们现网也遇到这种情况
+靠DNS来做LoadBalance，是存在风险的，一旦其中一个后端故障又没有机器剔除后端的话，不幸调度到失败节点上，服务就不可用，当然我们现网也遇到这种情况
 -   扩容麻烦<br>
 扩容，缩容，都需要修改DNS指向
 
@@ -67,7 +67,7 @@ Consul支持开箱即用的多数据中心.这意味着用户不需要担心需�
 
 在Consul集群中，Server节点是一定需要的，Client节点可以不需要；
 
-同一集群内的Server节点（图中每个DataCenter都具由3个Server节点）有一个Leader和多个Follower，Leader节点会将数据同步到Follower，Server的数量推荐是3个或者5个，在Leader挂掉的时候会启动选举机制产生一个新的Leader。Server间的选举遵循(RAFT算法)[https://github.com/hashicorp/raft]
+同一集群内的Server节点（图中每个DataCenter都具由3个Server节点）有一个Leader和多个Follower，Leader节点会将数据同步到Follower，Server的数量推荐是3个或者5个，在Leader挂掉的时候会启动选举机制产生一个新的Leader。Server间的选举遵循[RAFT算法](https://github.com/hashicorp/raft)
 
 集群内的Consul节点通过gossip协议维护成员关系（这里指的是Client和Server之间的通信），也就是说某个节点了解集群内现在还有哪些节点，这些节点是Client还是Server。单个数据中心的gossip协议同时使用TCP和UDP通信，并且都使用8301端口。
 
@@ -91,7 +91,7 @@ Consul支持开箱即用的多数据中心.这意味着用户不需要担心需�
 
 ## Consul-Docker部署
 
-Consul的docker镜像基于alpine构建的，进入容器的时候需要指定/bin/bash
+Consul的docker镜像基于alpine构建的，进入容器的时候需要指定/bin/sh
 
 首先拉取镜像：
 ```
