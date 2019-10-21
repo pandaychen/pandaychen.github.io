@@ -6,9 +6,7 @@ date:       2019-10-20
 author:     pandaychen
 catalog: true
 tags:
-    - Consul
-    - Loadbalance
-    - GRPC
+    - Etcd
 ---
 
 ##	Etcd 最佳实践
