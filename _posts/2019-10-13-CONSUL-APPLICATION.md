@@ -4,7 +4,7 @@ title:      Consul服务治理的那些事(一)
 subtitle:   使用GRPC+Consul构建高可用的后端服务
 date:       2019-10-12
 author:     pandaychen
-catalog: true
+catalog:    true
 tags:
     - Consul
     - Loadbalance
