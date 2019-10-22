@@ -93,19 +93,19 @@ Etcdctl get /a/b --prefix --write-out=fields    #
 ```
 
 ```
---quota-backend-bytes
+3.--quota-backend-bytes
 ```
 此参数Etcd-db数据大小，默认是2G,当数据达到2G的时候就不允许写入，必须对历史数据进行压缩才能继续写入。在启动的时候就应该提前确定大小，官方推荐是8G
 
 ###  Lease机制（Heartbeat）
 EtcdV3中提供了自动续期的函数[Lease.KeepAlive](https://github.com/Etcd-io/Etcd/blob/master/clientv3/lease.go#L108)，可以实现自动定时的续约某个租约（绑定到某个KEY）。关于Lease的TTL时间设置大小，是有个双刃剑的问题：
-1.  如果LeaseID过长，某台应用服务的Lease突然中断（服务不可用）且Etcd不能及时感知到服务下线，那么来自客户端的请求很有可能继续发送到故障的服务，从而导致调用失败；
+1.  如果LeaseID过长，某台应用服务故障（服务不可用），导致Lease突然中断且Etcd不能及时感知到服务下线，那么来自客户端的请求很有可能继续发送到故障的服务，从而导致调用失败；
 2.  如果LeaseID过短，网络的突然抖动，导致Key在Lease未成功续期而被Etcd移除，这就导致应用服务是正常的，但是在Etcd中，该（应用服务）因为Lease的TTL过期导致节点（KEY）已经不存在了。
 3.  KeepAlive和Put一样，如果在执行之前Lease就已经过期了，那么需要重新分配Lease。Etcd并没有提供API来实现原子的Put with Lease。
 
 
 解决的方法，我这里提供两点思路：
-1.  使用定时器timer代替Lease的Keepalive()功能，定时PUT-KEY-with-Lease，时间建议设置为LeaseTTL的1/3
+1.  使用定时器timer代替Lease的Keepalive功能，定时PUT-KEY-with-Lease，续期时间建议设置为LeaseTTL的1/3
 2.  监听Lease的channel，如果发现channel被动关闭了，重新申请Lease然后再执行KeepAlive方法进行续期（当然了，也要先判断Key是不是丢失了）
 
 总结一下：<br>
