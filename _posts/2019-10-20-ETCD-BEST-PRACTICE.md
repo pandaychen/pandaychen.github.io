@@ -78,6 +78,57 @@ Etcd中，存在租约的概念，租约过期后，Key就会被删除。假设�
 1.	Etcd有V2和V3版本，数据是不互通的，所以别用V3的API去操作V2版本API写入的数据，反之亦然
 2.	在V2版本中，每一个key都进行一次Etcd的set操作，这个操作是加锁的，所以，在读写的情况下会耗时很多在锁上面。V3版本中，是先聚合，再每128个操作进行一次事务性执行。V3较V2性能提升明显。
 
+### 创建安全的EtcdV3客户端
+在很多环境中我们启动etcd都是通过配置tls方式进行的（比如Kubernetes）,所以在连接etcd的时候需要使用tls的方式连接(可是百度上很多文章居然都没写.),具体的连接方式如下:
+```
+tlsInfo := transport.TLSInfo{
+    CertFile:      "etcd-v3.3.12-linux-amd64/etcd.pem",
+    KeyFile:       "etcd-v3.3.12-linux-amd64/etcd-key.pem",
+    TrustedCAFile: "etcd-v3.3.12-linux-amd64/ca.pem",
+}
+tlsConfig, err := tlsInfo.ClientConfig()
+if err != nil {
+    log.Fatal(err)
+}
+config := clientv3.Config{
+    Endpoints: []string{"127.0.0.1:2379"},
+    TLS:       tlsConfig,
+}
+client, e := clientv3.New(config)
+if e != nil {
+    log.Fatal(e.Error())
+}
+defer client.Close()
+```
+
+当然也可以使用User+Password的方式来创建，看这里的[clientv3.Client结构](https://godoc.org/github.com/coreos/etcd/clientv3#Client)
+```
+type Client struct {
+    Cluster
+    KV
+    Lease
+    Watcher
+    Auth
+    Maintenance
+
+    // Username is a user name for authentication.
+    Username string
+    // Password is a password for authentication.
+    Password string
+    // contains filtered or unexported fields
+}
+```
+
+此外，由于EtcdV3的客户端是gRPC实现的，所以也提供了gRPC拦截器的初始化：
+```
+cli, err := clientv3.New(clientv3.Config{
+    Endpoints: endpoints,
+    DialOptions: []grpc.DialOption{
+        grpc.WithUnaryInterceptor(grpcprom.UnaryClientInterceptor),
+        grpc.WithStreamInterceptor(grpcprom.StreamClientInterceptor),
+    },
+})
+```
 
 ### MVCC
 MVCC( Multiversion concurrency control 多版本并发控制 )，Etcd在内存中维护了一个 BTREE(B树)纯内存索引，它是有序的。(回想起MYSQL的索引也是BTREE实现的，极大的提升查找效率)<br>
