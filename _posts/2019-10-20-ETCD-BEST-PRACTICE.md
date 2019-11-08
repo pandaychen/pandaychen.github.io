@@ -63,9 +63,9 @@ Network Partition是必然的，网络非常可能出现问题（断线、超时
 
 ###	Some Funny Things
 Etcd官方提供了一个动态演示集群原理的项目<br>
-![play.etcd.io](https://github.com/etcd-io/etcdlabs)
+[play.etcd.io](https://github.com/etcd-io/etcdlabs)
 
-官方的API文档在这里：![Etcd-API](https://etcd.io/docs/v3.2.17/learning/api/)
+官方的API文档在这里：[Etcd-API](https://etcd.io/docs/v3.2.17/learning/api/)
 
 ### 物理节点监控
 物理节点的监控+进程监控<br>
@@ -189,6 +189,5 @@ Etcd提供了watcher，来监控集群kv的变化。这个在开发GRPC服务发
 ### 参考文档
 -   https://godoc.org/github.com/Etcd-io/Etcd/clientv3
 -   https://github.com/Etcd-io/Etcd/blob/master/Documentation/op-guide/maintenance.md
--   
 
 
