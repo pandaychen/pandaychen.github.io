@@ -1,24 +1,24 @@
 ---
 layout:     post
-title:      kubernetes应用改造(一)
-subtitle:   使用GRPC+Headless-Service构建后端服务
+title:      Kubernetes应用改造(一)
+subtitle:   使用gRPC+Headless-Service构建后端服务
 date:       2019-10-20
 author:     pandaychen
 catalog:    true
 tags:
     - Kubernetes
-    - GRPC
+    - gRPC
     - HeadlessSvc
 ---
 
 ## 背景
 
-本地后台程序容器化，服务上云，SASS化尝试，现阶段没有比Kubernetes更好的选择了。从七月到现在，三个月时间，通过对项目代码改造、后台服务的迁移和现网运行排障，算是对Kubernetes的服务部署和微服务化有了比较全面的认知。这篇博客就以GRPC服务在Kubernetes上的LoadBalancer改造来开个头。
+本地后台程序容器化，服务上云，SASS化尝试，现阶段没有比Kubernetes更好的选择了。从七月到现在，三个月时间，通过对项目代码改造、后台服务的迁移和现网运行排障，算是对Kubernetes的服务部署和微服务化有了比较全面的认知。这篇博客就以gRPC服务在Kubernetes上的LoadBalancer改造来开个头。
 
 
 ## Kubernetes从入门到入门
 
-网上有很多关于Kubernetes的高质量文章和阿里公开课，可以帮助读者构建Kubernetes的生态认知。Kubernetes的几个核心概念中，只要理解了分层的概念，穿透各个组件都是围绕此来设计和实现的。下层为上层提供服务，上层不要知道下层的具体实现细节，只需使用下层提供的服务。而层与层之间联系的桥梁就是接口(Interface)。<br>
+网上有很多关于Kubernetes的高质量文章，以及阿里的公开课，可以帮助读者构建Kubernetes的生态认知。Kubernetes的几个核心概念中，只要理解了分层的概念，穿透各个组件都是围绕此来设计和实现的。下层为上层提供服务，上层不要知道下层的具体实现细节，只需使用下层提供的服务。而层与层之间联系的桥梁就是接口(Interface)。<br>
 
 ##	开发需要掌握的Kubernetes
 就我个人而言，作为一名合格的云开发者，我认为需要理清楚下面的知识概念：
@@ -35,19 +35,27 @@ tags:
 10.	Kubernetes上的负载均衡如何做
 11. Kubernetes中的认证与授权、RBAC
 12. RBAC的应用之，如何使用ServiceAccount+证书来调用APISERVER的相关操作（当然了，必须对SA授权）
-13.	如何通过Kubernetes的API来获取POD列表的实时变化（实现GRPC+Kubernetes的自定义负载均衡的算法）
+13.	如何通过Kubernetes的API来获取POD列表的实时变化（实现gRPC+Kubernetes的自定义负载均衡的算法）
 
 ##  进阶话题
 - Kubernetes路由的实现原理，IPVS
 - Istio，感觉这个开源的作品在未来若干年会成为主流的管理应用
-- CRD开发，各种现网的特殊需求，原生提供的Crontroller可能无法满足
+- CRD开发，满足各种现网的特殊需求，原生提供的Crontroller可能无法满足，需要定制化适合业务的Controller
 
 未完待续
 
 ##  Service In Kubernetes
 
 引用一下GKE的图:<br>
-[Service](https://s2.ax1x.com/2019/10/22/KG5E5D.png)
-[Service+LB](https://s2.ax1x.com/2019/10/22/KG5aMn.png)
 
-一般应用中都使用Service的负载均衡方式
+![image](https://s2.ax1x.com/2019/10/22/KG5E5D.png)
+
+![image](https://s2.ax1x.com/2019/10/22/KG5aMn.png)
+
+一般应用中都使用LoadBalance的Service方式
+
+##  Kubernetes+gRPC的负载均衡的问题
+使用 k8s默认的Service做负载均衡的情况下，gRPC 的 RPC 协议是基于 HTTP/2 标准实现的，HTTP/2 的一大特性就是不需要像 HTTP/1.1 一样，每次发出请求都要重新建立一个新连接，而是会复用原有的连接。所以这将导致 kube-proxy 只有在连接建立时才会做负载均衡，而在这之后的每一次 RPC 请求都会利用原本的连接，那么实际上后续的每一次的 RPC 请求都跑到了同一个地方。看下面的文章
+![gRPC Load Balancing on Kubernetes without Tears](https://kubernetes.io/blog/2018/11/07/grpc-load-balancing-on-kubernetes-without-tears/)
+
+##  

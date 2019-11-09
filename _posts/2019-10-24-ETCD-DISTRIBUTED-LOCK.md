@@ -31,7 +31,7 @@ tags:
 要实现分布式锁，核心在两点，一是如何达成共识、二是状态同步。目前的实现方式一般会借助于Redis/ZooKeeper/Etcd来实现：
 1.	采用REDIS的SETNX命令+LUA原子脚本来实现（单REDIS实例），存在单点的风险
 2.	对1的改进版是采用集群Redis的[Redlock](http://stor.51cto.com/art/201901/590874.htm)
-3. [基于ZooKeeper实现的分布式锁](https://juejin.im/post/5c01532ef265da61362232ed)
+3. [基于ZooKeeper实现的分布式锁](https://juejin.im/post/5c01532ef265da61362232ed)<br>
 此外，下面这篇文章值得一读：
 [基于Redis的分布式锁到底安全吗](http://zhangtielei.com/posts/blog-redlock-reasoning.html)
 
