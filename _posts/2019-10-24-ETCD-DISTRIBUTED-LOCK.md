@@ -61,38 +61,31 @@ func lockUntilSignal(c *clientv3.Client, lockname string, cmdArgs []string) erro
     ...
 }
 ```
-
 先贴一下锁Mutex部分的Code，[Mutex](https://github.com/coreos/etcd/blob/master/clientv3/concurrency/mutex.go#L26)：
 在Code中注释介绍了具体的实现，代码也不长，简单分析一下：
-
-Mutex的结构
 ```
 // Mutex implements the sync Locker interface with etcd
 type Mutex struct {
 	s *Session
-
 	pfx   string   //锁的共同前缀pfx，如"/service/lock/"
 	myKey string   //当前持有锁的客户端的leaseid值（完整Key的组成为 pfx+"/"+leaseid）
 	myRev int64    //revision，理解为当前持有锁的Revision编号
 	hdr   *pb.ResponseHeader
 }
 ```
-
 初始化Mutex，可以看到在NewMutex方法中，并非直接拿传进来的pfx作为prefix的，而且在后面加了个"/"，在Etcd开发项目中，定义或查找prefix或suffix时都建议加上分隔符"/"，这是个好习惯，也可以避免出现问题。
 ```
 func NewMutex(s *Session, pfx string) *Mutex {
    //Etcd这里默认将/path的key结构转换为一个目录结构 /path/
    return &Mutex{s, pfx + "/", "", -1, nil}     
 }
-```  
-
+```
 TryAcquire：最基础的加锁方法，不难看出，该方法是通过Etcd的TXN（多键条件事务）原子方式来实现的，EtcdV3的TXN的语意是先做一个比较（compare）操作，如果比较成立则执行一系列操作，如果比较不成立则执行另外一系列操作。有类似于C语言中的条件表达式。即下面这句：
-
 Txn事务，以原子方式判定cmp的条件，如果为True，就设置getOwner的值；否则False，返回getOwner的值；最终用Commit()提交
 ```
 resp, err := client.Txn(ctx).If(cmp).Then(put, getOwner).Else(get, getOwner).Commit()
 ```
-
+下面看下TryAcquire方法：
 ```
 func (m *Mutex) tryAcquire(ctx context.Context) (*v3.TxnResponse, error) {
 	s := m.s
@@ -186,9 +179,7 @@ func (m *Mutex) Lock(ctx context.Context) error {
 	return werr
 }
 ```
-
 再看看waitDeletes函数的行为, waitDeletes 模拟了一种公平的先来后到的排队逻辑，等待所有当前比当前key的revision小的key被删除后，锁释放后才返回
-
 ```
 func waitDeletes(ctx context.Context, client *v3.Client, pfx string, maxCreateRev int64) (*pb.ResponseHeader, error) {
    // 注意WithLastCreate和WithMaxCreateRev这两个特性
@@ -208,7 +199,6 @@ func waitDeletes(ctx context.Context, client *v3.Client, pfx string, maxCreateRe
    }
 }
 
- 
 func waitDelete(ctx context.Context, client *v3.Client, key string, rev int64) error {
    cctx, cancel := context.WithCancel(ctx)
    defer cancel()
@@ -233,7 +223,6 @@ func waitDelete(ctx context.Context, client *v3.Client, key string, rev int64) e
 }
 
 ```
-
 ##	总结下Etcd实现分布式锁的步骤
 分析完concurrency的主要代码，不难总结出用Etcd构造（公平式长期）分布式锁的一般流程如下：
 
