@@ -79,7 +79,7 @@ Etcd中，存在租约的概念，租约过期后，Key就会被删除。假设�
 2.	在V2版本中，每一个key都进行一次Etcd的set操作，这个操作是加锁的，所以，在读写的情况下会耗时很多在锁上面。V3版本中，是先聚合，再每128个操作进行一次事务性执行。V3较V2性能提升明显。
 
 ### 创建安全的EtcdV3客户端
-在很多环境中我们启动etcd都是通过配置tls方式进行的（比如Kubernetes）,所以在连接etcd的时候需要使用tls的方式连接(可是百度上很多文章居然都没写.),具体的连接方式如下:
+在很多环境中我们启动Etcd都是通过配置TLS方式进行的（比如Kubernetes）,所以在连接Etcd的时候需要使用TLS方式连接：
 ```
 tlsInfo := transport.TLSInfo{
     CertFile:      "etcd-v3.3.12-linux-amd64/etcd.pem",
