@@ -1,17 +1,17 @@
 ---
 layout:     post
 title:      Consul服务治理的那些事(一)
-subtitle:   使用GRPC+Consul构建高可用的后端服务
+subtitle:   使用gRPC+Consul构建高可用的后端服务
 date:       2019-10-12
 author:     pandaychen
 catalog:    true
 tags:
     - Consul
     - Loadbalance
-    - GRPC
+    - gRPC
 ---
 
-业余时间利用GRPC+Consul实现的服务发现一个项目[grpclb2consul](https://github.com/pandaychen/grpclb2consul/)。这篇文章，总结下我在开发和Consul使用过程中的一些经验<br>
+业余时间利用gRPC+Consul实现的服务发现一个项目[grpclb2consul](https://github.com/pandaychen/grpclb2consul/)。这篇文章，总结下我在开发和Consul使用过程中的一些经验<br>
 
 ##  Consul介绍
 
@@ -33,7 +33,7 @@ Consul支持开箱即用的多数据中心.这意味着用户不需要担心需�
 
 
 ##  为什么要使用服务治理
-我们的项目，后台都是GRPC的服务，最早的调用方式都是RPC调用满天飞，各种短连接请求；另外负载均衡的方式主要是DNS。这种方式主要有以下几个缺点（当然现网中也遇到过）：<br>
+我们的项目，后台都是gRPC的服务，最早的调用方式都是RPC调用满天飞，各种短连接请求；另外负载均衡的方式主要是DNS。这种方式主要有以下几个缺点（当然现网中也遇到过）：<br>
 
 -   性能不高<br>
 短连接调用，连接的建立有开销，一旦调用路径增加，性能和时延的问题都会凸显
@@ -134,18 +134,18 @@ docker run -d --name=consul_4 -e CONSUL_BIND_INTERFACE=eth0 consul agent --serve
 ### 服务注册
 Consul通用的注册方式，JSON配置文件，需要在配置文件中指定两个重要信息，一是服务的IP和端口，二是健康检查的方法，尤其要注意健康检查，这个在Consul实现服务注册时特别重要，一旦健康检查服务失败，服务会被标记为下线。这个地方需要注意，我在另外一篇文章中详细说。<br>
 
-在测试服务端[server.go](https://github.com/pandaychen/grpclb2consul/blob/master/example/server.go)中，设置GRPC健康检查方式为TTL，Consul-Agent地址设置为http://172.17.0.2:8500，运行GRPC-Server：
+在测试服务端[server.go](https://github.com/pandaychen/grpclb2consul/blob/master/example/server.go)中，设置gRPC健康检查方式为TTL，Consul-Agent地址设置为http://172.17.0.2:8500，运行gRPC-Server：
 ![image](https://s2.ax1x.com/2019/10/18/KVCUvq.png)
 
 查看WEB，健康检查通过，服务启动成功：
 ![image](https://s2.ax1x.com/2019/10/18/KVCDVU.png)
 
 ### 服务发现
-在测试客户端[client.go](https://github.com/pandaychen/grpclb2consul/blob/master/example/client.go)中，设置Consul-Agent地址为http://172.17.0.3:8500，注意这里和Server设置的不一样（当然也可以一样），运行GRPC-Client:
+在测试客户端[client.go](https://github.com/pandaychen/grpclb2consul/blob/master/example/client.go)中，设置Consul-Agent地址为http://172.17.0.3:8500，注意这里和Server设置的不一样（当然也可以一样），运行gRPC-Client:
 ![image](https://s2.ax1x.com/2019/10/18/KVCfr6.png)
 
 ##  后记
-至此，一个GRPC+Consul的可用框架就搭建完成了。后面我还会写一篇文章，介绍Consul服务注册的详细方法、Consul与Etcd的比较。<br>
+至此，一个gRPC+Consul的可用框架就搭建完成了。后面我还会写一篇文章，介绍Consul服务注册的详细方法、Consul与Etcd的比较。<br>
 
 
 
