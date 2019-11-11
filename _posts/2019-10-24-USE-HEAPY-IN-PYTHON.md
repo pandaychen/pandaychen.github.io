@@ -10,13 +10,13 @@ tags:
 ---
 
 ##  背景
-最近工作中遇到一个场景，使用python写的脚本做kafka的消费端，使用的是多进程模式，父进程从kafka收，通过multiprocessing.Queue发给子进程处理，处理的数据是基于会话的，子进程用一个dict来存储。KEY为会话ID，VALUE为一个list（模拟queue的方式实现了一个字符数组队列），根据指定的分隔符做push和pop操作。但是随着会话数量的增加，dict使用的内存量也是无限扩展，根据先前遇到的case来看，这样无限增长下去的后果就是被系统给OOM。于是，这就引入了一个问题，如何监控Heap的使用量？如何避免dict内存的无限扩张？
+最近工作中遇到一个场景，使用`python`写的脚本做`kafka`的消费端，使用的是多进程模式，父进程从`kafka`收，通过`multiprocessing.Queue`发给子进程处理，处理的数据是基于会话的，子进程用一个`dict`来存储。KEY为会话ID，VALUE为一个list（模拟`queue`的方式实现了一个字符数组队列），根据指定的分隔符做`push`和`pop`操作。但是随着会话数量的增加，`dict`使用的内存量也是无限扩展，根据先前遇到的case来看，这样无限增长下去的后果就是被系统给OOM。于是，这就引入了一个问题，如何监控`Heap`的使用量？如何避免`dict`内存的无限扩张？
 
 
 ##  监控篇
-[Python高性能编程](https://book.douban.com/subject/27064848/)这本书中介绍过一个模块，Heapy。很适合拿来做Heap内存用量统计。<br>
-guppy 获取内存使用的各种对象占用情况<br>
-guppy 可以打印各种对象所占空间大小，如果python进程中有未释放的对象，造成内存占用升高，可通过guppy查看。<br>
+[Python高性能编程](https://book.douban.com/subject/27064848/)这本书中介绍过一个模块，`Heapy`。很适合拿来做Heap内存用量统计。<br>
+`guppy` 获取内存使用的各种对象占用情况<br>
+`guppy` 可以打印各种对象所占空间大小，如果python进程中有未释放的对象，造成内存占用升高，可通过`guppy`查看。<br>
 
 看下面的例子：
 ```
