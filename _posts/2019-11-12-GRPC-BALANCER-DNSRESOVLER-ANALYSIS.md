@@ -1,7 +1,7 @@
 ---
 layout:     post
-title:      
-subtitle:   gRPC源码分析-DnsResovler篇
+title:      gRPC源码分析-DnsResovler篇
+subtitle:   如何使用DNS负载均衡器
 date:       2019-07-11
 author:     pandaychen
 header-img: 
@@ -15,7 +15,7 @@ tags:
 
 关于`gRPC Naming`机制，官方有比较详细的[文档](https://github.com/grpc/grpc/blob/master/doc/naming.md)介绍。
 
-Resovler（解析器）在gRPC中完成了这样一个过程，它对来自服务注册中心的数据（`Push`或者`Pull`两种方式），做出响应，将得到的结果数据通知gRPC内置的负载均衡器`Loadbalancer`。在实现上通常划分为resolver和watcher。官方提供了一个基于`DNS`的实现，这篇文章来分析下这个`DnsResovler`的实现逻辑。
+Resovler（解析器）在`gRPC`中完成了这样一个过程，它对来自服务注册中心的数据（`Push`或者`Pull`两种方式），做出响应，将得到的结果数据通知`gRPC`内置的负载均衡器`Balancer`。在实现上通常划分为`Resolver`和`Watcher`两个模块。官方提供了一个基于`DNS`的实现，这篇文章来分析下这个`DnsResovler`的实现逻辑。
 
 `gRPC`支持`DNS`作为默认的`Name Resovler`，如果配置的域名指向多个合法的`DNS`记录（如`A`、`TXT`等），则使用`DnsResovler`的`gRPC`请求将在多个`IP`之间轮转。客户端的调用形式如下：
 
@@ -521,4 +521,5 @@ func parseTarget(target string) (host, port string, err error) {
 
 ```
 
-##	参考
+##	总结
+至此，`gRPC`默认的`DNS`解析器主要源码就分析完成了。不过，由于`DNS`本身无法感知后端健康状态的问题，所以在实战中如何剔除掉不健康的后端，是使用`DNS`作为负载均衡手段时需要考虑的问题；另外`DNS`有`TTL`这个特性的存在，在多层次`DNS`架构中，可能也会成为服务治理的一个难题。
