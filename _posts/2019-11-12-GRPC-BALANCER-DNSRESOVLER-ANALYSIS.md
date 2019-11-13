@@ -202,7 +202,7 @@ func UnregisterForTesting(scheme string) {
 ```
 
 ##  源码分析之dns_resolver.go（gRPC提供的DNS解析器）
-代码在此(dns_resolver.go)[https://github.com/grpc/grpc-go/blob/master/resolver/dns/dns_resolver.go]，这里的`DNS`解析器和先前我在项目中实现的`Consul`、`Etcd`的解析器相比，最大的不同，是`DNS`必须以轮询方式去请求获取`Endpoint`的地址列表。下面的代码中的`watcher()`方法有所体现：
+代码在此[dns_resolver.go](https://github.com/grpc/grpc-go/blob/master/resolver/dns/dns_resolver.go)，这里的`DNS`解析器和先前我在项目中实现的`Consul`、`Etcd`的解析器相比，最大的不同，是`DNS`必须以轮询方式去请求获取`Endpoint`的地址列表。下面的代码中的`watcher()`方法有所体现：
 ```
 // Package dns implements a dns resolver to be installed as the default resolver
 // in grpc.
