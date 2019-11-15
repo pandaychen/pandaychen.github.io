@@ -50,7 +50,7 @@ EtcdV3版本的[Concurrency包](https://godoc.org/github.com/coreos/etcd/clientv
 我们从Etcd提供的[Lock方法](https://github.com/etcd-io/etcd/blob/master/etcdctl/ctlv3/command/lock_command.go)来入手，看看Lock操作是如何实现的：
 
 command.lockUntilSignal
-```
+``` golang
 func lockUntilSignal(c *clientv3.Client, lockname string, cmdArgs []string) error {
    m := concurrency.NewMutex(s, lockname)		//通过concurrency的NewMutex初始化
     ctx, cancel := context.WithCancel(context.TODO())
