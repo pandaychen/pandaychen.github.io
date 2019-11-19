@@ -16,12 +16,10 @@ tags:
 ##  Jekyll支持Latex的设置
 
 1.  第一步，将`_config.yml`中的 `markdown` 修改为
-
 ``` js
 markdown: kramdown
 ```
 2. 第二步，在`header`文件中添加引用和设置代码，也就是_include/header.html中
-
 ``` js
   <script type="text/x-mathjax-config">
     MathJax.Hub.Config({
@@ -35,17 +33,17 @@ markdown: kramdown
 ``` 
 
 ##  数学公式的例子
+1.	
+$$E=mc^2$$
+2.	行间公式（Lorentz方程）
 
-1.  $$E=mc^2$$
-
-2.  行间公式（Lorentz方程）
 $$ 
 \begin{aligned} \dot{x} &= \sigma(y-x) \\ 
 \dot{y} &= \rho x - y - xz \\ 
 \dot{z} &= -\beta z + xy \end{aligned} 
 $$
 
-3.  
+3.	
 $$
 R_{\mu \nu} - {1 \over 2}g_{\mu \nu}\,R + g_{\mu \nu} \Lambda
 = {8 \pi G \over c^4} T_{\mu \nu}
