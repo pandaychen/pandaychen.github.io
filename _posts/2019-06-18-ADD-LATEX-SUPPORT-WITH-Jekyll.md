@@ -36,13 +36,11 @@ markdown: kramdown
 1.	
 $$E=mc^2$$
 2.	行间公式（Lorentz方程）
-
 $$ 
 \begin{aligned} \dot{x} &= \sigma(y-x) \\ 
 \dot{y} &= \rho x - y - xz \\ 
 \dot{z} &= -\beta z + xy \end{aligned} 
 $$
-
 3.	
 $$
 R_{\mu \nu} - {1 \over 2}g_{\mu \nu}\,R + g_{\mu \nu} \Lambda
