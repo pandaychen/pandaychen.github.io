@@ -11,7 +11,7 @@ tags:
 ---
 
 ##  介绍
-上一次用[`Latex`](https://zh.wikipedia.org/wiki/LaTeX)都是7年前的事情了，编写密码学的复杂的数学公式之必备利器。
+上一次用[`Latex`](https://zh.wikipedia.org/wiki/LaTeX)都是7年前的事情了，编写密码学的复杂数学公式之必备利器。
 
 ##  Jekyll支持Latex的设置
 
