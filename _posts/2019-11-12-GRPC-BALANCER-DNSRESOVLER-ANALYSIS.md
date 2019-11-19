@@ -19,7 +19,7 @@ Resovler（解析器）在`gRPC`中完成了这样一个过程，它对来自服
 
 `gRPC`支持`DNS`作为默认的`Name Resovler`，如果配置的域名指向多个合法的`DNS`记录（如`A`、`TXT`等），则使用`DnsResovler`的`gRPC`请求将在多个`IP`之间轮转。客户端的调用形式如下：
 
-```
+``` golang
 conn, err := grpc.Dial(
         "dns:///test-service-domain:8080",
         grpc.WithBalancerName(roundrobin.Name),
@@ -28,7 +28,7 @@ conn, err := grpc.Dial(
 
 如果去除 "dns:///", 仅仅是域名加端口的形式，则只会请求同一个实例。只有当该实例Shutdown或者下线后才会切换到另一个实例。
 
-```
+``` golang
 conn, err := grpc.Dial(
         "test-service-domain:8081",
         grpc.WithBalancerName(roundrobin.Name),
@@ -41,7 +41,7 @@ conn, err := grpc.Dial(
 `gRPC`支持`DNS`作为默认`Naming`系统，同时也提供了实现`Naming`系统乃至`LoadBalance`功能的用户侧接口。所以，第三方注册中心，如`Etcd`、`Consul`、`Zookeeper`都可以作为非常优秀的`gRPC`负载均衡实现。
 `gRPC Name Resolution`常用如下格式，scheme表示要使用的`Naming`方式。目前常用的schemes有（`DNS`是内置的方案）：
 
-```
+``` golang
 scheme://authority/endpoint_name
 
 dns (例: dns://8.8.8.8/www.qq.com)
@@ -51,7 +51,7 @@ ipv6 (IPv6地址 例: ipv6:///2607:f8b0:400a:801::1001)
 
 ##  源码分析之resolver.go
 
-```
+``` go
 // Package resolver defines APIs for name resolution in gRPC.
 // All APIs in this package are experimental.
 package resolver
@@ -203,7 +203,7 @@ func UnregisterForTesting(scheme string) {
 
 ##  源码分析之dns_resolver.go（gRPC提供的DNS解析器）
 代码在此[dns_resolver.go](https://github.com/grpc/grpc-go/blob/master/resolver/dns/dns_resolver.go)，这里的`DNS`解析器和先前我在项目中实现的`Consul`、`Etcd`的解析器相比，最大的不同，是`DNS`必须以轮询方式去请求获取`Endpoint`的地址列表。下面的代码中的`watcher()`方法有所体现：
-```
+``` go
 // Package dns implements a dns resolver to be installed as the default resolver
 // in grpc.
 func init() {

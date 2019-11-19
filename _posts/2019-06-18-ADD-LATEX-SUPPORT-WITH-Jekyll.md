@@ -35,18 +35,17 @@ markdown: kramdown
 ##  数学公式的例子
 1.	
 $$E=mc^2$$
-2.	行间公式（Lorentz方程）
+2.	
 $$ 
 \begin{aligned} \dot{x} &= \sigma(y-x) \\ 
 \dot{y} &= \rho x - y - xz \\ 
 \dot{z} &= -\beta z + xy \end{aligned} 
 $$
-3.	
+3.  
 $$
 R_{\mu \nu} - {1 \over 2}g_{\mu \nu}\,R + g_{\mu \nu} \Lambda
 = {8 \pi G \over c^4} T_{\mu \nu}
 $$
-
 
 ##  参考
 -   [How to support latex in github-pages?](https://stackoverflow.com/questions/26275645/how-to-support-latex-in-github-pages)
