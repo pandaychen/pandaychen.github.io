@@ -5,6 +5,7 @@ subtitle:   使用heapy统计堆上的对象（内存）
 date:       2019-10-20
 author:     pandaychen
 catalog:    true
+description:	使用heapy统计堆上的对象，如何避免dict内存扩容导致的OOM
 tags:
     - 性能优化
 ---
