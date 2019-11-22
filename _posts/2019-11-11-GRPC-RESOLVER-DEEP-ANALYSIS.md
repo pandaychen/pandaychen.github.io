@@ -185,12 +185,12 @@ import (
 	etcdnaming "go.etcd.io/etcd/clientv3/naming"
 	"google.golang.org/grpc"
 )
-
 cli, cerr := clientv3.NewFromURL("http://localhost:2379")
 r := &etcdnaming.GRPCResolver{Client: cli}
 b := grpc.RoundRobin(r)
 conn, gerr := grpc.Dial("my-service", grpc.WithBalancer(b), grpc.WithBlock(), ...)
 ```
+
 
 ### 调用链视图
 grpc.RoundRobin-->Dial/DialContext-->newCCResolverWrapper-->调用resolver.Build()--->调用Build()实现的Watcher()--->完成并返回状态
