@@ -12,12 +12,12 @@ tags:
 ---
 
 ##	前言
-gRPC 负载均衡是针对每次请求，而不是连接，这样可以保证服务端负载的均衡性，gRPC 所有负载均衡算法实现都在客户端。本系列就来分析下gRPC 是如何构建它的负载均衡框架的。
+gRPC 负载均衡是针对每次请求，而不是连接，这样可以保证服务端负载的均衡性，所有负载均衡算法实现都在客户端。本系列文章对 gRPC 的负载均衡框架做深入的分析。
 
 ##  gRPC的解析器Resolver
 Resolver，直观上就联想到/etc/resolv.conf，配置域名解析规则，和DNS服务器交互，获取解析结果。<br>
-本篇文章详细分析下[gRPC-Resolver](https://godoc.org/google.golang.org/grpc/resolver)的实现，[上一篇文章](https://pandaychen.github.io/2019/07/11/GRPC-SERVICE-DISCOVERY/)介绍了`gRPC`负载均衡的基础概念。<br>
-首先，来看一张关于`gRPC`客户端负载均衡实现的官方架构图（截止目前最新的架构）：
+本篇文章详细分析下[gRPC-Resolver](https://godoc.org/google.golang.org/grpc/resolver)的实现，[上一篇文章](https://pandaychen.github.io/2019/07/11/GRPC-SERVICE-DISCOVERY/)介绍了gRPC负载均衡的基础概念。<br>
+首先，来看一张关于gRPC客户端负载均衡实现的官方架构图（截止目前最新的架构）：
 ![image](https://raw.githubusercontent.com/grpc/proposal/master/L9_graphics/bar_after.png)
 从图中，可以看到Resolver解析器位于架构的最左方，它主要完成下面这几个功能：
 
@@ -34,7 +34,7 @@ Resolver，直观上就联想到/etc/resolv.conf，配置域名解析规则，�
 本小节，来分析下[resolver.go](https://godoc.org/google.golang.org/grpc/resolver)的主要结构。最早gRPC提供了[`Naming`](https://godoc.org/google.golang.org/grpc/naming)包，用来完成解析的功能，不过其功能很有限，现在已经deprecated了，现在一般用resolver包来完成
 
 ### Address结构
-Address结构中的Addr字段一般包含ip和端口信息，Metadata一般放入服务器的额外信息，比如权重、总连接数等等信息，用于负载均衡算法的判定
+Address结构中的`Addr`字段一般包含ip和端口信息，`Metadata`一般放入服务器的额外信息，比如权重、总连接数等等信息，用于负载均衡算法的判定
 ```go
 // Address represents a server the client connects to.
 // This is the EXPERIMENTAL API and may be changed or extended in the future.
@@ -73,8 +73,8 @@ type Address struct {
 ```
 
 ### Builder
-官方文档的这句：`Builder creates a resolver that will be used to watch name resolution updates`，当向grpc注册（解析器）服务发现时，实际上注册的是Builder，一般在Build中会开启单独的groutine，进行list-watcher逻辑。
-Build()参数中的`cc ClientConn`，提供了Builder和ClientConn交互的纽带，可以调用`cc.UpdateState(resolver.State{Addresses: addrList})`来向`ClientConn`即时发送服务器列表的更新<br>
+官方文档的这句：`Builder creates a resolver that will be used to watch name resolution updates`，大致意思是：当向gRPC注册（解析器）服务发现时，实际上注册的是`Builder`，一般在`Build`中会开启单独的groutine，进行List-watcher逻辑。<br>
+Build()参数中的`cc ClientConn`，提供了`Builder`和`ClientConn`交互的纽带，可以调用`cc.UpdateState(resolver.State{Addresses: addrList})`来向`ClientConn`即时发送服务器列表的更新<br>
 **<font color="#dd0000">这里先预埋一个问题，我们实现的`resolver.Builder()`在哪个gRPC阶段被调用？</font>**
 
 ```go
@@ -101,20 +101,20 @@ type Resolver interface {
 	//
     // It could be called multiple times concurrently.
     // 当有连接被出现异常时，会触发该方法，因为这时候可能是有服务实例挂了，需要立即实现一次服务发现
-	ResolveNow(ResolveNowOptions)   
+	ResolveNow(ResolveNowOptions)
 	// Close closes the resolver.
 	Close()
 }
 ```
 
 ### ClientConn
-resolver中的`ClientConn`结构提供了resolver通知`ClientConn`更新服务端列表的回调方法。日常封装自己的resolver时，常用下面的结构，这里注册中心用的是`Etcd`：
+resolver中的`ClientConn`结构提供了resolver通知`ClientConn`更新服务端列表的回调方法。日常封装自己的resolver时，建议使用一个成员变量来接收`resolver.ClientConn`，这里注册中心用的是`Etcd`：
 ```go
 type EtcdResolver struct {
-    ......
+    ...
 	cc            resolver.ClientConn       //用来接收在resolver.Build()中的第二个参数，由外部传入
 	EtcdCli       *clientv3.Client
-    ......
+    ...
 }
 ```
 再看ClientConn的结构：
@@ -164,10 +164,13 @@ type Target struct {
 ```
 ### 小结
 现在我们对resolver做下小结：
-其中Builder接口用来创建Resolver，我们可以提供自己的服务发现实现，然后将其注册到grpc中，其中通过scheme来标识，而Resolver接口则是提供服务发现功能。当resover发现服务列表发生变更时，会通过ClientConn回调接口通知上层。
+其中`Builder`接口用来创建`Resolver`，我们可以提供自己的服务发现实现逻辑，然后将其注册到gRPC中，其中通过`scheme`来标识，而`Resolver`接口则是提供服务发现功能。当`Resolver`发现服务列表发生变更时，会通过`ClientConn`回调接口通知上层。
 
 ##  Resolver的调用链
-在实际项目中，一般gRPC+`Etcd`实现的客户端的负载均衡调用的代码实现如下（Etcd也有个官方的简单实现[Using etcd discovery with go-grpc](https://etcd.io/docs/v3.3.12/dev-guide/grpc_naming/)），下面本节就从`DialContext`入手：
+本小节，来分析下Resolver的调用链是什么。<br>
+
+在实际项目中，一般gRPC`+`Etcd实现的客户端的负载均衡调用的代码实现如下（Etcd也有个官方的简单实现[Using etcd discovery with go-grpc](https://etcd.io/docs/v3.3.12/dev-guide/grpc_naming/)）：
+-	通用的实现方式
 ```go
 resolver := NewXXXResolver(service_name,registy_endpoints)      //传入要watcher的key和etcd集群地址
 balancer := grpc.RoundRobin(resolver)                           //调用负载均衡器初始化resolver
@@ -175,8 +178,7 @@ ctx, cancel := context.WithTimeout(context.Background(), GRPC_CONNECT_TIMEOUT*ti
 //Dial/DialContext开启balancer+resolver的功能
 conn, err = grpc.DialContext(ctx, registy_endpoints, grpc.WithTransportCredentials(creds), grpc.WithBalancer(balancer), grpc.WithBlock())
 ```
-
-下面是Etcd文档的实现，大同小异
+-	Etcd文档的实现，大同小异
 ```go
 import (
 	"go.etcd.io/etcd/clientv3"
@@ -191,18 +193,21 @@ conn, gerr := grpc.Dial("my-service", grpc.WithBalancer(b), grpc.WithBlock(), ..
 ```
 
 ### 调用链视图
-DialContext-->newCCResolverWrapper-->调用resolver.Build()--->调用Build()实现的Watcher()--->完成并返回状态
+grpc.RoundRobin-->Dial/DialContext-->newCCResolverWrapper-->调用resolver.Build()--->调用Build()实现的Watcher()--->完成并返回状态
 ![image]()
 
 ### grpc.RoundRobin
 [grpc.RoundRobin](https://github.com/grpc/grpc-go/blob/master/balancer.go#L124)是一个`grpc.Balancer`
-它的原型如下，可见传入的参数是`naming.Resolver`，返回值是`grpc.Balancer`
+它的原型如下，可见传入的参数是`naming.Resolver`，返回值是`grpc.Balancer`，ps：从描述上看，此方法也即将`Deprecated`，更新后的方法[balancer/roundrobin](https://godoc.org/google.golang.org/grpc/balancer/roundrobin)，这是一个很规范的实现gRPC `Picker`的模板，后面文章会详细分析。
 ```go
-func RoundRobin(r naming.Resolver) Balancer
+// Deprecated: please use package balancer/roundrobin. May be removed in a future 1.x release.
+func RoundRobin(r naming.Resolver) Balancer {
+	return &roundRobin{r: r}
+}
 ```
 
 ### DialContext
-当我们使用Dial或者DialContext接口创建grpc的客户端连接时，首先会解析参数target（Etcd集群地址），然后创建对应的resolver：
+这里我们就从`DialContext`入手，看下gRPC对Resolver的处理过程。当我们使用Dial或者DialContext接口创建gRPC的客户端连接时，首先会解析参数target（Etcd集群地址），然后创建对应的resolver：
 ``` go
 func DialContext(ctx context.Context, target string, opts ...DialOption) (conn *ClientConn, err error) {
 	cc := &ClientConn{
@@ -225,8 +230,8 @@ func DialContext(ctx context.Context, target string, opts ...DialOption) (conn *
 	// 如果没有指定resolverBuilder
 	if cc.dopts.resolverBuilder == nil {
 		// 解析target，根据target的scheme获取对应的resolver
-		cc.parsedTarget = parseTarget(cc.target)
- 		cc.dopts.resolverBuilder = resolver.Get(cc.parsedTarget.Scheme)
+		cc.parsedTarget = parseTarget(cc.target)							//解析我们自定义实现的resolver
+ 		cc.dopts.resolverBuilder = resolver.Get(cc.parsedTarget.Scheme)		//重要：在下面分析
 		// 如果scheme没有注册对应的resolver
 		if cc.dopts.resolverBuilder == nil {
             // 使用默认的resolver
@@ -269,17 +274,38 @@ func DialContext(ctx context.Context, target string, opts ...DialOption) (conn *
 ```
 
 ### parseTarget
+回想下resolver包中[`Build()`](https://godoc.org/google.golang.org/grpc/resolver#Get)中的`Scheme()`方法，一般实现中自己设定一个解析器标识:
+```go
+type Builder interface {
+    // Build creates a new resolver for the given target.
+    //
+    // gRPC dial calls Build synchronously, and fails if the returned error is not nil.
+    Build(target Target, cc ClientConn, opts BuildOptions) (Resolver, error)
+    // Scheme returns the scheme supported by this resolver.
+    // Scheme is defined at https://github.com/grpc/grpc/blob/master/doc/naming.md.
+    Scheme() string
+}
+```
+
+在项目中，需要设定一个解析器标识scheme，例如，解析器名称设置为`etcdv3resolver`，那么在`Dial`传入`etcdv3resolver:///`，就在`parseTarget`这里做解析：
+```go
+func (r EtcdNewResolver) Scheme() string {
+	return "etcdv3resolver"
+}
+```
+
+如果已经实现自定义的resolver，那么传入`Dial`的scheme会在这里做解析：
 ```go
 // 有效的target：scheme://authority/endpoint
 func parseTarget(target string) (ret resolver.Target) {
 	var ok bool
-	ret.Scheme, ret.Endpoint, ok = split2(target, "://")
+	ret.Scheme, ret.Endpoint, ok = split2(target, "://")	//传入etcdv3resolver:///，Scheme就是etcdv3resolver
 	if !ok {
         // 如果没有scheme，则整个target作为endpoint
 		return resolver.Target{Endpoint: target}
 	}
     // 如果指定了sheme，那么必须有`/`，分割authorigy和endpoint
-    // 当不需要指定authorigy，比如使用dnsResolver时:`dns:///www.demo.com`
+    // 当不需要指定authority，比如使用dnsResolver时:`dns:///www.demo.com`
 	ret.Authority, ret.Endpoint, ok = split2(ret.Endpoint, "/")
 	if !ok {
 		return resolver.Target{Endpoint: target}
@@ -287,6 +313,22 @@ func parseTarget(target string) (ret resolver.Target) {
 	return ret
 }
 ```
+
+###	resolver.Get(cc.parsedTarget.Scheme)
+这里会根据解析得到的解析器的名称，去`resolve.m map[string]Builder`这个全局map中查询对应的`Builder`，然后返回给`cc.dopts.resolverBuilder`，这样，我们自定义的`resolver.Builder`就成功的和`ClientConn`关联上了
+```go
+//resolver中的全局MAP
+m = make(map[string]Builder)
+// Get returns the resolver builder registered with the given scheme.
+// If no builder is register with the scheme, nil will be returned.
+func Get(scheme string) Builder {
+	if b, ok := m[scheme]; ok {
+		return b
+	}
+	return nil
+}
+```
+
 ### newCCResolverWrapper
 这里回答前面预埋的一个问题，我们自己构建resolver中的`Build()`方法，最终是在哪里被调用的？答案就是`newCCResolverWrapper`
 ```go
@@ -316,4 +358,10 @@ func newCCResolverWrapper(cc *ClientConn) (*ccResolverWrapper, error) {
 }
 ```
 
-##  参考
+##  总结
+至此，对gRPC-Resolver的流程分析就基本完成了。
+
+##	参考
+-	[package resolver](https://godoc.org/google.golang.org/grpc/resolver)
+-	[package grpc](https://godoc.org/google.golang.org/grpc)
+-	[package roundrobin](https://godoc.org/google.golang.org/grpc/balancer/roundrobin)
