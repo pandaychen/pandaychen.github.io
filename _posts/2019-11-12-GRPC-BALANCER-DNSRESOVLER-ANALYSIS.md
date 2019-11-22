@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      gRPC源码分析之DnsResovler篇
+title:      gRPC源码分析之DnsResolver篇
 subtitle:   如何使用内置的DNS负载均衡器
 date:       2019-07-11
 author:     pandaychen
@@ -15,9 +15,9 @@ tags:
 
 关于`gRPC Naming`机制，官方有比较详细的[文档](https://github.com/grpc/grpc/blob/master/doc/naming.md)介绍。
 
-Resovler（解析器）在`gRPC`中完成了这样一个过程，它对来自服务注册中心的数据（`Push`或者`Pull`两种方式），做出响应，将得到的结果数据通知`gRPC`内置的负载均衡器`Balancer`。在实现上通常划分为`Resolver`和`Watcher`两个模块。官方提供了一个基于`DNS`的实现，这篇文章来分析下这个`DnsResovler`的实现逻辑。
+Resolver（解析器）在`gRPC`中完成了这样一个过程，它对来自服务注册中心的数据（`Push`或者`Pull`两种方式），做出响应，将得到的结果数据通知`gRPC`内置的负载均衡器`Balancer`。在实现上通常划分为`Resolver`和`Watcher`两个模块。官方提供了一个基于`DNS`的实现，这篇文章来分析下这个`DnsResolver`的实现逻辑。
 
-`gRPC`支持`DNS`作为默认的`Name Resovler`，如果配置的域名指向多个合法的`DNS`记录（如`A`、`TXT`等），则使用`DnsResovler`的`gRPC`请求将在多个`IP`之间轮转。客户端的调用形式如下：
+`gRPC`支持`DNS`作为默认的`Name Resolver`，如果配置的域名指向多个合法的`DNS`记录（如`A`、`TXT`等），则使用`DnsResolver`的`gRPC`请求将在多个`IP`之间轮转。客户端的调用形式如下：
 
 ``` golang
 conn, err := grpc.Dial(

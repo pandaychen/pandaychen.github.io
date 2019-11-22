@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      gRPC源码分析之Resovler篇
+title:      gRPC源码分析之Resolver篇
 subtitle:   gRPC客户端解析器分析
 date:       2019-11-20
 author:     pandaychen
@@ -169,8 +169,8 @@ type Target struct {
 ##  Resolver的调用链
 在实际项目中，一般gRPC+`Etcd`实现的客户端的负载均衡调用的代码实现如下（Etcd也有个官方的简单实现[Using etcd discovery with go-grpc](https://etcd.io/docs/v3.3.12/dev-guide/grpc_naming/)），下面本节就从`DialContext`入手：
 ```go
-resovler := NewXXXResolver(service_name,registy_endpoints)      //传入要watcher的key和etcd集群地址
-balancer := grpc.RoundRobin(resovler)                           //调用负载均衡器初始化resovler
+resolver := NewXXXResolver(service_name,registy_endpoints)      //传入要watcher的key和etcd集群地址
+balancer := grpc.RoundRobin(resolver)                           //调用负载均衡器初始化resolver
 ctx, cancel := context.WithTimeout(context.Background(), GRPC_CONNECT_TIMEOUT*time.Second)
 //Dial/DialContext开启balancer+resolver的功能
 conn, err = grpc.DialContext(ctx, registy_endpoints, grpc.WithTransportCredentials(creds), grpc.WithBalancer(balancer), grpc.WithBlock())
@@ -305,7 +305,7 @@ func newCCResolverWrapper(cc *ClientConn) (*ccResolverWrapper, error) {
 	}
 
 	var err error
-    // 创建resovler，resovler创建之后，需要立即执行服务发现逻辑，然后将发现的服务列表通过resolver.ClientConn回调接口通知上层
+    // 创建resolver，resolver创建之后，需要立即执行服务发现逻辑，然后将发现的服务列表通过resolver.ClientConn回调接口通知上层
     
     // 非常重要：这里的Build也就是我们在自己的resolver.go中实现的Build()方法，传入的三个参数。在我们实现中，Build中创建和启动了Watcher
 	ccr.resolver, err = rb.Build(cc.parsedTarget, ccr, resolver.BuildOption{DisableServiceConfig: cc.dopts.disableServiceConfig})
