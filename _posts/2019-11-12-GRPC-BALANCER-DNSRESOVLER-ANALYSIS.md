@@ -1,7 +1,7 @@
 ---
 layout:     post
-title:      gRPC源码分析-DnsResovler篇
-subtitle:   如何使用DNS负载均衡器
+title:      gRPC源码分析之DnsResovler篇
+subtitle:   如何使用内置的DNS负载均衡器
 date:       2019-07-11
 author:     pandaychen
 header-img: 
@@ -520,6 +520,9 @@ func parseTarget(target string) (host, port string, err error) {
 }
 
 ```
+
+##	DnsResolver的应用场景
+在项目中，`DnsResolver`与[CoreDNS](https://github.com/coredns/coredns)搭配是一个不错的选择，不过需要注意的是，解析DNS的时间，`DnsResolver`中默认是30分钟，个人感觉可以优化下。
 
 ##	总结
 至此，`gRPC`默认的`DNS`解析器主要源码就分析完成了。不过，由于`DNS`本身无法感知后端健康状态的问题，所以在实战中如何剔除掉不健康的后端，是使用`DNS`作为负载均衡手段时需要考虑的问题；另外`DNS`有`TTL`这个特性的存在，在多层次`DNS`架构中，可能也会成为服务治理的一个难题。

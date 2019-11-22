@@ -19,7 +19,7 @@ tags:
 `guppy` 可以打印各种对象所占空间大小，如果`python`进程中有未释放的对象，造成内存占用升高，可通过`guppy`查看。<br>
 
 看下面的例子：
-```
+``` python
 #coding=utf8
 
 from guppy import hpy
@@ -44,7 +44,7 @@ if __name__=='__main__':
 
 <br><br>
 运行下输入结果，可以看到最终200w个数据，大约占用了151987464/1024/1024=144M内存。
-```
+``` bash
 Partition of a set of 25949 objects. Total size = 3325000 bytes.
  Index  Count   %     Size   % Cumulative  % Kind (class / dict of class)
      0  11775  45   933896  28    933896  28 str
@@ -77,8 +77,8 @@ Partition of a set of 2025820 objects. Total size = 151987464 bytes.
 ##  优化篇
 为了避免`dict`的无限内存扩张，我的优化主要从下面几个方面着手的：
 1.  预估好单机的可用内存量可以承载多大规模的会话，设置处理的会话数量上限，在进程中做统计，当会话量达到上限的80%时，触发告警机制；
-2.  对Kafka的消费端做分组，生产端对会话ID做`Topic`绑定，确定一个唯一的会话只发到一个固定的Partition上，这就保证了一个会话数据，只被一个固定的消费端进程处理；
-3.  对Dict的本身使用上，定时器或者LRU的处理是必不可少的，实现上可以用采用最小堆或TimeWheel，定期清理超时的Key。
+2.  对`Kafka`的消费端做分组，生产端对会话ID做`Topic`绑定，确定一个唯一的会话只发到一个固定的Partition上，这就保证了一个会话数据，只被一个固定的消费端进程处理；
+3.  对`dict`的本身使用上，定时器或者LRU的处理是必不可少的，实现上可以用采用最小堆或TimeWheel，定期清理超时的Key。
 
 
 ##  后记
