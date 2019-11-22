@@ -28,13 +28,13 @@ Resolver，直观上就联想到/etc/resolv.conf，配置域名解析规则，�
 ##  Resolver的应用
 这里先提供两个典型的实现，`DNSResolver`和`EtcdResolver`：
 -   [DNSResolver](https://pandaychen.github.io/2019/07/11/GRPC-BALANCER-DNSRESOVLER-ANALYSIS/)，gRPC官方提供的实现，以定时轮询方式访问域名服务器来获取服务器更新
--   [EtcdResolver](https://etcd.io/docs/v3.3.12/dev-guide/grpc_naming/))，Etcd文档提供的示例，以List-Watcher方式实现的Resolver
+-   [EtcdResolver](https://etcd.io/docs/v3.3.12/dev-guide/grpc_naming/)，Etcd文档提供的示例，以List-Watcher方式实现的Resolver
 
 ##  resolver.go中主要结构分析
-本小节，来分析下[resolver.go](https://godoc.org/google.golang.org/grpc/resolver)的主要结构。最早gRPC提供了[`Naming`](https://godoc.org/google.golang.org/grpc/naming)包，用来完成解析的功能，不过其功能很有限，现在已经deprecated了，现在一般用resolver包来完成
+本小节，来分析下[resolver.go](https://godoc.org/google.golang.org/grpc/resolver)的主要结构。最早gRPC提供了[`Naming`](https://godoc.org/google.golang.org/grpc/naming)包，用来完成解析的功能，不过其功能很有限，现在已经deprecated了，现在一般用resolver包来完成。
 
 ### Address结构
-Address结构中的`Addr`字段一般包含ip和端口信息，`Metadata`一般放入服务器的额外信息，比如权重、总连接数等等信息，用于负载均衡算法的判定
+Address结构中的`Addr`字段一般包含ip和端口信息，`Metadata`一般放入服务器的额外信息，比如权重、总连接数等等信息，用于负载均衡算法的判定：
 ```go
 // Address represents a server the client connects to.
 // This is the EXPERIMENTAL API and may be changed or extended in the future.
@@ -74,7 +74,7 @@ type Address struct {
 
 ### Builder
 官方文档的这句：`Builder creates a resolver that will be used to watch name resolution updates`，大致意思是：当向gRPC注册（解析器）服务发现时，实际上注册的是`Builder`，一般在`Build`中会开启单独的groutine，进行List-watcher逻辑。<br>
-Build()参数中的`cc ClientConn`，提供了`Builder`和`ClientConn`交互的纽带，可以调用`cc.UpdateState(resolver.State{Addresses: addrList})`来向`ClientConn`即时发送服务器列表的更新<br>
+Build()参数中的`cc ClientConn`，提供了`Builder`和`ClientConn`交互的纽带，可以调用`cc.UpdateState(resolver.State{Addresses: addrList})`来向`ClientConn`即时发送服务器列表的更新。<br>
 **<font color="#dd0000">这里先预埋一个问题，我们实现的`resolver.Builder()`在哪个gRPC阶段被调用？</font>**
 
 ```go
@@ -163,8 +163,9 @@ type Target struct {
 }
 ```
 ### 小结
-现在我们对resolver做下小结：
+现在我们对resolver做下小结：<br>
 其中`Builder`接口用来创建`Resolver`，我们可以提供自己的服务发现实现逻辑，然后将其注册到gRPC中，其中通过`scheme`来标识，而`Resolver`接口则是提供服务发现功能。当`Resolver`发现服务列表发生变更时，会通过`ClientConn`回调接口通知上层。
+下一小节，我们来看下Resolver在gRPC客户端流程中实例的调用链。
 
 ##  Resolver的调用链
 本小节，来分析下Resolver的调用链是什么。<br>
@@ -317,7 +318,7 @@ func parseTarget(target string) (ret resolver.Target) {
 ```
 
 ###	resolver.Get(cc.parsedTarget.Scheme)
-这里会根据解析得到的解析器的名称，去`resolve.m map[string]Builder`这个全局map中查询对应的`Builder`，然后返回给`cc.dopts.resolverBuilder`，这样，我们自定义的`resolver.Builder`就成功的和`ClientConn`关联上了
+这里会根据解析得到的解析器的名称，去resolver包中`m map[string]Builder`这个全局map中查询对应的`Builder`，然后返回给`cc.dopts.resolverBuilder`，这样，我们自定义的`resolver.Builder`就成功的和`ClientConn`关联上了。
 ```go
 //resolver中的全局MAP
 m = make(map[string]Builder)
@@ -332,7 +333,7 @@ func Get(scheme string) Builder {
 ```
 
 ### newCCResolverWrapper
-这里回答前面预埋的一个问题，我们自己构建resolver中的`Build()`方法，最终是在哪里被调用的？答案就是`newCCResolverWrapper`
+这里回答前面预埋的一个问题，我们自己构建resolver中的`Build()`方法，最终是在哪里被调用的？答案就是`newCCResolverWrapper`。代码如下：
 ```go
 func newCCResolverWrapper(cc *ClientConn) (*ccResolverWrapper, error) {
 	// 在DialContext方法中，已经初始化了resolverBuilder
