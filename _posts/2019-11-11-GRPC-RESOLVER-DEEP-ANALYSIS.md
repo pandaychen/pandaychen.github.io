@@ -171,6 +171,7 @@ type Target struct {
 
 在实际项目中，一般gRPC`+`Etcd实现的客户端的负载均衡调用的代码实现如下（Etcd也有个官方的简单实现[Using etcd discovery with go-grpc](https://etcd.io/docs/v3.3.12/dev-guide/grpc_naming/)）：
 -	通用的实现方式
+
 ```go
 resolver := NewXXXResolver(service_name,registy_endpoints)      //传入要watcher的key和etcd集群地址
 balancer := grpc.RoundRobin(resolver)                           //调用负载均衡器初始化resolver
@@ -178,7 +179,9 @@ ctx, cancel := context.WithTimeout(context.Background(), GRPC_CONNECT_TIMEOUT*ti
 //Dial/DialContext开启balancer+resolver的功能
 conn, err = grpc.DialContext(ctx, registy_endpoints, grpc.WithTransportCredentials(creds), grpc.WithBalancer(balancer), grpc.WithBlock())
 ```
+
 -	Etcd文档的实现，大同小异
+
 ```go
 import (
 	"go.etcd.io/etcd/clientv3"
@@ -190,7 +193,6 @@ r := &etcdnaming.GRPCResolver{Client: cli}
 b := grpc.RoundRobin(r)
 conn, gerr := grpc.Dial("my-service", grpc.WithBalancer(b), grpc.WithBlock(), ...)
 ```
-
 
 ### 调用链视图
 grpc.RoundRobin-->Dial/DialContext-->newCCResolverWrapper-->调用resolver.Build()--->调用Build()实现的Watcher()--->完成并返回状态
