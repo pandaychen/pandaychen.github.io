@@ -52,7 +52,7 @@ tags:
 &emsp;&emsp;gRPC的内置方案如下图所示：
 ![image](https://image-static.segmentfault.com/210/753/2107536928-58c636c2d6702_articlex)
 <br>
-&emsp;&emsp;gRPC在官网文档中提供了实现LB的思路，并在不同语言的gRPC代码API中已提供了命名解析和负载均衡接口供扩展。默认提供了[DNS-resovler的实现](https://github.com/gRPC/gRPC-go/blob/v1.8.0/resolver/resolver.go)，接口相当规范，实现起来也不复杂，只需要实现服务注册（Registry）和服务监听+解析（Watcher+Resolver）的逻辑就行了，这里简单介绍其基本实现过程：
+&emsp;&emsp;gRPC在官网文档中提供了实现LB的思路，并在不同语言的gRPC代码API中已提供了命名解析和负载均衡接口供扩展。默认提供了[DNS-resolver的实现](https://github.com/gRPC/gRPC-go/blob/v1.8.0/resolver/resolver.go)，接口相当规范，实现起来也不复杂，只需要实现服务注册（Registry）和服务监听+解析（Watcher+Resolver）的逻辑就行了，这里简单介绍其基本实现过程：
 
 -   构建注册中心，这里注册中心一般要求具备分布式一致性（满足CAP定理的AP或CP）的高可用的组件集群，如Zookeeper、Consul、Etcd等
 -   构建gRPC服务端的注册逻辑，服务启动后定时向注册中心注册自身的关键信息（一般开启新的groutine来完成），至少包含IP和端口，其他可选信息，如自身的负载信息（CPU和Memory）、当前实时连接数等，这些辅助信息有助于帮助系统更好的执行LB算法
@@ -62,7 +62,7 @@ tags:
 ### gRPC负载均衡的运行机制
 gRPC提供了负载均衡实现的用户侧接口，我们可以非常方便的定制化业务的负载均衡策略，为了理解gRPC的负载均衡的实现机制，建议分析下`gRPC`实现负载均衡的代码。
 ![image](https://s2.ax1x.com/2019/11/13/MYima4.png)
-1.  Resovler 
+1.  Resolver 
 2.  Balancer
 3.  Register
 
