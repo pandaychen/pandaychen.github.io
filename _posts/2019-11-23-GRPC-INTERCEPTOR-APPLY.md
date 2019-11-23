@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      gRPC的Interceptor实战篇
+title:      gRPC之Interceptor实战篇
 subtitle:   
 date:       2019-11-20
 author:     pandaychen
@@ -16,6 +16,7 @@ tags:
 
 ##  Interceptor的结构体
 -   一元拦截器（grpc.UnaryInterceptor）<br>
+包含服务端`UnaryServerInterceptor`和客户端`UnaryClientInterceptor`，这里我们分析`UnaryServerInterceptor`:
 ```go
 func UnaryInterceptor(i UnaryServerInterceptor) ServerOption {
     return func(o *options) {
@@ -77,7 +78,6 @@ if err != nil {
 var opts []grpc.ServerOption
 opts = append(opts, grpc.UnaryInterceptor(interceptor))
 server := grpc.NewServer(opts...)
- 
 chatprt.RegisterHelloServer()
 server.Serve(listener)
 ```
