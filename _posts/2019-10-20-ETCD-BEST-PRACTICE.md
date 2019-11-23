@@ -75,12 +75,12 @@ Etcd官方提供了一个动态演示集群原理的项目<br>
 Etcd中，存在租约的概念，租约过期后，Key就会被删除。假设我们三台机器组成了Etcd集群，那么如果其中某台机器的NTP误差较大的话，是存在风险的，可能会导致设置的Lease时间和预期不符。所以必要的NTP同步是需要的
 
 ###	版本问题
-1.	Etcd有V2和V3版本，数据是不互通的，所以别用V3的API去操作V2版本API写入的数据，反之亦然
+1.	Etcd有V2和V3版本，数据是不互通的，所以勿用V3的API去操作V2版本API写入的数据，反之亦然
 2.	在V2版本中，每一个key都进行一次Etcd的set操作，这个操作是加锁的，所以，在读写的情况下会耗时很多在锁上面。V3版本中，是先聚合，再每128个操作进行一次事务性执行。V3较V2性能提升明显。
 
 ### 创建更安全的客户端
 在很多环境中我们启动Etcd都是通过配置TLS方式进行的（比如Kubernetes）,所以在连接Etcd的时候需要使用TLS方式连接：
-```
+```go
 tlsInfo := transport.TLSInfo{
     CertFile:      "etcd-v3.3.12-linux-amd64/etcd.pem",
     KeyFile:       "etcd-v3.3.12-linux-amd64/etcd-key.pem",
@@ -102,7 +102,7 @@ defer client.Close()
 ```
 
 当然也可以使用User+Password的方式来创建，看这里的[clientv3.Client结构](https://godoc.org/github.com/coreos/etcd/clientv3#Client)
-```
+```go
 type Client struct {
     Cluster
     KV
@@ -120,7 +120,7 @@ type Client struct {
 ```
 
 此外，由于EtcdV3的客户端是gRPC实现的，所以也提供了gRPC拦截器的初始化：
-```
+```go
 cli, err := clientv3.New(clientv3.Config{
     Endpoints: endpoints,
     DialOptions: []grpc.DialOption{
@@ -133,7 +133,7 @@ cli, err := clientv3.New(clientv3.Config{
 ### MVCC
 MVCC( Multiversion concurrency control 多版本并发控制 )，Etcd在内存中维护了一个 BTREE(B树)纯内存索引，它是有序的。(回想起MYSQL的索引也是BTREE实现的，极大的提升查找效率)<br>
 在这个BTREE中，整个KV存储大概就是这样：
-```
+```go
 type treeIndex struct {
     sync.RWMutex
     tree *btree.BTree
@@ -161,7 +161,7 @@ Etcd在事件模型（watch 机制）上与ZooKeeper完全不同，每次数据�
 -	使用参数 --write-out 可以格式化（json/fields ...）输出详细的信息，包括 Revision、ModRevison、Version，此外，还包括LeaseID
 
 如：
-```
+``` bash
 Etcdctl get /a/b --prefix --write-out=fields    #
 
 "Key" : "/a/b/key1-Iag4se1uz1"
@@ -188,15 +188,15 @@ Etcdctl get /a/b --prefix --write-out=fields    #
 
 因此，在大量使用的Etcd的实际生产场景中，需要考虑优化Etcd集群的配置，定期做compact和defrag，且对每个节点的defrag时间需要错开，不能同时进行。Etcd提供了如下参数来帮助我们实现自动压缩和碎片整理：
 
-```
+```bash
 1. --auto-compaction-retention  
 ```
 
-```
+```bash
 2.--max-request-bytes
 ```
 
-```
+```bash
 3.--quota-backend-bytes
 ```
 此参数Etcd-db数据大小，默认是2G,当数据达到2G的时候就不允许写入，必须对历史数据进行压缩才能继续写入。在启动的时候就应该提前确定大小，官方推荐是8G

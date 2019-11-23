@@ -70,12 +70,10 @@ gRPC提供了负载均衡实现的用户侧接口，我们可以非常方便的�
 在实践中，如何选取负载均衡策略是一个很有趣的话题，例如Nginx的`upstream`机制中就有很多经典的LB策略，如带权重的轮询[Weight-RoundRobin](https://github.com/nginx/nginx/blob/master/src/http/ngx_http_upstream_round_robin.c)，一般常用的负载均衡方法有如下几种：
 
 1.  RoundRobin（轮询）
-2.  Weight-RoundRobin（加权轮询）
-
+2.  Weight-RoundRobin（加权轮询）<br>
 不同的后端服务器可能机器的配置和当前系统的负载并不相同，因此它们的抗压能力也不相同。给配置高、负载低的机器配置更高的权重，而配置低、负载高的机器，给其分配较低的权重，降低其系统负载，加权轮询能很好地处理这一问题，并将请求顺序且按照权重分配到后端。
 3.  Random（随机）
-4.  Weight-Random（加权随机）
-
+4.  Weight-Random（加权随机）<br>
 通过系统的随机算法，根据后端服务器的列表随机选取其中的一台服务器进行访问
 5.  源地址哈希法
 
