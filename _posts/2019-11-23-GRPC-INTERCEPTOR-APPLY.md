@@ -91,3 +91,67 @@ type StreamServerInterceptor func(srv interface{}, ss ServerStream, info *Stream
 
 ##  Warning
 在 gRPC 中，服务器本身只能设置一个`UnaryServerInterceptor`和 `StreamServerInterceptor`。客户端亦是如此，虽然不会报错，但是只有最后一个才起作用。那么如何配置多个拦截器呢？ 下面我们从拦截器的实现代码入手分析下如何实现多个拦截器。
+
+
+##  如何实现多个拦截器
+[WithUnaryInterceptor](https://godoc.org/google.golang.org/grpc#WithUnaryInterceptor)
+```go
+// WithUnaryInterceptor returns a DialOption that specifies the interceptor for
+// unary RPCs.
+func WithUnaryInterceptor(f UnaryClientInterceptor) DialOption {
+	return newFuncDialOption(func(o *dialOptions) {
+		o.unaryInt = f
+	})
+}
+```
+设想下，如何设计链式的Interceptor？我脑海中浮现两个方案：
+-   回调方式调用
+-   数组依次调用
+
+##  已有的方案
+
+### go-grpc-middleware的Chain实现
+```go
+import "github.com/grpc-ecosystem/go-grpc-middleware"
+
+myServer := grpc.NewServer(
+    grpc.StreamInterceptor(grpc_middleware.ChainStreamServer(
+        ...
+    )),
+    grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(
+       ...
+    )),
+)
+```
+看看`ChainUnaryServer`方法的实现，在[chain.go](https://github.com/grpc-ecosystem/go-grpc-middleware/blob/master/chain.go)的实现：
+```go
+// ChainUnaryServer creates a single interceptor out of a chain of many interceptors.
+//
+// Execution is done in left-to-right order, including passing of context.
+// For example ChainUnaryServer(one, two, three) will execute one before two before three, and three
+// will see context changes of one and two.
+func ChainUnaryServer(interceptors ...grpc.UnaryServerInterceptor) grpc.UnaryServerInterceptor {
+	n := len(interceptors)
+
+    //return里面包含了一个完整的回调
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+        //定义chainer调用
+		chainer := func(currentInter grpc.UnaryServerInterceptor, currentHandler grpc.UnaryHandler) grpc.UnaryHandler {
+			return func(currentCtx context.Context, currentReq interface{}) (interface{}, error) {
+				return currentInter(currentCtx, currentReq, info, currentHandler)
+			}
+		}
+
+		chainedHandler := handler
+		for i := n - 1; i >= 0; i-- {
+			chainedHandler = chainer(interceptors[i], chainedHandler)
+		}
+
+		return chainedHandler(ctx, req)
+	}
+}
+```
+从实现上看，它采用了回调函数调用的方式，调用链为`chainedHandler[n-1]`-->`chainedHandler[n-2]`-->`...`-->`chainedHandler[0]`-->`handler`
+
+##  参考
+
