@@ -69,7 +69,7 @@ interceptor = func(ctx context.Context, req interface{}, info *grpc.UnaryServerI
 }
 ```
 相应的 gRPC 服务端代码大致如下：
-```go
+``` golang
 listener, err := net.Listen("tcp", fmt.Sprintf(":%s", port))
 if err != nil {
     panic(err)
