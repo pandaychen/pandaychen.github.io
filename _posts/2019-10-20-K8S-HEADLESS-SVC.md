@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      Kubernetes应用改造(一)
+title:      Kubernetes应用改造（一）
 subtitle:   使用gRPC+Headless-Service构建后端服务
 date:       2019-10-20
 author:     pandaychen

@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      Consul服务治理的那些事(一)
+title:      Consul服务治理的那些事（一）
 subtitle:   使用gRPC+Consul构建高可用的后端服务
 date:       2019-10-12
 author:     pandaychen
@@ -11,7 +11,7 @@ tags:
     - gRPC
 ---
 
-业余时间利用gRPC+Consul实现的服务发现一个项目[grpclb2consul](https://github.com/pandaychen/grpclb2consul/)。这篇文章，总结下我在开发和Consul使用过程中的一些经验<br>
+业余时间利用gRPC`+`Consul实现的服务发现一个项目[grpclb2consul](https://github.com/pandaychen/grpclb2consul/)。这篇文章，总结下我在开发和Consul使用过程中的一些经验<br>
 
 ##  Consul介绍
 
@@ -94,20 +94,20 @@ Consul支持开箱即用的多数据中心.这意味着用户不需要担心需�
 Consul的docker镜像基于alpine构建的，进入容器的时候需要指定/bin/sh
 
 首先拉取镜像：
-```
+```bash
 docker pull consul      #拉取镜像
 ```
 
 先启动第一个Docker：
 
-```
+```bash
 #启动第1个Server节点，集群要求要有3个Server，将容器8500端口映射到主机8900端口，同时开启管理界面
 docker run -d --name=consul_1 -p 8900:8500 -e CONSUL_BIND_INTERFACE=eth0 consul agent --server=true --bootstrap-expect=3 --client=0.0.0.0 -ui
 ```
 使用docker exec -ti 7efe(容器ID)  /bin/sh进入容器查看下容器的内网IP:172.17.0.2，以此IP为Server节点将其他Consul-Node加入并构建集群：
 ![image](https://s2.ax1x.com/2019/10/17/KELqB9.png)
 
-```
+```bash
 #启动第2个Server节点，并加入集群
 docker run -d --name=consul_2 -e CONSUL_BIND_INTERFACE=eth0 consul agent --server=true --client=0.0.0.0 --join 172.17.0.2
  

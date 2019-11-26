@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      基于gRPC的服务发现与负载均衡(基础篇)
+title:      基于gRPC的服务发现与负载均衡（基础篇）
 subtitle:   gRPC负载均衡架构分析
 date:       2019-07-11
 author:     pandaychen

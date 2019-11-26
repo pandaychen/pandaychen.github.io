@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      Kubernetes应用改造(二)
+title:      Kubernetes应用改造（二）
 subtitle:   使用Statefulsets钩建Etcd集群
 date:       2019-10-20
 author:     pandaychen

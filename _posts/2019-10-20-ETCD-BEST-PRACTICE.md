@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      Etcd 最佳实(踩)践(坑)
+title:      Etcd 最佳实（踩）践（坑）
 subtitle:   Etcd 日常踩坑集锦
 date:       2019-10-20
 author:     pandaychen
