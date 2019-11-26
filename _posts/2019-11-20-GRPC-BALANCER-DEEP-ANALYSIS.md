@@ -12,7 +12,7 @@ tags:
 ---
 
 ##  前言
-gRPC的Balancer代码[balancer](https://github.com/grpc/grpc-go/tree/master/balancer)
+本篇文章详细分析下[gRPC-Banlancer](https://github.com/grpc/grpc-go/tree/master/balancer)的实现。<br>
 首先，提几个问题，带着这几个问题，再看源码会收货更多：
 -   resolver获取到的后端列表，在哪里进行初始化连接的？
 -   resolver和balancer的交互是怎样的？
@@ -20,15 +20,14 @@ gRPC的Balancer代码[balancer](https://github.com/grpc/grpc-go/tree/master/bala
 -   picker如何实现？
 
 ##  0x00	gRPC的平衡器Balancer
-本篇文章详细分析下[gRPC-Banlancer](https://github.com/grpc/grpc-go/tree/master/balancer)的实现。<br>
-首先，再看这张gRPC客户端负载均衡实现的官方架构图（截止目前最新的架构）：
+首先，再看这张gRPC客户端负载均衡实现的官方架构图：
 ![image](https://raw.githubusercontent.com/grpc/proposal/master/L9_graphics/bar_after.png)
 从图中，可以看到Balancer平衡器位于架构的最右方，内置一个Picker模块，Balancer主要完成下面这几个功能：
 
 -   与Resolver通信（维持通信机制），接收Resolver通知的服务端列表更新，维护Connection Pool及每个连接的状态
 -   对上一步获取的服务端列表，调用`newSubConn`异步建立长连接（每个后端一个长连接），同时，监控连接的状态，及时更新Connection Pool
 -	创建Picker，Picker执行的算法就是真正的LB逻辑，当客户端使用`conn`初始化RPC方法时，通过Picker选择一个存活的连接，返回给客户端，然后调用UpdatePicker更新LB算法的内置状态，为下一次调用做准备
--   是gRPC负载均衡最核心的模块
+-   Balancer是gRPC负载均衡最核心的模块
 
 下面我们从Resovler更新列表开始，逐步揭开Balancer神秘的面纱。
 
