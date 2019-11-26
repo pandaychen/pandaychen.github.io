@@ -352,7 +352,8 @@ func newCCResolverWrapper(cc *ClientConn) (*ccResolverWrapper, error) {
 	var err error
     // 创建resolver，resolver创建之后，需要立即执行服务发现逻辑，然后将发现的服务列表通过resolver.ClientConn回调接口通知上层
     
-    // 非常重要：这里的Build也就是我们在自己的resolver.go中实现的Build()方法，传入的三个参数。在我们实现中，Build中创建和启动了Watcher
+	// 非常重要：这里的Build也就是我们在自己的resolver.go中实现的Build()方法，传入的三个参数。在我们实现中，Build中创建和启动了Watcher
+	 // 在gRPC的DNSresolver实现里，调用dnsBuilder.Build函数创建dnsResolver
 	ccr.resolver, err = rb.Build(cc.parsedTarget, ccr, resolver.BuildOption{DisableServiceConfig: cc.dopts.disableServiceConfig})
 	if err != nil {
 		return nil, err
@@ -360,6 +361,9 @@ func newCCResolverWrapper(cc *ClientConn) (*ccResolverWrapper, error) {
 	return ccr, nil
 }
 ```
+
+###	Resovler与Balancer的交互
+
 
 ##  总结
 至此，对gRPC-Resolver的流程分析就基本完成了。
