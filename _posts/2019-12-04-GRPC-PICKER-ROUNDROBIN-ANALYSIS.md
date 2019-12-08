@@ -1,7 +1,7 @@
 ---
 layout:     post
-title:      gRPC源码分析之官方Picker实现（Picker With RoundRobin）
-subtitle:   gRPC客户端选择器分析
+title:      gRPC源码分析之官方Picker实现
+subtitle:   gRPC客户端选择器分析（Picker With RoundRobin）
 date:       2019-12-06
 author:     pandaychen
 header-img: 
@@ -12,7 +12,7 @@ tags:
 ---
 
 ##	0x00	前言
-gRPC官方提供了基于[RoundRobin轮询算法](https://en.wikipedia.org/wiki/Round-robin_scheduling)的[Picker](https://github.com/grpc/grpc-go/blob/dc49de8acd511e4d47ad0cbf58bd77f4775c165f/balancer/roundrobin/roundrobin.go)实现。这篇文章简单分析下其源码，理解此过程，可以很轻易的实现自定义的负载均衡逻辑。前面文章已经介绍了Balancer和Picker的内部实现机制，本篇就在此基础上进行分析。官方给出的Picker接口实例化，整体逻辑比较直观，先贴下源码：
+&emsp;&emsp;gRPC官方提供了基于[RoundRobin轮询算法](https://en.wikipedia.org/wiki/Round-robin_scheduling)的[Picker](https://github.com/grpc/grpc-go/blob/dc49de8acd511e4d47ad0cbf58bd77f4775c165f/balancer/roundrobin/roundrobin.go)实现。这篇文章简单分析下其源码，理解此过程，可以很轻易的实现自定义的负载均衡逻辑。前面文章已经介绍了Balancer和Picker的内部实现机制，本篇就在此基础上进行分析。官方给出的Picker接口实例化，整体逻辑比较直观，先贴下源码：
 ```go
 package roundrobin
 
@@ -78,7 +78,7 @@ func (p *rrPicker) Pick(balancer.PickInfo) (balancer.PickResult, error) {
 ```
 
 ## 0x01	初始化
-首先，定义Pcker的名字和结构，`rrPickerBuilder`需要实现如何根据当前活跃的连接`info.ReadySCs`，生成初始化的ConnectionPool（可以看出gRPC提供了非常灵活的LB实现接口），`rrPicker`结构用来从ConnectionPool中，按照一定的策略来选择单个连接，给上层
+&emsp;&emsp;首先，定义Pcker的名字和结构，`rrPickerBuilder`需要实现如何根据当前活跃的连接`info.ReadySCs`，生成初始化的ConnectionPool（可以看出gRPC提供了非常灵活的LB实现接口），`rrPicker`结构用来从ConnectionPool中，按照一定的策略来选择单个连接，给上层
 ```go
 const Name = "round_robin"
 type rrPickerBuilder struct{}
@@ -99,7 +99,7 @@ return balancer.PickResult{SubConn: sc}
 ```
 
 ## 0x02	注册  Picker
-使用`NewBalancerBuilderV2`来实现将我们实现的Picker逻辑嵌入（注册）到Balancer中，同时提供一个Picker的名字（关联对应的`balancer.Builder`），将其注册到Balancer的全局map中。
+&emsp;&emsp;使用`NewBalancerBuilderV2`来实现将我们实现的Picker逻辑嵌入（注册）到Balancer中，同时提供一个Picker的名字（关联对应的`balancer.Builder`），将其注册到Balancer的全局map中。
 
 包初始化方法`init`：
 ```go
@@ -171,7 +171,7 @@ func (bb *baseBuilder) Name() string {
 
 
 ##	0x04 构建负载均衡选择器rrPicker
-这里选择官方的`V2Picker`来作为Picker，只需要实现`Pick`方法就ok：
+&emsp;&emsp;这里选择官方的`V2Picker`来作为Picker，只需要实现`Pick`方法就ok：
 ```go
 type V2Picker interface {
 	// Pick returns the connection to use for this RPC and related information.
@@ -240,4 +240,4 @@ type PickResult struct {
 ```
 
 ##	0x05	总结
-可以看出，gRPC的`Picker`结构实现，还是非常友好的。只要理解了代码的流程，很容易的可以写出自己的负载均衡实现逻辑，下一篇文章，再聊聊目前比较流行的负载均衡算法，如待权重的rr、P2C、随机、一致性hash、会话保持等实现。
+&emsp;&emsp;可以看出，gRPC的`Picker`结构实现，还是非常友好的。只要理解了代码的流程，很容易的可以写出自己的负载均衡实现逻辑，下一篇文章，再聊聊目前比较流行的负载均衡算法，如待权重的rr、P2C、随机、一致性hash、会话保持等实现。
