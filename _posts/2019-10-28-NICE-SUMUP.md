@@ -58,3 +58,5 @@ tags:
 ##  后台服务实现（gPRC/HTTP/TCP）
 -   gRPC、HTTP的客户端是否需要加入重试机制？
 -   gRPC、HTTP的客户端是否需要保持长连接（避免连接建立导致的消耗，如TLS等）
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

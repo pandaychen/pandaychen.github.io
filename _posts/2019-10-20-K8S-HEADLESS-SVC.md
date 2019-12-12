@@ -123,4 +123,5 @@ serv-ca.nspace.svc.cluster.local service = 0 25 8088 172-16-1-18.serv-ca.nspace.
 
 
 ##  总结
-在
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

@@ -372,3 +372,5 @@ func newCCResolverWrapper(cc *ClientConn) (*ccResolverWrapper, error) {
 -	[package resolver](https://godoc.org/google.golang.org/grpc/resolver)
 -	[package grpc](https://godoc.org/google.golang.org/grpc)
 -	[package roundrobin](https://godoc.org/google.golang.org/grpc/balancer/roundrobin)
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

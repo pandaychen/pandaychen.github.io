@@ -526,3 +526,5 @@ func parseTarget(target string) (host, port string, err error) {
 
 ##	总结
 至此，`gRPC`默认的`DNS`解析器主要源码就分析完成了。不过，由于`DNS`本身无法感知后端健康状态的问题，所以在实战中如何剔除掉不健康的后端，是使用`DNS`作为负载均衡手段时需要考虑的问题；另外`DNS`有`TTL`这个特性的存在，在多层次`DNS`架构中，可能也会成为服务治理的一个难题。
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

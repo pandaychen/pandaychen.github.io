@@ -83,3 +83,5 @@ Partition of a set of 2025820 objects. Total size = 151987464 bytes.
 
 
 ##  后记
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
