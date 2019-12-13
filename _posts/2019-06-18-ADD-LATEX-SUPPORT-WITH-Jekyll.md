@@ -50,3 +50,5 @@ $$
 ##  参考
 -   [How to support latex in github-pages?](https://stackoverflow.com/questions/26275645/how-to-support-latex-in-github-pages)
 -   [在Jekyll中使用LaTex](https://lloyar.github.io/2018/10/08/mathjax-in-jekyll.html)
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

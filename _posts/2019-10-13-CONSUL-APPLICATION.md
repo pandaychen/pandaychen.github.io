@@ -147,6 +147,6 @@ Consul通用的注册方式，JSON配置文件，需要在配置文件中指定�
 ##  后记
 至此，一个gRPC+Consul的可用框架就搭建完成了。后面我还会写一篇文章，介绍Consul服务注册的详细方法、Consul与Etcd的比较。<br>
 
-
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
 
 

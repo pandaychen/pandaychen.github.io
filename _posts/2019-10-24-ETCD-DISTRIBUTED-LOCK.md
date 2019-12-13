@@ -258,3 +258,5 @@ type Session struct {
 ```
 
 ##	总结
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

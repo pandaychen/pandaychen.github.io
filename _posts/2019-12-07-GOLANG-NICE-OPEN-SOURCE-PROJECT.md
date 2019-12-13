@@ -25,3 +25,5 @@ tags:
 
 ##	微服务框架
 -	[kratos](https://github.com/bilibili/kratos)，Kratos是bilibili开源的一套Go微服务框架，包含大量微服务相关框架及工具。gRPC的封装，很实用
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
