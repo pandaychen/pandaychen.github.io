@@ -29,5 +29,9 @@ Hey，这里是熊喵君的博客，后台程序员，现居深圳。
 -   `Perl`
 -   `Shell`
 
+##### 个人作品
+-	[论持久战——带你走进腾讯DDoS防护体系](https://security.tencent.com/index.php/blog/msg/71)
+-	[CN 根域名被攻击至瘫痪，谁之过?](https://tech.sina.com.cn/zl/post/detail/i/2013-10-05/pid_8435554.htm)
+
 ##### 感悟
 我们遇到什么困难也不要怕，微笑着面对他，消除恐惧的最好办法就是面对恐惧，坚持才是胜利，加油，奥利给！
