@@ -239,7 +239,67 @@ type PickResult struct {
 }
 ```
 
-##	0x05	总结
+##	0x05	回看`Picker`
+虽然`Picker`结构已经被官方标识为Deprecated了，不过我们仍然可以简单的分析下[它的结构](https://godoc.org/google.golang.org/grpc/balancer#Picker)：
+```golang
+type Picker interface {
+    // Pick returns the SubConn to be used to send the RPC.
+    // The returned SubConn must be one returned by NewSubConn().
+    //
+    // This functions is expected to return:
+    // - a SubConn that is known to be READY;
+    // - ErrNoSubConnAvailable if no SubConn is available, but progress is being
+    //   made (for example, some SubConn is in CONNECTING mode);
+    // - other errors if no active connecting is happening (for example, all SubConn
+    //   are in TRANSIENT_FAILURE mode).
+    //
+    // If a SubConn is returned:
+    // - If it is READY, gRPC will send the RPC on it;
+    // - If it is not ready, or becomes not ready after it's returned, gRPC will
+    //   block until UpdateBalancerState() is called and will call pick on the
+    //   new picker. The done function returned from Pick(), if not nil, will be
+    //   called with nil error, no bytes sent and no bytes received.
+    //
+    // If the returned error is not nil:
+    // - If the error is ErrNoSubConnAvailable, gRPC will block until UpdateBalancerState()
+    // - If the error is ErrTransientFailure or implements IsTransientFailure()
+    //   bool, returning true:
+    //   - If the RPC is wait-for-ready, gRPC will block until UpdateBalancerState()
+    //     is called to pick again;
+    //   - Otherwise, RPC will fail with unavailable error.
+    // - Else (error is other non-nil error):
+    //   - The RPC will fail with the error's status code, or Unknown if it is
+    //     not a status error.
+    //
+    // The returned done() function will be called once the rpc has finished,
+    // with the final status of that RPC.  If the SubConn returned is not a
+    // valid SubConn type, done may not be called.  done may be nil if balancer
+    // doesn't care about the RPC status.
+    Pick(ctx context.Context, info PickInfo) (conn SubConn, done func(DoneInfo), err error)
+}
+```
+首先，`Picker`是一个`interface{}`，从字面上理解，该结构就是（Picker）返回一个可用的连接（`conn SubConn`）。而我比较好奇的是另外一个返回值`done func(DoneInfo)`，从文档的解释看，这个是当RPC请求成功时，会返回RPC的调用状态。它的参数[`DoneInfo`](https://godoc.org/google.golang.org/grpc/balancer#DoneInfo)的结构如下：
+```golang
+//DoneInfo contains additional information for done.
+type DoneInfo struct {
+    // Err is the rpc error the RPC finished with. It could be nil.
+    Err error
+    // Trailer contains the metadata from the RPC's trailer, if present.
+    Trailer metadata.MD
+    // BytesSent indicates if any bytes have been sent to the server.
+    BytesSent bool
+    // BytesReceived indicates if any byte has been received from the server.
+    BytesReceived bool
+    // ServerLoad is the load received from server. It's usually sent as part of
+    // trailing metadata.
+    //
+    // The only supported type now is *orca_v1.LoadReport.
+    ServerLoad interface{}
+}
+```
+对gRPC有开发经验的同学，一眼就看出了`Trailer metadata.MD`这个选项，可以在服务端RPC实现中，通过`grpc.UnaryServerInterceptor`将某些服务端的状态（如CPU，内存信息）、请求时延等，写入`Trailer`，这样当客户端成功的调用RPC后，就可以从`Trailer`中读出这些信息，作为下一次负载均衡算法的选取依据。有兴趣的可以看B站实现的[wrr算法](https://github.com/bilibili/kratos/blob/master/pkg/net/rpc/warden/balancer/wrr/wrr.go)，它就是这么做的。
+
+##	0x06	总结
 &emsp;&emsp;可以看出，gRPC的`Picker`结构实现，还是非常友好的。只要理解了代码的流程，很容易的可以写出自己的负载均衡实现逻辑，下一篇文章，再聊聊目前比较流行的负载均衡算法，如待权重的rr、P2C、随机、一致性hash、会话保持等实现。
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
