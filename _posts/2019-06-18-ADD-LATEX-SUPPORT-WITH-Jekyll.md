@@ -8,6 +8,7 @@ header-img:
 catalog: true
 tags:
     - Latex
+    - Jekyll
 ---
 
 ##  介绍

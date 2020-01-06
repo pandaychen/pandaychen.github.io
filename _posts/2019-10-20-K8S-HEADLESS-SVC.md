@@ -8,6 +8,8 @@ catalog:    true
 tags:
     - Kubernetes
     - gRPC
+    - Headless Service
+    - 负载均衡
 ---
 
 ## 背景
@@ -41,7 +43,6 @@ tags:
 - `Kubernetes`路由的实现原理，`IPVS`
 - `Istio`，感觉这个开源的作品在未来若干年会成为主流的管理应用
 - `Kube-CRD`开发，满足各种现网的特殊需求，原生提供的`Crontroller`可能无法满足，需要定制化适合业务的`Controller`
-
 
 ## Service的本质
 理解`Service`从下面几点出发：
@@ -116,7 +117,7 @@ serv-ca.nspace.svc.cluster.local service = 0 25 8088 172-16-1-18.serv-ca.nspace.
 
 ## gRPC+Headless Service应用
 接上篇，如何将`gRPC`、`CoreDNS`（集群中的默认`DNS`插件）和`Headless Service`这三者融合起来，实现长连接+负载均衡呢？
-答案就是[gRPC-DnsResolver](https://github.com/grpc/grpc-go/blob/master/internal/resolver/dns/dns_resolver.go)
+答案就是[gRPC-DnsResolver](https://github.com/grpc/grpc-go/blob/master/internal/resolver/dns/dns_resolver.go)，默认的DNS查询时间是`30s`
 
 经过改造后的方案效果，见下图，以`Pod`视角来看，成功与4个后端`Pod`建立了长连接，大功告成。
 ![image](https://s2.ax1x.com/2019/11/14/MUYOuq.png)

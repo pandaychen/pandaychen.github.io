@@ -7,7 +7,8 @@ author:     pandaychen
 catalog:    true
 tags:
     - Etcd
-    - Lock
+	- Lock
+	- 分布式锁
 ---
 
 ##  分布式锁基础

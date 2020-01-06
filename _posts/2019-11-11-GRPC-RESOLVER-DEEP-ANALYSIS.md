@@ -7,8 +7,8 @@ author:     pandaychen
 header-img: 
 catalog: true
 tags:
-    - gRPC
-    - Loadbalance
+    - gRPC Resolver
+	- Loadbalance
 ---
 
 ##	前言

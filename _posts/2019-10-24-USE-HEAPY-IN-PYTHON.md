@@ -8,6 +8,7 @@ catalog:    true
 description:	使用heapy统计堆上的对象，如何避免dict内存扩容导致的OOM
 tags:
     - 性能优化
+    - Python
 ---
 
 ##  背景
