@@ -59,4 +59,10 @@ tags:
 -   gRPC、HTTP的客户端是否需要加入重试机制？
 -   gRPC、HTTP的客户端是否需要保持长连接（避免连接建立导致的消耗，如TLS等）
 
+##  日志篇
+-   日志分级，详细的日志，日志格式（uber的zap logger是一个非常优秀的实践）
+
+##  单例非服务进程高可用
+-   
+
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
