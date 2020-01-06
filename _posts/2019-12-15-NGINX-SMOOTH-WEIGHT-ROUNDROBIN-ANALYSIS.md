@@ -285,6 +285,52 @@ nginx平滑的基于权重轮询算法其实很简单。[算法原文](https://g
 我们可以发现，a, b, c选择的次数符合5:1:1，而且权重大的不会被连接选择。7轮选择后，
 当前值又回到{0, 0, 0}，以上操作可以一直循环，一样符合平滑和基于权重。
 
+##  0x05  Nginx对gRPC负载均衡的支持
+Nginx从1.13.10版本[Introducing gRPC Support with NGINX 1.13.10](http://manguijie.top/2018/09/grpc-name-resolve-loadbalance)宣布支持gRPC负载均衡。
+nginx配置中增加`grpc_pass`，使用方式与`proxy_pass`基本一致，如下：
+```bash
+worker_processes  1;
+events {
+    worker_connections  1024;
+}
+
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+    log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                      '$status $body_bytes_sent "$http_referer" '
+                      '"$http_user_agent" "$http_x_forwarded_for"';
+
+    error_log   logs/error.log debug;
+    access_log  logs/access.log  main;
+
+    sendfile        on;
+    keepalive_timeout  65;
+
+    upstream grpc_servers {
+        #least_conn;
+        #keepalive 1000;
+        server 127.0.0.1:10006;
+    }
+    server {
+        listen       8080 http2;
+        server_name  localhost;
+        location / {
+            grpc_pass grpc://grpc_servers;
+            error_page 502 = /error502grpc;
+        }
+
+        location = /error502grpc {
+            internal;
+            default_type application/grpc;
+            add_header grpc-status 14;
+            add_header grpc-message "unavailable";
+            return 204;
+        }
+    }
+}
+```
+
 ##  0x05    回顾&&总结
 &emsp;&emsp;下面来回答下本篇一开始提出的问题：
 
