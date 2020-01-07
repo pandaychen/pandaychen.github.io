@@ -9,11 +9,9 @@ catalog: true
 tags:
 	- gRPC
 	- Loadbalance
-	- 负载均衡
 ---
 
 ##  0x00    前言
-
 &emsp;&emsp;在后台服务开发中，高可用性是构建中核心且重要的一环。服务发现（Service discovery）和负载均衡（Load Balance）一直都是我关注的话题。今天来谈一下我在实际中是如何理解及落地的。
 
 ##  0x01 负载均衡 && 服务发现
