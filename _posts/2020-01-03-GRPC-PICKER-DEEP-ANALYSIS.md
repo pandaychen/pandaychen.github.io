@@ -2,11 +2,12 @@
 layout:     post
 title:      gRPC源码分析之Picker篇
 subtitle:   gRPC客户端选择器实现分析
+date:       2019-01-03
 author:     pandaychen
 catalog:    true
 tags:
-    - gRPC
-	- Loadbalance
+    - gRPC负载均衡
+    - Picker
 ---
 
 ##	0x00	再看RR-Picker实现
