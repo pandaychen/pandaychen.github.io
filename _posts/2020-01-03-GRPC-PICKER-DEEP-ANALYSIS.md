@@ -4,8 +4,7 @@ title:      gRPC源码分析之Picker篇
 subtitle:   gRPC客户端选择器实现分析
 date:       2020-01-03
 author:     pandaychen
-header-img: img/encryption.jpg
-catalog: true
+catalog:	true
 tags:
     - gRPC
 	- Loadbalance
