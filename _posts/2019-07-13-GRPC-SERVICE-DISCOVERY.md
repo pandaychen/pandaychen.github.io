@@ -18,9 +18,10 @@ tags:
 ### 基础
 &emsp;&emsp;负载均衡，顾名思义，是通过某种手段将流量/请求分配到不通的服务器上去，保证后台的每个服务收到的请求都尽可能保持平衡<br>
 &emsp;&emsp;服务发现，就是指客户端按照某种约定的方式主动去（注册中心）寻找服务，然后再连接相应的服务<br>
-&emsp;&emsp;关于负载均衡的构建与实现，可以看下这两篇文章：
+&emsp;&emsp;关于负载均衡的构建与实现，可以看下这几篇文章：
 -   [gRPC服务发现&负载均衡](https://segmentfault.com/a/1190000008672912)
 -   [gRPC Load Balancing](https://gRPC.io/blog/loadbalancing/)
+-	[Load Balancing in gRPC](https://github.com/grpc/grpc/blob/master/doc/load-balancing.md)
 
 ### 服务发现概念
 
