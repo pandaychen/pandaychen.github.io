@@ -6,8 +6,7 @@ date:       2019-10-24
 author:     pandaychen
 catalog:    true
 tags:
-    - Etcd
-	- Lock
+	- Etcd Lock
     - 分布式锁
 ---
 
