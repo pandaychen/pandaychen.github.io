@@ -16,6 +16,7 @@ tags:
 ###	RR-Picker实现
 一个简单的实现如下所示：
 -	第一步：设定全局`balancer`的名字和创建全局变量（package级别）。
+
 ```go
 var _ base.PickerBuilder = &roundRobinPickerBuilder{}		//创建全局变量(package级别)
 var _ balancer.Picker = &roundRobinPicker{}					//创建全局变量(package级别)
@@ -32,6 +33,7 @@ func init() {
 }
 ```
 -	第二步：定义`PickerBuilder`的实例化结构，并实现接口中定义的`Build`方法，该方法返回一个`balancer.Picker`。
+
 ```go
 type roundRobinPickerBuilder struct{}
 
@@ -65,6 +67,7 @@ func (*roundRobinPickerBuilder) Build(readySCs map[resolver.Address]balancer.Sub
 }
 ```
 -	第三步： 构建`roundRobinPicker`，该结构需要实现`balancer.Picker`定义的`Pick`方法。
+
 ```go
 type roundRobinPicker struct {
 	subConns []balancer.SubConn
