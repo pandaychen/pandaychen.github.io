@@ -509,7 +509,7 @@ func (cc *ClientConn) getTransport(ctx context.Context, failfast bool, method st
 ##	0x05	总结
 &emsp;&emsp;本文分析了gRPC是如何将自定义的Picker实现应用在最终的流程。
 
-##	0X06	参考
+##	0x06	参考
 -	[grpc-client端分析](https://mcll.top/2019/07/29/grpc-client%E7%AB%AF%E5%88%86%E6%9E%901/)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

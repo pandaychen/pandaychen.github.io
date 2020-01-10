@@ -2,13 +2,13 @@
 layout:     post
 title:      Etcd 应用开发之分布式锁
 subtitle:   Etcd 应用开发（续）
-date:       2019-10-20
+date:       2019-10-24
 author:     pandaychen
 catalog:    true
 tags:
     - Etcd
 	- Lock
-	- 分布式锁
+    - 分布式锁
 ---
 
 ##  分布式锁基础
