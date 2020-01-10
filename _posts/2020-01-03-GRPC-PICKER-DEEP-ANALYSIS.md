@@ -13,9 +13,9 @@ tags:
 ##	0x00	再看RR-Picker实现
 &emsp;&emsp;前文中分析了官方提供的轮询 `Picker` 代码，我们可以使用 gRPC 提供的 `balancer` 包中的接口实现自定义的选择器 `Picker`，也就是自定义的负载均衡逻辑，只需要三步即可。这篇文章，讨论下，我们自己实现的`Picker`逻辑是如何gRPC中生效的。
 
-###	Picker实现
+###	RR-Picker实现
 一个简单的实现如下所示：
-1.	第一步：设定全局`balancer`的名字和创建全局变量（package级别）
+-	第一步：设定全局`balancer`的名字和创建全局变量（package级别）
 
 ```go
 var _ base.PickerBuilder = &roundRobinPickerBuilder{}		//创建全局变量(package级别)
@@ -33,14 +33,12 @@ func init() {
 }
 ```
 
-2.	第二步：定义`PickerBuilder`的实例化结构，并实现接口中定义的`Build`方法，该方法返回一个`balancer.Picker`
+-	第二步：定义`PickerBuilder`的实例化结构，并实现接口中定义的`Build`方法，该方法返回一个`balancer.Picker`
 
 ```go
 type roundRobinPickerBuilder struct{}
 
 func (*roundRobinPickerBuilder) Build(readySCs map[resolver.Address]balancer.SubConn) balancer.Picker {
-	grpclog.Infof("roundrobinPicker: newPicker called with readySCs: %v", readySCs)
-
 	if len(readySCs) == 0 {
 		return base.NewErrPicker(balancer.ErrNoSubConnAvailable)
 	}
@@ -69,8 +67,7 @@ func (*roundRobinPickerBuilder) Build(readySCs map[resolver.Address]balancer.Sub
 	}
 }
 ```
-
-3.	第三步： 构建`roundRobinPicker`，该结构需要实现`balancer.Picker`定义的`Pick`方法
+-	第三步： 构建`roundRobinPicker`，该结构需要实现`balancer.Picker`定义的`Pick`方法。
 ```go
 type roundRobinPicker struct {
 	subConns []balancer.SubConn
@@ -188,7 +185,7 @@ func Register(b Builder) {
 ```
 
 ##	0x02	应用自定义Picker
-这节，我们从`NewBalancerBuilderWithConfig`方法开始，看下自定义的Picker是如何生效的
+这节，我们从`NewBalancerBuilderWithConfig`方法开始，看下自定义的Picker是如何生效的。
 ```go
 // NewBalancerBuilderWithConfig returns a base balancer builder configured by the provided config.
 func NewBalancerBuilderWithConfig(name string, pb PickerBuilder, config Config) balancer.Builder {
@@ -223,7 +220,7 @@ func (bb *baseBuilder) Build(cc balancer.ClientConn, opt balancer.BuildOptions) 
 }
 ```
 
-在`balancer.Balancer`这个interface{}中，`UpdateSubConnState` 和`HandleSubConnStateChange`功能是一样的，我们继续分析下`UpdateSubConnState`和``这两个方法在哪里被调用的
+在`balancer.Balancer`这个`interface{}`中，`UpdateSubConnState` 和`HandleSubConnStateChange`功能是一样的，我们继续分析下`UpdateSubConnState`和`UpdateClientConnState`这两个方法在哪里被调用的。
 ```go
 
 // Balancer takes input from gRPC, manages SubConns, and collects and aggregates
@@ -260,7 +257,7 @@ type Balancer interface {
 }
 ```
 ###	UpdateSubConnState的实现
-(https://github.com/grpc/grpc-go/blob/master/balancer/base/balancer.go#L178)，其中有个很重要的方法`regeneratePicker`，在发生下面的情况时，需要重建Picker，这个很好理解，注意看下`func (*roundRobinPickerBuilder) Build(readySCs map[resolver.Address]balancer.SubConn) balancer.Picker` 的`readySCs`参数，这个参数表示当前可用的连接，如果连接发生问题，当然需要重建连接池
+在[`UpdateSubConnState`方法](https://github.com/grpc/grpc-go/blob/master/balancer/base/balancer.go#L178)中，其中有个很重要的方法`regeneratePicker`，在发生下面的情况时，需要重建Picker，这个很好理解，注意看下`func (*roundRobinPickerBuilder) Build(readySCs map[resolver.Address]balancer.SubConn) balancer.Picker` 的`readySCs`参数，这个参数表示当前可用的连接，如果连接发生问题，当然需要重建连接池。
 ```go
    // 当下面情况发生时，需要重新创建Picker：
    //    - 连接由其他状态转变为Ready状态
@@ -509,10 +506,10 @@ func (cc *ClientConn) getTransport(ctx context.Context, failfast bool, method st
 
 在 newClientStream 方法中，我们通过 getTransport 方法获取了 Transport 层中抽象出来的 ClientTransport 和 ServerTransport，实际上就是获取一个连接给后续 RPC 调用传输使用。到此，gRPC的客户端就获取了由自定义LoadBalancer算法得到的最终的`TCP`连接
 
-##	0x06	总结
+##	0x05	总结
 &emsp;&emsp;本文分析了gRPC是如何将自定义的Picker实现应用在最终的流程。
 
-##	0X04	参考
+##	0X06	参考
 -	[grpc-client端分析](https://mcll.top/2019/07/29/grpc-client%E7%AB%AF%E5%88%86%E6%9E%901/)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
