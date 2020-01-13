@@ -13,13 +13,13 @@ tags:
 ##	0x00	再看RR-Picker实现
 &emsp;&emsp;前文中分析了官方提供的轮询 `Picker` 代码，我们可以使用 gRPC 提供的 `balancer` 包中的接口实现自定义的选择器 `Picker`，也就是自定义的负载均衡逻辑，只需要三步即可。这篇文章，讨论下，我们自己实现的`Picker`逻辑是如何gRPC中生效的。
 
-###	RR-Picker实现
-一个简单的实现如下所示：
+###	一个RR-Picker实现步骤
+&emsp;&emsp;一个简单的实现如下所示：
 -	第一步：设定全局`balancer`的名字和创建全局变量（package级别）。
 
 ```go
 var _ base.PickerBuilder = &roundRobinPickerBuilder{}		//创建全局变量(package级别)
-var _ balancer.Picker = &roundRobinPicker{}					//创建全局变量(package级别)
+var _ balancer.Picker = &roundRobinPicker{}				//创建全局变量(package级别)
 
 const RoundRobin = "round_robin"		//注册到resolver中的lb全局名字
 
@@ -83,9 +83,16 @@ func (p *roundRobinPicker) Pick(ctx context.Context, opts balancer.PickOptions) 
 	return sc, nil, nil
 }
 ```
+至此，一个基础的RR-Picker接口就基本实现了，下面我们看看，gRPC运行中，在何时调用我们实现的Balancer逻辑的。
+
+###	引入的问题
+和之前分析代码的文章一样，这里先引入三个问题：
+-	自定义实现的`PickerBuilder`如何被调用？
+-	自定义实现的`Picker`如何被调用？
+-	何时返回`Picker.Pick`的结果给上层gRPC客户端或RPC方法？
 
 ##	0x01	balancer.Picker 与 base.PickerBuilder
-上面两个结构，`roundRobinPickerBuilder`对应了`base.PickerBuilder`，`roundRobinPicker`对应了`balancer.Picker`，下面就分析这两个结构。
+&emsp;&emsp;上面实现（封装）的两个结构，`roundRobinPickerBuilder`对应了`base.PickerBuilder`，`roundRobinPicker`对应了`balancer.Picker`，下面就分析这两个结构的作用。
 
 ###	balancer.Picker
 &emsp;&emsp;[`balancer.Picker`](https://github.com/grpc/grpc-go/blob/master/balancer/balancer.go)定义如下，从描述看其即将会被 `V2Picker` 取代，这里我们先只看 `Picker`。`Picker` 也是一个`interface{}`，封装它必须要实现 `Pick` 方法，该方法是从给定的连接池中，选取一个可用连接并返回。
@@ -257,9 +264,9 @@ type Balancer interface {
 }
 ```
 ###	UpdateSubConnState的实现
-在[`UpdateSubConnState`方法](https://github.com/grpc/grpc-go/blob/master/balancer/base/balancer.go#L178)中，其中有个很重要的方法`regeneratePicker`，在发生下面的情况时，需要重建Picker，这个很好理解，注意看下`func (*roundRobinPickerBuilder) Build(readySCs map[resolver.Address]balancer.SubConn) balancer.Picker` 的`readySCs`参数，这个参数表示当前可用的连接，如果连接发生问题，当然需要重建连接池。
+在[`UpdateSubConnState`方法](https://github.com/grpc/grpc-go/blob/master/balancer/base/balancer.go#L178)中，其中有个很重要的方法`regeneratePicker`，在发生下面的情况时，需要重建Picker，这个很好理解，注意看下`func (*roundRobinPickerBuilder) Build(readySCs map[resolver.Address]balancer.SubConn) balancer.Picker` 的`readySCs`参数，这个参数表示当前可用的连接（池），如果连接发生问题，当然需要重建连接池。
 ```go
-   // 当下面情况发生时，需要重新创建Picker：
+   // 	 当下面情况发生时，需要重新创建Picker：
    //    - 连接由其他状态转变为Ready状态
    //    - 连接由Ready状态转变为其他状态
    //    - balancer转变为TransientFailure状态
@@ -361,12 +368,31 @@ func (b *baseBalancer) regeneratePicker(err error) {
 ```
 
 ##	0x03	自定义Picker的调用（1）
-最后一个问题，在哪里返回自定义Picker的结果呢？https://github.com/grpc/grpc-go/blob/master/picker_wrapper.go，注册Pciker
+&emsp;&emsp;第二个问题，在哪里应用自定义的Picker？先看下刚才出现的[`UpdateBalancerState`方法](src\google.golang.org\grpc\balancer_conn_wrappers.go)，在`UpdateSubConnState`方法中进行调用。
+```go
+func (ccb *ccBalancerWrapper) UpdateBalancerState(s connectivity.State, p balancer.Picker) {
+	ccb.mu.Lock()
+	defer ccb.mu.Unlock()
+	if ccb.subConns == nil {
+		return
+	}
+	// Update picker before updating state.  Even though the ordering here does
+	// not matter, it can lead to multiple calls of Pick in the common start-up
+	// case where we wait for ready and then perform an RPC.  If the picker is
+	// updated later, we could call the "connecting" picker when the state is
+	// updated, and then call the "ready" picker after the picker gets updated.
+	ccb.cc.blockingpicker.updatePicker(p)		//传入pick的实现
+	ccb.cc.csMgr.updateState(s)
+}
+```
+接下来，看下[`updatePicker`方法](https://github.com/grpc/grpc-go/blob/master/picker_wrapper.go)，该方法注册了传入的`balancer.Picker`：
+```go
 // updatePicker is called by UpdateBalancerState. It unblocks all blocked pick.
 func (pw *pickerWrapper) updatePicker(p balancer.Picker) {
 	pw.updatePickerV2(&v2PickerWrapper{picker: p, connErr: pw.connErr})
 }
-
+```
+`v2PickerWrapper`的定义如下，v2PickerWrapper wraps a balancer：
 ```go
 // v2PickerWrapper wraps a balancer.Picker while providing the
 // balancer.V2Picker API.  It requires a pickerWrapper to generate errors
@@ -377,11 +403,11 @@ type v2PickerWrapper struct {
 	connErr *connErr
 }
 ```
-
-在v2PickerWrapper的实现中，解答了这个问题。
+很明显，在`v2PickerWrapper`的`Picker`方法实现中，解答了这个问题：
 ```go
 func (v *v2PickerWrapper) Pick(info balancer.PickInfo) (balancer.PickResult, error) {
-	sc, done, err := v.picker.Pick(info.Ctx, info)		//调用我们自定义的Picker，roundRobinPicker，返回一个可用的连接sc给调用方
+	sc, done, err := v.picker.Pick(info.Ctx, info)		
+	//调用我们自定义的Picker，roundRobinPicker，返回一个可用的连接sc给调用方
 	if err != nil {
 		if err == balancer.ErrTransientFailure {
 			return balancer.PickResult{}, balancer.TransientFailureError(fmt.Errorf("%v, latest connection error: %v", err, v.connErr.connectionError()))
@@ -391,6 +417,7 @@ func (v *v2PickerWrapper) Pick(info balancer.PickInfo) (balancer.PickResult, err
 	return balancer.PickResult{SubConn: sc, Done: done}, nil
 }
 ```
+### pickerWrapper的pick实现
 
 ```go
 // pick returns the transport that will be used for the RPC.
@@ -490,10 +517,10 @@ func (pw *pickerWrapper) pick(ctx context.Context, failfast bool, info balancer.
 ```
 
 ##	0x04	自定义Picker的调用（2）
-在哪里返回Picker的结果给上层gRPC客户端呢？https://github.com/grpc/grpc-go/blob/master/clientconn.go#L881，看到下面的picker没
+&emsp;&emsp;最后一个问题，在哪里返回Picker的结果给上层gRPC客户端呢？在`ClientConn`的[`getTransport`方法](https://github.com/grpc/grpc-go/blob/master/clientconn.go#L881)，看到了对上述`pickerWrapper`的`pick`实现的调用：
 ```GO
 func (cc *ClientConn) getTransport(ctx context.Context, failfast bool, method string) (transport.ClientTransport, func(balancer.DoneInfo), error) {
-	t, done, err := cc.blockingpicker.pick(ctx, failfast, balancer.PickInfo{	//注意这里调用的是pick方法，自定义的Picker在picker中
+	t, done, err := cc.blockingpicker.pick(ctx, failfast, balancer.PickInfo{	//注意这里调用的是pick（小写）方法，自定义的Picker在picker中
 		Ctx:            ctx,
 		FullMethodName: method,
 	})
@@ -504,10 +531,10 @@ func (cc *ClientConn) getTransport(ctx context.Context, failfast bool, method st
 }
 ```
 
-在 newClientStream 方法中，我们通过 getTransport 方法获取了 Transport 层中抽象出来的 ClientTransport 和 ServerTransport，实际上就是获取一个连接给后续 RPC 调用传输使用。到此，gRPC的客户端就获取了由自定义LoadBalancer算法得到的最终的`TCP`连接
+在 `newClientMethod` 的gRPC客户端方法中，我们通过 `getTransport` 方法获取了 Transport 层中抽象出来的 ClientTransport 和 ServerTransport，实际上就是获取一个连接给后续 RPC 调用传输使用。到此，gRPC的客户端就获取了由自定义LoadBalancer算法得到的最终的`TCP`连接
 
 ##	0x05	总结
-&emsp;&emsp;本文分析了gRPC是如何将自定义的Picker实现应用在最终的流程。
+&emsp;&emsp;本文分析了gRPC是如何将自定义的Picker实现应用在最终的负载均衡流程，理解`Picker`的实现原理有助于我们实现更健壮的Loadbalancer逻辑。
 
 ##	0x06	参考
 -	[grpc-client端分析](https://mcll.top/2019/07/29/grpc-client%E7%AB%AF%E5%88%86%E6%9E%901/)
