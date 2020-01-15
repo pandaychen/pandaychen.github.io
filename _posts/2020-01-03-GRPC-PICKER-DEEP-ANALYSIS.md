@@ -368,7 +368,7 @@ func (b *baseBalancer) regeneratePicker(err error) {
 ```
 
 ##	0x03	自定义Picker的调用（1）
-&emsp;&emsp;第二个问题，在哪里应用自定义的Picker？先看下刚才出现的[`UpdateBalancerState`方法](src\google.golang.org\grpc\balancer_conn_wrappers.go)，在`UpdateSubConnState`方法中进行调用。
+&emsp;&emsp;第二个问题，在哪里应用自定义的Picker？先看下刚才出现的[`UpdateBalancerState`方法](https://github.com/grpc/grpc-go/blob/master/balancer_conn_wrappers.go)，在`UpdateSubConnState`方法中进行调用。
 ```go
 func (ccb *ccBalancerWrapper) UpdateBalancerState(s connectivity.State, p balancer.Picker) {
 	ccb.mu.Lock()
