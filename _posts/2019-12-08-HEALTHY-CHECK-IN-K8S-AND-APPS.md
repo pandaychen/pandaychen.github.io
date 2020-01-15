@@ -9,3 +9,7 @@ tags:
     - Kubernetes
     - 健康检查
 ---
+
+
+##	Consul的健康检查
+https://github.com/hashicorp/consul/blob/master/agent/checks/grpc.go
