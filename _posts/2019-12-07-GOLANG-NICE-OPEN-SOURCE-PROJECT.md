@@ -35,6 +35,11 @@ tags:
 -	[lile](https://github.com/lileio/lile)，Lile is a application generator (think create-react-app, rails new or django startproject) for gRPC services in Go and a set of tools/libraries.
 -	[awesome-grpc](https://github.com/grpc-ecosystem/awesome-grpc)，A curated list of useful resources for gRPC
 
+##	gRPC组件
+-	[gRPC+K8S-resolver](https://github.com/sercand/kuberesolver)
+-	[kuberesolver](https://github.com/everflow-io/kuberesolver)
+
+
 ##	通用
 -	[fish-shell](https://github.com/fish-shell/fish-shell)，The user-friendly command line shell. 
 
