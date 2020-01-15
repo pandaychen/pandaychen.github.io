@@ -10,6 +10,9 @@ tags:
     - 健康检查
 ---
 
+##	Consul的健康检查
+https://github.com/hashicorp/consul/blob/master/agent/checks/grpc.go
+
 ## 0x00 Kubernetes服务的健康检查机制
 
 ## 就绪探针(Readiness)
