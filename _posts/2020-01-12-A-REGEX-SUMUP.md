@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      玩转正则表达式（进阶篇）
-subtitle:   
+subtitle:   贪婪 or 非贪婪，Python版本
 date:       2020-01-12
 author:     pandaychen
 catalog:    true
@@ -72,11 +72,23 @@ print re.search(qm_re6,str23).groups()
 `(?>!pattern)`就是匹配前面不跟"pattern"的
 
 
-##	0x03    Python中`re.search()`和`re.match()`的区别
+##	0x03    Python中`re.search()`和`re.match()`等的区别
+-   `match`
+匹配 string 开头，成功返回 Match object, 失败返回 None ，只匹配一个。
+-   `search`
+在 string 中进行搜索，成功返回Match object, 失败返回 None , 只匹配一个。
+-   `findall`
+在 string 中查找所有匹配成功的分组。返回`list`对象，每个 item 是由每个匹配的捕获分组组成的list。
+-   `finditer`
+在 string 中查找所有匹配成功的字符串, 返回`iterator`，每个item是一个Match object
 
 
-##  参考
+##  0x04    不建议使用`re.compile()`
+
+##  0x04    参考
 -   [Python正则表达式指南](https://www.cnblogs.com/huxi/archive/2010/07/04/1771073.html)
 -	[细说正则表达式](https://www.jianshu.com/p/147fab022566)
+-   [What is the difference between Python's re.search and re.match?](http://stackoverflow.com/questions/180986/what-is-the-difference-between-pythons-re-search-and-re-match)
+-   [一日一技：请不要再用re.compile了](https://mp.weixin.qq.com/s?__biz=MzI2MzEwNTY3OQ%3D%3D&mid=2648977413&idx=1&sn=705b2055e7cd4b2caaf94eb67f236315&chksm=f2506de5c527e4f39159139a806e3f2b43b0682831c3e1caa26f8ad2b51ad59cf82b9ecf8968&scene=27)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
