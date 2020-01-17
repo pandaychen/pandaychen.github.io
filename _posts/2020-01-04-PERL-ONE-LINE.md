@@ -1,7 +1,7 @@
 ---
 layout:     post
-title:      `Perl`单行技巧
-subtitle:   
+title:      Perl单行特技
+subtitle:   Let's Perl
 date:       2020-01-04
 author:     pandaychen
 catalog:    true
