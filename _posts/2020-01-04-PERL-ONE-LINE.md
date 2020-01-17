@@ -36,7 +36,7 @@ ls -lAF |perl -e 'while (<>){print $_}'
 ls -lAF | perl -e 'while (<>) { next if /^[dt]/; print $_; }'
 ```
 
-> `-n`选项在你的程序中封装一个while循环，循环通过钻石操作符读取输入，把$_设置为读取的内容
+> `-n`选项在你的程序中封装一个`while`循环，循环通过钻石操作符读取输入，把`$_`设置为读取的内容
 
 ```perl
 #如上面的
@@ -45,7 +45,7 @@ ls -lAF |perl -e 'while (<>){print $_}'
 ls -lAF |perl -ne 'print $_'
 ```
 
-> `-p`选项做同样的事，并且每次递归后输出$_的值
+> `-p`选项做同样的事，并且每次递归后输出`$_`的值
 
 ```perl
 ls -l | perl -pe 's/\S+ //'
