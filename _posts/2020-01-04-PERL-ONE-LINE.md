@@ -2,17 +2,17 @@
 layout:     post
 title:      `Perl`单行技巧
 subtitle:   
-date:       2020-01-12
+date:       2020-01-04
 author:     pandaychen
 catalog:    true
 tags:
     - Perl
 ---
 
-##  Perl
+##  0x00 前言
 &emsp;&emsp;在日常处理文本时，`Perl`的单行模式非常有用。本文介绍下强大的单行特技。
 
-## 
+## 0x01	Perl单行应用
 > -e开关允许我们在命令行中运行脚本
 ```perl
 #简单的打印
