@@ -90,5 +90,6 @@ print re.search(qm_re6,str23).groups()
 -	[细说正则表达式](https://www.jianshu.com/p/147fab022566)
 -   [What is the difference between Python's re.search and re.match?](http://stackoverflow.com/questions/180986/what-is-the-difference-between-pythons-re-search-and-re-match)
 -   [一日一技：请不要再用re.compile了](https://mp.weixin.qq.com/s?__biz=MzI2MzEwNTY3OQ%3D%3D&mid=2648977413&idx=1&sn=705b2055e7cd4b2caaf94eb67f236315&chksm=f2506de5c527e4f39159139a806e3f2b43b0682831c3e1caa26f8ad2b51ad59cf82b9ecf8968&scene=27)
+-   [Details of the Cloudflare outage on July 2, 2019](https://blog.cloudflare.com/details-of-the-cloudflare-outage-on-july-2-2019/)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

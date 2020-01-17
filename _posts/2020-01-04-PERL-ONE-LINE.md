@@ -127,5 +127,6 @@ perl -alne 'map { /regex/ && $t++ } @F; END { print $t }'
 perl -ne '/regex/ && print'
 ```
 
-## 参考
+## 0x03	参考
 -  [Introduction to Perl one-liners](https://catonmat.net/introduction-to-perl-one-liners)
+-  [perl单行命令笔记](http://xiaoxuenotes.com/blog/2013/06/26/perl-oneline-command.html)
