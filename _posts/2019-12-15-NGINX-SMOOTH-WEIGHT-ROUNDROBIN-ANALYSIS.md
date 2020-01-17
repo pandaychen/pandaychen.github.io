@@ -14,7 +14,7 @@ tags:
 ---
 
 ##  0x00    引入问题
-提一个问题：Nginx的`upstream`机制支持自动剔除故障的后端吗？这个问题我们后面解答
+提一个问题：Nginx的`upstream`机制支持自动剔除故障的后端吗？这个问题我们后面解答。
 
 ##	0x01	Nginx中的负载均衡介绍
 
@@ -258,16 +258,18 @@ nginx使用的平滑权重轮询算法介绍以及原理分析。
 更加平滑。
 
 ##	0x04 nginx平滑的基于权重轮询算法
-nginx平滑的基于权重轮询算法其实很简单。[算法原文](https://github.com/phusion/nginx/commit/27e94984486058d73157038f7950a0a36ecc6e35)
+&emsp;&emsp;本节，介绍下 Nginx 平滑的基于权重轮询算法。[算法原文在此](https://github.com/phusion/nginx/commit/27e94984486058d73157038f7950a0a36ecc6e35)
 描述为：
 > Algorithm is as follows: on each peer selection we increase current_weight
 > of each eligible peer by its weight, select peer with greatest current_weight
 > and reduce its current_weight by total number of weight points distributed
 > among peers.
 
-算法执行2步，选择出1个当前节点。  
-1. 每个节点，用它们的当前值加上它们自己的权重。
+每次（轮）算法执行2步，结果选择出1个当前节点。  
+1. 开始本轮选择前（第1轮不在此逻辑），每个节点，用它们的当前值加上它们自己的权重。
 2. 选择当前值最大的节点为选中节点，并把它的当前值减去所有节点的权重总和。
+
+从算法的描述来看，每轮需要保存节点当前（变化）的权重值。下面举个例子：
 
 例如`{a:5, b:1, c:1}`三个节点。一开始我们初始化三个节点的当前值为`{0, 0, 0}`。
 选择过程如下表：  
@@ -282,8 +284,49 @@ nginx平滑的基于权重轮询算法其实很简单。[算法原文](https://g
 | 6    | {9, -1, -1}      | a        | {2, -1, -1}      |
 | 7    | {7, 0, 0}        | a        | {0, 0, 0}        |
 
-我们可以发现，a, b, c选择的次数符合5:1:1，而且权重大的不会被连接选择。7轮选择后，
-当前值又回到{0, 0, 0}，以上操作可以一直循环，一样符合平滑和基于权重。
+我们可以发现，a, b, c选择的次数符合`5:1:1`这个权重比例，而且权重大的不会被连接选择。7轮选择后，当前值又回到`{0, 0, 0}`，以上操作可以一直循环，一样符合平滑和基于权重。不但实现了基于权重的轮询算法，而且还实现了平滑的算法。所谓平滑，就是在一段时间内，不仅服务器被选择的次数的分布和它们的权重一致，而且调度算法还比较均匀的选择服务器，而不会集中一段时间之内只选择某一个权重比较高的服务器。如果使用随机算法选择或者普通的基于权重的轮询算法，就比较容易造成某个服务集中被调用压力过大。
+
+举个例子，比如权重为{a:5, b:1, c:1)的一组服务器，Nginx的平滑的轮询算法选择的序列为`{ a, a, b, a, c, a, a }`,这显然要比`{ c, b, a, a, a, a, a }`序列更平滑，更合理，不会造成对a服务器的集中访问。
+
+```go
+type smoothWeighted struct {
+	Item            interface{}
+	Weight          int
+	CurrentWeight   int
+	EffectiveWeight int
+}
+
+func nextSmoothWeighted(items []*smoothWeighted) (best *smoothWeighted) {
+	total := 0
+
+	for i := 0; i < len(items); i++ {
+		w := items[i]
+
+		if w == nil {
+			continue
+		}
+
+		w.CurrentWeight += w.EffectiveWeight
+		total += w.EffectiveWeight
+		if w.EffectiveWeight < w.Weight {
+			w.EffectiveWeight++
+		}
+
+		if best == nil || w.CurrentWeight > best.CurrentWeight {
+			best = w
+		}
+
+	}
+
+	if best == nil {
+		return nil
+	}
+
+	best.CurrentWeight -= total
+	return best
+}
+```
+
 
 ##  0x05  Nginx对gRPC负载均衡的支持
 Nginx从1.13.10版本[Introducing gRPC Support with NGINX 1.13.10](http://manguijie.top/2018/09/grpc-name-resolve-loadbalance)宣布支持gRPC负载均衡。

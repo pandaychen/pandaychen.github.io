@@ -78,7 +78,7 @@ func (p *rrPicker) Pick(balancer.PickInfo) (balancer.PickResult, error) {
 ```
 
 ## 0x01	初始化
-&emsp;&emsp;首先，定义Pcker的名字和结构，`rrPickerBuilder`需要实现如何根据当前活跃的连接`info.ReadySCs`，生成初始化的ConnectionPool（可以看出gRPC提供了非常灵活的LB实现接口），`rrPicker`结构用来从ConnectionPool中，按照一定的策略来选择单个连接，给上层
+&emsp;&emsp;首先，定义Picker的名字和结构，`rrPickerBuilder`需要实现如何根据当前活跃的连接`info.ReadySCs`，生成初始化的ConnectionPool（可以看出gRPC提供了非常灵活的LB实现接口），`rrPicker`结构用来从ConnectionPool中，按照一定的策略来选择单个连接，给上层
 ```go
 const Name = "round_robin"
 type rrPickerBuilder struct{}
