@@ -11,7 +11,7 @@ tags:
 ---
 
 ##  0x00        前言
-&emsp;&emsp;channel 是 golang 非常有趣的一个功能，基于 channel 和 goroutine 一起配合可以实现非常实用的功能。如 生产-消费者模型、Pipe等。
+channel 是 golang 非常有趣的一个功能，基于 channel 和 goroutine 一起配合可以实现非常实用的功能。如 生产-消费者模型、Pipe等。
 对下面这两句话的理解，从初学到现在，已经有了极为深刻的理解：
 
 > Do not communicate by sharing memory; instead, share memory by communicating.
@@ -46,7 +46,7 @@ c2 := male(chan []byte, 1024)           //有缓冲
 
 2.      对于同一个通道，接收操作是阻塞的（协程或函数中的），直到发送者可用：如果通道中没有数据，接收者就阻塞了。
 
-###     
+###     无缓冲Channel
 无缓冲：发送和接收动作是同时发生的。如果没有 goroutine 读取 channel （<- channel），则发送者 (channel <-) 会一直阻塞。
 ![image]()
 
@@ -110,22 +110,85 @@ func main() {
 
 ```go
 select {
-case x := <- chan1:
-    // … 使用x进行一些操作
+        case x := <- chan1:
+        // … 使用x进行一些操作
 
-case y, ok := <- chan2:
-    // 使用y进行一些操作，检查ok值判断chan2是否已经关闭
+        case y, ok := <- chan2:
+        // 使用y进行一些操作，检查ok值判断chan2是否已经关闭
 
-case chan3 <- z:
-    // z值被成功发送到chan3上时
+        case chan3 <- z:
+        // z值被成功发送到chan3上时
 
-default:
-    // 上面case均无法执行时，执行此分支（防止程序逻辑阻塞的范式）
+        default:
+        // 上面case均无法执行时，执行此分支（防止程序逻辑阻塞的范式）
 }
 ```
 
-##      0x02 channel的应用范式
+-       主routine利用channel发送数据，终结子 gorouitine-workers
+
+```GO
+//这是一个常见的终结sub worker goroutines的方法
+//每个worker goroutine通过select监视一个die channel来及时获取main goroutine的退出通知
+package main
+
+import (
+        "fmt"
+        "sync"
+        "time"
+)
+
+func worker(wg *sync.WaitGroup, die chan bool, index int) {
+        defer wg.Done()
+        fmt.Println("Begin: This is Worker:", index)
+        for {
+                select {
+                //case xx：
+                //Doing Jobs forever...
+                case <-die:
+                        fmt.Println("Done: This is Worker:", index)
+                        return
+                }
+        }
+}
+
+func main() {
+        die := make(chan bool)
+        var wg sync.WaitGroup
+
+        for i := 1; i <= 100; i++ {
+                wg.Add(1)
+                go worker(&wg, die, i)
+        }
+
+        time.Sleep(time.Second * 5)
+        close(die)
+        time.Sleep(time.Second * 5)
+        wg.Wait()
+}
+```
+
+-       清除有缓冲channel
+
+
+我们再看看其他一些 channel 在应用中的范式（套路）。
+
+##      0x02 channel的应用范式（interesting）
+
+###     for-select经典用法
+`for-select`循环模式如下所示：
+```go
+for { // 无限循环或遍历
+    select {
+    // 对通道进行操作
+    }
+}
+```
+
+###     
+
 
 
 ##  参考
--   [聊一聊 Go 中 channel 的行为](https://www.infoq.cn/article/wZ1kKQLlsY1N7gigvpHo)
+-       [聊一聊 Go 中 channel 的行为](https://www.infoq.cn/article/wZ1kKQLlsY1N7gigvpHo)
+-       [Concurrency in Go 中文笔记](https://www.kancloud.cn/mutouzhang/go/596835)
+-       [](https://www.jianshu.com/p/3e1837860575)
