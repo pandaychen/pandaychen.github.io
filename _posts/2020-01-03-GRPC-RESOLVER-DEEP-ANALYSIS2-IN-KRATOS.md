@@ -4,10 +4,9 @@ title:      gRPC应用篇之Resolver接口封装（未完）
 subtitle:   如何封装gRPC的Resolver（Kratos）
 date:       2019-01-03
 author:     pandaychen
-header-img: 
 catalog: true
 tags:
-    - gRPC Resolver
+	- gRPC Resolver
 	- gRPC
 ---
 
