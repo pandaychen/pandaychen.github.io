@@ -194,12 +194,41 @@ func main() {
 ##      0x02 channel的应用范式（interesting）
 
 ###     for-select经典用法
-`for-select`循环模式如下所示：
+在使用select时很少只是对其进行一次evaluation，我们常常将其与`for {}`结合在一起使用，并选择适当时机从`for {}`中退出。
 ```go
-for { // 无限循环或遍历
-    select {
-    // 对通道进行操作
-    }
+for {
+        select {
+                case x := <- chan1:
+                // … 使用x进行一些操作
+
+                case y, ok := <- chan2:
+                // 使用y进行一些操作，检查ok值判断chan2是否已经关闭
+
+                case chan3 <- z:
+                // z值被成功发送到chan3上时
+
+                default:
+                // 上面case均无法执行时，执行此分支（防止程序逻辑阻塞的范式）
+        }
+}
+```
+
+###     for-select-Timeout经典用法
+带超时机制的 select 也是经典用法，下面是示例代码：
+```go
+func worker(start chan bool) {
+        //30s的定时器
+        timeout := time.After(30 * time.Second)
+        for {
+                select {
+                case <-othercase1:
+                        //do things...
+                case othercase2 <- y:
+                        //do things...
+                case <- timeout:
+                    return
+                }
+        }
 }
 ```
 
