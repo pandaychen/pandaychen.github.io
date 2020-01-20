@@ -2,12 +2,12 @@
 layout:     post
 title:      gRPC应用篇之Resolver接口封装（未完）
 subtitle:   如何封装gRPC的Resolver（Kratos）
-date:       2019-01-03
+date:       2020-01-01
 author:     pandaychen
+header-img: 
 catalog: true
 tags:
-	- gRPC Resolver
-	- gRPC
+    - gRPC
 ---
 
 > 本篇文章分析下，Kratos中如何封装 gRPC 中服务发现的接口，已经在项目中是如何使用的。
