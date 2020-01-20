@@ -48,11 +48,11 @@ c2 := male(chan []byte, 1024)           //有缓冲
 
 ###     无缓冲Channel
 无缓冲：发送和接收动作是同时发生的。如果没有 goroutine 读取 channel （<- channel），则发送者 (channel <-) 会一直阻塞。
-![image]()
+![image](https://s2.ax1x.com/2020/01/20/1PGlLt.png)
 
 ###     有缓冲Channel
 缓冲：缓冲 channel 类似一个有容量的队列。当队列满的时候发送者会阻塞；当队列空的时候接收者会阻塞。
-![image]()
+![image](https://s2.ax1x.com/2020/01/20/1PGtJg.png)
 
 ##      细节（容易忽略）
 
