@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      golang的Channel（应用篇）
+title:      Golang的Channel（应用篇）
 subtitle:   如何使用channel开发有保证的应用
 date:       2020-01-12
 author:     pandaychen
@@ -48,16 +48,17 @@ c2 := male(chan []byte, 1024)           //有缓冲
 
 ###     无缓冲Channel
 无缓冲：发送和接收动作是同时发生的。如果没有 goroutine 读取 channel （<- channel），则发送者 (channel <-) 会一直阻塞。
-![image]()
+![image](https://s2.ax1x.com/2020/01/20/1PGlLt.png)
 
 ###     有缓冲Channel
 缓冲：缓冲 channel 类似一个有容量的队列。当队列满的时候发送者会阻塞；当队列空的时候接收者会阻塞。
-![image]()
+![image](https://s2.ax1x.com/2020/01/20/1PGtJg.png)
 
 ##      细节（容易忽略）
 
 -       向一个已经被close的channel中继续发送数据会导致run-time panic
 -       从一个nil channel中接收数据会一直被block
+-       select的case中建议不要出现非阻塞的条件（如等待某个channel读事件，其他routine将此channel关闭，导致该case永远为真）
 
 
 ##      channel基础应用
@@ -167,8 +168,26 @@ func main() {
 }
 ```
 
--       清除有缓冲channel
+-      有缓冲channel的默认行为
+默认 unbuffered channel 与 buffered channel的行为是不同的，它们体现了一种交付保证（unbuffered channel）和不保证的思路（buffered channel），见文章[聊一聊Go中channel的行为](https://www.infoq.cn/article/wZ1kKQLlsY1N7gigvpHo)，例如：看出带缓冲的channel略有不同。尽管已经close了，但我们依旧可以从中读出关闭前写入的3个值。第四次读取时，则会返回该channel类型的零值。向这类channel写入操作也会触发panic。
 
+```go
+package main
+import "fmt"
+
+func main() {
+        c := make(chan int, 3)
+        c <- 15
+        c <- 34
+        c <- 65
+        close(c)
+        fmt.Printf("%d\n", <-c)
+        fmt.Printf("%d\n", <-c)
+        fmt.Printf("%d\n", <-c)
+        fmt.Printf("%d\n", <-c)
+        c <- 1
+}
+```
 
 我们再看看其他一些 channel 在应用中的范式（套路）。
 
@@ -184,7 +203,166 @@ for { // 无限循环或遍历
 }
 ```
 
-###     
+###     心跳（Heartbeat）
+一个定时心跳上报的 demo（使用 select ）：
+```go
+func worker(start chan bool) {
+        heartbeat := time.Tick(10 * time.Second)
+        for {
+                select {
+                default:
+                        time.Sleep(time.Duration(1) * time.Second)
+                case <- heartbeat:
+                        // 上报心跳 or 做心跳超时回调任务
+                case othercase:
+                        // Do other things
+                }
+
+        }
+}
+```
+
+###     关闭channel的时候，最好设置channel为nil（nil channel在select中很有用）
+这是一个好习惯，通过将已经关闭的 channel 置为 nil，下次 select 将会阻塞在该 channel 上，使得 select 继续下面的分支evaluation。
+```go
+package main
+
+import "fmt"
+import "time"
+
+func main() {
+        var c1, c2 chan int = make(chan int), make(chan int)
+        go func() {
+                time.Sleep(time.Second * 5)
+                c1 <- 5
+                close(c1)
+        }()
+
+        go func() {
+                time.Sleep(time.Second * 7)
+                c2 <- 7
+                close(c2)
+        }()
+
+        for {
+                select {
+                case x, ok := <-c1:
+                        if !ok {
+                                c1 = nil
+                        } else {
+                                fmt.Println(x)
+                        }
+                case x, ok := <-c2:
+                        if !ok {
+                                c2 = nil
+                        } else {
+                                fmt.Println(x)
+                        }
+                }
+                if c1 == nil && c2 == nil {
+                        break
+                }
+        }
+        fmt.Println("over")
+}
+```
+
+###     生产-消费者模型
+生产者产生一些数据将其放入 channel；然后消费者按照顺序，一个一个的从 channel 中取出这些数据进行处理。这是最常见的 channel 的使用方式。当 channel 的缓冲用尽（无数据）时，生产者必须等待（阻塞）。
+
+```go
+package main
+
+import (
+        "fmt"
+        "sync"
+        "time"
+)
+
+func producer(wg *sync.WaitGroup, c chan int64, max int) {
+        defer wg.Done()
+        for {
+                for i := 0; i < max; i++ {
+                        c <- time.Now().Unix()
+                }
+
+                time.Sleep(1 * time.Second)
+        }
+}
+
+func consumer(wg *sync.WaitGroup, c chan int64) {
+        defer wg.Done()
+        var v int64
+        ok := true
+
+        for ok {
+                if v, ok = <-c; ok {
+                        fmt.Println(v)
+                }
+        }
+}
+
+func main() {
+        var wg sync.WaitGroup
+        var chan_size int = 10
+        chan1 := make(chan int64, chan_size)
+        go producer(&wg, chan1, chan_size)
+        wg.Add(1)
+        go consumer(&wg, chan1)
+        wg.Add(1)
+
+        wg.Wait()
+        close(chan1)
+}
+```
+###     生成器（generator）
+
+```go
+package main
+
+import "fmt"
+
+func uuidgenerator() <-chan string {
+        id := make(chan string)
+        go func() {
+                var counter int64 = 0
+                for {
+                        id <- fmt.Sprintf("%x", counter)
+                        counter += 1
+                }
+        }()
+        return id
+}
+func main() {
+        id := uuidgenerator()
+        for i := 0; i < 10; i++ {
+                fmt.Println(<-id)
+        }
+}
+```
+
+##      0x03 channel的陷阱
+
+-       nil channel会阻塞
+对一个没有初始化的channel进行读（或写）操作都将发生阻塞，如下：
+
+```go
+package main
+
+func main() {
+        var c chan int
+        <-c
+        //c <- 1
+}
+
+//运行报错：
+fatal error: all goroutines are asleep - deadlock!
+
+goroutine 1 [chan receive (nil chan)]:
+main.main()
+        /root/chan1.go:6 +0x29
+exit status 2
+```
 
 
 
