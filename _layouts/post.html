@@ -205,12 +205,12 @@ layout: default
 <!-- anchor-js, Doc:http://bryanbraun.github.io/anchorjs/ -->
 <script>
     async("//cdnjs.cloudflare.com/ajax/libs/anchor-js/1.1.1/anchor.min.js",function(){
-        // BY Fix:去除标题前的‘#’ issues:<https://github.com/pandaychen/pandaychen.github.io/issues/137>
-        // anchors.options = {
-        //   visible: 'always',
-        //   placement: 'right',
-        //   icon: '#'
-        // };
+        // BY Fix:去除标题前的'#' issues:<https://github.com/pandaychen/pandaychen.github.io/issues/137>
+        anchors.options = {
+           visible: 'always',
+           placement: 'right',
+           icon: '#'
+        };
         anchors.add().remove('.intro-header h1').remove('.subheading').remove('.sidebar-container h5');
     })
 </script>
