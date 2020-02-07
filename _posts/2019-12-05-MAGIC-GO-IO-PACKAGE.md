@@ -228,5 +228,13 @@ func main() {
 ##  0x03	golang  io.Pipe的妙用
 
 
-##	0x04	参考
+
+##	0x04	一些IO优化的tips
+1.	关于io.Copy的优化
+在前面讨论过，`io.Copy`此方法，从src拷贝数据到dst，中间会借助字节数组作为buf。可以使用`io.CopyBuffer` 替代 `io.Copy`，并使用sync.Pool缓存buf, 以减少临时对象的申请和释放。
+```GOLANG
+io.CopyBuffer(dst Writer, src Reader, buf []byte)
+```
+
+##	0x05	参考
 -	[Go编程技巧--io.Reader/Writer](https://segmentfault.com/a/1190000013358594)

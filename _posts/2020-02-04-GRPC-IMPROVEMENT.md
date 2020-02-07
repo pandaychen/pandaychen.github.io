@@ -115,6 +115,7 @@ func NewServer(conf *ServerConfig, opt ...grpc.ServerOption) (s *Server) {
 ```
 
 ####	定义向链式拦截器数组添加拦截器实现的方法Use
+```GOLANG
 // Use attachs a global inteceptor to the server.
 // For example, this is the right place for a rate limiter or error management inteceptor.
 
@@ -130,8 +131,9 @@ func (s *Server) Use(handlers ...grpc.UnaryServerInterceptor) *Server {
 	s.handlers = mergedHandlers		//更新自带的handlers，数组
 	return s
 }
+```
 
-####	使用拦截器数组
+####	最后一步，使用Use方法
 
 ```GOLANG
 // NewServer returns a new blank Server instance with a default server interceptor.
@@ -157,6 +159,5 @@ func NewServer(conf *ServerConfig, opt ...grpc.ServerOption) (s *Server) {
 	return
 }
 ```
-
 
 ##	0x04	参考
