@@ -12,9 +12,9 @@ tags:
 ---
 
 ##  0x00    介绍
-&emsp;&emsp; 连接池技术，一般是客户端侧高效管理和复用连接，避免重复创建（带来的性能损耗，特别是 `TLS`）和销毁连接的一种技术手段。在项目中灵活使用连接池，对降低服务器负载十分有帮助。如 `go-xorm` 的 [连接池](https://github.com/go-xorm/manual-zh-CN/blob/master/chapter-01/1.engine.md)、`go-redis` 的 [连接池](https://github.com/go-redis/redis/tree/master/internal/pool)，本文就来分析下 `go-redis` 中的连接池实现。
+&emsp;&emsp;连接池技术，一般是客户端侧高效管理和复用连接，避免重复创建（带来的性能损耗，特别是 `TLS`）和销毁连接的一种技术手段。在项目中灵活使用连接池，对降低服务器负载十分有帮助。如 go-xorm 的 [连接池](https://github.com/go-xorm/manual-zh-CN/blob/master/chapter-01/1.engine.md)、go-redis 的 [连接池](https://github.com/go-redis/redis/tree/master/internal/pool)，本文就来分析下 go-redis 中的连接池实现。
 
-总览下连接池的核心 [代码结构](https://github.com/go-redis/redis/blob/master/internal/pool/pool.go)，`go-redis` 的连接池实现分为如下几个部分：
+总览下连接池的核心 [代码结构](https://github.com/go-redis/redis/blob/master/internal/pool/pool.go)，go-redis 的连接池实现分为如下几个部分：
 1.	连接池初始化、管理连接
 2.	建立与关闭连接
 3.	获取与放回连接
@@ -36,7 +36,7 @@ type Options struct {
 }
 ```
 
-[单个连接](https://github.com/go-redis/redis/blob/master/internal/pool/conn.go) 的结构体定义，核心是 net.Conn 封装及根据 Redis 协议实现相应的读写操作：
+[单个连接](https://github.com/go-redis/redis/blob/master/internal/pool/conn.go) 的结构体定义，核心是 `net.Conn` 封装及根据 Redis 协议实现相应的读写操作：
 ```GOLANG
 type Conn struct {
     netConn net.Conn  // tcp 连接
@@ -640,7 +640,7 @@ var timers = sync.Pool{
 }
 ```
 
-##	0x07    参考
+##	0x06    参考
 -	[Redis Clients](http://redis.io/clients#go)
 -   [Go Redis 连接池实现](https://jackckr.github.io/golang/go-redis%E8%BF%9E%E6%8E%A5%E6%B1%A0%E5%AE%9E%E7%8E%B0/)
 -	[openresty 连接池](https://wiki.jikexueyuan.com/project/openresty/web/conn_pool.html)
