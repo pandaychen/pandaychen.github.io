@@ -4,12 +4,11 @@ title:      GoRedis连接池（Pool）源码分析
 subtitle:   
 date:       2020-02-22
 author:     pandaychen
-header-img:
-catalog:	true
-category:	false
+header-img: 
+catalog: true
+category:   false
 tags:
-	- Redis
-	- 连接池
+    - Redis
 ---
 
 ##  0x00    连接池介绍
@@ -22,7 +21,7 @@ tags:
 4.	监控统计 && 连接保活配置
 
 ##  0x01    结构体
-[连接池选项](https://github.com/go-redis/redis/blob/master/internal/pool/pool.go#L51)定义：
+连接池[选项](https://github.com/go-redis/redis/blob/master/internal/pool/pool.go#L51)定义：
 ```GOLANG
 type Options struct {
 	Dialer  func(context.Context) (net.Conn, error)
