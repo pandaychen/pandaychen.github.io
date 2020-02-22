@@ -22,7 +22,7 @@ tags:
 
 ##  0x01    Pool 相关的结构体
 连接池 [选项](https://github.com/go-redis/redis/blob/master/internal/pool/pool.go#L51) 定义：
-```GOLANG
+```go
 type Options struct {
 	Dialer  func(context.Context) (net.Conn, error)
 	OnClose func(*Conn) error
@@ -37,7 +37,7 @@ type Options struct {
 ```
 
 [单个连接](https://github.com/go-redis/redis/blob/master/internal/pool/conn.go) 的结构体定义，核心是 `net.Conn` 封装及根据 Redis 协议实现相应的读写操作：
-```GOLANG
+```go
 type Conn struct {
     netConn net.Conn  // tcp 连接
 
@@ -52,7 +52,7 @@ type Conn struct {
 ```
 
 连接池的结构体定义：
-```GO
+```go
 type ConnPool struct {
     opt *Options // 连接池配置
 
@@ -77,7 +77,7 @@ type ConnPool struct {
 ```
 
 连接池统计 Stats 的结构定义：
-```GO
+```go
 // Stats contains pool state information and accumulated stats.
 type Stats struct {
 	Hits     uint32 // number of times free connection was found in the pool
@@ -92,7 +92,7 @@ type Stats struct {
 
 ##  0x02    Pool 接口
 首先，封装 Pool 的接口实现方法，如下：
-```GOLANG
+```go
 type Pooler interface {
     NewConn(context.Context) (*Conn, error) // 创建连接
     CloseConn(*Conn) error // 关闭连接
@@ -113,7 +113,7 @@ type Pooler interface {
 
 ####    1、初始化连接池
 使用工厂函数创建全局 Pool 对象，首先会初始化一个 ConnPool 实例，赋予 PoolSize 大小的连接队列和轮转队列，接着会根据 MinIdleConns 参数维持一个最小连接数，以保证连接池中有这么多数量的连接处于活跃状态。IdleTimeout 和 IdleCheckFrequency 参数用来在每过一段时间内会对连接池中不活跃的连接做清理操作。再看 ConnPool 结构体的定义，conns 和 idleConns 这两个队列，conns 就是连接队列，而 idleConns 就是轮转队列。
-```GO
+```go
 func NewConnPool(opt *Options) *ConnPool {
     p := &ConnPool{
         opt: opt,   //Save 配置
@@ -178,7 +178,7 @@ func (p *ConnPool) addIdleConn() error {
 ```
 
 ####    2、关闭连接池
-```GO
+```go
 func (p *ConnPool) Close() error {
     // 原子性检查连接池是否已经关闭，若没关闭，则将关闭标志置为 1
     if !atomic.CompareAndSwapUint32(&p._closed, 0, 1) {
@@ -211,7 +211,7 @@ func (p *ConnPool) Close() error {
 ##  0x04    单个连接管理
 
 ####    1、建立连接
-```GO
+```go
 func (p *ConnPool) newConn(ctx context.Context, pooled bool) (*Conn, error) {
     // 拨号
     cn, err := p.dialConn(ctx, pooled)
@@ -278,7 +278,7 @@ func (p *ConnPool) tryDial() {
 ```
 
 ####    2、从连接池取出连接
-```GOLANG
+```go
 // Get returns existed connection from the pool or creates a new one.
 func (p *ConnPool) Get(ctx context.Context) (*Conn, error) {
     if p.closed() {
@@ -378,7 +378,7 @@ func (p *ConnPool) popIdle() *Conn {
 ```
 
 ####    3、向连接池放回连接
-```GO
+```go
 func (p *ConnPool) Put(cn *Conn) {
     // 检查连接中是否还有数据没被读取
     if cn.rd.Buffered()> 0 {
@@ -406,7 +406,7 @@ func (p *ConnPool) Put(cn *Conn) {
 
 ####    4、移除和关闭连接
 在 Pool 的实现中，移除（Remove）和关闭连接（CloseConn），底层调用的都是 removeConnWithLock 函数：
-```GO
+```go
 func (p *ConnPool) Remove(cn *Conn, reason error) {
     p.removeConnWithLock(cn)
     p.freeTurn()
@@ -420,7 +420,7 @@ func (p *ConnPool) CloseConn(cn *Conn) error {
 ```
 
 removeConnWithLock 函数的工作流程如下：
-```GO
+```go
 func (p *ConnPool) removeConnWithLock(cn *Conn) {
     // 连接队列加锁
     p.connsMu.Lock()
@@ -459,7 +459,7 @@ func (p *ConnPool) closeConn(cn *Conn) error {
 
 ####    5、监控 && 回收过期连接
 在 `NewConnPool` 方法中，若传入的 Option 配置了空闲连接超时和检查空闲连接频率，则新启动一个用于检查并清理过期连接的 goroutine，每隔 frequency 时间遍历检查连接池中是否存在过期连接，并清理。其代码如下：
-```GO
+```go
 //frequency 指定了多久进行一次检查，这里直接作为定时器 ticker 的触发间隔
 func (p *ConnPool) reaper(frequency time.Duration) {
     // 创建 ticker
@@ -537,7 +537,7 @@ func (p *ConnPool) reapStaleConn() *Conn {
 ```
 
 #### 6、检查连接是否已经过期
-```GO
+```go
 func (p *ConnPool) isStaleConn(cn *Conn) bool {
 	if p.opt.IdleTimeout == 0 && p.opt.MaxConnAge == 0 {
         // 未配置超时选项
@@ -581,7 +581,7 @@ func (p *ConnPool) Filter(fn func(*Conn) bool) error {
 
 ####    3、统计连接池数据
 监控统计对调整连接池配置选项，优化连接池性能提供了重要的依据，在任何系统的设计中都是不必可少的组件。
-```GO
+```go
 // 连接池连接数量总数
 func (p *ConnPool) Len() int {
     p.connsMu.Lock()
