@@ -1,12 +1,12 @@
 ---
 layout:     post
-title:      Go-Redis连接池（Pool）源码分析
+title:      GoRedis连接池（Pool）源码分析
 subtitle:   
 date:       2020-02-22
 author:     pandaychen
-header-img: 
-catalog: true
-category:   false
+header-img:
+catalog:	true
+category:	false
 tags:
 	- Redis
 	- 连接池
