@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      神奇的Golang-IO包（计划）
+title:      神奇的 Golang-IO 包（计划）
 subtitle:   
 date:       2020-01-01
 author:     pandaychen
@@ -10,22 +10,22 @@ tags:
     - Golang
 ---
 
-##	0x01	Golang的io包介绍
-在 golang 中，标准库中的package设计的基本原则是职责内聚。通常开发者可以使用自定义Wrapper的方式来封装标准库package中的interface接口，亦或在此基础上扩展，添加自定义的功能。
+##	0x01	Golang 的 io 包介绍
+在 golang 中，标准库中的 package 设计的基本原则是职责内聚。通常开发者可以使用自定义 Wrapper 的方式来封装标准库 package 中的 interface 接口，亦或在此基础上扩展，添加自定义的功能。
 但是有一点，返回值必须封装的方法保持一致。
 
-##  0x02    神奇的io.Copy
+##  0x02    神奇的 io.Copy
 
-###	io.Copy的好处
-`io.Copy()`相较于`ioutil.ReadAll()`之类，最大的不同是它采用了一个定长的缓冲区做中转，复制过程中，内存的消耗量是较为固定的。如果你的代理的网络状况不佳，就会发现`io.Copy()`比`ioutil.ReadAll()`的好处了。
+###	io.Copy 的好处
+`io.Copy()` 相较于 `ioutil.ReadAll()` 之类，最大的不同是它采用了一个定长的缓冲区做中转，复制过程中，内存的消耗量是较为固定的。如果你的代理的网络状况不佳，就会发现 `io.Copy()` 比 `ioutil.ReadAll()` 的好处了。
 
-###	io.Copy与Tcp的开发结合
+###	io.Copy 与 Tcp 的开发结合
 
-做过服务端开发的同学一定都写过代理 Proxy，代理的本质，是转发两个相同方向路径上的stream（数据流）。例如，一个`A-->B-->C`的代理模式，B作为代理，需要完成下面两件事情：
-1.	读取从`A--->B`的数据，转发到`B--->C`
-2.	读取从`C--->B`的数据，转发到`B--->A`
+做过服务端开发的同学一定都写过代理 Proxy，代理的本质，是转发两个相同方向路径上的 stream（数据流）。例如，一个 `A-->B-->C` 的代理模式，B 作为代理，需要完成下面两件事情：
+1.	读取从 `A--->B` 的数据，转发到 `B--->C`
+2.	读取从 `C--->B` 的数据，转发到 `B--->A`
 
-在golang中，只需要`io.Copy()`就能轻而易举的完成上面的事情，其[实现代码](https://golang.org/src/io/io.go?s=12796:12856#L353)如下所示：
+在 golang 中，只需要 `io.Copy()` 就能轻而易举的完成上面的事情，其 [实现代码](https://golang.org/src/io/io.go?s=12796:12856#L353) 如下所示：
 ```go
 func copyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
 	// If the reader has a WriteTo method, use it to do the copy.
@@ -75,8 +75,8 @@ func copyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
 }
 ```
 
-###	io.Copy与Http的开发结合
-在Web开发中，如果我们要实现下载一个文件（并保存在本地），有哪些高效的方式呢？<br>
+###	io.Copy 与 Http 的开发结合
+在 Web 开发中，如果我们要实现下载一个文件（并保存在本地），有哪些高效的方式呢？<br>
 第一种方式：`http.Get()`+`ioutil.WriteFile()`，将下载内容直接写到文件中
 
 ```go
@@ -97,9 +97,9 @@ func DownloadFile() error {
 	return ioutil.WriteFile("/tmp/xxx_file", data, 0755)
 }
 ```
-But，第一种方式的问题在于，如果是大文件，会出现内存不足的问题，因为它是需要先把请求内容全部读取到内存中，然后再写入到文件中的。优化的方案就是使用`io.Copy()`，它是将源复制到目标，并且是按默认的缓冲区`32k`循环操作的，不会将内容一次性全写入内存中
+But，第一种方式的问题在于，如果是大文件，会出现内存不足的问题，因为它是需要先把请求内容全部读取到内存中，然后再写入到文件中的。优化的方案就是使用 `io.Copy()`，它是将源复制到目标，并且是按默认的缓冲区 `32k` 循环操作的，不会将内容一次性全写入内存中
 
-第二种方式：使用`io.Copy()`
+第二种方式：使用 `io.Copy()`
 ```go
 func DownloadFile() {
     url :="http://xxx/somebigfile"
@@ -108,7 +108,8 @@ func DownloadFile() {
         fmt.Fprint(os.Stderr ,"get url error" , err)
     }
     defer resp.Body.Close()    
-    out, err := os.Create("/tmp/xxx_file")
+	out, err := os.Create("/tmp/xxx_file")
+	// 很重要：初始化一个 io.Writer
     wt :=bufio.NewWriter(out)
    
     defer out.Close()
@@ -123,8 +124,8 @@ func DownloadFile() {
 同理，复制大文件也可以用 `io.copy()` 这个，防止产生内存溢出。
 
 
-###	使用io.Copy实现SSH代理
-利用`io.Copy()`实现SSH代理的代码如下，只需要2个`io.Copy()`就简单的将两条连接无缝衔接起来了，非常直观。
+###	使用 io.Copy 实现 SSH 代理
+利用 `io.Copy()` 实现 SSH 代理的代码如下，只需要 2 个 `io.Copy()` 就简单的将两条连接无缝衔接起来了，非常直观。
 ```go
 
 type Endpoint struct {
@@ -225,16 +226,16 @@ func main() {
 }
 ```
 
-##  0x03	golang  io.Pipe的妙用
+##  0x03	golang  io.Pipe 的妙用
 
 
 
-##	0x04	一些IO优化的tips
-1.	关于io.Copy的优化
-在前面讨论过，`io.Copy`此方法，从src拷贝数据到dst，中间会借助字节数组作为buf。可以使用`io.CopyBuffer` 替代 `io.Copy`，并使用sync.Pool缓存buf, 以减少临时对象的申请和释放。
+##	0x04	一些 IO 优化的 tips
+1.	关于 io.Copy 的优化
+在前面讨论过，`io.Copy` 此方法，从 src 拷贝数据到 dst，中间会借助字节数组作为 buf。可以使用 `io.CopyBuffer` 替代 `io.Copy`，并使用 sync.Pool 缓存 buf, 以减少临时对象的申请和释放。
 ```GOLANG
 io.CopyBuffer(dst Writer, src Reader, buf []byte)
 ```
 
 ##	0x05	参考
--	[Go编程技巧--io.Reader/Writer](https://segmentfault.com/a/1190000013358594)
+-	[Go 编程技巧 --io.Reader/Writer](https://segmentfault.com/a/1190000013358594)
