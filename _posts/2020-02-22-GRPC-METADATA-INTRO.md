@@ -91,7 +91,7 @@ if err == nil {
 -	`NewOutgoingContext`：将新创建的 Metadata 添加到 context 中，这样会 ** 覆盖 ** 掉原来已有的 metadata
 -	`AppendToOutgoingContext`：可以将 key-value 对添加到已有的 context 中。如果对应的 context 没有 metadata，那么就会创建一个；如果已有 metadata 了，那么就将数据添加到原来的 metadata（推荐使用 `AppendToOutgoingContext`，PS：在 Interceptor 中，常常需要给 Metadata 添加 key-value 对）
 
-NewOutgoingContext 方法：
+`NewOutgoingContext` 方法的用例：
 ```go
 // create a new context with some metadata
 md := metadata.Pairs("k1", "v1", "k1", "v2", "k2", "v3")
@@ -109,7 +109,7 @@ response, err := client.SomeRPC(ctx, someRequest)
 stream, err := client.SomeStreamingRPC(ctx)
 ```
 
-AppendToOutgoingContext 方法：
+`AppendToOutgoingContext` 方法的用例：
 ```go
 // create a new context with some metadata
 ctx := metadata.AppendToOutgoingContext(ctx, "k1", "v1", "k1", "v2", "k2", "v3")
@@ -136,11 +136,10 @@ func NewOutgoingContext(ctx context.Context, md MD) context.Context {
 
 ```
 
-####	接收 Metadata
+####	接收 Metadata（和 Server 发送对应）
 客户端如何接收 Metadata？答案是 `grpc.Header()` 和 `grpc.Trailer()`，客户端可以接收的 Metadata 只有 header 和 trailer。此外，针对 Unary Call 和 Streaming 两种 RPC 类型，接收 metadata 的方式也不同。
 
 1.	UnaryCall，使用 `grpc.Header()` 和 `grpc.Trailer()` 方法来接收 Metadata
-
 ```go
 var header, trailer metadata.MD // variable to store header and trailer
 r, err := client.SomeRPCMethod(
@@ -153,8 +152,7 @@ r, err := client.SomeRPCMethod(
 // do something with header and trailer
 ```
 
-2.	Streaming Call，Server/Client/Bidirectional streaming RPC，相应的 Header 和 Trailer 可以通过调用返回的 ClientStream 接口的 Header() 和 Trailer() 方法接收
-
+2.	Streaming Call，Server/Client/Bidirectional streaming RPC，相应的 Header 和 Trailer 可以通过调用返回的 ClientStream 接口的 Header() 和 Trailer() 方法接收。
 ```go
 stream, err := client.SomeStreamingRPC(ctx)
 
@@ -166,14 +164,14 @@ trailer := stream.Trailer()
 ```
 
 ##	0x03	服务端处理
-服务端处理 Metadata 的方法和客户端有些细微的区别。先给一个Server的例子：
+服务端处理 Metadata 的方法和客户端有些细微的区别。先给一个 Server 的例子：
 ```go
 // server is used to implement helloworld.GreeterServer.
 type server struct{}
 
 // SayHello implements helloworld.GreeterServer
 func (s *server) SayHello(ctx context.Context, in *pb.HelloRequest) (*pb.HelloReply, error) {
-	// 服务端尝试接收metadata数据，通过FromIncomingContext接收
+	// 服务端尝试接收 metadata 数据，通过 FromIncomingContext 接收
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
 		fmt.Printf("get metadata error")
@@ -183,15 +181,15 @@ func (s *server) SayHello(ctx context.Context, in *pb.HelloRequest) (*pb.HelloRe
 	if t, ok := md["timestamp"]; ok {
 		fmt.Printf("timestamp from metadata:\n")
 		for i, e := range t {
-			fmt.Printf(" %d. %s\n", i, e)
+			fmt.Printf("%d. %s\n", i, e)
 		}
 	}
 	//fmt.Printf("%v: Receive is %s\n", time.Now(), in.Name)
-	return &pb.HelloReply{Message: "Hello " + in.Name}, nil
+	return &pb.HelloReply{Message: "Hello" + in.Name}, nil
 }
 ```
 
-####	Server 接收Metedata
+####	Server 接收 Metedata
 服务器需要在 RPC 调用中的 context 中获取客户端发送的 metadata。如果是一个普通的 RPC 调用，那么就可以直接用 context；如果是一个 Streaming 调用，服务器需要从相应的 stream 里获取 context，然后获取 metadata。
 ```go
 //Unary Call
@@ -207,7 +205,7 @@ func (s *server) SomeStreamingRPC(stream pb.Service_SomeStreamingRPCServer) erro
 }
 ```
 
-####	Server 发送Metedata
+####	Server 发送 Metedata（和 Client 接收 Metadata 对应）
 一般而言，Server 发送的环节，一般在 RPC 请求处理完成时。客户端可以接收的 metadata 只有 header 和 trailer，因此 server 也只能发送 header 和 trailer。
 
 1.	UnaryCall
