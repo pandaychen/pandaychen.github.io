@@ -62,9 +62,6 @@ md := metadata.Pairs(
 ```
 
 ##  0x02	客户端处理
-在 Opentracing 的分析中，我们之前是用 StartSpanFromContext 来模拟从 context 中启动一个子 span，但是 StartSpanFromContext 或者 SpanFromContext 只能在同一个服务内使用，grpc 中 client 的 context 和 server 的 context 并不是同一个 context，无法使用这两个函数。（参考 https://github.com/grpc/grpc-go/issues/130）
-如果想通过 grpc 的 context 传递 span 的信息，就需要使用 grpc 的 metadata 来传递（一个简单的例子：https://medium.com/@harlow/grpc-context-for-client-server-metadata-91cec8729424）。
-同时 grpc-client 端提供了 Inject 函数，可以将 span 的 context 信息注入到 carrier 中，再将 carrier 写入到 metadata 中，即可完成 span 信息的传递。
 
 ####  发送 Metadata
 贴一个客户端发送的例子：
@@ -139,6 +136,7 @@ func NewOutgoingContext(ctx context.Context, md MD) context.Context {
 ####	接收 Metadata（和 Server 发送对应）
 客户端如何接收 Metadata？答案是 `grpc.Header()` 和 `grpc.Trailer()`，客户端可以接收的 Metadata 只有 header 和 trailer。此外，针对 Unary Call 和 Streaming 两种 RPC 类型，接收 metadata 的方式也不同。
 
+
 1.	UnaryCall，使用 `grpc.Header()` 和 `grpc.Trailer()` 方法来接收 Metadata
 ```go
 var header, trailer metadata.MD // variable to store header and trailer
@@ -148,7 +146,6 @@ r, err := client.SomeRPCMethod(
     grpc.Header(&header),    // will retrieve header
     grpc.Trailer(&trailer),  // will retrieve trailer
 )
-
 // do something with header and trailer
 ```
 
