@@ -65,7 +65,7 @@ md := metadata.Pairs(
 
 ####  发送 Metadata
 贴一个客户端发送的例子：
-![image](https://s2.ax1x.com/2020/02/26/3aljER.jpg)
+![image](https://s2.ax1x.com/2020/02/27/3a6BLj.png)
 
 ```go
 
