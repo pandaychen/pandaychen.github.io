@@ -149,13 +149,11 @@ r, err := client.SomeRPCMethod(
 // do something with header and trailer
 ```
 
-2.	Streaming Call，Server/Client/Bidirectional streaming RPC，相应的 Header 和 Trailer 可以通过调用返回的 ClientStream 接口的 Header() 和 Trailer() 方法接收。
+2.	Streaming Call，包含Server、Client和Bidirectional三种streaming类型RPC，相应的 Header 和 Trailer 可以通过调用返回的 ClientStream 接口的 Header() 和 Trailer() 方法接收。
 ```go
 stream, err := client.SomeStreamingRPC(ctx)
-
 // retrieve header
 header, err := stream.Header()
-
 // retrieve trailer
 trailer := stream.Trailer()
 ```
