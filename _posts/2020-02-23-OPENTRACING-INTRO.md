@@ -30,9 +30,9 @@ tags:
 
 这几种交织的 case 都具有典型的应用，如下：
 
-*	Logging：ELK，近几年势头最猛的日志分析服务，无须多言。
-*	Metrics：Prometheus，第二个加入 CNCF 的开源项目，非常好用。
-*	Tracing：OpenTracing，严格来说 Opentracing 只是一种规范（已加入 CNCF），比较典型的如 Jaeger、Zipkin
+*	Logging：ELK
+*	Metrics：Prometheus
+*	Tracing：Jaeger、Zipkin
 
 
 ##  0x02	OpenTracing 的概念与原理
@@ -56,9 +56,10 @@ tags:
 ##  0x03	数据模型基础
 原始文档在此 [The OpenTracing Semantic Specification](https://github.com/opentracing/specification/blob/master/specification.md)
 
-Tracing 的流程示例如下：
+Tracing 的流程和基于时间维度的示例如下：
 
 ![image](https://s2.ax1x.com/2020/02/26/3UQcbn.png)
+![image](https://s2.ax1x.com/2020/02/26/3Ud6r6.png)
 
 *	`Trace` : 调用链
 *	`Span`：某个处理阶段（我通常理解为 RPC 方法），翻译为阶段、或者跨度
