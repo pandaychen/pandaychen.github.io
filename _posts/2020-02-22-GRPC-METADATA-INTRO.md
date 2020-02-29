@@ -149,7 +149,7 @@ r, err := client.SomeRPCMethod(
 // do something with header and trailer
 ```
 
-2.	Streaming Call，包含Server、Client和Bidirectional三种streaming类型RPC，相应的 Header 和 Trailer 可以通过调用返回的 ClientStream 接口的 Header() 和 Trailer() 方法接收。
+2.	Streaming Call，包含 Server、Client 和 Bidirectional 三种 streaming 类型 RPC，相应的 Header 和 Trailer 可以通过调用返回的 ClientStream 接口的 Header() 和 Trailer() 方法接收。
 ```go
 stream, err := client.SomeStreamingRPC(ctx)
 // retrieve header
@@ -159,7 +159,7 @@ trailer := stream.Trailer()
 ```
 
 ##	0x03	服务端处理
-服务端处理 Metadata 的方法和客户端有些细微的区别。先给一个 Server 的例子：
+服务端处理 Metadata 的方法和客户端有些细微的区别，服务端一般作为 RPC 的 response 端，使用 `FromIncomingContext` 方法接收 Metadata。先给一个 Server 的例子：
 ```go
 // server is used to implement helloworld.GreeterServer.
 type server struct{}
