@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      给Jekyll增加Latex公式渲染
+title:      给 Jekyll 增加 Latex 公式渲染
 subtitle:   
 date:       2019-06-18
 author:     pandaychen
@@ -12,15 +12,15 @@ tags:
 ---
 
 ##  介绍
-上一次用[`Latex`](https://zh.wikipedia.org/wiki/LaTeX)都是7年前的事情了，编写密码学的复杂数学公式之必备利器。
+上一次用 [`Latex`](https://zh.wikipedia.org/wiki/LaTeX) 都是 7 年前的事情了，编写密码学的复杂数学公式之必备利器。
 
-##  Jekyll支持Latex的设置
+##  Jekyll 支持 Latex 的设置
 
-1.  第一步，将`_config.yml`中的 `markdown` 修改为
+1.  第一步，将 `_config.yml` 中的 `markdown` 修改为
 ``` js
 markdown: kramdown
 ```
-2. 第二步，在`header`文件中添加引用和设置代码，也就是_include/header.html中
+2. 第二步，在 `header` 文件中添加引用和设置代码，也就是_include/header.html 中
 ``` js
   <script type="text/x-mathjax-config">
     MathJax.Hub.Config({
@@ -50,6 +50,6 @@ $$
 
 ##  参考
 -   [How to support latex in github-pages?](https://stackoverflow.com/questions/26275645/how-to-support-latex-in-github-pages)
--   [在Jekyll中使用LaTex](https://lloyar.github.io/2018/10/08/mathjax-in-jekyll.html)
+-   [在 Jekyll 中使用 LaTex](https://lloyar.github.io/2018/10/08/mathjax-in-jekyll.html)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
