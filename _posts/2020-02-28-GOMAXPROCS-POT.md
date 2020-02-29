@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      GOMAXPROCS 的 “坑”
-subtitle:
+subtitle:	容器环境中使用runtime.GOMAXPROCS()需谨慎
 date:       2020-02-28
 author:     pandaychen
 header-img:
