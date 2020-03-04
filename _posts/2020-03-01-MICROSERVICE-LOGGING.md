@@ -12,7 +12,7 @@ tags:
 ---
 
 ##  0x00    前言
-&emsp;&emsp; 作为一个多年的后台开发人员，（结构化）日志对于后台项目的重要性不言而喻。通常调试、记录运行错误及基于日志关键字的监控都会需要后台提供足够充分的日志。Golang 中有非常多优秀的日志库，如 [Zap](https://github.com/uber-go/zap) 和 [Logus](https://github.com/sirupsen/logrus) 等。这篇文章分享下在项目中，如何将 Zap 和 gRPC 完美的融合在一起，保证日志的可读性和高效，同时也兼顾的性能。
+&emsp;&emsp; 作为一个多年的后台开发人员，（结构化）日志对于后台项目的重要性不言而喻。通常调试、记录运行错误及基于日志关键字的监控都会需要后台提供足够充分的日志。Golang 中有非常多优秀的日志库，如 [Zap](https://github.com/uber-go/zap) 和 [Logus](https://github.com/sirupsen/logrus) 等。这篇文章分享下在项目中，如何将 Zap 和 gRPC 完美的融合在一起，保证日志的可读性和高效，同时也兼顾了性能。
 
 ##  0x01    日志的选择参数
 Zap 库满足了常见日志库的所有优点，非常适合在项目中使用。具体来说：
@@ -63,7 +63,51 @@ type LoggerV2 interface {
 }
 ```
 
-Zap 库中提供了两种日志记录器：Sugared Logger 和 Logger。
+此外，Zap 库中提供了两种日志记录器：Sugared Logger 和 Logger。二者的区别在于 [官方描述](https://godoc.org/go.uber.org/zap#hdr-Choosing_a_Logger)：
+
+Sugared Logger：类似于 `fmt.Printf`，更通用。
+
+> In contexts where performance is nice, but not critical, use the SugaredLogger. It's 4-10x faster than other structured logging packages and supports both structured and printf-style logging. Like log15 and go-kit, the SugaredLogger's structured logging APIs are loosely typed and accept a variadic number of key-value pairs. (For more advanced use cases, they also accept strongly typed fields - see the SugaredLogger.With documentation for details.)
+
+用法：
+```go
+sugar := zap.NewExample().Sugar()
+defer sugar.Sync()
+sugar.Infow("failed to fetch URL",
+  "url", "http://example.com",
+  "attempt", 3,
+  "backoff", time.Second,
+)
+sugar.Infof("failed to fetch URL: %s", "http://example.com")
+```
+
+Logger：性能更高，但需要自己按照 zap 的结构化进行记录。
+> In the rare contexts where every microsecond and every allocation matter, use the Logger. It's even faster than the SugaredLogger and allocates far less, but it only supports strongly-typed, structured logging.
+
+用法：
+```go
+logger := zap.NewExample()
+defer logger.Sync()
+logger.Info("failed to fetch URL",
+  zap.String("url", "http://example.com"),
+  zap.Int("attempt", 3),
+  zap.Duration("backoff", time.Second),
+)
+```
+
+不过二者可以转换：
+```go
+logger := zap.NewExample()
+defer logger.Sync()
+sugar := logger.Sugar()
+plain := sugar.Desugar()
+```
+
+####    gRPC 中使用 Zap 记录
+在 grpclog 包中，按照 `grpclog.SetLoggerV2(自己实现的 LoggerV2 对象)` 导入自己实现的方法，然后 grpclog 就会按照自定义的方法来输出日志了，非常方便。
+```
+grpclog.Errorf("err %v", err)
+```
 
 
 ##  0x03    关于日志的一些细节
