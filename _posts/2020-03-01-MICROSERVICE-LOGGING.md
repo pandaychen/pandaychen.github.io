@@ -23,7 +23,7 @@ Zap 库满足了常见日志库的所有优点，非常适合在项目中使用�
 -   支持采样：全日志记录，支持采样率，防止服务请求剧增导致时输出的日志量剧增
 
 ##  0x02    gRPC 和 Zap 打包
-&emsp;&emsp; gRPC 的 grpclog 包，提供了 [LoggerV2](https://godoc.org/google.golang.org/grpc/grpclog#LoggerV2) 的 `interface{}` 定义，[代码在此](https://github.com/grpc/grpc-go/blob/master/grpclog/loggerv2.go)。因此，只要通过 Zap 实现 LoggerV2 的接口（用 Zap 实例化 grpc.LoggerV2），并通过 `SetLoggerV2(l LoggerV2)` 将实现的对象设置到 grpclog 包中，那么 gRPC 就会默认使用我们传入的 Zap 的 logger 进行日志打印，非常完美。
+&emsp;&emsp; gRPC 的 grpclog 包，提供了 [LoggerV2](https://godoc.org/google.golang.org/grpc/grpclog#LoggerV2) 的 `interface{}` 定义，[代码在此](https://github.com/grpc/grpc-go/blob/master/grpclog/loggerv2.go)。因此，只要通过 Zap 实现 LoggerV2 的接口（用自己封装的 Zap.logger 实例化 grpc.LoggerV2），并通过 `SetLoggerV2(l LoggerV2)` 将实现的对象设置到 grpclog 包中，那么 gRPC 就会默认使用我们传入的 Zap 的 logger 进行日志打印，非常完美。
 
 LoggerV2 的接口定义了下面的方法集合，所以在我们自己的 Zap 库中，对这里所有的方法都要进行二次封装。
 ```go
@@ -104,11 +104,11 @@ plain := sugar.Desugar()
 ```
 
 ####    gRPC 中使用 Zap 记录
-在 grpclog 包中，按照 `grpclog.SetLoggerV2(自己实现的 LoggerV2 对象)` 导入自己实现的方法，然后 grpclog 就会按照自定义的方法来输出日志了，非常方便。
+&emsp;&emsp; 在 grpclog 包中，按照 `grpclog.SetLoggerV2(自己实现的 LoggerV2 对象)` 导入自己封装的 zaplogger 方法，然后 grpclog 就会按照自定义的方法来输出日志了，非常方便。
 ```
+grpclog.Infof("%s", message)
 grpclog.Errorf("err %v", err)
 ```
-
 
 ##  0x03    关于日志的一些细节
 如何在高并发的实时系统中优化日志写入呢？在笔者之前的 DPDK 网络包处理项目中，总结了这几条经验：
