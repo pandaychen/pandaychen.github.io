@@ -35,6 +35,7 @@ tags:
 2.  自动关闭空连接
 
 下面这张表格总结了常见的Golang的Redis客户端库的连接池特性，笔者在项目中使用的连接池是基于[go-redis](https://github.com/go-redis/redis/tree/master/internal/pool)的。
+
 | 连接池功能 | go-redis | radix.V2 | redigo|
 | :-----:| :----: | :----: | :----: |
 | 实现数据结构 | slice | channel | linklist|
