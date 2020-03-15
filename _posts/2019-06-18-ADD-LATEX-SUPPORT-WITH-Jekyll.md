@@ -1,10 +1,10 @@
 ---
 layout:     post
 title:      给 Jekyll 增加 Latex 公式渲染
-subtitle:   
+subtitle:
 date:       2019-06-18
 author:     pandaychen
-header-img: 
+header-img:
 catalog: true
 tags:
     - Latex
@@ -31,18 +31,18 @@ markdown: kramdown
     });
   </script>
   <script src="https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML" type="text/javascript"></script>
-``` 
+```
 
 ##  数学公式的例子
-1.	
+1.
 $$E=mc^2$$
-2.	
-$$ 
-\begin{aligned} \dot{x} &= \sigma(y-x) \\ 
-\dot{y} &= \rho x - y - xz \\ 
-\dot{z} &= -\beta z + xy \end{aligned} 
+2.
 $$
-3.  
+\begin{aligned} \dot{x} &= \sigma(y-x) \\
+\dot{y} &= \rho x - y - xz \\
+\dot{z} &= -\beta z + xy \end{aligned}
+$$
+3.
 $$
 R_{\mu \nu} - {1 \over 2}g_{\mu \nu}\,R + g_{\mu \nu} \Lambda
 = {8 \pi G \over c^4} T_{\mu \nu}
