@@ -62,7 +62,9 @@ c2 := male(chan []byte, 1024)           // 有缓冲
 
 
 ##      channel 基础应用
--       阻塞等待（某事件）完成，类似于 signal 的功能
+
+####    阻塞等待至完成
+阻塞等待（某事件）完成，类似于 signal 的功能
 
 ```go
 func c1() {
@@ -76,7 +78,8 @@ func c1() {
 }
 ```
 
--       简单的 groutine pool，通过 channel 发送通知
+####     groutine pool 池并发
+简单的 groutine pool，通过 channel 发送通知
 
 ```go
 package main
@@ -104,8 +107,8 @@ func main() {
 }
 ```
 
--       channel 的事件与 select 的 case 条件完美结合
-从不同的并发执行的 goroutine 中获取值可以通过关键字 select 来完成，select 是 golang 特别有趣的用法:)。在实现微服务网关时，一般会有一个主控协程（manager goroutine）负责处理各个子 channel 的调度，是非常优雅的实现 [代码](https://github.com/pandaychen/gobetween/blob/master/src/server/scheduler/scheduler.go#L117)。
+####       channel + select 结合
+Channel 的事件触发机制与 select 的 case 机制结合，差不多成为 golang 编程范式了。从不同的并发执行的 goroutine 中获取值可以通过关键字 select 来完成，select 是 golang 特别有趣的用法:)。在实现微服务网关时，一般会有一个主控协程（manager goroutine）负责处理各个子 channel 的调度，是非常优雅的实现 [代码](https://github.com/pandaychen/gobetween/blob/master/src/server/scheduler/scheduler.go#L117)。
 
 > select 是 golang 中 pseudo-random 伪随机算法的一种实现
 
@@ -125,7 +128,8 @@ select {
 }
 ```
 
--       主 routine 利用 channel 发送数据，终结子 gorouitine-workers
+####    routine通知子routine退出
+主 routine 利用 channel 发送数据，终结子 routine-workers
 
 ```GO
 // 这是一个常见的终结 sub worker goroutines 的方法
@@ -168,7 +172,7 @@ func main() {
 }
 ```
 
--      有缓冲 channel 的默认行为
+####      有缓冲 channel 的默认行为
 默认 unbuffered channel 与 buffered channel 的行为是不同的，它们体现了一种交付保证（unbuffered channel）和不保证的思路（buffered channel），见文章 [聊一聊 Go 中 channel 的行为](https://www.infoq.cn/article/wZ1kKQLlsY1N7gigvpHo)，例如：看出带缓冲的 channel 略有不同。尽管已经 close 了，但我们依旧可以从中读出关闭前写入的 3 个值。第四次读取时，则会返回该 channel 类型的零值。向这类 channel 写入操作也会触发 panic。
 
 ```go
@@ -399,3 +403,5 @@ exit status 2
 -       [聊一聊 Go 中 channel 的行为](https://www.infoq.cn/article/wZ1kKQLlsY1N7gigvpHo)
 -       [Concurrency in Go 中文笔记](https://www.kancloud.cn/mutouzhang/go/596835)
 -       [go 并发编程范式](https://www.jianshu.com/p/3e1837860575)
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
