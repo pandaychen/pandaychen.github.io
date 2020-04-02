@@ -13,11 +13,11 @@ tags:
 
 
 ##  0x00 前言
-&emsp;&emsp;Hystrix-go 中实现接口错误率计算的方式，是一个非常典型的 rollingCount + 滑动窗口实现的计数桶。这篇文章来分析下其代码实现。其主要的功能 [实现代码](https://github.com/afex/hystrix-go/blob/master/hystrix/rolling/rolling.go) 在此。
+&emsp;&emsp;Hystrix-go 中实现接口错误率计算的数据结构，是一个非常典型的 RollingCount + 滑动窗口实现的计数桶（更专业一点的称呼：**时间序列数据库**）。这篇文章来分析下其代码实现。其主要的功能 [实现代码](https://github.com/afex/hystrix-go/blob/master/hystrix/rolling/rolling.go) 在此。
 
 ##	0x01	滑动窗口
 
-&emsp;&emsp; 默认的统计控制器 DefaultMetricCollector 保存着熔断器的所有状态，成功次数（successes），调用次数（numRequests），失败次数（failures），被拒绝次数（rejects）等等
+&emsp;&emsp; 默认的统计控制器 DefaultMetricCollector 保存着熔断器的所有状态，成功次数（successes），调用次数（numRequests），失败次数（failures），被拒绝次数（rejects）等等。
 
 ```golang
 type DefaultMetricCollector struct {
@@ -60,7 +60,7 @@ type numberBucket struct {
 	Value float64
 }
 ```
-这里，**Number 只保存 10s 内的数据**。每一次对熔断器的状态进行修改（更新）时，Number 都要先得到当前的 timestamp（秒级），如果 Bucket 不存在则创建。
+这里，每一次对熔断器的状态进行修改（更新）时，Number 都要先得到当前的 timestamp（秒级），如果 Bucket 不存在则创建。Rolling 包像个时间序列数据库，Buckets 的 Key 是 Unix 时间戳，Number 只保存 10s 内的数据。
 
 ```golang
 func (r *Number) getCurrentBucket() *numberBucket {
@@ -94,7 +94,7 @@ func (r *Number) removeOldBuckets() {
 
 最后，看下，对于对每个 bucket 中的 value 值进行更新的 Increment 方法，调用了 `getCurrentBucket` 和 `removeOldBuckets` 方法，即先得到 Bucket，更新对应的计数后再删除旧的数据（Bucket）。这样就实现了，根据时间的增长，定期更新滑动窗口中的值，并且删除掉 10s 窗口之外的旧数据的功能。
 
-此外，因为每个桶都会被多个线程并发地更新指标数据，所以桶对象需要提供一些线程安全的数据结构和更新方法。为此，原生的 Hystrix（JAVA）版本大量使用了 CAS，而 golang 版本则使用 sync.RWMutex 来控制。另外，在原生版本中，Hystrix 使用一个环形数组（Ringbuffer）来维护这些桶，类似于一个 FIFO 的队列。该数组实现有一个叫 addLast(Bucket o) 的方法，用于向环形数组的末尾追加新的桶对象，当数组中的元素个数没超过最大大小时，只是简单的维护尾指针；否则，在维护尾指针时，还要通过维护首指针，将第一个位置上元素剔除掉。而 golang 版本就使用 map 来实现，根据时间错来模拟 FIFO：即插入时，检查当前的 timestamp，如果没有就创建，插入完成后，删除 10s 之前的 Key，这样就使用 map 模拟了 FIFO 的功能。如下面的 Increment 方法：
+此外，因为每个桶都会被多个线程并发地更新指标数据，所以桶对象需要提供一些线程安全的数据结构和更新方法。为此，原生的 Hystrix（JAVA）版本大量使用了 CAS，而 golang 版本则使用 sync.RWMutex 来控制。另外，在原生版本中，Hystrix 使用一个环形数组（Ringbuffer）来维护这些桶，类似于一个 FIFO 的队列。该数组实现有一个叫 addLast(Bucket o) 的方法，用于向环形数组的末尾追加新的桶对象，当数组中的元素个数没超过最大大小时，只是简单的维护尾指针；否则，在维护尾指针时，还要通过维护首指针，将第一个位置上元素剔除掉。而 golang 版本就使用 map 来实现，根据时间戳来模拟 FIFO：即插入时，检查当前的 timestamp，如果没有就创建，插入完成后，删除 10s 之前的 Key，这样就使用 map 模拟了 FIFO 的功能。如下面的 Increment 方法：
 
 更新统计数据时，都是向当前最新的 bucket 中更新的，因此 hystrix 的滑动窗口类 HystrixRollingNumber 中提供了 getCurrentBucket() 方法，获取当前最新的 bucket。其执行流程和图如下：
 
@@ -179,3 +179,5 @@ func (r *Number) Sum(now time.Time) float64 {
 
 ##	0x04	参考
 -	[服务容错与保护方案 — Hystrix](https://kiswo.com/article/1030)
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
