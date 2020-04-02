@@ -122,11 +122,11 @@ func (r *Number) Increment(i float64) {
 
 判定熔断状态，调用了 IsHealthy 方法：
 ```golang
-	if !circuit.metrics.IsHealthy(time.Now()) {
-		// too many failures, open the circuit
-		circuit.setOpen()
-		return true
-	}
+if !circuit.metrics.IsHealthy(time.Now()) {
+	// too many failures, open the circuit
+	circuit.setOpen()
+	return true
+}
 ```
 
 [IsHealthy 方法](https://github.com/afex/hystrix-go/blob/master/hystrix/metrics.go#L148)，判断当前系统的错误率和计算的比值：
