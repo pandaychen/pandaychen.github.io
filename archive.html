@@ -49,7 +49,7 @@ https://github.com/kitian616/jekyll-TeXt-theme
 
 				{% capture tags %}
 				{% for tag in site.tags %}
-				<a data-sort="{{ site.posts.size | minus: tag[1].size | prepend: '0000' | slice: -4, 4 }}"
+				<a href="#{{ tag[0] }}"  data-sort="{{ site.posts.size | minus: tag[1].size | prepend: '0000' | slice: -4, 4 }}"
 					data-encode="{{ tag[0] | strip | url_encode }}"
 					class="tag-button"
 					title="{{ tag[0] }}" rel="{{ tag[1].size }}">
