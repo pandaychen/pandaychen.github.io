@@ -33,6 +33,14 @@ https://github.com/kitian616/jekyll-TeXt-theme
 	<div class="row">
 		<div class="col-lg-8 col-lg-offset-2 col-md-10 col-md-offset-1">
 			<!-- Tags (as filter) -->
+		
+			<!--
+			<div id='tag_cloud' class="tags">
+                                {% for tag in site.tags %}
+                                <a href="#{{ tag[0] }}" title="{{ tag[0] }}" rel="{{ tag[1].size }}">{{ tag[0] }}</a>
+                                {% endfor %}
+                        </div>
+			-->
 			<div id='tag_cloud' class="tags">
 				<a class="tag-button--all" data-encode="">
 					Show All
@@ -41,7 +49,7 @@ https://github.com/kitian616/jekyll-TeXt-theme
 
 				{% capture tags %}
 				{% for tag in site.tags %}
-				<a data-sort="{{ site.posts.size | minus: tag[1].size | prepend: '0000' | slice: -4, 4 }}"
+				<a href="#{{ tag[0] }}"  data-sort="{{ site.posts.size | minus: tag[1].size | prepend: '0000' | slice: -4, 4 }}"
 					data-encode="{{ tag[0] | strip | url_encode }}"
 					class="tag-button"
 					title="{{ tag[0] }}" rel="{{ tag[1].size }}">
@@ -78,6 +86,7 @@ https://github.com/kitian616/jekyll-TeXt-theme
 				<section>
 				<span class="fa listing-seperator">
 					<span class="tag-text">{{ _currentdate }}</span>
+					<span class="tag-text">{{ tag[0] }}</span>
 				</span>
 				{%- assign _date = _currentdate -%}
 			{%- endif -%}
@@ -98,3 +107,4 @@ https://github.com/kitian616/jekyll-TeXt-theme
 		</div>
 	</div>
 </div>
+
