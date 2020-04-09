@@ -140,7 +140,7 @@ func (m *metricExchange) IsHealthy(now time.Time) bool {
 }
 ```
 
-[`ErrorPercent()`](https://github.com/afex/hystrix-go/blob/master/hystrix/metrics.go#L133) 方法大致逻辑是，从滑动窗口中计算出错误率，定义为：（当前时间 - 滑动窗口的最左侧时间），该区间内的错误总数 / 请求总数，该值即为 ErrorPercent
+[`ErrorPercent()`](https://github.com/afex/hystrix-go/blob/master/hystrix/metrics.go#L133) 方法大致逻辑是，从滑动窗口中计算出错误率，定义为：（当前时间 - 滑动窗口的最左侧时间），该区间内的$$\frac{错误总数}{请求总数}$$，该值即为 ErrorPercent
 
 ```golang
 func (m *metricExchange) ErrorPercent(now time.Time) int {
