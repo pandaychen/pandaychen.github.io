@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      Hystrix 中的 RollingCount 实现
+title:      理解 Hystrix-go 中的 RollingCount 实现
 subtitle:
 date:       2020-04-01
 author:     pandaychen
@@ -92,11 +92,11 @@ func (r *Number) removeOldBuckets() {
 }
 ```
 
-最后，看下，对于对每个 bucket 中的 value 值进行更新的 Increment 方法，调用了 `getCurrentBucket` 和 `removeOldBuckets` 方法，即先得到 Bucket，更新对应的计数后再删除旧的数据（Bucket）。这样就实现了，根据时间的增长，定期更新滑动窗口中的值，并且删除掉 10s 窗口之外的旧数据的功能。
+最后，看下，对于对每个 bucket 中的 value 值进行更新的 Increment 方法，调用了 `getCurrentBucket()` 和 `removeOldBuckets()` 方法，即先得到 Bucket，更新对应的计数后再删除旧的数据（Bucket）。这样就实现了，根据时间的增长，定期更新滑动窗口中的值，并且删除掉 10s 窗口之外的旧数据的功能。
 
-此外，因为每个桶都会被多个线程并发地更新指标数据，所以桶对象需要提供一些线程安全的数据结构和更新方法。为此，原生的 Hystrix（JAVA）版本大量使用了 CAS，而 golang 版本则使用 sync.RWMutex 来控制。另外，在原生版本中，Hystrix 使用一个环形数组（Ringbuffer）来维护这些桶，类似于一个 FIFO 的队列。该数组实现有一个叫 addLast(Bucket o) 的方法，用于向环形数组的末尾追加新的桶对象，当数组中的元素个数没超过最大大小时，只是简单的维护尾指针；否则，在维护尾指针时，还要通过维护首指针，将第一个位置上元素剔除掉。而 golang 版本就使用 map 来实现，根据时间戳来模拟 FIFO：即插入时，检查当前的 timestamp，如果没有就创建，插入完成后，删除 10s 之前的 Key，这样就使用 map 模拟了 FIFO 的功能。如下面的 Increment 方法：
+此外，因为每个桶都会被多个线程并发地更新指标数据，所以桶对象需要提供一些线程安全的数据结构和更新方法。为此，原生的 Hystrix（JAVA）版本大量使用了 CAS，而 Hystrix-Go 则使用 sync.RWMutex 来实现。另外，在 JAVA 版本中，Hystrix 使用一个环形数组（Ringbuffer）来维护这些桶，类似于一个 FIFO 的队列。该数组实现有一个叫 addLast(Bucket o) 的方法，用于向环形数组的末尾追加新的桶对象，当数组中的元素个数没超过最大大小时，只是简单的维护尾指针；否则，在维护尾指针时，还要通过维护首指针，将第一个位置上元素剔除掉。而 Hystrix-Go 则使用 map 来实现，根据时间戳来模拟 FIFO：即插入时，检查当前的 timestamp，如果没有就创建，插入完成后，删除 10s 之前的 Key，这样就使用 map 模拟了 FIFO 的功能。
 
-更新统计数据时，都是向当前最新的 bucket 中更新的，因此 hystrix 的滑动窗口类 HystrixRollingNumber 中提供了 getCurrentBucket() 方法，获取当前最新的 bucket。其执行流程和图如下：
+如下面的 `Increment()` 方法，就模拟了 FIFO 中的 Push 功能：向滑动窗口中更新统计数据时，都是向当前最新的 Bucket 中更新的，因此 Hystrix-Go 的滑动窗口类 `HystrixRollingNumber` 中提供了 `getCurrentBucket()` 方法，获取当前最新的 Bucket。其执行流程和图如下：
 
 ```golang
 func (r *Number) Increment(i float64) {
@@ -107,7 +107,7 @@ func (r *Number) Increment(i float64) {
 	r.Mutex.Lock()
 	defer r.Mutex.Unlock()
 	// 先得到 bucket（当前 timestamp）
-	b := r.getCurrentBucket()
+	b := r.getCurrentBucket()  //代码在上面，先以timestamp检查，不存在则新建
 	b.Value += i
 	// 删除掉旧的
 	r.removeOldBuckets()
@@ -117,26 +117,30 @@ func (r *Number) Increment(i float64) {
 
 
 
-##	0x03	Hystrix 计算错误率的方法
+##	0x03	在滑动窗口中计算错误率
 &emsp;&emsp;Hystrix-go 的配置选项提供了 ErrorPercentThreshold 参数，该参数定义为，错误百分比，请求数量大于等于 RequestVolumeThreshold 并且错误率到达这个百分比后就会启动熔断。那么这个数据是如何计算的？且跟着代码来看：
 
-判定熔断状态，调用了 IsHealthy 方法：
+判定熔断状态的[逻辑](https://github.com/afex/hystrix-go/blob/master/hystrix/circuit.go#L105)中，调用了 `IsHealthy()` 方法：
 ```golang
+...
+//注意传入的参数是time.Now()
 if !circuit.metrics.IsHealthy(time.Now()) {
 	// too many failures, open the circuit
 	circuit.setOpen()
 	return true
 }
+...
 ```
 
-[IsHealthy 方法](https://github.com/afex/hystrix-go/blob/master/hystrix/metrics.go#L148)，判断当前系统的错误率和计算的比值：
+在[`IsHealthy()`实现](https://github.com/afex/hystrix-go/blob/master/hystrix/metrics.go#L148)中，判断当前系统的错误率和计算的比值：
 ```golang
 func (m *metricExchange) IsHealthy(now time.Time) bool {
+	//now是当前时间
 	return m.ErrorPercent(now) < getSettings(m.Name).ErrorPercentThreshold
 }
 ```
 
-ErrorPercent 方法，从滑动窗口中计算出错误率，定义为：（当前时间 - 滑动窗口的最左侧时间），该区间内的错误总数 / 请求总数，该值即为 ErrorPercent
+[`ErrorPercent()`](https://github.com/afex/hystrix-go/blob/master/hystrix/metrics.go#L133) 方法大致逻辑是，从滑动窗口中计算出错误率，定义为：（当前时间 - 滑动窗口的最左侧时间），该区间内的错误总数 / 请求总数，该值即为 ErrorPercent
 
 ```golang
 func (m *metricExchange) ErrorPercent(now time.Time) int {
@@ -151,11 +155,12 @@ func (m *metricExchange) ErrorPercent(now time.Time) int {
 		errPct = (float64(errs) / float64(reqs)) * 100
 	}
 
+	//做了上取整
 	return int(errPct + 0.5)
 }
 ```
 
-而 [`Sum` 方法](https://github.com/afex/hystrix-go/blob/master/hystrix/rolling/rolling.go) 也很直观，就是遍历滑动窗口（Bucket），累加相应状态的计数：
+而 [`Sum()` 方法](https://github.com/afex/hystrix-go/blob/master/hystrix/rolling/rolling.go) 也很直观，就是遍历滑动窗口（Bucket），累加相应状态的计数：
 ```go
 // Sum sums the values over the buckets in the last 10 seconds.
 func (r *Number) Sum(now time.Time) float64 {
@@ -176,8 +181,10 @@ func (r *Number) Sum(now time.Time) float64 {
 }
 ```
 
+##	Ox04	总结
+本文分析了 Hystrix-Go 中的滑动窗口的实现，根据滑动窗口累计一段时间窗口内的统计数据，然后计算比值，在目前的熔断器、限流器的实现中都比较常见。
 
-##	0x04	参考
+##	0x05	参考
 -	[服务容错与保护方案 — Hystrix](https://kiswo.com/article/1030)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
