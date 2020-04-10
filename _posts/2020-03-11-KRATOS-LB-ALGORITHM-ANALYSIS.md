@@ -1,7 +1,7 @@
 ---
 layout:     post
-title:      gRPC 微服务构建之 LB 算法实现（未完）
-subtitle:   Kratos 中的 LB 算法分析
+title:      分析 Kratos 中的 Dynamic-Wrr 负载均衡算法的实现
+subtitle:   Kratos 中的 Wrr 算法代码分析
 date:       2020-03-11
 author:     pandaychen
 header-img:
@@ -9,12 +9,12 @@ catalog: true
 category:   false
 tags:
     - Kratos
-    - WRR
+    - 负载均衡
 ---
 
 ##	0x00	前言
 
-回顾下在先前文章中分析过实现自定义 gRPC Balancer 算法的三个步骤：
+回顾下在先前的文章[gRPC源码分析之官方Picker实现](https://pandaychen.github.io/2019/12/06/GRPC-PICKER-ROUNDROBIN-ANALYSIS/)中，分析过实现自定义 gRPC Balancer 算法的三个步骤：
 
 1.	注册 Balancer 的名字
 2.	实现 PickerBuild 及 Builder() 方法，用于当 resolver 解析器发生解析变更时（后端节点增删）时，更新 Picker 使用的 LB-Pool
@@ -129,9 +129,49 @@ func (*wrrPickerBuilder) Build(readySCs map[resolver.Address]balancer.SubConn) b
 }
 ```
 
+####	节点权重的计算公式
+先看下在代码中，权重的更新值是如何计算的。[核心代码](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/balancer/wrr/wrr.go#L261)在此：
+$$peer.Score=\frac{succ_rate}{latency*cpuUsage}$$
 
-#### Picker实现
-真正实现 wrr 的算法在下面这个方法中：
+![image](https://s1.ax1x.com/2020/04/10/GorC8J.png)
+
+```golang
+...
+for i, conn := range p.subConns {
+	cpu := float64(atomic.LoadInt64(&conn.si.cpu))
+	ss := math.Float64frombits(atomic.LoadUint64(&conn.si.success))
+
+	//从滑动窗口中获取错误总数和请求总数
+	errc, req := conn.errSummary()
+	// 从滑动窗口计算平均req延迟
+	lagv, lagc := conn.latencySummary()
+
+	if req > 0 && lagc > 0 && lagv > 0 {
+		// client-side success ratio
+		cs := 1 - (float64(errc) / float64(req))
+		//成功率校正
+		if cs <= 0 {
+			cs = 0.1
+		} else if cs <= 0.2 && req <= 5 {
+			cs = 0.2
+		}
+		//根据下式得到conn（也就是node）的打分，1e9=10^9
+		conn.score = math.Sqrt((cs * ss * ss * 1e9) / (lagv * cpu))
+		stats[i] = statistics{cs: cs, ss: ss, lantency: lagv, cpu: cpu, req: req}
+	}
+	stats[i].addr = conn.addr.Addr
+
+	if conn.score > 0 {
+		total += conn.score
+		count++
+	}
+}
+...
+```
+
+
+#### Picker 实现
+真正实现 WRR 的算法在下面这个方法中：
 ```go
 func (p *wrrPicker) Pick(ctx context.Context, opts balancer.PickOptions) (balancer.SubConn, func(balancer.DoneInfo), error) {
 	// FIXME refactor to unify the color logic，每次客户端 RPC-CALL 都会调用
@@ -256,6 +296,10 @@ func (p *wrrPicker) pick(ctx context.Context, opts balancer.PickOptions) (balanc
 ```
 
 ##	0x03	总结
+通过阅读 Kratos 这部分代码，有如下收获：
+1.	错误率和延迟的计算，采用滑动窗口得到更平滑（精确）的取值 
+2.	对 balancer.SubConn 的封装，将 WRR 算法需要的权重数据完美的封装在自定义的结构中
+3.	通过 gRPC 的 Tailer 机制返回节点的 CPU 利用率，动态更新 WRR 算法中定义的节点权重值
 
 ##  0x04	参考
 -	[Upstream: smooth weighted round-robin balancing.](https://github.com/phusion/nginx/commit/27e94984486058d73157038f7950a0a36ecc6e35)
