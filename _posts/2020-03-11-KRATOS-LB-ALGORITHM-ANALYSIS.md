@@ -29,7 +29,7 @@ Kratos 在传统的 [Nginx-WRR 算法](https://tenfy.cn/2018/11/12/smooth-weight
 ####	结构
 
 定义 Backend 服务的结构：
-```go
+```golang
 type serverInfo struct {
 	cpu     int64
 	success uint64 // float64 bits
@@ -37,7 +37,7 @@ type serverInfo struct {
 ```
 
 封装的 balancer.Subconn 结构，加入了对此连接的属性
-```go
+```golang
 type subConn struct {
 	conn balancer.SubConn       // 一个 conn 代表到一个 backend 的长连接
 	addr resolver.Address
@@ -75,7 +75,7 @@ type wrrPicker struct {
 ```
 
 再看下 wrrPickerBuilder.Build()，该方法由参数的 readySCs，根据权重，构造出给 wrrPicker 选择的初始化连接集合：
-```go
+```golang
 func (*wrrPickerBuilder) Build(readySCs map[resolver.Address]balancer.SubConn) balancer.Picker {
     //readySCs 是从 gRPC 的 conn-pool 拿到的最新的可用连接池（每次 watcher 触发都会调用，如果 readyScs 后端无改动，则不会）
     // 初始化需要返回的结构（balancer.Picker）
@@ -131,7 +131,7 @@ func (*wrrPickerBuilder) Build(readySCs map[resolver.Address]balancer.SubConn) b
 
 ####	节点权重的计算公式
 先看下在代码中，权重的更新值是如何计算的。[核心代码](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/balancer/wrr/wrr.go#L261)在此：
-$$peer.Score=\frac{succ_rate}{latency*cpuUsage}$$
+$$peer.Score=\frac{succrate}{latency*cpuUsage}$$
 
 ![image](https://s1.ax1x.com/2020/04/10/GorC8J.png)
 
@@ -172,7 +172,7 @@ for i, conn := range p.subConns {
 
 #### Picker 实现
 真正实现 WRR 的算法在下面这个方法中：
-```go
+```golang
 func (p *wrrPicker) Pick(ctx context.Context, opts balancer.PickOptions) (balancer.SubConn, func(balancer.DoneInfo), error) {
 	// FIXME refactor to unify the color logic，每次客户端 RPC-CALL 都会调用
 	color := nmd.String(ctx, nmd.Color)
@@ -191,7 +191,7 @@ func (p *wrrPicker) Pick(ctx context.Context, opts balancer.PickOptions) (balanc
 ```
 
 
-```go
+```golang
 func (p *wrrPicker) pick(ctx context.Context, opts balancer.PickOptions) (balancer.SubConn, func(balancer.DoneInfo), error) {
 	var (
 		conn        *subConn
@@ -291,7 +291,6 @@ func (p *wrrPicker) pick(ctx context.Context, opts balancer.PickOptions) (balanc
 		p.mu.Unlock()
 		log.Info("warden wrr(%s): %+v", conn.addr.ServerName, stats)
 	}, nil
-
 }
 ```
 
