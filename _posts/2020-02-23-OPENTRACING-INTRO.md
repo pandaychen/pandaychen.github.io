@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      微服务基础之 OpenTracing
+title:      微服务基础之 链路追踪（OpenTracing）
 subtitle:
 date:       2020-02-23
 author:     pandaychen
