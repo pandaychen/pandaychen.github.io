@@ -209,11 +209,10 @@ func (p *wrrPicker) pick(ctx context.Context, opts balancer.PickOptions) (balanc
 		if conn == nil || conn.cwt < sc.cwt {
 			conn = sc
 		}
-    }
+	}
     // 按照 WRR 算法的要求
 	conn.cwt -= totalWeight
     p.mu.Unlock()
-
     // 计算本次 RPC 请求的延迟
 	start := time.Now()
 	if cmd, ok := nmd.FromContext(ctx); ok {
