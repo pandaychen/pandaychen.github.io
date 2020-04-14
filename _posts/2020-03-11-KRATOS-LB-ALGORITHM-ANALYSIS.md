@@ -75,6 +75,7 @@ type wrrPicker struct {
 ```
 
 再看下 wrrPickerBuilder.Build()，该方法由参数的 readySCs，根据权重，构造出给 wrrPicker 选择的初始化连接集合：
+这里有一个细节需要注意，在 gRPC 中，当 Resolver 中的监听器**监控到后端节点发生了改变（下线或上线）**时，才会触发下面 Build() 的调用：
 ```golang
 func (*wrrPickerBuilder) Build(readySCs map[resolver.Address]balancer.SubConn) balancer.Picker {
     //readySCs 是从 gRPC 的 conn-pool 拿到的最新的可用连接池（每次 watcher 触发都会调用，如果 readyScs 后端无改动，则不会）
@@ -297,7 +298,7 @@ func (p *wrrPicker) pick(ctx context.Context, opts balancer.PickOptions) (balanc
 通过阅读 Kratos 这部分代码，有如下收获：
 1.	错误率和延迟的计算，采用滑动窗口得到更平滑（精确）的取值 
 2.	对 balancer.SubConn 的封装，将 WRR 算法需要的权重数据完美的封装在自定义的结构中
-3.	通过 gRPC 的 Tailer 机制返回节点的 CPU 利用率，动态更新 WRR 算法中定义的节点权重值
+3.	通过 gRPC 的 Tailer() 机制返回节点的 CPU 利用率，动态更新 WRR 算法中定义的节点权重值
 
 ##  0x04	参考
 -	[Upstream: smooth weighted round-robin balancing.](https://github.com/phusion/nginx/commit/27e94984486058d73157038f7950a0a36ecc6e35)
