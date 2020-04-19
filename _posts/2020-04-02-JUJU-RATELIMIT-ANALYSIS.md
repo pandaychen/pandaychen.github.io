@@ -16,7 +16,7 @@ tags:
 1.  （初始化）生产令牌桶
 2.  消费令牌的接口
 
-![image](https://s1.ax1x.com/2020/04/19/JKCgdH.jpg)
+![image](https://s1.ax1x.com/2020/04/19/JK4QqU.jpg)
 
 ####    令牌桶结构
 结构定义如下，初读此结构，会发现并没有类似Hystrix-Go的限速实现中的类似channel结构，那么限速的逻辑（某个时间点桶中可用的令牌数）如何实现的？且看下面
