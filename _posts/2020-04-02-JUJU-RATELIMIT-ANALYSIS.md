@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      JUJU-Ratelimit 限速算法实现分析
+title:      JuJu-Ratelimit 限速算法实现分析
 subtitle:   分析一款基于令牌桶实现的限速算法
 date:       2020-04-02
 author:     pandaychen
@@ -126,7 +126,7 @@ func (tb *Bucket) WaitMaxDuration(count int64, maxWait time.Duration) bool {}
 
 ####     adjustavailableTokens 方法
 `adjustavailableTokens`，该方法是用来计算当前时刻桶中可取的令牌总数。前面说了，令牌桶算法实现是每隔一段固定的时间向桶中放令牌，这个时间间隔足够合适，令牌的限速效果就越平滑。
-这个 [方法的实现](https://github.com/juju/ratelimit/blob/master/ratelimit.go#L312)，并非使用定时器，而是采用了一种很精妙的计算方式，类似于惰性求值，计算方法描述如下：
+这个 [方法的实现](https://github.com/juju/ratelimit/blob/master/ratelimit.go#L312)，并非使用 Buffered Channel 及其他辅助结构实现，而是采用了一种很精妙的计算方式，类似于惰性求值，计算方法描述如下：
 
 假设令牌桶容量为 $$capacity$$，上一次放令牌的时间为 $$t_1$$（`latestTick`），当时桶中的令牌数 $$k_1$$（`availableTokens`），默认存放令牌的单位时间间隔为 $$t_i$$，每次向令牌桶中放 $$x$$ 个令牌。现在调用 `TakeAvailable()` 方法来获取令牌，将这个时刻记为 $$t_2$$。在 $$t_2$$ 时刻，令牌桶中可用的令牌数可以使用下式推算：
 
@@ -234,3 +234,5 @@ func (tb *Bucket) take(now time.Time, count int64, maxWait time.Duration) (time.
 
 ##  0x02  参考
 -   [JUJU-limit 实现](https://github.com/juju/ratelimit)
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
