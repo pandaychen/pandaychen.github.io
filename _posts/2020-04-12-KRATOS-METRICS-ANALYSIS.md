@@ -23,7 +23,7 @@ Metrics和Window的用途如下：
 
 下面看看Window的数据结构及封装的主要操作方法：
 
-Bucket 提供了 Append 方法，用于向 Points 中添加数据，Points是float64的slice，主要存放单个指标的值，如延迟，错误次数等等
+>	Bucket 提供了 Append 方法，用于向 Points 中添加数据，Points是float64的slice，主要存放单个指标的值，如延迟，错误次数等等
 
 ```golang
 type Bucket struct {
@@ -48,7 +48,7 @@ type Window struct {
 
 
 ##	0x02	滑动窗口 window 实现
-![image](https://github.com/go-kratos/kratos/blob/master/doc/img/ratelimit-rolling-window.png)
+![image](https://s1.ax1x.com/2020/04/26/J61qD1.png)
 
 ##	0x03	window 的迭代器实现
 
@@ -84,6 +84,6 @@ func (i *Iterator) Bucket() Bucket {
 
 
 ##  0x04    参考
-
+-	[Kratos-Metrics](https://github.com/go-kratos/kratos/tree/master/pkg/stat/metric)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
