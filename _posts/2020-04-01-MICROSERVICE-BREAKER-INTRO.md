@@ -56,7 +56,7 @@ OPEN ------ HALFOPEN ------ CLOSED
 -	关闭熔断：情况好转，恢复目标服务调用
 
 ##	0x03	总结
-本文介绍了微服务中常用熔断机制的原理，熔断机制是预防服务雪崩的最有效的一种手段。目前在 gRPC 项目中，就使用了 [Hystrix-Go](https://github.com/afex/hystrix-go)作为客户端的熔断实现。
+本文介绍了微服务中常用熔断机制的原理，熔断机制是预防服务雪崩的最有效的一种手段。目前在 gRPC 项目中，就使用了 [Hystrix-Go](https://github.com/afex/hystrix-go) 作为客户端的熔断实现。
 下面文章分析下 Hystrix-Go 是如何实现熔断机制的。
 
 ##  0x04	参考
