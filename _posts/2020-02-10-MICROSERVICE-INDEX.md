@@ -13,7 +13,7 @@ tags:
 
 ##  0x00    我理解的微服务 && 架构
 
-简单一句话概括：微服务架构（Microservices architecture） 就是采用一组松耦合服务的方式架构应用
+&emsp;&emsp; 简单一句话概括：微服务架构（Microservices architecture） 就是采用一组松耦合服务的方式架构应用
 
 -   微服务（细粒度）的拆分：每个业务逻辑都被分解为一个微服务，微服务之间通过 REST API 或 RPC 方式通信
 
@@ -23,7 +23,7 @@ tags:
 
 ##  0x01    微服务架构的挑战
 
-微服务治理的复杂性问题：如何保证注册和发现；如何保证多机房高可用；如何保证低延迟等等。其次，微服务化以后，服务拆分的比较多，调用链也比较长，调用链很容易受到一个坏节点的影响，导致用户端出现超时的现象。另外，负载不均衡会导致热点问题，并影响资源调度；单个节点不可用，如果限流或者熔断手段做的不好可能有雪崩效应；微服务代理的分布式事务问题和分布式一致性问题，以及编排、日志、链路追踪等问题。
+&emsp;&emsp; 微服务治理的复杂性问题：如何保证注册和发现；如何保证多机房高可用；如何保证低延迟等等。其次，微服务化以后，服务拆分的比较多，调用链也比较长，调用链很容易受到一个坏节点的影响，导致用户端出现超时的现象。另外，负载不均衡会导致热点问题，并影响资源调度；单个节点不可用，如果限流或者熔断手段做的不好可能有雪崩效应；微服务代理的分布式事务问题和分布式一致性问题，以及编排、日志、链路追踪等问题。
 
 概括起来，微服务架构的挑战有如下几点：
 
@@ -107,9 +107,14 @@ tags:
     -   多级缓存
     -   微服务缓存模式
 
-##  0x05    参考
+
+##  0x05    Kubernetes + Service Mesh = 完整的微服务框架
+一图胜千言，Kubernetes在微服务架构中的重要性
+![image](https://s1.ax1x.com/2020/04/26/J6KYdO.png)
+
+##  0x06    参考
 -   [微服务的模式语言](https://microservices.io/patterns/cn/index.html)
--   [一篇文章快速理解微服务架构](http://dockone.io/article/3687)
+-   [Microservices Architecture Introduction](https://xiaoxubeii.github.io/articles/microservices-architecture-introduction/)
 
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
