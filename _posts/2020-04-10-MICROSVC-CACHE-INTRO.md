@@ -14,8 +14,9 @@ tags:
 
 ##	0x00 前言
 
-&emsp;&emsp;在微服务架构中，后台组件开启热数据缓存，可以有效的降低 Mysql 等后端存储的读负载。在笔者项目后台服务构建中，一般会有**本地缓存（Local-cache）---> Redis（高可用缓存服务）--->Mysql**，这种层级的缓存逻辑。
+&emsp;&emsp;在微服务架构中，后台组件开启热数据缓存，可以有效的降低 Mysql 等后端存储的读负载。在笔者项目后台服务构建中，一般会有**本地缓存（Local-cache）---> Redis（高可用缓存服务）--->Mysql（高可用存储集群）**，这种层级的缓存逻辑。
 
+![image](https://s1.ax1x.com/2020/04/17/JeS9bt.png)
 
 ##	0x01	缓存更新模式
 
@@ -24,16 +25,16 @@ tags:
 缓存机制是牺牲强制一致性换来高性能的一种手段之一。一般而言，缓存更新有以下几种模式（在项目中用的最多的是 Cache Aside 模式）：
 
 1.	Cache Aside 模式
-Client 读取 Cache 数据：未命中 cache，Client 读数据库，读取成功后 Client 将数据更新到 cache
-Client 读取 Cache 数据：读取到了返回。
-Client 更新 Cache 数据：先更新数据库，更新数据库成功后让 Cache 失效（删除 Cache 后再更新 Cache）
+    -   Client 读取 Cache 数据：未命中 Cache，Client 读数据库，读取成功后 Client 将数据更新到 Cache
+    -   Client 读取 Cache 数据：读取到了返回。
+    -   Client 更新 Cache 数据：先更新数据库，更新数据库成功后让 Cache 失效（删除 Cache 后再更新 Cache）
 
 2.	Read/Write Through 模式
-Read Through ：Client 读取 Cache 服务，未命中，Cache 服务读取数据库，并且自己更新数据，对 Client 保持透明
-Write Through ：Client 更新数据的时候，命中 Cache 则更新 Cache，Cache 服务自身去更新数据库。未命中 Cache，直接去更新数据库
+    -   Read Through ：Client 读取 Cache 服务，未命中，Cache 服务读取数据库，并且自己更新数据，对 Client 保持透明
+    -   Write Through ：Client 更新数据的时候，命中 Cache 则更新 Cache，Cache 服务自身去更新数据库。未命中 Cache，直接去更新数据库
 
 3.	Write Behind Caching 模式
-更新数据时，只更新 Cache。Cache 服务异步批量去更新数据库，比如按照时间周期，定期更新一次，等等
+    -   更新数据时，只更新 Cache。Cache 服务异步批量去更新数据库，比如按照时间周期，定期更新一次，等等
 
 
 ##	0x02	缓存架构构建
