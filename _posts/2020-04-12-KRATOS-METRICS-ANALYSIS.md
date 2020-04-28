@@ -254,7 +254,7 @@ func (r *RollingPolicy) add(f func(offset int, val float64), val float64) {
 ```
 
 `Reduce` 方法，非常有意思，它的传入参数是 [reduce.go](https://github.com/go-kratos/kratos/blob/master/pkg/stat/metric/reduce.go) 中定义的求值操作，如 `Sum`、`Avg`、`Min`、`Max` 和 `Couter`。
-该方法的作用是，在 timespan 这个区间进行遍历，计算遍历的起始位置 `offset` 和长度 `count`，会调用上面这个几个方法之一（对遍历的这些 Bucket）进行计算，最终得到 val。比如，求当前时间到 `lastAppendTime` 之间，滑动窗口的 Sum 累加值。
+该方法的作用是，在 timespan 这个区间进行遍历，计算遍历的起始位置 `offset` 和长度 `count`，会调用上面这个几个方法之一（对遍历的这些 Bucket）进行计算，最终得到 val。比如，求当前时间 `time.Now()` 到 `lastAppendTime` 之间，滑动窗口的 Sum 累加值。
 ```golang
 // Reduce applies the reduction function to all buckets within the window.
 func (r *RollingPolicy) Reduce(f func(Iterator) float64) (val float64) {
