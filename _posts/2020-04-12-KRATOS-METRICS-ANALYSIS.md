@@ -183,6 +183,8 @@ type RollingPolicy struct {
 
 ####	RollingPolicy 的方法封装
 
+RollingPolicy中有`3`个核心方法，分别为`timespan`、`add`和`Reduce`。
+
 下面 `timespan()` 方法就是计算：当前调用此方法的时刻，距离上一次写入（`lastAppendTime`）滑过了几个 Bucket
 ```golang
 func (r *RollingPolicy) timespan() int {
@@ -195,16 +197,36 @@ func (r *RollingPolicy) timespan() int {
 }
 ```
 
+RollingPolicy的添加数据方法，分别调用了window的`Append`和`Add`方法：
+
+```golang
+// Append appends the given points to the window.
+func (r *RollingPolicy) Append(val float64) {
+	r.add(r.window.Append, val)
+}
+
+// Add adds the given value to the latest point within bucket.
+func (r *RollingPolicy) Add(val float64) {
+	r.add(r.window.Add, val)
+}
+```
+
+`add`方法：通过计算出当前时间`time.Now()`与`lastAppendTime`的跨度差，在环形滑动窗口中获取正确的位置，然后调用传入的`f`进行插入操作。请注意，跨度超过了Window的End位置需要从Start位置重新计算。
+
 ```golang
 func (r *RollingPolicy) add(f func(offset int, val float64), val float64) {
 	r.mu.Lock()
+	// 计算时间跨度（跨过了几个 bucket）
 	timespan := r.timespan()
 	if timespan > 0 {
+		//当timespan>0时，表示有跨度
+		//更新当前append时间
 		r.lastAppendTime = r.lastAppendTime.Add(time.Duration(timespan * int(r.bucketDuration)))
 		offset := r.offset
 		// reset the expired buckets
-		s := offset + 1
+		s := offset + 1 //s指向下一个位置
 		if timespan > r.size {
+			//如果跨度超过了window的大小，timespan最大为window的size
 			timespan = r.size
 		}
 		e, e1 := s+timespan, 0 // e: reset offset must start from offset+1
@@ -213,34 +235,26 @@ func (r *RollingPolicy) add(f func(offset int, val float64), val float64) {
 			e = r.size
 		}
 		for i := s; i < e; i++ {
+			//清理 offset1---> s+timespan的之间的bucket
 			r.window.ResetBucket(i)
 			offset = i
 		}
 		for i := 0; i < e1; i++ {
+			// 如果超过一个跨度，那么说明时间跨度在两个区间上
 			r.window.ResetBucket(i)
 			offset = i
 		}
 		r.offset = offset
 	}
+	//添加到offset位置
+	//（当timespan==0时，说明，当前时间未出现span，直接操作r.offset位置即可）
 	f(r.offset, val)
 	r.mu.Unlock()
 }
 ```
 
-```golang
-// Append appends the given points to the window.
-func (r *RollingPolicy) Append(val float64) {
-	r.add(r.window.Append, val)
-}
-```
-
-```golang
-// Add adds the given value to the latest point within bucket.
-func (r *RollingPolicy) Add(val float64) {
-	r.add(r.window.Add, val)
-}
-```
-
+`Reduce`方法，非常有意思，它的传入参数是[reduce.go](https://github.com/go-kratos/kratos/blob/master/pkg/stat/metric/reduce.go)中定义的求值操作，如Sum、Avg、Min、Max和Couter。
+该方法的作用是，在timespan这个区间进行遍历，计算遍历的起始位置`offset`和长度`count`，会调用上面这个几个方法之一（对遍历的这些Bucket）进行计算，最终得到val。比如，求当前时间到`lastAppendTime`之间，滑动窗口的Sum累加值。
 ```golang
 // Reduce applies the reduction function to all buckets within the window.
 func (r *RollingPolicy) Reduce(f func(Iterator) float64) (val float64) {
@@ -251,6 +265,8 @@ func (r *RollingPolicy) Reduce(f func(Iterator) float64) (val float64) {
 		if offset >= r.size {
 			offset = offset - r.size
 		}
+		//计算得到遍历的开始位置offset和遍历长度count
+		//f的参数，就是Iterator的结果
 		val = f(r.window.Iterator(offset, count))
 	}
 	r.mu.RUnlock()
@@ -261,7 +277,7 @@ func (r *RollingPolicy) Reduce(f func(Iterator) float64) (val float64) {
 ##	0x05	总结
 本文分析了 Kratos 框架中的 Metrics 基础封装、滑动窗口的实现 Window、实例化 RollingPolicy 等，下一篇文章来分析下，更高级的结构 RollingCounter、RollingGauage 等。
 
-##  0x04    参考
+##  0x06    参考
 -	[Kratos-Metrics](https://github.com/go-kratos/kratos/tree/master/pkg/stat/metric)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
