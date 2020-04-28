@@ -12,7 +12,7 @@ tags:
 ---
 
 ##  0x00    前言
-&emsp;&emsp; 这篇文章，了解下 Google SRE 中的过载保护的处理机制 --[Handling Overload](https://landing.google.com/sre/sre-book/chapters/handling-overload)
+&emsp;&emsp; 这篇文章，了解下 Google SRE 中的过载保护（弹性熔断）的处理机制 --[Handling Overload](https://landing.google.com/sre/sre-book/chapters/handling-overload)
 
 之前的文章，分析了 Hystrix-Go 熔断算法的实现，其算法核心是：当请求失败比率达到一定阈值之后，熔断器开启，并休眠一段时间（由配置决定），这段休眠期过后，熔断器将处于半开状态，在此状态下将试探性的放过一部分流量，如果这部分流量调用成功后，再次将熔断器关闭，否则熔断器继续保持开启并进入下一轮休眠周期。
 

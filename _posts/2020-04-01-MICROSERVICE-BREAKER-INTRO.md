@@ -35,6 +35,8 @@ OPEN ------ HALFOPEN ------ CLOSED
 
 ![image](https://s1.ax1x.com/2020/04/24/J0JYb8.png)
 
+##	0x02	熔断算法指标的量化
+
 ![image](https://s1.ax1x.com/2020/04/23/J093dg.png)
 
 当 Service-E 服务出现故障时，Service-B 的熔断检测模块，**主动** 检测到 Client 调用 Service-E 服务错误率达到设置阈值，从而 **主动** 开启熔断，开启熔断的结果，是访问 Service-E 的请求全部返回错误，或者按照默认值处理；当 Service-E 服务恢复时，**自动** 关闭熔断状态。这里的好处：
