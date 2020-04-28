@@ -29,8 +29,14 @@ The number of requests attempted by the application layer(at the client, on top 
 -   accepts（成功的请求总量）
 The number of requests accepted by the backend
 
-客户端请求拒绝的概率，基于如下公式计算：
+客户端请求拒绝的概率，基于如下公式计算（其中$$K$$为倍率）：
 $$max(0,\frac{requests-K*accepts}{requests+1})$$
+
+
+
+关于$$K$$值的意义：
+-   Reducing the multiplier will make adaptive throttling behave more aggressively
+-   Increasing the multiplier will make adaptive throttling behave less aggressively
 
 ##  0x02    代码实现
 
