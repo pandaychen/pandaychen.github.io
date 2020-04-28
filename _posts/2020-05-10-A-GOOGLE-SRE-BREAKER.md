@@ -23,12 +23,47 @@ tags:
 We implemented client-side throttling through a technique we call adaptive throttling：该算法称为自适应限流。
 
 该算法统计的指标依赖如下两种：
--   requests
+-   requests（请求总量）
 The number of requests attempted by the application layer(at the client, on top of the adaptive throttling system)
 
--   accepts
+-   accepts（成功的请求总量）
 The number of requests accepted by the backend
 
+客户端请求拒绝的概率，基于如下公式计算：
+$$max(0,\frac{requests-K*accepts}{requests+1})$$
+
+##  0x02    代码实现
+
+```golang
+func (b *sreBreaker) Allow() error {
+	success, total := b.summary()
+	k := b.k * float64(success)
+	if log.V(5) {
+		log.Info("breaker: request: %d, succee: %d, fail: %d", total, success, total-success)
+	}
+	// check overflow requests = K * success
+	if total < b.request || float64(total) < k {
+		if atomic.LoadInt32(&b.state) == StateOpen {
+			atomic.CompareAndSwapInt32(&b.state, StateOpen, StateClosed)
+		}
+		return nil
+	}
+	if atomic.LoadInt32(&b.state) == StateClosed {
+		atomic.CompareAndSwapInt32(&b.state, StateClosed, StateOpen)
+	}
+	dr := math.Max(0, (float64(total)-k)/float64(total+1))
+	drop := b.trueOnProba(dr)
+	if log.V(5) {
+		log.Info("breaker: drop ratio: %f, drop: %t", dr, drop)
+	}
+	if drop {
+		return ecode.ServiceUnavailable
+	}
+	return nil
+}
+```
+
+##  0x03    效果展示
 
 ##  参考
 -   [Handling Overload](https://landing.google.com/sre/sre-book/chapters/handling-overload/#eq2101)
