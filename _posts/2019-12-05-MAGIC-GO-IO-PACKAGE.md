@@ -1,10 +1,10 @@
 ---
 layout:     post
-title:      神奇的 Golang-IO 包（计划）
-subtitle:   
+title:      神奇的 Golang-IO 包
+subtitle:
 date:       2020-01-01
 author:     pandaychen
-header-img: 
+header-img:
 catalog: true
 tags:
     - Golang
@@ -107,13 +107,13 @@ func DownloadFile() {
     if err != nil {
         fmt.Fprint(os.Stderr ,"get url error" , err)
     }
-    defer resp.Body.Close()    
+    defer resp.Body.Close()
 	out, err := os.Create("/tmp/xxx_file")
 	// 很重要：初始化一个 io.Writer
     wt :=bufio.NewWriter(out)
-   
+
     defer out.Close()
-    
+
     n, err :=io.Copy(wt, resp.Body)
     if err != nil {
         panic(err)
@@ -227,7 +227,7 @@ func main() {
 ```
 
 ##  0x03	golang  io.Pipe 的妙用
-
+（未完待续）
 
 
 ##	0x04	一些 IO 优化的 tips

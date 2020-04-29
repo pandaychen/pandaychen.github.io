@@ -162,17 +162,17 @@ Sub(float64)
 
 ####    Gauge 使用例子
 ```golang
-//初始化
+// 初始化
 cpuUsage := prometheus.NewGauge(prometheus.GaugeOpts{
     Name:      "CPU_Usage",
     Help:      "the Usage of CPU",
 })
-//注册
+// 注册
 prometheus.MustRegister(cpuUsage)
 // 定时获取 cpu 温度并且写入到容器
 func(){
     tem = getCpuCurrentUsage()
-    //向cpuUsage中写入值，调用Set方法
+    // 向 cpuUsage 中写入值，调用 Set 方法
 	cpuUsage.Set(tem)
 }
 ```
@@ -197,7 +197,7 @@ cpulistUsage.WithLabelValues("cpu4").Set(cpu4_usage)
 ```
 
 ##  0x05    Histogram
-&emsp;&emsp; Histogram主要用于表示一段时间范围内对数据进行采样，（通常是请求持续时间或响应大小），并能够对其指定区间以及总数进行统计，通常我们用它计算分位数的直方图。
+&emsp;&emsp; Histogram 主要用于表示一段时间范围内对数据进行采样，（通常是请求持续时间或响应大小），并能够对其指定区间以及总数进行统计，通常我们用它计算分位数的直方图。
 ```golang
 temps := prometheus.NewHistogram(prometheus.HistogramOpts{
     Name:    "pond_temperature_celsius",
@@ -240,9 +240,11 @@ temps.Write(metric)
 fmt.Println(proto.MarshalTextString(metric)
 ```
 
-##  0x07 gRPC 调用调用
+##  0x07 gRPC 调用
+（未完待续）
 
 ##  0x08    参考
 -   [Go gRPC Interceptors for Prometheus monitoring](https://github.com/grpc-ecosystem/go-grpc-prometheus)
--   [](https://segmentfault.com/a/1190000018372347)
--   [](https://godoc.org/github.com/prometheus/client_golang/prometheus)
+-   [容器监控实践—Prometheus 基本架构](https://segmentfault.com/a/1190000018372347)
+-   [GoDoc - package prometheus](https://godoc.org/github.com/prometheus/client_golang/prometheus)
+-   [go-grpc-prometheus-demo](https://github.com/soushin/go-grpc-prometheus-demo)
