@@ -163,3 +163,5 @@ func main() {
 ##  0X06	参考
 -   [管理处理器的亲和性（affinity）](https://www.ibm.com/developerworks/cn/linux/l-affinity.html)
 -   [[译]Go 调度器: M, P 和 G](https://colobu.com/2017/05/04/go-scheduler/)
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

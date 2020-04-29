@@ -204,3 +204,5 @@ method[/helloworld.Greeter/SayHello] call[[::1]:50051] cost[3.072303ms]
 ##	0x04	参考
 -	[gRPC Metadata 文档](https://github.com/grpc/grpc-go/blob/master/Documentation/grpc-metadata.md)
 -	[gRPC 的那些事 - interceptor](https://colobu.com/2017/04/17/dive-into-gRPC-interceptor/)
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

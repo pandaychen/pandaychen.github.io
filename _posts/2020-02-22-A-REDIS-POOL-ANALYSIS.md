@@ -645,3 +645,5 @@ var timers = sync.Pool{
 -   [Go Redis 连接池实现](https://jackckr.github.io/golang/go-redis%E8%BF%9E%E6%8E%A5%E6%B1%A0%E5%AE%9E%E7%8E%B0/)
 -	[openresty 连接池](https://wiki.jikexueyuan.com/project/openresty/web/conn_pool.html)
 -   [实现连接池的几种姿势](https://zhuanlan.zhihu.com/p/47480504)
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

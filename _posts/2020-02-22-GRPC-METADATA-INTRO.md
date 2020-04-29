@@ -231,3 +231,5 @@ func (s *server) SomeStreamingRPC(stream pb.Service_SomeStreamingRPCServer) erro
 
 ##	0x04	参考
 -	[Dive into gRPC(6)：metadata](https://www.jianshu.com/p/863dad87d16f)
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

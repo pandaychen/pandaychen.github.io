@@ -27,3 +27,5 @@ tags:
 ##  0x04    参考
 -   [gRPC 的那些事 - interceptor](https://colobu.com/2017/04/17/dive-into-gRPC-interceptor/)
 -   [go-grpc-interceptor](https://github.com/mercari/go-grpc-interceptor)
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

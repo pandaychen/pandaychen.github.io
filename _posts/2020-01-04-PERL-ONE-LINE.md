@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      Perl单行特技（One-Line）
-subtitle:   拾起了我心爱的小perl...perl
+subtitle:   神奇的胶水语言
 date:       2020-01-04
 author:     pandaychen
 catalog:    true
@@ -130,3 +130,5 @@ perl -ne '/regex/ && print'
 ## 0x03	参考
 -  [Introduction to Perl one-liners](https://catonmat.net/introduction-to-perl-one-liners)
 -  [perl单行命令笔记](http://xiaoxuenotes.com/blog/2013/06/26/perl-oneline-command.html)
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

@@ -55,3 +55,5 @@ tags:
 ##	0x06	参考
 -	[缓存更新的套路](https://coolshell.cn/articles/17416.html)
 -	[分布式之数据库和缓存双写一致性方案解析](https://www.cnblogs.com/rjzheng/p/9041659.html?hmsr=joyk.com&utm_source=joyk.com&utm_medium=referral)
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

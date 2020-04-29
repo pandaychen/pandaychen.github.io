@@ -48,3 +48,5 @@ snowflake 算法，是 twitter 开源的唯一 ID 生成算法是生成器最佳
 ##	0x03    参考
 -   [python 生成器和迭代器有这篇就够了](https://www.cnblogs.com/wj-1314/p/8490822.html)
 -	[Twitter snowflake ID 算法之 golang 实现](https://segmentfault.com/a/1190000013831352)
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

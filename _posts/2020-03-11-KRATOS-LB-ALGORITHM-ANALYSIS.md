@@ -302,3 +302,5 @@ func (p *wrrPicker) pick(ctx context.Context, opts balancer.PickOptions) (balanc
 
 ##  0x04	参考
 -	[Upstream: smooth weighted round-robin balancing.](https://github.com/phusion/nginx/commit/27e94984486058d73157038f7950a0a36ecc6e35)
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

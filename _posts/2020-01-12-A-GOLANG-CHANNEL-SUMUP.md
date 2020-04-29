@@ -6,8 +6,7 @@ date:       2020-01-12
 author:     pandaychen
 catalog:    true
 tags:
-    - Channel
-    - golang
+    - Golang
 ---
 
 ##  0x00        前言

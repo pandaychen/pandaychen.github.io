@@ -8,7 +8,6 @@ header-img:
 catalog: true
 tags:
     - gRPC
-    - Interceptor
 ---
 
 ##  背景

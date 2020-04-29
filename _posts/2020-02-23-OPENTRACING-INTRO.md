@@ -94,3 +94,5 @@ Tracing 的流程和基于时间维度的示例如下：
 -   [OpenTracing 详解](https://pjw.io/articles/2018/05/08/opentracing-explanations/#section-3)
 -   [Go 微服务全链路跟踪详解](https://jfeng45.github.io/posts/go_opentracing/)
 -   [Istio 中对 grpc 全跟踪](http://www.gameapp.club/2018/11/23/istio-grpc-opentracing/)
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

@@ -239,3 +239,5 @@ io.CopyBuffer(dst Writer, src Reader, buf []byte)
 
 ##	0x05	参考
 -	[Go 编程技巧 --io.Reader/Writer](https://segmentfault.com/a/1190000013358594)
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
