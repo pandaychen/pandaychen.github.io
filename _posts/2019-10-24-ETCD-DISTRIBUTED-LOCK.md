@@ -43,7 +43,7 @@ Etcd 支持以下功能，正是依赖这些功能来实现分布式锁的：
 -	Prefix 机制：即前缀机制，也称目录机制。可以根据前缀（目录）获取该目录下所有的 key 及对应的属性（包括 key, value 以及 revision 等）
 -	Watch 机制：即监听机制，Watch 机制支持 Watch 某个固定的 key，也支持 Watch 一个目录（前缀机制），当被 Watch 的 key 或目录发生变化，客户端将收到通知
 
-###  0x04	分析 Concurrency 包
+##  0x04	分析 Concurrency 包
 
 EtcdV3 版本的 [Concurrency 包](https://godoc.org/github.com/coreos/etcd/clientv3/concurrency) 提供了一些实现 [分布式锁](https://github.com/coreos/etcd/blob/master/clientv3/concurrency/mutex.go) 及[分布式选主](https://github.com/coreos/etcd/blob/master/clientv3/concurrency/election.go#L31)的接口，这两个概念间是有共性的，譬如，谁抢到了锁谁就是 Master.
 我们从 Etcd 提供的 [Lock 方法](https://github.com/etcd-io/etcd/blob/master/etcdctl/ctlv3/command/lock_command.go) 来入手，看看 Lock 操作是如何实现的：
