@@ -53,6 +53,7 @@ for index, ci := range cpuInfos {
 
 ####	CPU 的使用率
 通过 `Percent` 方法采集 CPU 的使用率，特别需要注意传入采集的周期参数。比如下面这段代码，传入的周期是 200ms，采集的结果：
+
 ```golang
 for {
 	percent, _ := cpu.Percent(200*time.Millisecond, false)
