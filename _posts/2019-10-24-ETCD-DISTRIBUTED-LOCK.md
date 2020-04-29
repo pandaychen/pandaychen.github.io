@@ -6,7 +6,6 @@ date:       2019-10-24
 author:     pandaychen
 catalog:    true
 tags:
-    - Etcd Lock
     - 分布式锁
 ---
 
@@ -233,7 +232,7 @@ func waitDelete(ctx context.Context, client *v3.Client, key string, rev int64) e
 }
 ```
 
-##	总结下 Etcd 实现分布式锁的步骤
+##	0x05	总结下 Etcd 分布式锁的步骤
 分析完 concurrency 的主要代码，不难总结出用 Etcd 构造（公平式长期）分布式锁的一般流程如下：
 
 1.	假设锁的 name 为 /root/lockname，用来控制某个共享资源，concurrency 会自动将其转换为目录形式：/root/lockname/
@@ -248,7 +247,7 @@ func waitDelete(ctx context.Context, client *v3.Client, key string, rev int64) e
 
 6.	当客户端持有锁期间，其它客户端只能等待，为了避免等待期间租约失效，客户端需创建一个定时任务进行续约续期。如果持有锁期间客户端崩溃，心跳停止，Key 将因租约到期而被删除，从而锁释放，避免死锁
 
-##	应用 concurrency 包的几个细节
+##	0x06	应用 concurrency 包的几个细节
 让我们来看下 concurrency 封装的 [Session](https://github.com/etcd-io/etcd/blob/master/clientv3/concurrency/session.go#L28) 结构：
 
 ```golang
@@ -267,7 +266,7 @@ type Session struct {
 }
 ```
 
-##	总结
+##	0x07	总结
 本文分析了基于 Etcd 的分布式锁的实现。 
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
