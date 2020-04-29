@@ -60,7 +60,7 @@ tags:
 
 ##	0x02 gRPC 负载均衡的运行机制
 gRPC 提供了负载均衡实现的用户侧接口，我们可以非常方便的定制化业务的负载均衡策略，为了理解 gRPC 的负载均衡的实现机制，后续博客中我会分析下 `gRPC` 实现负载均衡的代码。
-![image](https://s2.ax1x.com/2019/11/13/MYima4.png)
+![image](https://wx1.sbimg.cn/2020/04/29/grpc-lb-basic1.png)
 1.  Resolver
 	-	解析器，用于从注册中心实时获取当前服务端的列表，同步发送给 Balancer
 2.  Balancer
