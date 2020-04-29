@@ -7,7 +7,7 @@ author:     pandaychen
 catalog: true
 tags:
     - gRPC
-    - Loadbalance
+    - 负载均衡
 ---
 
 ##  0x00    前言
