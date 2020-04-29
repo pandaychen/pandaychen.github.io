@@ -18,7 +18,7 @@ tags:
 
 ###	后台组件
 
--   Google 为 Facebook 写的一个高性能 mysql 框架[vitess](https://github.com/vitessio/vitess)，里面不少后台组件可供借鉴
+-   Google 为 Facebook 写的一个高性能 mysql 框架 [vitess](https://github.com/vitessio/vitess)，里面不少后台组件可供借鉴
 
 -   go-redis 队列：[goworker](https://github.com/benmanns/goworker)，goworker is a Go-based background worker that runs 10 to 100,000* times faster than Ruby-based workers，高性能的消息队列，官网： https://www.goworker.org
 	-	goworker 中，使用了 vitess 中的 [pool](https://github.com/vitessio/vitess/blob/master/go/pools/resource_pool.go) 实现了 redis 的连接池功能，interesting，代码在此：https://github.com/benmanns/goworker/blob/master/redis.go
@@ -44,7 +44,7 @@ tags:
 
 
 ##	通用
--	[fish-shell](https://github.com/fish-shell/fish-shell)，The user-friendly command line shell. 
+-	[fish-shell](https://github.com/fish-shell/fish-shell)，The user-friendly command line shell.
 
 
 ##	其他
