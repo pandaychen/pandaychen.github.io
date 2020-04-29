@@ -248,7 +248,7 @@ Etcd 提供了 watcher，来监控集群 kv 的变化。这个在开发 gRPC 服
 
 
 ##  0x10    参考文档
--   https://godoc.org/github.com/Etcd-io/Etcd/clientv3
--   https://github.com/Etcd-io/Etcd/blob/master/Documentation/op-guide/maintenance.md
+-   [Godoc - package clientv3](https://godoc.org/github.com/Etcd-io/Etcd/clientv3)
+-   [etcd/Documentation/op-guide/maintenance.md](https://github.com/Etcd-io/Etcd/blob/master/Documentation/op-guide/maintenance.md)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
