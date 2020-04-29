@@ -529,7 +529,7 @@ func parseTarget(target string) (host, port string, err error) {
 集群的 CoreDNS 部署情况，通过 Deployment 方式部署，分配的集群内 IP 地址为：`172.16.0.3` 和 `172.16.1.2`：
 ![image](https://wx2.sbimg.cn/2020/04/29/coredns-1.png)
 
-通过 `nslookup` 查询下服务名字的解析情况：
+通过 `nslookup` 查询下服务名字（服务必须以 Headless-Service 方式部署）的解析情况：
 ![image](https://wx1.sbimg.cn/2020/04/29/coredns-1.png)
 
 ![image](https://wx2.sbimg.cn/2020/04/29/coredns-2.png)
