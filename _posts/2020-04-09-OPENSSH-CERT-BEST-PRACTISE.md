@@ -29,11 +29,15 @@ tags:
 
 在安全性上，DSA 和 RSA 是易于对两个极大质数乘积做质因数分解的困难度，而 ECDSA, ED25519 则是基于椭圆曲线的离散对数难题。
 
-总结来说：这四种算法的推荐排序如下：
+总结来说：这 4 种算法的推荐排序如下：
 Your SSH keys might use one of the following algorithms:
+
 🚨 DSA: It’s unsafe and even no longer supported since OpenSSH version 7, you need to upgrade it!
+
 ⚠️ RSA: It depends on key size. If it has 3072 or 4096-bit length, then you’re good. Less than that, you probably want to upgrade it. The 1024-bit length is even considered unsafe.
+
 👀 ECDSA: It depends on how well your machine can generate a random number that will be used to create a signature. There’s also a trustworthiness concern on the NIST curves that being used by ECDSA.
+
 ✅ Ed25519: It’s the most recommended public-key algorithm available today!
 
 ####    用户认证
@@ -77,11 +81,11 @@ ssh_host_ecdsa_key-cert.pub:
         Key ID: "08a093ec-cb4e-4bc2-9800-825095418397:981b88e2-a214-4075-af77-72da9600f34f"
         Serial: 0
         Valid: from 2019-07-31T11:21:00 to 2019-07-31T12:22:50
-        Principals: 
+        Principals:
                 root
                 pandaychen
         Critical Options: (none)
-        Extensions: 
+        Extensions:
                 permit-X11-forwarding
                 permit-agent-forwarding
                 permit-port-forwarding

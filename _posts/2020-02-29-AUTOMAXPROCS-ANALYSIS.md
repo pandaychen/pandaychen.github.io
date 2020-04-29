@@ -12,7 +12,7 @@ tags:
 ---
 
 ##	0x00	前言
-&emsp;&emsp; 前一排文章 [GOMAXPROCS 的 “坑”](https://pandaychen.github.io/2020/02/28/GOMAXPROCS-POT/)，简单描述了 GOMAXPROCS 在容器场景可能会出现的问题。解决方法是使用 Uber 提供的 Automaxprocs 包，自动的根据 CGROUP 值识别容器的 CPU quota，并自动设置 GOMAXPROCS 线程数量，本篇文章就简答分析下 Automaxprocs 是如何做到做一点的。
+&emsp;&emsp; 前一篇文章 [GOMAXPROCS 的 “坑”](https://pandaychen.github.io/2020/02/28/GOMAXPROCS-POT/)，简单描述了 GOMAXPROCS 在容器场景可能会出现的问题。解决方法是使用 Uber 提供的 Automaxprocs 包，自动的根据 CGROUP 值识别容器的 CPU quota，并自动设置 GOMAXPROCS 线程数量，本篇文章就简答分析下 Automaxprocs 是如何做到做一点的。
 
 ##	0x01	再看 Docker 中的 CPU 调度
 docker 官方文档中指出：
@@ -75,6 +75,7 @@ image: ---------
 这会导致 Golang 服务默认会拿宿主机的 CPU 核心数来调用 runtime.GOMAXPROCS()，导致 P 数量远远大于可用的 CPU 核心，引起频繁上下文切换，影响高负载情况下的服务性能。而 Uber-Automaxprocs 这个库 能够正确识别容器允许使用的核心数，合理的设置 processor 数目，避免高并发下的切换问题。
 
 ##	0x04	Automaxprocs 的源码分析
+我们知道，docker使用cgroup来限制容器CPU使用, 使用该容器配置的cpu.cfsquotaus/cpu.cfsperiodus即可获得CPU配额. 所以关键是找到容器的这两个值.
 
 ####	1、初始化
 通过 [Readme.md](https://github.com/uber-go/automaxprocs/blob/master/README.md) 中的 import 方式，
@@ -144,6 +145,45 @@ func Set(opts ...Option) (func(), error) {
 	return undo, nil
 }
 ```
+
+####	解析进程的 CGroup 信息
+对应的方法是[`parseCGroupSubsystems()`](https://github.com/uber-go/automaxprocs/blob/master/internal/cgroups/subsys.go#L77)，该方法的核心在于解析`/proc/$pid/cgroup`文件，转换成[`CGroupSubsys`结构](https://github.com/uber-go/automaxprocs/blob/master/internal/cgroups/subsys.go#L46)
+```go
+// parseCGroupSubsystems parses procPathCGroup (usually at `/proc/$PID/cgroup`)
+// and returns a new map[string]*CGroupSubsys.
+func parseCGroupSubsystems(procPathCGroup string) (map[string]*CGroupSubsys, error) {
+	cgroupFile, err := os.Open(procPathCGroup)
+	if err != nil {
+		return nil, err
+	}
+	defer cgroupFile.Close()
+
+	scanner := bufio.NewScanner(cgroupFile)
+	subsystems := make(map[string]*CGroupSubsys)
+
+	for scanner.Scan() {
+		//解析文本
+		cgroup, err := NewCGroupSubsysFromLine(scanner.Text())
+		if err != nil {
+			return nil, err
+		}
+		for _, subsys := range cgroup.Subsystems {
+			subsystems[subsys] = cgroup
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	return subsystems, nil
+}
+```
+
+####	解析进程的MountInfo信息
+[parseMountInfo方法](https://github.com/uber-go/automaxprocs/blob/master/internal/cgroups/mountpoint.go#L146)
+（未完待续）
+
 
 ##	参考
 -	[Managing Compute Resources for Containers](https://kubernetes.io/docs/concepts/configuration/manage-compute-resources-container/)

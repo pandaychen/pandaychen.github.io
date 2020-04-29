@@ -229,7 +229,7 @@ func (cc *ClientConn) switchBalancer(name string) {
 ```
 
 ### ccBalancerWrapper.watcher
-** 这个 watcher 的作用是什么?**
+**这个 watcher 的作用是什么?**
 在创建 ccBalancerWrapper 时，会启用独立的 groutine 执行 watcher 函数，因为只有 watcher 会调用 balancer 接口，所以 balancer 可以做到无锁更新。
 ```go
 func (ccb *ccBalancerWrapper) watcher() {

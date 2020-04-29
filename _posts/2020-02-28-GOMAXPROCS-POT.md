@@ -14,7 +14,8 @@ tags:
 ##  0x00    概念
 几个名词：
 -   CPU core：CPU 逻辑核
--   CPU socket；CPU 插槽
+-   CPU socket：CPU 插槽
+-	NUMA架构：
 
 
 通过 `cat /proc/cpuinfo` 可以查看机器的 CPU 详细信息，比如，笔者的机器是单 CPU、8 逻辑核
@@ -128,9 +129,9 @@ func main(){
 所以，在 Docker-container 中, Golang 设置的 GOMAXPROCS 并不准确。
 
 ####     Kubernetes-Pod
-同样的，在 kubernetes 集群中，如果采用如此设置，会导致 Node（宿主机）中的线程数过多。笔者在测试集群中，集群中有 3 个 Node，总核数约 36 核。
+同样的，在 kubernetes 集群中，如果采用如此设置，会导致 Node（宿主机）中的线程数过多。在笔者的测试集群中，集群中有 3 个 Node，总核数约 36 核。
 ```bash
-CPU: 8.95/36.0 核
+CPU: 8.95/35.97 核
 内存: 18.56/63.95GB
 ```
 
@@ -146,10 +147,10 @@ CPU: 8.95/36.0 核
 ```
 
 总结下，在 Docker-container 和 kubernetes 集群中，存在 GOMAXPROCS 会错误识别容器 cpu 核心数的问题。此外，
-在 Kubernetes 集群中，为每个应用 Pod 分配的 CPU 及 CPU limits 不一定相同，所以通过配置指定 GOMAXPROCS 线程数来匹配 CPU 核心个数的方法，不太靠谱，同时这种 Fix 的方式也与 Kubernetes 的（自动）扩缩容理念不符。
+在 Kubernetes 集群中，为每个应用 Pod 分配的 CPU 及 CPU limits 不一定相同，所以通过配置指定 GOMAXPROCS 线程数来匹配 CPU 核心个数的方法，不太靠谱，同时这种 Fixed 的方式也与 Kubernetes 的（自动）扩缩容理念不符。
 
 ##	0x05	解决
-如何解决 golang 程序自适应容器 CPU 核心数的问题？在 Google 上搜索，找到了 Uber 的这个库[automaxprocs](https://github.com/uber-go/automaxprocs)，大致原理是读取 Cgroup 值识别容器的 CPU quota，计算得到实际核心数，并自动设置 GOMAXPROCS 线程数量。有兴趣的同学可以阅读其源码，加深理解。它的使用方式也是非常简单：
+如何解决 golang 程序自适应容器 CPU 核心数的问题？在 Google 上搜索，找到了 Uber 的这个库[automaxprocs](https://github.com/uber-go/automaxprocs)，大致原理是读取 CGroup 值识别容器的 CPU quota，计算得到实际核心数，并自动设置 GOMAXPROCS 线程数量。有兴趣的同学可以阅读其源码，加深理解。它的使用方式也是非常简单：
 ```go
 import _ "go.uber.org/automaxprocs"
 
