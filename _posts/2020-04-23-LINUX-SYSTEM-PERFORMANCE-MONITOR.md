@@ -58,8 +58,8 @@ for {
 	percent, _ := cpu.Percent(200*time.Millisecond, false)
 	fmt.Printf("cpu percent:%v\n", percent)
 }
-``
-`
+```
+
 200ms 采集的 CPU 使用率结果，有为 `0` 的数据，这样可以不一定能反应 CPU 的平均使用率。我们把采集周期调整为 500ms，再看看结果：
 ```bash
 cpu percent:[4.761904466246813]
