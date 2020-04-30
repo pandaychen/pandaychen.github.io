@@ -4,11 +4,13 @@ title:      gRPC源码分析之Picker篇
 subtitle:   gRPC客户端选择器实现分析
 date:       2020-01-03
 author:     pandaychen
-catalog:    true
+catalog: true
+category:   false
 tags:
-	- 负载均衡
 	- gRPC
+	- 负载均衡
 ---
+
 
 ##	0x00	再看RR-Picker实现
 &emsp;&emsp;前文中分析了官方提供的轮询 `Picker` 代码，我们可以使用 gRPC 提供的 `balancer` 包中的接口实现自定义的选择器 `Picker`，也就是自定义的负载均衡逻辑，只需要三步即可。这篇文章，讨论下，我们自己实现的`Picker`逻辑是如何gRPC中生效的。
