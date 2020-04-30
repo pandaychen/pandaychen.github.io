@@ -15,7 +15,7 @@ tags:
 ##  0x00    前言
 写这篇文章的初衷是，在研究 Opentracing 中，出现了大量以 Metadata 的代码，特此总结下。
 
-> **gRPC 的 Metadata 简单理解，就是 Http 的 Header 中的 key-value 对 **
+> **gRPC 的 Metadata 简单理解，就是 Http 的 Header 中的 key-value 对**
 
 Metadata 是以 key-value 的形式存储数据的，其中 key 是 string 类型，而 value 是 []string，即一个字符串数组类型。metadata 使得 client 和 server 能够为对方提供关于本次调用的一些信息，就像一次 http 请求的 RequestHeader 和 ResponseHeader 一样。http 中 header 的生命周周期是一次 http 请求，那么 metadata 的生命周期就是一次 RPC 调用。
 
@@ -85,7 +85,7 @@ if err == nil {
 ```
 
 ####	两个方法：`AppendToOutgoingContext` 和 `NewOutgoingContext`
--	`NewOutgoingContext`：将新创建的 Metadata 添加到 context 中，这样会 ** 覆盖 ** 掉原来已有的 metadata
+-	`NewOutgoingContext`：将新创建的 Metadata 添加到 context 中，这样会 **覆盖** 掉原来已有的 metadata
 -	`AppendToOutgoingContext`：可以将 key-value 对添加到已有的 context 中。如果对应的 context 没有 metadata，那么就会创建一个；如果已有 metadata 了，那么就将数据添加到原来的 metadata（推荐使用 `AppendToOutgoingContext`，PS：在 Interceptor 中，常常需要给 Metadata 添加 key-value 对）
 
 `NewOutgoingContext` 方法的用例：

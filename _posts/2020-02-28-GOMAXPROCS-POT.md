@@ -125,7 +125,7 @@ func main(){
 
 
 ####  Docker-Container
-在 Docker-container 中，`runtime.GOMAXPROCS()` 获取的是 ** 宿主机 ** 的 CPU 核数。`P` 值设置过大，导致生成线程过多，会增加上线文切换的负担，导致严重的上下文切换，浪费 CPU。
+在 Docker-container 中，`runtime.GOMAXPROCS()` 获取的是 **宿主机** 的 CPU 核数。`P` 值设置过大，导致生成线程过多，会增加上线文切换的负担，导致严重的上下文切换，浪费 CPU。
 所以，在 Docker-container 中, Golang 设置的 GOMAXPROCS 并不准确。
 
 ####     Kubernetes-Pod

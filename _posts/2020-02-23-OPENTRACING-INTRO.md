@@ -64,7 +64,7 @@ Tracing 的流程和基于时间维度的示例如下：
 *	`Trace` : 调用链
 *	`Span`：某个处理阶段（我通常理解为 RPC 方法，但是通常一个 RPC 方法会包含一个或多个 Span），翻译为阶段、或者跨度
 
-** 每个调用链由多个 Span 组成。Span 和 Span 的关系称为 Reference。上图中，总共有标号为 A-H 的 8 个 Span。**
+**每个调用链由多个 Span 组成。Span 和 Span 的关系称为 Reference。上图中，总共有标号为 A-H 的 8 个 Span。**
 
 进一步的，每个 Span 包含如下状态：
 *	操作名称：RPC 方法
