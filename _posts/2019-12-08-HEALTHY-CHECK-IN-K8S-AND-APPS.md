@@ -64,9 +64,7 @@ facebook 开源的库 [grace](https://github.com/facebookarchive/grace)，可以
 此时，Kubernetes 将向 pod 中的容器发送 `SIGTERM` 信号，这个信号让容器知道它们很快就会被关闭。这里很重要，在我们的代码应该监听此事件并在此时开始执行收尾工作、清理资源及优雅退出。
 
 4. Kubernetes 优雅等待期
-此时，Kubernetes 等待指定的时间称为优雅终止等待期。 默认情况为 30 秒（可以视程序的逻辑处理适当延长）。 值得注意的是，这与 preStop Hook 和 `SIGTERM` 信号并行发生。 Kubernetes 不会等待 preStop Hook 完成。
-
-如果应用程序完成关闭并在 terminationGracePeriod 完成之前退出，Kubernetes 会立即进入下一步。
+此时，Kubernetes 等待指定的时间称为优雅终止等待期。 默认情况为 30 秒（可以视程序的逻辑处理适当延长）。 值得注意的是，这与 preStop Hook 和 `SIGTERM` 信号并行发生。 Kubernetes 不会等待 preStop Hook 完成。如果应用程序完成关闭并在 terminationGracePeriod 完成之前退出，Kubernetes 会立即进入下一步。
 
 5. `SIGKILL` 信号被发送到 Pod，并删除 Pod
 如果容器在优雅等待期结束后仍在运行，则会发送 SIGKILL 信号并强制删除。 此时，所有 Kubernetes 对象也会被清除，至此，Kubernetes 清理 Pod 的整个流程结束。
