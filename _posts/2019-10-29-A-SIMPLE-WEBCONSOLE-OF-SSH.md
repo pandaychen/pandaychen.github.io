@@ -7,7 +7,6 @@ author:     pandaychen
 catalog:    true
 tags:
     - WebConsole
-    - WebSocket
 ---
 
 ##  基础

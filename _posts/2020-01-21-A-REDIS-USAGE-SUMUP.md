@@ -104,5 +104,18 @@ Set 作为 CS 中最基础的数据结构，使用非常广泛，在 Redis 中 S
 
 ##  Hash 使用
 
+##  慎用的操作
+
+在项目实践中，也遇到了一些性能问题，如下：
+
+-   SMEMBERS
+SMEMBERS 命令是从一个 Set 结构获取集合，但这个集合数据量已经很大，当这个命令被频繁的调用，会极大的占用网络 IO，当网络被占满时，其余的操作也会受到影响。
+
+-   慢操作
+
+
 ##	0x04	参考
+-   [Using pipelining to speedup Redis queries](https://redis.io/topics/pipelining)
 -   [聊聊 GO-REDIS 的一些高级用法](http://vearne.cc/archives/1113)
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

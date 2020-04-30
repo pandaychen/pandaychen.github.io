@@ -7,10 +7,8 @@ author:     pandaychen
 header-img: img/encryption.jpg
 catalog: true
 tags:
-    - Loadbalance
     - Nginx
     - 负载均衡
-    - 平滑负载均衡算法
 ---
 
 ##  0x00    引入问题

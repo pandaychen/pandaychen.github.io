@@ -7,7 +7,8 @@ author:     pandaychen
 header-img:
 catalog: true
 tags:
-    - gRPC
+	- gRPC
+	- 负载均衡
 ---
 
 > 本篇文章分析下，Kratos 中如何封装 gRPC 中服务发现的接口，已经在项目中是如何使用的。

@@ -8,7 +8,7 @@ header-img: img/golang-tools-fun.png
 catalog: true
 category:   false
 tags:
-    - Ratelimit
+    - 熔断
 ---
 
 ##  0x00    前言
@@ -22,11 +22,12 @@ tags:
 
 We implemented client-side throttling through a technique we call adaptive throttling：该算法称为（客户端）自适应限流。
 
-当客户端检测到最近的请求出现错误都是 "out of quota（配额不足）"，说明可能这个客户端超过了资源配额，后端任务会快速拒绝请求，返回 “配额不足” 的错误，有可能后端忙着不
-停发送拒绝请求，导致过载；
-• 依赖的资源出现大量错误，处于对下游的保护
+现实中，过载是极易发生的异常状态：
 
-客户端自行限制请求速度，限制生成请求的数量, 超过这个数量的请求直接在本地回复失败，而不会真是发送到服务端
+一方面，当客户端检测到最近的请求出现错误都是 "out of quota（配额不足）"，说明可能这个客户端超过了资源配额，后端任务会快速拒绝请求，返回 "配额不足" 的错误，有可能后端忙着不停发送拒绝请求，导致过载；
+另一方面，当依赖的资源出现大量错误，处于对下游的保护，也需要在客户端本地进行限流操作
+
+解决的办法就是客户端自行限制请求速度，限制生成请求的数量, 超过这个数量的请求直接在本地回复失败，而不会真是发送到服务端
 
 该算法统计的指标依赖如下两种，每个客户端记录过去两分钟内的以下信息（一般代码中以滑动窗口实现）：
 -   $$requests$$（客户端请求总量）：
@@ -48,7 +49,7 @@ The number of requests accepted by the backend
 $$max(0,\frac{requests-K*accepts}{requests+1})$$
 
 该公式的解释如下：
-当 $$requests-K*accepts>=0$$ 时，概率 $$p==0$$，客户端不会主动丢弃请求；反之，则概率 $$p$$，会随着 $$accepts$$ 值的变小而增加，即成功接受的请求数越少，本地丢弃请求的概率就越高。
+当 $$requests-K*accepts>=0$$ 时，概率 $$p==0$$，客户端不会主动丢弃请求；反之，则概率 $$p$$，会随着 $$accepts$$ 值的变小而增加，即成功接受的请求数越少，本地丢弃请求的概率就越高。通俗点说，Client 可以发送请求直到$$requests = K * accepts$$， 一旦超过限制， 按照**概率**进行截流。
 
 从 Google 的文档描述中，该算法在实际中使用效果极为良好，可以使整体上保持一个非常稳定的请求速率。对于后端而言，调整 $$K$$ 值可以使得自适应限流算法适配不同的后端。关于 $$K$$ 值的意义，原文描述如下：
 -   Reducing the multiplier will make adaptive throttling behave more aggressively

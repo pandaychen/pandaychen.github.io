@@ -6,8 +6,7 @@ date:       2019-11-11
 author:     pandaychen
 catalog:    true
 tags:
-    - gRPC负载均衡
-    - Resolver
+    - 负载均衡
 ---
 
 ##	前言
