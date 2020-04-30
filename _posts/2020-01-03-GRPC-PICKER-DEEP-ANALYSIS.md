@@ -1,29 +1,29 @@
 ---
 layout:     post
-title:      gRPC源码分析之Picker篇
-subtitle:   gRPC客户端选择器实现分析
+title:      gRPC 源码分析之 Picker 篇
+subtitle:	gRPC 客户端选择器实现分析
 date:       2020-01-03
 author:     pandaychen
+header-img: img/golang-tools-fun.png
 catalog: true
 category:   false
 tags:
-	- gRPC
-	- 负载均衡
+    - gRPC
 ---
 
 
-##	0x00	再看RR-Picker实现
-&emsp;&emsp;前文中分析了官方提供的轮询 `Picker` 代码，我们可以使用 gRPC 提供的 `balancer` 包中的接口实现自定义的选择器 `Picker`，也就是自定义的负载均衡逻辑，只需要三步即可。这篇文章，讨论下，我们自己实现的`Picker`逻辑是如何gRPC中生效的。
+##	0x00	再看 RR-Picker 实现
+&emsp;&emsp; 前文中分析了官方提供的轮询 `Picker` 代码，我们可以使用 gRPC 提供的 `balancer` 包中的接口实现自定义的选择器 `Picker`，也就是自定义的负载均衡逻辑，只需要三步即可。这篇文章，讨论下，我们自己实现的 `Picker` 逻辑是如何 gRPC 中生效的。
 
-###	一个RR-Picker实现步骤
-&emsp;&emsp;一个简单的实现如下所示：
--	第一步：设定全局`balancer`的名字和创建全局变量（package级别）。
+###	一个 RR-Picker 实现步骤
+&emsp;&emsp; 一个简单的实现如下所示：
+-	第一步：设定全局 `balancer` 的名字和创建全局变量（package 级别）。
 
 ```go
-var _ base.PickerBuilder = &roundRobinPickerBuilder{}		//创建全局变量(package级别)
-var _ balancer.Picker = &roundRobinPicker{}				//创建全局变量(package级别)
+var _ base.PickerBuilder = &roundRobinPickerBuilder{}		// 创建全局变量 (package 级别)
+var _ balancer.Picker = &roundRobinPicker{}				// 创建全局变量 (package 级别)
 
-const RoundRobin = "round_robin"		//注册到resolver中的lb全局名字
+const RoundRobin = "round_robin"		// 注册到 resolver 中的 lb 全局名字
 
 // newRoundRobinBuilder creates a new roundrobin balancer builder.
 func newRoundRobinBuilder() balancer.Builder {
@@ -34,7 +34,7 @@ func init() {
 	balancer.Register(newRoundRobinBuilder())
 }
 ```
--	第二步：定义`PickerBuilder`的实例化结构，并实现接口中定义的`Build`方法，该方法返回一个`balancer.Picker`。
+-	第二步：定义 `PickerBuilder` 的实例化结构，并实现接口中定义的 `Build` 方法，该方法返回一个 `balancer.Picker`。
 
 ```go
 type roundRobinPickerBuilder struct{}
@@ -68,7 +68,7 @@ func (*roundRobinPickerBuilder) Build(readySCs map[resolver.Address]balancer.Sub
 	}
 }
 ```
--	第三步： 构建`roundRobinPicker`，该结构需要实现`balancer.Picker`定义的`Pick`方法。
+-	第三步： 构建 `roundRobinPicker`，该结构需要实现 `balancer.Picker` 定义的 `Pick` 方法。
 
 ```go
 type roundRobinPicker struct {
@@ -85,19 +85,19 @@ func (p *roundRobinPicker) Pick(ctx context.Context, opts balancer.PickOptions) 
 	return sc, nil, nil
 }
 ```
-至此，一个基础的RR-Picker接口就基本实现了，下面我们看看，gRPC运行中，在何时调用我们实现的Balancer逻辑的。
+至此，一个基础的 RR-Picker 接口就基本实现了，下面我们看看，gRPC 运行中，在何时调用我们实现的 Balancer 逻辑的。
 
 ###	引入的问题
 和之前分析代码的文章一样，这里先引入三个问题：
--	自定义实现的`PickerBuilder`如何被调用？
--	自定义实现的`Picker`如何被调用？
--	何时返回`Picker.Pick`的结果给上层gRPC客户端或RPC方法？
+-	自定义实现的 `PickerBuilder` 如何被调用？
+-	自定义实现的 `Picker` 如何被调用？
+-	何时返回 `Picker.Pick` 的结果给上层 gRPC 客户端或 RPC 方法？
 
 ##	0x01	balancer.Picker 与 base.PickerBuilder
-&emsp;&emsp;上面实现（封装）的两个结构，`roundRobinPickerBuilder`对应了`base.PickerBuilder`，`roundRobinPicker`对应了`balancer.Picker`，下面就分析这两个结构的作用。
+&emsp;&emsp; 上面实现（封装）的两个结构，`roundRobinPickerBuilder` 对应了 `base.PickerBuilder`，`roundRobinPicker` 对应了 `balancer.Picker`，下面就分析这两个结构的作用。
 
 ###	balancer.Picker
-&emsp;&emsp;[`balancer.Picker`](https://github.com/grpc/grpc-go/blob/master/balancer/balancer.go)定义如下，从描述看其即将会被 `V2Picker` 取代，这里我们先只看 `Picker`。`Picker` 也是一个`interface{}`，封装它必须要实现 `Pick` 方法，该方法是从给定的连接池中，选取一个可用连接并返回。
+&emsp;&emsp;[`balancer.Picker`](https://github.com/grpc/grpc-go/blob/master/balancer/balancer.go) 定义如下，从描述看其即将会被 `V2Picker` 取代，这里我们先只看 `Picker`。`Picker` 也是一个 `interface{}`，封装它必须要实现 `Pick` 方法，该方法是从给定的连接池中，选取一个可用连接并返回。
 ```go
 // Picker is used by gRPC to pick a SubConn to send an RPC.
 // Balancer is expected to generate a new picker from its snapshot every time its
@@ -105,7 +105,7 @@ func (p *roundRobinPicker) Pick(ctx context.Context, opts balancer.PickOptions) 
 //
 // The pickers used by gRPC can be updated by ClientConn.UpdateBalancerState().
 //
-// Deprecated: use V2Picker instead		
+// Deprecated: use V2Picker instead
 type Picker interface {
 	// Pick returns the SubConn to be used to send the RPC.
 	// The returned SubConn must be one returned by NewSubConn().
@@ -144,7 +144,7 @@ type Picker interface {
 ```
 
 ###	base.PickerBuilder
-[`base.PickerBuilder`](https://github.com/grpc/grpc-go/blob/master/balancer/base/base.go)定义如下，其定义了一个`Build`方法，该方法需要返回`balancer.Picker`。
+[`base.PickerBuilder`](https://github.com/grpc/grpc-go/blob/master/balancer/base/base.go) 定义如下，其定义了一个 `Build` 方法，该方法需要返回 `balancer.Picker`。
 ```go
 // PickerBuilder creates balancer.Picker.
 type PickerBuilder interface {
@@ -160,23 +160,23 @@ type V2PickerBuilder interface {
 }
 ```
 
-当我们创建了自定义的`PickerBuilder`后，通过`base.NewBalancerBuilderWithConfig`方法，注册我们实现的`Picker`逻辑
+当我们创建了自定义的 `PickerBuilder` 后，通过 `base.NewBalancerBuilderWithConfig` 方法，注册我们实现的 `Picker` 逻辑
 ```go
 // NewBalancerBuilderWithConfig returns a base balancer builder configured by the provided config.
 func NewBalancerBuilderWithConfig(name string, pb PickerBuilder, config Config) balancer.Builder {
 	return &baseBuilder{
 		name:          name,
-		pickerBuilder: pb,		//这里保存了我们自定义了roundRobinPickerBuilder
+		pickerBuilder: pb,		// 这里保存了我们自定义了 roundRobinPickerBuilder
 		config:        config,
 	}
 }
 ```
 
-在包的`init`方法中，使用[`balancer.Register`方法](https://github.com/grpc/grpc-go/blob/master/balancer/balancer.go)注册我们的`Picker`
+在包的 `init` 方法中，使用 [`balancer.Register` 方法](https://github.com/grpc/grpc-go/blob/master/balancer/balancer.go) 注册我们的 `Picker`
 ```go
 var (
 	// m is a map from name to balancer builder.
-	m = make(map[string]Builder)		//全局balancer-Map
+	m = make(map[string]Builder)		// 全局 balancer-Map
 )
 
 // Register registers the balancer builder to the balancer map. b.Name
@@ -193,25 +193,25 @@ func Register(b Builder) {
 }
 ```
 
-##	0x02	应用自定义Picker
-这节，我们从`NewBalancerBuilderWithConfig`方法开始，看下自定义的Picker是如何生效的。
+##	0x02	应用自定义 Picker
+这节，我们从 `NewBalancerBuilderWithConfig` 方法开始，看下自定义的 Picker 是如何生效的。
 ```go
 // NewBalancerBuilderWithConfig returns a base balancer builder configured by the provided config.
 func NewBalancerBuilderWithConfig(name string, pb PickerBuilder, config Config) balancer.Builder {
-	return &baseBuilder{			//返回baseBuilder
+	return &baseBuilder{			// 返回 baseBuilder
 		name:          name,
-		pickerBuilder: pb,			//这里保存了我们自定义了roundRobinPickerBuilder
+		pickerBuilder: pb,			// 这里保存了我们自定义了 roundRobinPickerBuilder
 		config:        config,
 	}
 }
 ```
 
-在`baseBuilder`的[`Build`方法](https://github.com/grpc/grpc-go/blob/master/balancer/base/balancer.go#L38)中，初始化了重要的`balancer.Balancer`。
+在 `baseBuilder` 的 [`Build` 方法](https://github.com/grpc/grpc-go/blob/master/balancer/base/balancer.go#L38) 中，初始化了重要的 `balancer.Balancer`。
 ```go
 func (bb *baseBuilder) Build(cc balancer.ClientConn, opt balancer.BuildOptions) balancer.Balancer {
 	bal := &baseBalancer{
 		cc:              cc,
-		pickerBuilder:   bb.pickerBuilder,		//这里是我们自定义的roundRobinPickerBuilder
+		pickerBuilder:   bb.pickerBuilder,		// 这里是我们自定义的 roundRobinPickerBuilder
 		v2PickerBuilder: bb.v2PickerBuilder,
 
 		subConns: make(map[resolver.Address]balancer.SubConn),
@@ -229,7 +229,7 @@ func (bb *baseBuilder) Build(cc balancer.ClientConn, opt balancer.BuildOptions) 
 }
 ```
 
-在`balancer.Balancer`这个`interface{}`中，`UpdateSubConnState` 和`HandleSubConnStateChange`功能是一样的，我们继续分析下`UpdateSubConnState`和`UpdateClientConnState`这两个方法在哪里被调用的。
+在 `balancer.Balancer` 这个 `interface{}` 中，`UpdateSubConnState` 和 `HandleSubConnStateChange` 功能是一样的，我们继续分析下 `UpdateSubConnState` 和 `UpdateClientConnState` 这两个方法在哪里被调用的。
 ```go
 
 // Balancer takes input from gRPC, manages SubConns, and collects and aggregates
@@ -265,14 +265,14 @@ type Balancer interface {
 	Close()
 }
 ```
-###	UpdateSubConnState的实现
-在[`UpdateSubConnState`方法](https://github.com/grpc/grpc-go/blob/master/balancer/base/balancer.go#L178)中，其中有个很重要的方法`regeneratePicker`，在发生下面的情况时，需要重建Picker，这个很好理解，注意看下`func (*roundRobinPickerBuilder) Build(readySCs map[resolver.Address]balancer.SubConn) balancer.Picker` 的`readySCs`参数，这个参数表示当前可用的连接（池），如果连接发生问题，当然需要重建连接池。
+###	UpdateSubConnState 的实现
+在 [`UpdateSubConnState` 方法](https://github.com/grpc/grpc-go/blob/master/balancer/base/balancer.go#L178) 中，其中有个很重要的方法 `regeneratePicker`，在发生下面的情况时，需要重建 Picker，这个很好理解，注意看下 `func (*roundRobinPickerBuilder) Build(readySCs map[resolver.Address]balancer.SubConn) balancer.Picker` 的 `readySCs` 参数，这个参数表示当前可用的连接（池），如果连接发生问题，当然需要重建连接池。
 ```go
-   // 	 当下面情况发生时，需要重新创建Picker：
-   //    - 连接由其他状态转变为Ready状态
-   //    - 连接由Ready状态转变为其他状态
-   //    - balancer转变为TransientFailure状态
-   //    - balancer由TransientFailure转变为Non-TransientFailure状态
+   // 	 当下面情况发生时，需要重新创建 Picker：
+   //    - 连接由其他状态转变为 Ready 状态
+   //    - 连接由 Ready 状态转变为其他状态
+   //    - balancer 转变为 TransientFailure 状态
+   //    - balancer 由 TransientFailure 转变为 Non-TransientFailure 状态
 ```
 
 ```go
@@ -308,12 +308,12 @@ func (b *baseBalancer) UpdateSubConnState(sc balancer.SubConn, state balancer.Su
 	//  - the aggregated state of balancer became non-TransientFailure from TransientFailure
 	if (s == connectivity.Ready) != (oldS == connectivity.Ready) ||
 		(b.state == connectivity.TransientFailure) != (oldAggrState == connectivity.TransientFailure) {
-		//重新生成Picker
+		// 重新生成 Picker
 		b.regeneratePicker(state.ConnectionError)
 	}
 
 	if b.picker != nil {
-		//将自定义的picker传入UpdateBalancerState，b.picker是我们自己实现的lb逻辑
+		// 将自定义的 picker 传入 UpdateBalancerState，b.picker 是我们自己实现的 lb 逻辑
 		b.cc.UpdateBalancerState(b.state, b.picker)
 	} else {
 		b.cc.UpdateState(balancer.State{ConnectivityState: b.state, Picker: b.v2Picker})
@@ -321,7 +321,7 @@ func (b *baseBalancer) UpdateSubConnState(sc balancer.SubConn, state balancer.Su
 }
 ```
 
-`regeneratePicker`的实现如下，注意看`if b.pickerBuilder != nil {...b.picker = b.pickerBuilder.Build(readySCs)...}`这里，就解答了文章的第一个问题，在这里调用了我们自定义的`PickerBuilder`方法。注意：这里的`readySCs`可以理解为当前健康的连接池。
+`regeneratePicker` 的实现如下，注意看 `if b.pickerBuilder != nil {...b.picker = b.pickerBuilder.Build(readySCs)...}` 这里，就解答了文章的第一个问题，在这里调用了我们自定义的 `PickerBuilder` 方法。注意：这里的 `readySCs` 可以理解为当前健康的连接池。
 ```go
 // regeneratePicker takes a snapshot of the balancer, and generates a picker
 // from it. The picker is
@@ -350,11 +350,11 @@ func (b *baseBalancer) regeneratePicker(err error) {
 		// Filter out all ready SCs from full subConn map.
 		for addr, sc := range b.subConns {
 			if st, ok := b.scStates[sc]; ok && st == connectivity.Ready {
-				//readySCs中保存了connectivity.Ready（连接就绪）的连接集合
+				//readySCs 中保存了 connectivity.Ready（连接就绪）的连接集合
 				readySCs[addr] = sc
 			}
 		}
-		b.picker = b.pickerBuilder.Build(readySCs)	//重要：执行自定义的PickerBuilder，文中的roundRobinPickerBuilder方法
+		b.picker = b.pickerBuilder.Build(readySCs)	// 重要：执行自定义的 PickerBuilder，文中的 roundRobinPickerBuilder 方法
 	} else {
 		readySCs := make(map[balancer.SubConn]SubConnInfo)
 
@@ -364,13 +364,13 @@ func (b *baseBalancer) regeneratePicker(err error) {
 				readySCs[sc] = SubConnInfo{Address: addr}
 			}
 		}
-		b.v2Picker = b.v2PickerBuilder.Build(PickerBuildInfo{ReadySCs: readySCs})//重要：执行自定义的PickerBuilder，文中的roundRobinPickerBuilder方法
+		b.v2Picker = b.v2PickerBuilder.Build(PickerBuildInfo{ReadySCs: readySCs})// 重要：执行自定义的 PickerBuilder，文中的 roundRobinPickerBuilder 方法
 	}
 }
 ```
 
-##	0x03	自定义Picker的调用（1）
-&emsp;&emsp;第二个问题，在哪里应用自定义的Picker？先看下刚才出现的[`UpdateBalancerState`方法](https://github.com/grpc/grpc-go/blob/master/balancer_conn_wrappers.go)，在`UpdateSubConnState`方法中进行调用。
+##	0x03	自定义 Picker 的调用（1）
+&emsp;&emsp; 第二个问题，在哪里应用自定义的 Picker？先看下刚才出现的 [`UpdateBalancerState` 方法](https://github.com/grpc/grpc-go/blob/master/balancer_conn_wrappers.go)，在 `UpdateSubConnState` 方法中进行调用。
 ```go
 func (ccb *ccBalancerWrapper) UpdateBalancerState(s connectivity.State, p balancer.Picker) {
 	ccb.mu.Lock()
@@ -383,18 +383,18 @@ func (ccb *ccBalancerWrapper) UpdateBalancerState(s connectivity.State, p balanc
 	// case where we wait for ready and then perform an RPC.  If the picker is
 	// updated later, we could call the "connecting" picker when the state is
 	// updated, and then call the "ready" picker after the picker gets updated.
-	ccb.cc.blockingpicker.updatePicker(p)		//传入pick的实现
+	ccb.cc.blockingpicker.updatePicker(p)		// 传入 pick 的实现
 	ccb.cc.csMgr.updateState(s)
 }
 ```
-接下来，看下[`updatePicker`方法](https://github.com/grpc/grpc-go/blob/master/picker_wrapper.go)，该方法注册了传入的`balancer.Picker`：
+接下来，看下 [`updatePicker` 方法](https://github.com/grpc/grpc-go/blob/master/picker_wrapper.go)，该方法注册了传入的 `balancer.Picker`：
 ```go
 // updatePicker is called by UpdateBalancerState. It unblocks all blocked pick.
 func (pw *pickerWrapper) updatePicker(p balancer.Picker) {
 	pw.updatePickerV2(&v2PickerWrapper{picker: p, connErr: pw.connErr})
 }
 ```
-`v2PickerWrapper`的定义如下，v2PickerWrapper wraps a balancer：
+`v2PickerWrapper` 的定义如下，v2PickerWrapper wraps a balancer：
 ```go
 // v2PickerWrapper wraps a balancer.Picker while providing the
 // balancer.V2Picker API.  It requires a pickerWrapper to generate errors
@@ -405,11 +405,11 @@ type v2PickerWrapper struct {
 	connErr *connErr
 }
 ```
-很明显，在`v2PickerWrapper`的`Picker`方法实现中，解答了这个问题：
+很明显，在 `v2PickerWrapper` 的 `Picker` 方法实现中，解答了这个问题：
 ```go
 func (v *v2PickerWrapper) Pick(info balancer.PickInfo) (balancer.PickResult, error) {
-	sc, done, err := v.picker.Pick(info.Ctx, info)		
-	//调用我们自定义的Picker，roundRobinPicker，返回一个可用的连接sc给调用方
+	sc, done, err := v.picker.Pick(info.Ctx, info)
+	// 调用我们自定义的 Picker，roundRobinPicker，返回一个可用的连接 sc 给调用方
 	if err != nil {
 		if err == balancer.ErrTransientFailure {
 			return balancer.PickResult{}, balancer.TransientFailureError(fmt.Errorf("%v, latest connection error: %v", err, v.connErr.connectionError()))
@@ -419,7 +419,7 @@ func (v *v2PickerWrapper) Pick(info balancer.PickInfo) (balancer.PickResult, err
 	return balancer.PickResult{SubConn: sc, Done: done}, nil
 }
 ```
-### pickerWrapper的pick实现
+### pickerWrapper 的 pick 实现
 
 ```go
 // pick returns the transport that will be used for the RPC.
@@ -452,9 +452,9 @@ func (pw *pickerWrapper) pick(ctx context.Context, failfast bool, info balancer.
 			case <-ctx.Done():
 				var errStr string
 				if lastPickErr != nil {
-					errStr = "latest balancer error: " + lastPickErr.Error()
+					errStr = "latest balancer error:" + lastPickErr.Error()
 				} else if connectionErr := pw.connectionError(); connectionErr != nil {
-					errStr = "latest connection error: " + connectionErr.Error()
+					errStr = "latest connection error:" + connectionErr.Error()
 				} else {
 					errStr = ctx.Err().Error()
 				}
@@ -518,11 +518,11 @@ func (pw *pickerWrapper) pick(ctx context.Context, failfast bool, info balancer.
 }
 ```
 
-##	0x04	自定义Picker的调用（2）
-&emsp;&emsp;最后一个问题，在哪里返回Picker的结果给上层gRPC客户端呢？在`ClientConn`的[`getTransport`方法](https://github.com/grpc/grpc-go/blob/master/clientconn.go#L881)，看到了对上述`pickerWrapper`的`pick`实现的调用：
+##	0x04	自定义 Picker 的调用（2）
+&emsp;&emsp; 最后一个问题，在哪里返回 Picker 的结果给上层 gRPC 客户端呢？在 `ClientConn` 的 [`getTransport` 方法](https://github.com/grpc/grpc-go/blob/master/clientconn.go#L881)，看到了对上述 `pickerWrapper` 的 `pick` 实现的调用：
 ```GO
 func (cc *ClientConn) getTransport(ctx context.Context, failfast bool, method string) (transport.ClientTransport, func(balancer.DoneInfo), error) {
-	t, done, err := cc.blockingpicker.pick(ctx, failfast, balancer.PickInfo{	//注意这里调用的是pick（小写）方法，自定义的Picker在picker中
+	t, done, err := cc.blockingpicker.pick(ctx, failfast, balancer.PickInfo{	// 注意这里调用的是 pick（小写）方法，自定义的 Picker 在 picker 中
 		Ctx:            ctx,
 		FullMethodName: method,
 	})
@@ -533,12 +533,12 @@ func (cc *ClientConn) getTransport(ctx context.Context, failfast bool, method st
 }
 ```
 
-在 `newClientMethod` 的gRPC客户端方法中，我们通过 `getTransport` 方法获取了 Transport 层中抽象出来的 ClientTransport 和 ServerTransport，实际上就是获取一个连接给后续 RPC 调用传输使用。到此，gRPC的客户端就获取了由自定义LoadBalancer算法得到的最终的`TCP`连接
+在 `newClientMethod` 的 gRPC 客户端方法中，我们通过 `getTransport` 方法获取了 Transport 层中抽象出来的 ClientTransport 和 ServerTransport，实际上就是获取一个连接给后续 RPC 调用传输使用。到此，gRPC 的客户端就获取了由自定义 LoadBalancer 算法得到的最终的 `TCP` 连接
 
 ##	0x05	总结
-&emsp;&emsp;本文分析了gRPC是如何将自定义的Picker实现应用在最终的负载均衡流程，理解`Picker`的实现原理有助于我们实现更健壮的Loadbalancer逻辑。
+&emsp;&emsp; 本文分析了 gRPC 是如何将自定义的 Picker 实现应用在最终的负载均衡流程，理解 `Picker` 的实现原理有助于我们实现更健壮的 Loadbalancer 逻辑。
 
 ##	0x06	参考
--	[grpc-client端分析](https://mcll.top/2019/07/29/grpc-client%E7%AB%AF%E5%88%86%E6%9E%901/)
+-	[grpc-client 端分析](https://mcll.top/2019/07/29/grpc-client%E7%AB%AF%E5%88%86%E6%9E%901/)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
