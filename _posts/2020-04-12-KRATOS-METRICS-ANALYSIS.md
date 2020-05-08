@@ -274,6 +274,22 @@ func (r *RollingPolicy) Reduce(f func(Iterator) float64) (val float64) {
 }
 ```
 
+####	图解 `Reduce` 方法
+
+1、初始化状态
+![image](https://wx2.sbimg.cn/2020/05/08/reduce1.png)
+
+2、计算需要遍历的 Bucket 个数，如图（所有深绿色的部分，滑动窗口中的旧数据，都是需要遍历累计计算值的）
+$$count = r.size - r.timespan()$$
+
+![image](https://wx1.sbimg.cn/2020/05/08/reduce2.png)
+
+3、从 `r.offset + timespan + 1` 开始，遍历滑动窗口，遍历的个数是 `count`，这里没考虑 `offset` 超出 `r.size` 的情况（意为 `span` 的位置在 `r.offset` 之前）
+
+![image](https://wx2.sbimg.cn/2020/05/08/reduce3.png)
+
+4、最后，调用传入的 `Iterator` 计算值
+
 ##	0x05	总结
 本文分析了 Kratos 框架中的 Metrics 基础封装、滑动窗口的实现 Window、实例化 RollingPolicy 等，下一篇文章来分析下，更高级的结构 RollingCounter、RollingGauage 等。
 
