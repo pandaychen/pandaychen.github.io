@@ -72,39 +72,39 @@ OPEN ------ HALFOPEN ------ CLOSED
 
 Kratos 文档给出了使用 breaker 的步骤：
 ```golang
-	// Breaker 配置说明
-	type Config struct {
-		SwitchOff bool // 熔断器开关, 默认关 false.
+// Breaker 配置说明
+type Config struct {
+	SwitchOff bool // 熔断器开关, 默认关 false.
 
-		K float64  // 触发熔断的错误率（K = 1 - 1 / 错误率）
+	K float64  // 触发熔断的错误率（K = 1 - 1 / 错误率）
 
-		Window  xtime.Duration // 统计桶窗口时间
-		Bucket  int  // 统计桶大小
-		Request int64 // 触发熔断的最少请求数量（请求少于该值时不会触发熔断）
-	}
+	Window  xtime.Duration // 统计桶窗口时间
+	Bucket  int  // 统计桶大小
+	Request int64 // 触发熔断的最少请求数量（请求少于该值时不会触发熔断）
+}
 
-	......
+......
 
-	// 初始化熔断器组
-	// 一组熔断器公用同一个配置项，可从分组内取出单个熔断器使用。可用在比如 mysql 主从分离等场景。
-	brkGroup := breaker.NewGroup(&breaker.Config{})
-	// 为每一个连接指定一个 brekaker
-	// 此处假设一个客户端连接对象实例为 conn
-	//breakName 定义熔断器名称 一般可以使用连接地址
-	breakName = conn.Addr
-	conn.breaker = brkGroup.Get(breakName)
+// 初始化熔断器组
+// 一组熔断器公用同一个配置项，可从分组内取出单个熔断器使用。可用在比如 mysql 主从分离等场景。
+brkGroup := breaker.NewGroup(&breaker.Config{})
+// 为每一个连接指定一个 brekaker
+// 此处假设一个客户端连接对象实例为 conn
+//breakName 定义熔断器名称 一般可以使用连接地址
+breakName = conn.Addr
+conn.breaker = brkGroup.Get(breakName)
 
-	// 在连接发出请求前判断熔断器状态
-	if err = conn.breaker.Allow(); err != nil {
-		return
-	}
+// 在连接发出请求前判断熔断器状态
+if err = conn.breaker.Allow(); err != nil {
+	return
+}
 
-	// 连接执行成功或失败将结果告知 braker
-	if(respErr != nil){
-		conn.breaker.MarkFailed()
-	}else{
-		conn.breaker.MarkSuccess()
-	}
+// 连接执行成功或失败将结果告知 braker
+if(respErr != nil){
+	conn.breaker.MarkFailed()
+}else{
+	conn.breaker.MarkSuccess()
+}
 ```
 
 ####	mysqlclient 中的使用
@@ -166,7 +166,7 @@ func (b *sreBreaker) MarkFailed() {
 本文介绍了微服务中常用熔断机制的原理，熔断机制是预防服务雪崩的最有效的一种手段。目前在 gRPC 项目中，就使用了 [Hystrix-Go](https://github.com/afex/hystrix-go) 作为客户端的熔断实现，当然 Kratos 中的自适应熔断算法（基于 Google-SRE 设计）的现网应用效果可能会更优雅。
 下一篇文章来分析下 Hystrix-Go 是如何实现熔断策略的。
 
-##  0x04	参考
+##  0x05	参考
 -   [微服务 - 熔断机制](http://blog.zhuxingsheng.com/blog/micro-service-fuse-mechanism.html)
 -   [CircuitBreaker](https://martinfowler.com/bliki/CircuitBreaker.html)
 -	[Kratos-Breaker 文档](https://github.com/go-kratos/kratos/blob/master/doc/wiki-cn/breaker.md)
