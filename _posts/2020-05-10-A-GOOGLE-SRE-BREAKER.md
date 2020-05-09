@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      Google SRE 弹性熔断算法实现分析（未完待续）
+title:      Google SRE 弹性熔断算法实现分析
 subtitle:
 date:       2020-05-10
 author:     pandaychen
