@@ -23,7 +23,6 @@ tags:
 We implemented client-side throttling through a technique we call adaptive throttling：该算法称为（客户端）自适应限流。
 
 现实中，过载是极易发生的异常状态：
-
 一方面，当客户端检测到最近的请求出现错误都是 "out of quota（配额不足）"，说明可能这个客户端超过了资源配额，后端任务会快速拒绝请求，返回 "配额不足" 的错误，有可能后端忙着不停发送拒绝请求，导致过载；
 另一方面，当依赖的资源出现大量错误，处于对下游的保护，也需要在客户端本地进行限流操作
 
@@ -49,7 +48,7 @@ The number of requests accepted by the backend
 $$max(0,\frac{requests-K*accepts}{requests+1})$$
 
 该公式的解释如下：
-当 $$requests-K*accepts>=0$$ 时，概率 $$p==0$$，客户端不会主动丢弃请求；反之，则概率 $$p$$，会随着 $$accepts$$ 值的变小而增加，即成功接受的请求数越少，本地丢弃请求的概率就越高。通俗点说，Client 可以发送请求直到$$requests = K * accepts$$， 一旦超过限制， 按照**概率**进行截流。
+当 $$requests-K*accepts>=0$$ 时，概率 $$p==0$$，客户端不会主动丢弃请求；反之，则概率 $$p$$，会随着 $$accepts$$ 值的变小而增加，即成功接受的请求数越少，本地丢弃请求的概率就越高。通俗点说，Client 可以发送请求直到 $$requests = K * accepts$$， 一旦超过限制， 按照 **概率** 进行截流。
 
 从 Google 的文档描述中，该算法在实际中使用效果极为良好，可以使整体上保持一个非常稳定的请求速率。对于后端而言，调整 $$K$$ 值可以使得自适应限流算法适配不同的后端。关于 $$K$$ 值的意义，原文描述如下：
 -   Reducing the multiplier will make adaptive throttling behave more aggressively
@@ -61,9 +60,10 @@ $$max(0,\frac{requests-K*accepts}{requests+1})$$
 
 
 ##  0x02    代码实现
-
+代码实现来自 [sre_break.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/netutil/breaker/sre_breaker.go#L58)，注意下面 `success, total := b.summary()`，是基于滑动窗口 `metric.RollingCounter` 获取得到的（最近一段时间内） $$accepts$$ 和 $$requests$$ 值。
 ```golang
 func (b *sreBreaker) Allow() error {
+	// b.summary() -- 从滑动窗口中拿到
 	success, total := b.summary()
 	k := b.k * float64(success)
 	if log.V(5) {
@@ -91,7 +91,9 @@ func (b *sreBreaker) Allow() error {
 }
 ```
 
-##  0x03    效果展示 && 总结
+##  0x03    效果 && 总结
+本文介绍了 Google SRE 弹性熔断算法，弹性熔断是根据成功率动态调整的，当成功率越高的时候，被熔断的概率就越小；反之，当成功率越低时，被熔断的概率就相应增大。从 B 站的实战效果看，此熔断算法还是非常优秀的。
+![image](https://wx2.sbimg.cn/2020/05/09/sre_breaker_xiaoguo.png)
 
 ##  参考
--   [Handling Overload](https://landing.google.com/sre/sre-book/chapters/handling-overload/#eq2101)
+-   [Handling Overload -- Google SRE books](https://landing.google.com/sre/sre-book/chapters/handling-overload/#eq2101)
