@@ -241,7 +241,8 @@ fmt.Println(proto.MarshalTextString(metric)
 ```
 
 ##  0x07 gRPC 调用
-（未完待续）
+这小节，以 pull 方式为例，看下如何在 gRPC 中通过 prometheus 实现监控。基本的框架如下：
+![image](https://wx1.sbimg.cn/2020/05/11/grpc2prometheus.png)
 
 ##  0x08    参考
 -   [Go gRPC Interceptors for Prometheus monitoring](https://github.com/grpc-ecosystem/go-grpc-prometheus)
