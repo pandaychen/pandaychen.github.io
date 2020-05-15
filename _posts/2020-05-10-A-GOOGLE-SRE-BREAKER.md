@@ -91,9 +91,22 @@ func (b *sreBreaker) Allow() error {
 }
 ```
 
+最后，看下 `trueOnProba` 方法的实现，其中 `b.r.Float64()` 的 `r` 为 `*rand.Rand` 类型，此方法返回一个取值范围在`[0.0, 1.0)`的伪随机 Float64 值。
+当 `proba` 越大时，`truth` 为真的概率就越大。
+```golang
+func (b *sreBreaker) trueOnProba(proba float64) (truth bool) {
+	b.randLock.Lock()
+	truth = b.r.Float64() < proba
+	b.randLock.Unlock()
+	return
+}
+```
+
 ##  0x03    效果 && 总结
 本文介绍了 Google SRE 弹性熔断算法，弹性熔断是根据成功率动态调整的，当成功率越高的时候，被熔断的概率就越小；反之，当成功率越低时，被熔断的概率就相应增大。从 B 站的实战效果看，此熔断算法还是非常优秀的。
 ![image](https://wx2.sbimg.cn/2020/05/09/sre_breaker_xiaoguo.png)
 
-##  参考
+##  0x04	参考
 -   [Handling Overload -- Google SRE books](https://landing.google.com/sre/sre-book/chapters/handling-overload/#eq2101)
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
