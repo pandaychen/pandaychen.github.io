@@ -18,22 +18,26 @@ tags:
 ![image](https://wx2.sbimg.cn/2020/05/22/http-lb1.png)
 
 ##  0x01    目标拆解
-我们从要实现的功能及目标出发，来拆解一个 **高可用** 的（反向代理）网关，需要支持哪些功能？
+我们从要实现的功能及目标出发，来拆解一个 ** 高可用 ** 的（反向代理）网关，需要支持哪些功能？
 
 ![image](https://wx2.sbimg.cn/2020/05/22/http-lb-all-part.png)
 
 从架构图来看，我们将网关划分为控制平面（control plane）和数据平面（data plane）：
 
 控制平面包括：
-1.  Backend-Node-Manage：负责维护后端（Backend）的增删查改
-2.  Backend-Node-Discovery：后端的服务发现模块
-3.  Backend-Node-HealthyCheck：对后端的健康检查，如果后端有故障，要及时剔除
-4.  Backend-Node-LB-picker：选择何种负载均衡算法将客户端请求代理到后端
-5.  Client-API-interface：客户端调用的API
+1.  `Backend-Node-Manage`：负责维护后端（Backend）的增删查改
+2.  `Backend-Node-Discovery`：后端的服务发现模块
+3.  `Backend-Node-HealthyCheck`：对后端的健康检查，如果后端有故障，要及时剔除
+4.  `Backend-Node-LB-picker`：选择何种负载均衡算法将客户端请求代理到后端
+5.  `Client-API-interface`：客户端调用的 API
 
 数据平面只负责转发数据流，即类似反向代理的功能，不过也可以实现中间人（MITM）的功能
+1.  具备熔断、限速的功能，保证后端的稳定性
+2.  数据采集，统计，Metrics
+3.  高可用 -- 核心能力
+4.  扩展性 -- 性能
 
-
+##  0x02    实现一个简单的 Http-Gateway
 
 ##  参考
 -   [Let's Create a Simple Load Balancer With Go](https://kasvith.me/posts/lets-create-a-simple-lb-go/)
