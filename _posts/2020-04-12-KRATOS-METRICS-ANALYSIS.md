@@ -127,9 +127,9 @@ func (w *Window) Add(offset int, val float64) {
 -	Window 的迭代器生成
 
 ```golang
-// 需要提供传入的offset和count
+// 需要提供传入的 offset 和 count
 func (w *Window) Iterator(offset int, count int) Iterator {
-	// 构建window的Iterator（迭代器），方便统计和遍历
+	// 构建 window 的 Iterator（迭代器），方便统计和遍历
 	return Iterator{
 		count: count,
 		cur:   &w.window[offset],
@@ -175,14 +175,20 @@ func (i *Iterator) Bucket() Bucket {
 ```
 
 ##	0x03	滑动窗口 window + 时间跨度
-在项目中，如何在滑动窗口中加入时间跨度，用来实现滑动窗口结构的实例化？答案就是 Rolling 结构。如下图，一个 Bucket 代表 500ms，一个滑动窗口占据 2 个 Bucket。
+在项目中，如何在滑动窗口中加入时间跨度，用来实现滑动窗口结构的实例化？答案就是 Rolling 结构。如下图，一个 Bucket 代表 500ms，一个滑动窗口占据 2 个 Bucket。这是一个非常精妙的数据结构，表现在以下几点：
+1.	采集到的指标的时效性非常强，系统只需要采集最近一小段时间内关注的 Metrics 即可，对于较老的数据，会自动丢弃
+2.	如下图展示的的滑动窗口。整个滑动窗口用来保存最近 1s 的采样数据，每个小的桶用来保存 500ms 的采样数据。当时间流动之后，过期的桶会自动被新桶的数据覆盖掉，在图中，在 1000-1500ms 时，Bucket-1 的数据因为过期而被丢弃，之后 Bucket-3 的数据填到了窗口的头部。（由于在实现上滑动窗口被构造为一个环，所以 Bucket-3 的位置实际上在第 0 号位，即 Bucket-1 的位置）
+3.	由于滑动窗口以时间为 key，外部接口调用 Add 方法添加新的指标时，会根据时间跨度将不同（相近）时间戳的指标汇总到一个 "窗口" 中，从而可以使得统计结果更加趋于平滑，不会受到单次统计波动的影响
+
 ![image](https://s1.ax1x.com/2020/04/26/J61qD1.png)
+
+
 
 ##	0x04	滑动窗口的实例化 Rolling
 [Rolling_policy](https://github.com/go-kratos/kratos/blob/master/pkg/stat/metric/rolling_policy.go) 中，封装了滑动窗口，加入了互斥锁、单位时间跨度（单个桶）、最后一次更新时间等，使其成为外部可调用的结构体，如下：
 ```golang
 type RollingPolicy struct {
-	mu     sync.RWMutex
+	mu     sync.RWMutex		//（子协程）并发的 add 操作必须加锁！
 	size   int			// 滑动窗口的 size
 	window *Window		// 滑动窗口
 	offset int
