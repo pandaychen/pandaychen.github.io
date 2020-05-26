@@ -16,11 +16,12 @@ Hey，这里是熊喵君的博客，后台程序员，现居深圳。
 	腾讯（Tencent），后台开发
 
 ##### 关注技术领域
--   Kubernetes
+-   `Kubernetes`
 -   微服务（网关）构建
 -   后台 Service
 -   网络安全
 -   有趣的数据结构算法实现
+-	`OpenSSH`
 
 ##### 编程技能
 -   `Golang`
@@ -28,6 +29,9 @@ Hey，这里是熊喵君的博客，后台程序员，现居深圳。
 -   `Python`
 -   `Perl`
 -   `Shell`
+
+##### 个人推荐
+-	微服务框架：[Kratos](https://github.com/go-kratos/kratos)
 
 ##### 个人作品
 -	[论持久战——带你走进腾讯 DDoS 防护体系](https://security.tencent.com/index.php/blog/msg/71)
