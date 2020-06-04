@@ -15,7 +15,7 @@ tags:
 在数据、策略等需要 "分组（组中以 Name 区分）" 的情况下，非常适合使用该方式实现存储（取），这里存储的值以 interface{} 表示，可以是一个方法，或是一个结构体等；
 
 ##  0x01    核心代码
-Group 定义如下，注意 Group 的成员里 `new` 是一个方法成员，该方法的返回值为 `interface{}`：
+`Group` 定义如下，注意 `Group` 的成员里 `new` 是一个方法成员，该方法的返回值为 `interface{}`：
 ```golang
 // Package group provides a sample lazy load container.
 // The group only creating a new object not until the object is needed by user.
@@ -30,10 +30,10 @@ type Group struct {
 ```
 
 Group 只提供了如下对外的方法：
-1.  `NewGroup` 方法：初始化一个 Group，传入方法参数 `new func() interface{}`
+1.  `NewGroup` 方法：初始化一个 `Group`，传入方法参数 `new func() interface{}`
 2.  `Get` 方法：以 `key` 在 `sync.Map` 中搜索，如果不存在则创建并存储，创建调用的方法就是 `NewGroup` 中传入的参数 `new`
 3.  `Reset` 方法：传入方法参数 `new func() interface{}`，更新 `new` 成员
-4.  `Clear` 方法，遍历 `objs sync.Map`，删除所有的 key
+4.  `Clear` 方法，遍历 `objs sync.Map`，删除所有的 `key`
 
 ```golang
 // NewGroup news a group container.
@@ -136,6 +136,9 @@ func (g *Group) Get(key string) limit.Limiter {
 }
 ```
 
+这样，在 `bbr` 包的 `Get` 方法中，就通过 Lazy Load 方式拿到了一份限流器的配置。
+
+
 这里，贴一下 `bbr.newLimiter` 方法的代码，注意它返回的类型是 `limit.Limiter`，这里也体现了 golang 的特色：`interface{}` 可以包容万物。
 ```golang
 func newLimiter(conf *Config) limit.Limiter {
@@ -162,7 +165,7 @@ func newLimiter(conf *Config) limit.Limiter {
 
 ####	使用 Group
 
-如下 warden-Server 端的 [限流器 Interceptor 代码](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/ratelimiter/ratelimiter.go) 中，通过 `limiter := b.group.Get(uri)`，这里以 `uri` 为 key，从 Group 中获取限流器的配置，然后执行限流判定：
+如下 warden-Server 端的 [限流器 Interceptor 代码](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/ratelimiter/ratelimiter.go) 中，通过 `limiter := b.group.Get(uri)`，这里以 `uri` 为 `key`，从 `Group` 中获取限流器的配置，然后执行限流判定：
 
 ```golang
 // Limit is a server interceptor that detects and rejects overloaded traffic.
