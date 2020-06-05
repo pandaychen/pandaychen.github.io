@@ -84,8 +84,7 @@ func (g *Group) Clear() {
 Kraots 框架在限流器和熔断器中，都采用了 `Group` 方法进行了配置。这里以限流器的实现，观察下 `Group` 的应用模式。
 
 ####	Group 初始化及二次封装
-
-(https://github.com/go-kratos/kratos/blob/master/pkg/ratelimit/bbr/bbr.go)
+在 [BBR 限流算法的实现](https://github.com/go-kratos/kratos/blob/master/pkg/ratelimit/bbr/bbr.go) 中，使用了 `Group` 做限流策略封装：
 
 ```golang
 // RateLimiter bbr middleware.
@@ -194,3 +193,5 @@ func (b *RateLimiter) Limit() grpc.UnaryServerInterceptor {
 
 ##  0x03    参考
 -   [Group 的实现代码](https://github.com/go-kratos/kratos/blob/master/pkg/container/group/group.go)
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
