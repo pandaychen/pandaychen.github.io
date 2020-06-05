@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      Kratos 源码分析（2）：gRPC-Warden 拦截器（链）及通用拦截器实现
+title:      Kratos 源码分析（2）：gRPC-Warden 拦截器（链）及实现
 subtitle:   Kratos 框架分析
 date:       2020-05-30
 author:     pandaychen
@@ -22,15 +22,16 @@ tags:
 4.	[stats.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/stats.go)：`UnaryServerInterceptor` 实现，通过 `grpc.SetTrailer` 返回服务端的实时 CPU 使用率
 5.	[metrics.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/metrics.go)：定义 `logging.go` 中的 prometheus 的 `vectors`
 6.	[recovery.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/recovery.go)：包含了 `UnaryServerInterceptor` 及 `UnaryClientInterceptor`，用于 coredump 时捕获堆栈错误，打印堆栈信息
-此外，在 [server.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/server.go) 及[client.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/client.go)中也包含了若干拦截器，这个放在后面单独的分析篇中再展开。
+
+此外，在 [server.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/server.go) 及 [client.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/client.go) 中也包含了若干拦截器，这个放在后面单独的分析篇中再展开。
 
 
-##	0x02	再看 Warden-Server端Interceptor
+##	0x02	Warden-Server 端 Interceptor
 gRPC 暴露了服务端、客户端两个拦截器接口，基于两个拦截器可以针对性的 ** 定制公共模块 ** 的封装代码。
 * `grpc.UnaryServerInterceptor` 服务端拦截器
 * `grpc.UnaryClientInterceptor` 客户端拦截器
 
-#### gRPC 服务端拦截器
+####	gRPC 服务端拦截器
 首先，看一下 `grpc.UnaryServerInterceptor` 的 [声明](https://github.com/grpc/grpc-go/blob/master/interceptor.go)，如下：
 
 1.	`UnaryServerInfo` 结构：用于 `Server` 和 `FullMethod` 字段传递，`Server` 为 `gRPC server` 的对象实例，`FullMethod` 为 RPC 方法的全名
@@ -59,6 +60,25 @@ type UnaryHandler func(ctx context.Context, req interface{}) (interface{}, error
 // to complete the RPC.
 type UnaryServerInterceptor func(ctx context.Context, req interface{}, info *UnaryServerInfo, handler UnaryHandler) (resp interface{}, err error)
 ```
+
+##	0x03	Warden-Client 端 Interceptor
+
+####	gRPC 客户端拦截器
+客户端拦截器 `grpc.UnaryClientInterceptor` 的声明 [在此](https://github.com/grpc/grpc-go/blob/master/interceptor.go)，和 `UnaryServerInterceptor` 类似，只不过，服务端的 RPC 方法叫 `handler`，客户端叫 `invoker`：
+
+1.	`UnaryInvoker` 方法：表示客户端具体要发出的执行方法
+2.	`UnaryClientInterceptor` 方法：用于拦截 `invoker` 方法，可在 `invoker` 执行前后插入拦截代码
+
+```golang
+// UnaryInvoker is called by UnaryClientInterceptor to complete RPCs.
+type UnaryInvoker func(ctx context.Context, method string, req, reply interface{}, cc *ClientConn, opts ...CallOption) error
+
+// UnaryClientInterceptor intercepts the execution of a unary RPC on the client. invoker is the handler to complete the RPC
+// and it is the responsibility of the interceptor to call it.
+// This is an EXPERIMENTAL API.
+type UnaryClientInterceptor func(ctx context.Context, method string, req, reply interface{}, cc *ClientConn, invoker UnaryInvoker, opts ...CallOption) error
+```
+
 
 ##	总结
 

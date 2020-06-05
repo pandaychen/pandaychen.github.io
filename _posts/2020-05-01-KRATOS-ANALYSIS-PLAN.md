@@ -11,10 +11,10 @@ tags:
 
 ##  计划
 
-计划在工作之余研究下 Kratos 项目的实现，包含了微服务发现、gRPC 封装、Opentracing、Monitoring 等
+计划在工作之余研究下 [Kratos 项目](https://github.com/go-kratos/kratos)的源码及实现，包含了微服务发现、gRPC 封装、Opentracing、Monitoring 等
 
 1.  ~~Kratos 源码分析（1）：Lazy Load Container~~
-2.  Kratos 源码分析（2）：gRPC-Warden 拦截器（链）及通用拦截器
+2.  Kratos 源码分析（2）：gRPC-Warden 拦截器（链）及实现
 3.  Kratos 源码分析（3）：gRPC-Warden 中的超时传递
 4.  Kratos 源码分析（4）：gRPC-Warden 中的多消费者订阅 - Watcher 模式（gRPC-Resolver）
 5.  Kratos 源码分析（5）：gRPC-Warden 的服务端封装
