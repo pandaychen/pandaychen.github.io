@@ -64,7 +64,7 @@ type UnaryServerInterceptor func(ctx context.Context, req interface{}, info *Una
 ##	0x03	Warden-Client 端 Interceptor
 
 ####	gRPC 客户端拦截器
-客户端拦截器 `grpc.UnaryClientInterceptor` 的声明 [在此](https://github.com/grpc/grpc-go/blob/master/interceptor.go)，和 `UnaryServerInterceptor` 类似，只不过，服务端的 RPC 方法叫 `handler`，客户端叫 `invoker`：
+客户端拦截器 `grpc.UnaryClientInterceptor` 的声明 [在此](https://github.com/grpc/grpc-go/blob/master/interceptor.go)，和 `UnaryServerInterceptor` 类似，只不过，服务端的 RPC 方法叫 `handler`，客户端作为 RPC 调用方叫 `invoker`：
 
 1.	`UnaryInvoker` 方法：表示客户端具体要发出的执行方法
 2.	`UnaryClientInterceptor` 方法：用于拦截 `invoker` 方法，可在 `invoker` 执行前后插入拦截代码
@@ -78,6 +78,126 @@ type UnaryInvoker func(ctx context.Context, method string, req, reply interface{
 // This is an EXPERIMENTAL API.
 type UnaryClientInterceptor func(ctx context.Context, method string, req, reply interface{}, cc *ClientConn, invoker UnaryInvoker, opts ...CallOption) error
 ```
+
+##	0x04	Warden拦截器链（Chain）
+为了减轻开发者对拦截器的依赖，gRPC特意要求，无论服务端or客户端只能注册一个拦截器（官方的说法：Only one unary interceptor can be installed. The construction of multiple interceptors (e.g., chaining) can be implemented at the caller.），但是实际中，一个Interceptor肯定是不够的，所以需要对单拦截器进行扩展，那就是拦截器链。Warden包针对服务端和客户端都封装了Chain的实现。
+
+####	服务端Chain
+对于服务端，Warden封装的代码[在此](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/server.go#L263)
+
+在服务端注册时，调用`opt = append(opt, keepParam, grpc.UnaryInterceptor(s.interceptor))`，告诉gRPC，拦截器Chain该如何调用，调用的代码如下：
+
+```golang
+	......
+	opt = append(opt, keepParam, grpc.UnaryInterceptor(s.interceptor))
+	s.server = grpc.NewServer(opt...)
+	s.Use(s.recovery(), s.handle(), serverLogging(conf.LogFlag), s.stats(), s.validate())
+	s.Use(ratelimiter.New(nil).Limit())
+	......
+```
+
+其中`grpc.UnaryInterceptor(...)`的作用是进行拦截器的初始化，它的原型如下，注意该方法的参数，传入的是`s.interceptor`：
+
+```go
+// UnaryInterceptor returns a ServerOption that sets the UnaryServerInterceptor for the
+// server. Only one unary interceptor can be installed. The construction of multiple
+// interceptors (e.g., chaining) can be implemented at the caller.
+func UnaryInterceptor(i UnaryServerInterceptor) ServerOption {
+	return func(o *options) {
+		if o.unaryInt != nil {
+			panic("The unary server interceptor was already set and may not be reset.")
+		}
+		o.unaryInt = i
+	}
+}
+```
+
+从`s.interceptor`的实现代码，比较清晰的看出来，使用递归的方式将`s.handlers`中存储的interceptor组织成一个chain式逻辑，那么剩下的逻辑就是如何将每个interceptor放入这个数组中了。
+
+```golang
+// interceptor is a single interceptor out of a chain of many interceptors.
+// Execution is done in left-to-right order, including passing of context.
+// For example ChainUnaryServer(one, two, three) will execute one before two before three, and three
+// will see context changes of one and two.
+func (s *Server) interceptor(ctx context.Context, req interface{}, args *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	var (
+		i     int
+		chain grpc.UnaryHandler
+	)
+
+	n := len(s.handlers)
+	if n == 0 {
+		return handler(ctx, req)
+	}
+
+	chain = func(ic context.Context, ir interface{}) (interface{}, error) {
+		if i == n-1 {
+			//调用最终的rpc方法
+			return handler(ic, ir)
+		}
+		i++
+		return s.handlers[i](ic, ir, args, chain)
+	}
+
+	return s.handlers[0](ctx, req, args, chain)
+}
+```
+
+`s.handlers`的定义如下，它就是一个interceptors数组：
+
+```golang
+// Server is the framework's server side instance, it contains the GrpcServer, interceptor and interceptors.
+// Create an instance of Server, by using NewServer().
+type Server struct {
+	conf  *ServerConfig
+	mutex sync.RWMutex
+
+	server   *grpc.Server
+	handlers []grpc.UnaryServerInterceptor		//handles就是一个UnaryServerInterceptor数组
+}
+```
+
+接上面讨论的问题，就是如何向`s.handlers`中添加拦截器，`Use`方法就完成了这个事情，从代码可以看出，每次调用`Use`都是向数组的尾部插入新的拦截器：
+
+```golang
+// Use attachs a global inteceptor to the server.
+// For example, this is the right place for a rate limiter or error management inteceptor.
+func (s *Server) Use(handlers ...grpc.UnaryServerInterceptor) *Server {
+	finalSize := len(s.handlers) + len(handlers)
+	if finalSize >= int(_abortIndex) {
+		panic("warden: server use too many handlers")
+	}
+	mergedHandlers := make([]grpc.UnaryServerInterceptor, finalSize)
+	copy(mergedHandlers, s.handlers)
+	copy(mergedHandlers[len(s.handlers):], handlers)	//向尾部插入
+	s.handlers = mergedHandlers
+	return s
+}
+```
+
+最后一个问题，让我们再看下`s.interceptor`的实现，可以明确知道，构造的链式关系是`[0]--->[1]--->[2]--->[n-1]-->handler`，这个handler就是最终的RPC方法，所以Warden的拦截器Chain，**首先执行的是第0号数组位置的拦截器**：
+```golang
+	...
+	chain = func(ic context.Context, ir interface{}) (interface{}, error) {
+		if i == n-1 {
+			return handler(ic, ir)
+		}
+		i++
+		return s.handlers[i](ic, ir, args, chain)
+	}
+
+	return s.handlers[0](ctx, req, args, chain)
+	...
+```
+
+至此，对服务端的拦截器Chain的分析就完成了。
+
+
+-	[客户端Chain]
+
+
+
+##	0x04	Server端拦截器运行流程
 
 
 ##	总结
