@@ -79,13 +79,13 @@ type UnaryInvoker func(ctx context.Context, method string, req, reply interface{
 type UnaryClientInterceptor func(ctx context.Context, method string, req, reply interface{}, cc *ClientConn, invoker UnaryInvoker, opts ...CallOption) error
 ```
 
-##	0x04	Warden拦截器链（Chain）
-为了减轻开发者对拦截器的依赖，gRPC特意要求，无论服务端or客户端只能注册一个拦截器（官方的说法：Only one unary interceptor can be installed. The construction of multiple interceptors (e.g., chaining) can be implemented at the caller.），但是实际中，一个Interceptor肯定是不够的，所以需要对单拦截器进行扩展，那就是拦截器链。Warden包针对服务端和客户端都封装了Chain的实现。
+##	0x04	Warden 拦截器链（Chain）
+为了减轻开发者对拦截器的依赖，gRPC 特意要求，无论服务端 or 客户端只能注册一个拦截器（官方的说法：Only one unary interceptor can be installed. The construction of multiple interceptors (e.g., chaining) can be implemented at the caller.），但是实际中，一个 Interceptor 肯定是不够的，所以需要对单拦截器进行扩展，那就是拦截器链。Warden 包针对服务端和客户端都封装了 Chain 的实现。
 
-####	服务端Chain
-对于服务端，Warden封装的代码[在此](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/server.go#L263)
+####	服务端 Chain
+对于服务端，Warden 封装的代码 [在此](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/server.go#L263)
 
-在服务端注册时，调用`opt = append(opt, keepParam, grpc.UnaryInterceptor(s.interceptor))`，告诉gRPC，拦截器Chain该如何调用，调用的代码如下：
+在服务端注册时，调用 `opt = append(opt, keepParam, grpc.UnaryInterceptor(s.interceptor))`，告诉 gRPC，拦截器 Chain 该如何调用，调用的代码如下：
 
 ```golang
 	......
@@ -96,7 +96,7 @@ type UnaryClientInterceptor func(ctx context.Context, method string, req, reply 
 	......
 ```
 
-其中`grpc.UnaryInterceptor(...)`的作用是进行拦截器的初始化，它的原型如下，注意该方法的参数，传入的是`s.interceptor`：
+其中 `grpc.UnaryInterceptor(...)` 的作用是进行拦截器的初始化，它的原型如下，注意该方法的参数，传入的是 `s.interceptor`：
 
 ```go
 // UnaryInterceptor returns a ServerOption that sets the UnaryServerInterceptor for the
@@ -112,7 +112,7 @@ func UnaryInterceptor(i UnaryServerInterceptor) ServerOption {
 }
 ```
 
-从`s.interceptor`的实现代码，比较清晰的看出来，使用递归的方式将`s.handlers`中存储的interceptor组织成一个chain式逻辑，那么剩下的逻辑就是如何将每个interceptor放入这个数组中了。
+从 `s.interceptor` 的实现代码，比较清晰的看出来，使用递归的方式将 `s.handlers` 中存储的 interceptor 组织成一个 chain 式逻辑，那么剩下的逻辑就是如何将每个 interceptor 放入这个数组中了。
 
 ```golang
 // interceptor is a single interceptor out of a chain of many interceptors.
@@ -132,7 +132,7 @@ func (s *Server) interceptor(ctx context.Context, req interface{}, args *grpc.Un
 
 	chain = func(ic context.Context, ir interface{}) (interface{}, error) {
 		if i == n-1 {
-			//调用最终的rpc方法
+			// 调用最终的 rpc 方法
 			return handler(ic, ir)
 		}
 		i++
@@ -143,7 +143,7 @@ func (s *Server) interceptor(ctx context.Context, req interface{}, args *grpc.Un
 }
 ```
 
-`s.handlers`的定义如下，它就是一个interceptors数组：
+`s.handlers` 的定义如下，它就是一个 interceptors 数组：
 
 ```golang
 // Server is the framework's server side instance, it contains the GrpcServer, interceptor and interceptors.
@@ -153,11 +153,11 @@ type Server struct {
 	mutex sync.RWMutex
 
 	server   *grpc.Server
-	handlers []grpc.UnaryServerInterceptor		//handles就是一个UnaryServerInterceptor数组
+	handlers []grpc.UnaryServerInterceptor		//handles 就是一个 UnaryServerInterceptor 数组
 }
 ```
 
-接上面讨论的问题，就是如何向`s.handlers`中添加拦截器，`Use`方法就完成了这个事情，从代码可以看出，每次调用`Use`都是向数组的尾部插入新的拦截器：
+接上面讨论的问题，就是如何向 `s.handlers` 中添加拦截器，`Use` 方法就完成了这个事情，从代码可以看出，每次调用 `Use` 都是向数组的尾部插入新的拦截器：
 
 ```golang
 // Use attachs a global inteceptor to the server.
@@ -169,13 +169,13 @@ func (s *Server) Use(handlers ...grpc.UnaryServerInterceptor) *Server {
 	}
 	mergedHandlers := make([]grpc.UnaryServerInterceptor, finalSize)
 	copy(mergedHandlers, s.handlers)
-	copy(mergedHandlers[len(s.handlers):], handlers)	//向尾部插入
+	copy(mergedHandlers[len(s.handlers):], handlers)	// 向尾部插入
 	s.handlers = mergedHandlers
 	return s
 }
 ```
 
-最后一个问题，让我们再看下`s.interceptor`的实现，可以明确知道，构造的链式关系是`[0]--->[1]--->[2]--->[n-1]-->handler`，这个handler就是最终的RPC方法，所以Warden的拦截器Chain，**首先执行的是第0号数组位置的拦截器**：
+最后一个问题，让我们再看下 `s.interceptor` 的实现，可以明确知道，构造的链式关系是 `[0]--->[1]--->[2]--->[n-1]-->handler`，这个 handler 就是最终的 RPC 方法，所以 Warden 的拦截器 Chain，** 首先执行的是第 0 号数组位置的拦截器 **：
 ```golang
 	...
 	chain = func(ic context.Context, ir interface{}) (interface{}, error) {
@@ -190,20 +190,133 @@ func (s *Server) Use(handlers ...grpc.UnaryServerInterceptor) *Server {
 	...
 ```
 
-至此，对服务端的拦截器Chain的分析就完成了。
+至此，对服务端的拦截器 Chain 的分析就完成了。
 
 
--	[客户端Chain]
+####	客户端 Chain
+客户端的链逻辑实现和服务端比较类似，这里不再更多详述。
+
+##	0x04	Server 端拦截器运行流程
 
 
+##	0x05	Client 端拦截器运行流程
 
-##	0x04	Server端拦截器运行流程
+##	0x06	拦截器使用
+这里我们看下自适应限流拦截器的调用方式，`limiter.Limit()` 是实现了拦截器的 [完整逻辑](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/ratelimiter/ratelimiter.go#L48)
 
+```golang
+// New new a grpc server.
+func New(svc *service.Service) *warden.Server {
+	var rc struct {
+		Server *warden.ServerConfig
+	}
+	if err := paladin.Get("grpc.toml").UnmarshalTOML(&rc); err != nil {
+		if err != paladin.ErrNotExist {
+			panic(err)
+		}
+	}
+	ws := warden.NewServer(rc.Server)
 
-##	总结
+	// 挂载自适应限流拦截器到 warden server，使用默认配置
+	limiter := ratelimiter.New(nil)
+	ws.Use(limiter.Limit())
 
+	// 注意替换这里：
+	// RegisterDemoServer 方法是在 "api" 目录下代码生成的
+	// 对应 proto 文件内自定义的 service 名字，请使用正确方法名替换
+	pb.RegisterDemoServer(ws.Server(), svc)
 
-##  参考
+	ws, err := ws.Start()
+	if err != nil {
+		panic(err)
+	}
+	return ws
+}
+```
+
+`limiter.Limit()` 的实现：
+```golang
+// Limit is a server interceptor that detects and rejects overloaded traffic.
+func (b *RateLimiter) Limit() grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, args *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
+		uri := args.FullMethod
+		limiter := b.group.Get(uri)
+		done, err := limiter.Allow(ctx)
+		if err != nil {
+			_metricServerBBR.Inc(uri)
+			return
+		}
+		defer func() {
+			done(limit.DoneInfo{Op: limit.Success})
+			b.printStats(uri, limiter)
+		}()
+		resp, err = handler(ctx, req)
+		return
+	}
+}
+```
+
+##	0x07	Build Your Own 拦截器
+[这里摘抄自官方文档] 以服务端拦截器 `serverLogging` 为例，特别要主要的是在 `resp, err := handler(ctx, req)` 前后需要实现哪些逻辑，在此之前，RPC 方法还未执行；在此之后，RPC 方法已经执行完成，可以根据执行结果成功与否来实现自己的逻辑：
+
+```golang
+// serverLogging warden grpc logging
+func serverLogging() grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+        // NOTE: handler 执行之前的拦截代码：主要获取一些关键参数，如耗时计时、ip 等
+        // 如果自定义的拦截器只需要在 handler 执行后，那么可以直接执行 handler
+
+		startTime := time.Now()
+		caller := metadata.String(ctx, metadata.Caller)
+		if caller == "" {
+			caller = "no_user"
+		}
+		var remoteIP string
+		if peerInfo, ok := peer.FromContext(ctx); ok {
+			remoteIP = peerInfo.Addr.String()
+		}
+		var quota float64
+		if deadline, ok := ctx.Deadline(); ok {
+			quota = time.Until(deadline).Seconds()
+		}
+
+		// call server handler
+		resp, err := handler(ctx, req) // NOTE: 以具体执行的 handler 为分界线！！！
+
+        // NOTE: handler 执行之后的拦截代码：主要进行耗时计算、日志记录
+        // 如果自定义的拦截器在 handler 执行后不需要逻辑，这可直接返回
+
+		// after server response
+		code := ecode.Cause(err).Code()
+		duration := time.Since(startTime)
+
+		// monitor
+		statsServer.Timing(caller, int64(duration/time.Millisecond), info.FullMethod)
+		statsServer.Incr(caller, info.FullMethod, strconv.Itoa(code))
+		logFields := []log.D{
+			log.KVString("user", caller),
+			log.KVString("ip", remoteIP),
+			log.KVString("path", info.FullMethod),
+			log.KVInt("ret", code),
+			// TODO: it will panic if someone remove String method from protobuf message struct that auto generate from protoc.
+			log.KVString("args", req.(fmt.Stringer).String()),
+			log.KVFloat64("ts", duration.Seconds()),
+			log.KVFloat64("timeout_quota", quota),
+			log.KVString("source", "grpc-access-log"),
+		}
+		if err != nil {
+			logFields = append(logFields, log.KV("error", err.Error()), log.KV("stack", fmt.Sprintf("%+v", err)))
+		}
+		logFn(code, duration)(ctx, logFields...)
+		return resp, err
+	}
+}
+```
+
+##	0x08	总结
+本文是 Kratos 框架分析的第二篇，主要介绍了 Warden 框架中的拦截器的实现及使用。
+
+##  0x09	参考
 -   [Warden 拦截器文档](https://github.com/go-kratos/kratos/blob/master/doc/wiki-cn/warden-mid.md)
 -	[Golang: Creating gRPC interceptors](https://davidsbond.github.io/2019/06/14/creating-grpc-interceptors-in-go.html)
 
