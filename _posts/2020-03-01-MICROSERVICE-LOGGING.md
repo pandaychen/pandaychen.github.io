@@ -115,6 +115,9 @@ grpclog.Errorf("err %v", err)
 1.  线程将待落地日志结构化（标识日志类型、等级、内容等）写入 RingBuffer，读端从 RingBuffer 中取出日志，落地写入
 2.  单线程写日志
 3.  在 golang 中，利用 单独的 goroutine 异步写日志
+4.  打印 GoroutineId 对性能产生较大的影响，打印函数行号对性能有一定的影响，如下图：
+
+![image](https://wx2.sbimg.cn/2020/06/07/_20200604104623.jpg)
 
 ##  参考
 -   [从 Go 高性能日志库 zap 看如何实现高性能 Go 组件](https://mp.weixin.qq.com/s/i0bMh_gLLrdnhAEWlF-xDw)
