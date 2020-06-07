@@ -190,16 +190,146 @@ func (s *Server) Use(handlers ...grpc.UnaryServerInterceptor) *Server {
 	...
 ```
 
-至此，对服务端的拦截器 Chain 的分析就完成了。
+至此，对服务端的拦截器 Chain 的分析就完成了。总结下这个整体流程：
 
+* `Warden server` 使用 `Use` 方法进行 `grpc.UnaryServerInterceptor` 的注入，而 `func (s *Server) interceptor` 本身就实现了 `grpc.UnaryServerInterceptor`
+* `func (s *Server) interceptor` 可以根据注册的 `grpc.UnaryServerInterceptor` 顺序从前到后依次执行
+
+而 `Warden` 库在初始化的时候将该方法本身注册到了 `gRPC server`，在 `NewServer` 方法内可以看到下面代码：
+
+```go
+opt = append(opt, keepParam, grpc.UnaryInterceptor(s.interceptor))
+s.server = grpc.NewServer(opt...)
+```
+
+如此，完整的服务端拦截器逻辑就串联完成。
 
 ####	客户端 Chain
 客户端的链逻辑实现和服务端比较类似，这里不再更多详述。
 
 ##	0x04	Server 端拦截器运行流程
+本小节，描述下拦截器的具体执行过程，需要查看基于 `protobuf` 生成的执行代码：
 
+这个 `_Demo_SayHello_Handler` 方法是关键，该方法会被包装为 `grpc.ServiceDesc` 结构，被注册到 gRPC 内部，具体可在生成的 `pb.go` 代码内查找 `s.RegisterService(&_Demo_serviceDesc, srv)`。
+
+* 当 gRPC server 收到一次请求时，首先根据请求方法从注册到 `server` 内的 `grpc.ServiceDesc` 找到该方法对应的 `Handler` 如：`_Demo_SayHello_Handler` 并执行
+* `_Demo_SayHello_Handler` 执行过程请看上面具体代码，当 `interceptor` 不为 `nil` 时，会将 `SayHello` 包装为 `grpc.UnaryHandler` 结构传递给 `interceptor`
+
+这样就完成了 `UnaryServerInterceptor` 的执行过程。
+
+```go
+func _Demo_SayHello_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HelloReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DemoServer).SayHello(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/demo.service.v1.Demo/SayHello",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DemoServer).SayHello(ctx, req.(*HelloReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+```
 
 ##	0x05	Client 端拦截器运行流程
+同Server端分析类似，先看下基于 `protobuf` 生成的下面代码：
+
+当客户端调用 `SayHello` 时可以看到执行了 `grpc.Invoke` 方法，并且将 `fullMethod` 和其他参数传入，最终会执行下面[代码](https://github.com/grpc/grpc-go/blob/master/call.go)：
+
+```go
+func (c *demoClient) SayHello(ctx context.Context, in *HelloReq, opts ...grpc.CallOption) (*google_protobuf1.Empty, error) {
+	out := new(google_protobuf1.Empty)
+	err := grpc.Invoke(ctx, "/demo.service.v1.Demo/SayHello", in, out, c.cc, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+```
+`grpc.Invoke()`方法，如果拦截器（chain）已定义即`cc.dopts.unaryInt != nil`时，则执行自定义的RPC调用：
+
+```golang
+// Invoke sends the RPC request on the wire and returns after response is
+// received.  This is typically called by generated code.
+//
+// All errors returned by Invoke are compatible with the status package.
+func (cc *ClientConn) Invoke(ctx context.Context, method string, args, reply interface{}, opts ...CallOption) error {
+	// allow interceptor to see all applicable call options, which means those
+	// configured as defaults from dial option as well as per-call options
+	opts = combine(cc.dopts.callOptions, opts)
+
+	if cc.dopts.unaryInt != nil {
+		return cc.dopts.unaryInt(ctx, method, args, reply, cc, invoke, opts...)
+	}
+	return invoke(ctx, method, args, reply, cc, opts...)
+}
+```
+
+其中的 `unaryInt` 即为客户端连接创建时注册的拦截器，使用下面代码进行注册：
+```golang
+// WithUnaryInterceptor returns a DialOption that specifies the interceptor for unary RPCs.
+func WithUnaryInterceptor(f UnaryClientInterceptor) DialOption {
+	return newFuncDialOption(func(o *dialOptions) {
+		o.unaryInt = f
+	})
+}
+```
+
+需要注意的是客户端的拦截器在官方 `gRPC` 内也只能支持注册一个，与服务端拦截器 `interceptor chain` 逻辑类似 `warden` 在客户端拦截器也做了相同处理，并且在客户端连接时进行注册。
+```golang
+// Use attachs a global inteceptor to the Client.
+// For example, this is the right place for a circuit breaker or error management inteceptor.
+func (c *Client) Use(handlers ...grpc.UnaryClientInterceptor) *Client {
+	finalSize := len(c.handlers) + len(handlers)
+	if finalSize >= int(_abortIndex) {
+		panic("warden: client use too many handlers")
+	}
+	mergedHandlers := make([]grpc.UnaryClientInterceptor, finalSize)
+	copy(mergedHandlers, c.handlers)
+	copy(mergedHandlers[len(c.handlers):], handlers)
+	c.handlers = mergedHandlers
+	return c
+}
+
+// chainUnaryClient creates a single interceptor out of a chain of many interceptors.
+//
+// Execution is done in left-to-right order, including passing of context.
+// For example ChainUnaryClient(one, two, three) will execute one before two before three.
+func (c *Client) chainUnaryClient() grpc.UnaryClientInterceptor {
+	n := len(c.handlers)
+	if n == 0 {
+		return func(ctx context.Context, method string, req, reply interface{},
+			cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+			return invoker(ctx, method, req, reply, cc, opts...)
+		}
+	}
+
+	return func(ctx context.Context, method string, req, reply interface{},
+		cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		var (
+			i            int
+			chainHandler grpc.UnaryInvoker
+		)
+		chainHandler = func(ictx context.Context, imethod string, ireq, ireply interface{}, ic *grpc.ClientConn, iopts ...grpc.CallOption) error {
+			if i == n-1 {
+				return invoker(ictx, imethod, ireq, ireply, ic, iopts...)
+			}
+			i++
+			return c.handlers[i](ictx, imethod, ireq, ireply, ic, chainHandler, iopts...)
+		}
+
+		return c.handlers[0](ctx, method, req, reply, cc, chainHandler, opts...)
+	}
+}
+```
+
+如此完整的客户端拦截器逻辑就串联完成。
 
 ##	0x06	拦截器使用
 这里我们看下自适应限流拦截器的调用方式，`limiter.Limit()` 是实现了拦截器的 [完整逻辑](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/ratelimiter/ratelimiter.go#L48)
