@@ -207,7 +207,7 @@ s.server = grpc.NewServer(opt...)
 ####	客户端 Chain
 客户端的链逻辑实现和服务端比较类似，这里不再更多详述。
 
-##	0x04	Server 端拦截器运行流程
+##	0x05	Server 端拦截器运行流程
 本小节，描述下拦截器的具体执行过程，需要查看基于 `protobuf` 生成的执行代码：
 
 这个 `_Demo_SayHello_Handler` 方法是关键，该方法会被包装为 `grpc.ServiceDesc` 结构，被注册到 gRPC 内部，具体可在生成的 `pb.go` 代码内查找 `s.RegisterService(&_Demo_serviceDesc, srv)`。
@@ -237,7 +237,7 @@ func _Demo_SayHello_Handler(srv interface{}, ctx context.Context, dec func(inter
 }
 ```
 
-##	0x05	Client 端拦截器运行流程
+##	0x06	Client 端拦截器运行流程
 同Server端分析类似，先看下基于 `protobuf` 生成的下面代码：
 
 当客户端调用 `SayHello` 时可以看到执行了 `grpc.Invoke` 方法，并且将 `fullMethod` 和其他参数传入，最终会执行下面[代码](https://github.com/grpc/grpc-go/blob/master/call.go)：
@@ -331,7 +331,7 @@ func (c *Client) chainUnaryClient() grpc.UnaryClientInterceptor {
 
 如此完整的客户端拦截器逻辑就串联完成。
 
-##	0x06	拦截器使用
+##	0x07	拦截器使用
 这里我们看下自适应限流拦截器的调用方式，`limiter.Limit()` 是实现了拦截器的 [完整逻辑](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/ratelimiter/ratelimiter.go#L48)
 
 ```golang
@@ -386,7 +386,7 @@ func (b *RateLimiter) Limit() grpc.UnaryServerInterceptor {
 }
 ```
 
-##	0x07	Build Your Own 拦截器
+##	0x08	Build Your Own 拦截器
 [这里摘抄自官方文档] 以服务端拦截器 `serverLogging` 为例，特别要主要的是在 `resp, err := handler(ctx, req)` 前后需要实现哪些逻辑，在此之前，RPC 方法还未执行；在此之后，RPC 方法已经执行完成，可以根据执行结果成功与否来实现自己的逻辑：
 
 ```golang
@@ -443,10 +443,10 @@ func serverLogging() grpc.UnaryServerInterceptor {
 }
 ```
 
-##	0x08	总结
+##	0x09	总结
 本文是 Kratos 框架分析的第二篇，主要介绍了 Warden 框架中的拦截器的实现及使用。
 
-##  0x09	参考
+##  0x10	参考
 -   [Warden 拦截器文档](https://github.com/go-kratos/kratos/blob/master/doc/wiki-cn/warden-mid.md)
 -	[Golang: Creating gRPC interceptors](https://davidsbond.github.io/2019/06/14/creating-grpc-interceptors-in-go.html)
 
