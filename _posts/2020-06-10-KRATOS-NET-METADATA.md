@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      Kratos 源码分析（1-2）：Kratos 中的 Metadata 元数据
+title:      Kratos 源码分析（二）：Kratos 中的 Metadata 元数据
 subtitle:   一种全局变量的存储方式
 date:       2020-06-10
 author:     pandaychen
@@ -166,7 +166,7 @@ func NewContext(ctx context.Context, md MD) context.Context {
 }
 ```
 
-`FromContext` 方法，从当前的 ctx 向上遍历，查询 `mdKey{}` 对应的 Value 值：
+`FromContext` 方法，从当前的 ctx 向上遍历，查询 `mdKey{}` 对应的 Value 值，这个 `mdKey{}` 可以理解为全局唯一常量（Kratos 框架设置用此）。
 
 ```golang
 // FromContext returns the incoming metadata in ctx if it exists.  The
@@ -191,6 +191,8 @@ func String(ctx context.Context, key string) string {
 }
 ```
 
+`Int64` 和 `Value` 方法，也是类似：
+
 ```golang
 // Int64 get int64 value from metadata in context
 func Int64(ctx context.Context, key string) int64 {
@@ -210,7 +212,11 @@ func Value(ctx context.Context, key string) interface{} {
 	}
 	return md[key]
 }
+```
 
+`WithContext` 方法，首先从传入的 context 中查找 `mdKey{}` 对应的 Value，如果不存在就返回 `context.Background()`，如果存在，先将 `context` 复制一份为 `md`，然后去掉 `md` 的 `Trace` 信息，然后使用 `context.Background()`+ `context.WithValue(ctx, mdKey{}, md)` 生成一份新的 `context` 返回。
+
+```golang
 // WithContext return no deadline context and retain metadata.
 func WithContext(c context.Context) context.Context {
 	md, ok := FromContext(c)
@@ -222,7 +228,11 @@ func WithContext(c context.Context) context.Context {
 	}
 	return context.Background()
 }
+```
 
+`Bool` 方法，查找 `ctx context` 中 `mdKey{}` 的 MAP 中，`key` 值是否为 `bool` 类型：
+
+```golang
 // Bool get boolean from metadata in context use strconv.Parse.
 func Bool(ctx context.Context, key string) bool {
 	md, ok := ctx.Value(mdKey{}).(MD)
@@ -240,7 +250,11 @@ func Bool(ctx context.Context, key string) bool {
 		return false
 	}
 }
+```
 
+`Range` 方法，该方法传入 `rangeFunc` 及 `filterFunc`，其中后者可以传入多个，`filterFunc` 过滤 `key`，`rangeFunc` 作用于 `key` 及 `value`：
+
+```golang
 // Range range value from metadata in context filtered by filterFunc.
 func Range(ctx context.Context, rangeFunc func(key string, value interface{}), filterFunc ...func(key string) bool) {
 	var filter func(key string) bool
