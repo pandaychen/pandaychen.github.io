@@ -33,7 +33,7 @@ tags:
 
 ##  0x02    Balancer 和 Resolver 的交互
 
-通过前面文章 [gRPC 源码分析之 Resolver 篇](https://pandaychen.github.io/2019/11/20/GRPC-RESOLVER-DEEP-ANALYSIS/) 和[gRPC 源码分析 - DnsResovler 篇](https://pandaychen.github.io/2019/07/11/GRPC-BALANCER-DNSRESOVLER-ANALYSIS/)这两篇的分析，我们了解到通过 Resolver（名字服务解析或 List-watch）得到服务端 IP 列表后，最终会调用 `ClientConn.updateResolverState` 接口，这个接口开始涉及 Balancer 的逻辑，为何需要由 Resolver 通知 Balancer 呢？因为（通过 Resolver）获取到服务端 IP 列表后，需要根据负载均衡算法的初始化要求，对后端服务 IP 列表做一些初始化工作（如 consistent-hash、设置初始化权重等）
+通过前面文章 [gRPC 源码分析之 Resolver 篇](https://pandaychen.github.io/2019/11/20/GRPC-RESOLVER-DEEP-ANALYSIS/) 和 [gRPC 源码分析 - DnsResovler 篇](https://pandaychen.github.io/2019/07/11/GRPC-BALANCER-DNSRESOVLER-ANALYSIS/) 这两篇的分析，我们了解到通过 Resolver（名字服务解析或 List-watch）得到服务端 IP 列表后，最终会调用 `ClientConn.updateResolverState` 接口，这个接口开始涉及 Balancer 的逻辑，为何需要由 Resolver 通知 Balancer 呢？因为（通过 Resolver）获取到服务端 IP 列表后，需要根据负载均衡算法的初始化要求，对后端服务 IP 列表做一些初始化工作（如 consistent-hash、设置初始化权重等）
 
 ### resolver.ClientConn
 `dnsResolver.watcher`（或是自己实现的 Resolver）在解析到 IP 地址以及获取服务配置后分别调用 `ClientConn.NewAddress` 和 `ClientConn.NewServiceConfig` 两个接口通知上层应用，`ccResolverWrapper` 实现了 ClientConn 接口。

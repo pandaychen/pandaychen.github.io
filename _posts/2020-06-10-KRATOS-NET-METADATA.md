@@ -278,7 +278,7 @@ func Range(ctx context.Context, rangeFunc func(key string, value interface{}), f
 ```
 
 ##      0x04    总结
-本文分析了 Kratos 中 Metadata 及它和 Context 库的封装及使用，理解 Context 的原理对理解 Metadata 的实现非常有帮助。
+本文分析了 Kratos 中 Metadata 及它和 Context 库的封装及使用，理解 Context 的原理对理解 Metadata 的实现非常有帮助。此外，后续文章将分析下 Metadata 在 Kratos-Opentracing 的使用。
 
 ##      0x05    参考
 -       [Kratos Metadata 实现代码](https://github.com/go-kratos/kratos/tree/master/pkg/net/metadata)
