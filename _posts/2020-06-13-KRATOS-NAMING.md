@@ -68,11 +68,131 @@ type Builder interface {
 
 剩下的工作就是对上面这几个方法的实例化（Decorator），Kratos 中提供了 discovery、etcd 及 zookeeper 的三种实现。本文简单分析下 etcd 的相关接口实现。
 
-##  多消费者订阅-Watcher模型
+##  0x02    多消费者订阅-Watcher模型
 ![image](https://wx1.sbimg.cn/2020/06/12/4ccdbe50e68dd4e5269b30016737d876.png)
 
-##  Etcd 的 Naming 实现
-基于Etcd的封装[代码在此[(https://github.com/go-kratos/kratos/blob/master/pkg/naming/etcd/etcd.go)
+##  0x03    Etcd 的 Naming 实现
+基于Etcd的封装[代码在此](https://github.com/go-kratos/kratos/blob/master/pkg/naming/etcd/etcd.go)
+
+####    核心结构
+
+`EtcdBuilder`
+
+```golang
+// EtcdBuilder is a etcd clientv3 EtcdBuilder
+type EtcdBuilder struct {
+	cli        *clientv3.Client
+	ctx        context.Context
+	cancelFunc context.CancelFunc
+
+	mutex    sync.RWMutex
+	apps     map[string]*appInfo
+	registry map[string]struct{}
+}
+```
+
+```golang
+type appInfo struct {
+	resolver map[*Resolve]struct{}
+	ins      atomic.Value
+	e        *EtcdBuilder
+	once     sync.Once
+}
+```
+
+```golang
+// Resolve etch resolver.
+type Resolve struct {
+	id    string
+	event chan struct{}
+	e     *EtcdBuilder
+	opt   *naming.BuildOptions
+}
+```
+
+####    初始化
+
+
+####    Registry的实现
+
+```golang
+func (e *EtcdBuilder) Register(ctx context.Context, ins *naming.Instance) (cancelFunc context.CancelFunc, err error) {
+	e.mutex.Lock()
+	if _, ok := e.registry[ins.AppID]; ok {
+		err = ErrDuplication
+	} else {
+		e.registry[ins.AppID] = struct{}{}
+	}
+	e.mutex.Unlock()
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(e.ctx)
+	if err = e.register(ctx, ins); err != nil {
+		e.mutex.Lock()
+		delete(e.registry, ins.AppID)
+		e.mutex.Unlock()
+		cancel()
+		return
+	}
+	ch := make(chan struct{}, 1)
+	cancelFunc = context.CancelFunc(func() {
+		cancel()
+		<-ch
+	})
+
+	go func() {
+
+		ticker := time.NewTicker(time.Duration(registerTTL/3) * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				_ = e.register(ctx, ins)
+			case <-ctx.Done():
+				_ = e.unregister(ins)
+				ch <- struct{}{}
+				return
+			}
+		}
+	}()
+	return
+}
+
+//注册和续约公用一个操作
+func (e *EtcdBuilder) register(ctx context.Context, ins *naming.Instance) (err error) {
+	prefix := e.keyPrefix(ins)
+	val, _ := json.Marshal(ins)
+
+	ttlResp, err := e.cli.Grant(context.TODO(), int64(registerTTL))
+	if err != nil {
+		log.Error("etcd: register client.Grant(%v) error(%v)", registerTTL, err)
+		return err
+	}
+	_, err = e.cli.Put(ctx, prefix, string(val), clientv3.WithLease(ttlResp.ID))
+	if err != nil {
+		log.Error("etcd: register client.Put(%v) appid(%s) hostname(%s) error(%v)",
+			prefix, ins.AppID, ins.Hostname, err)
+		return err
+	}
+	return nil
+}
+func (e *EtcdBuilder) unregister(ins *naming.Instance) (err error) {
+	prefix := e.keyPrefix(ins)
+
+	if _, err = e.cli.Delete(context.TODO(), prefix); err != nil {
+		log.Error("etcd: unregister client.Delete(%v) appid(%s) hostname(%s) error(%v)",
+			prefix, ins.AppID, ins.Hostname, err)
+	}
+	log.Info("etcd: unregister client.Delete(%v)  appid(%s) hostname(%s) success",
+		prefix, ins.AppID, ins.Hostname)
+	return
+}
+
+func (e *EtcdBuilder) keyPrefix(ins *naming.Instance) string {
+	return fmt.Sprintf("/%s/%s/%s", etcdPrefix, ins.AppID, ins.Hostname)
+}
+```
 
 
 ##
