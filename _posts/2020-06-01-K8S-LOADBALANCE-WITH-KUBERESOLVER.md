@@ -3,6 +3,7 @@ layout:     post
 title:      Kubernetes 应用改造（三）-- 负载均衡
 subtitle:   Kubernetes 中的负载均衡总结
 date:       2020-06-01
+header-img: img/super-mario.jpg
 author:     pandaychen
 catalog:    true
 tags:
