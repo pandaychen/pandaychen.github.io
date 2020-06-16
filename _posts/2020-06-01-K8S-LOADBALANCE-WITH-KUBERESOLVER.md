@@ -39,6 +39,7 @@ gRPC 官方博客的文章 [gRPC Load Balancing](https://grpc.io/blog/grpc-load-
 
 ##  0x02  DNS 解析的缺陷
 &emsp;&emsp; 在使用 gRPC+DnsResolver+HeadlessService 实现 Kubernetes 负载均衡方案时，有个明显的缺陷就是，DnsResolver 是定时触发主动去解析获取当前 ServiceName 对应的 Pod 列表的，如果在两次解析的间隔期间，某个 Pod 发生了重启或者漂移（导致 IP 改变），那么这种情况对我们的解析器 DNSResolver 是无法立即感知到的。
+
 设想一下，有没有一种方法，可以使得我们像使用 Etcd 的 Watch 方法那样，可以监听在某个事件（在 Kubernetes 环境为 Pod）的增删上面呢？翻阅下 Kubernetes 的手册，发现提供查询的 API`/api/v1/watch/namespaces/{namespace}/endpoints/${service}`，这样使得我们可以主动监听某个 Service 下面的 Podlist 变化。
 
 这种方案就是 Watch Endpoint 方式，该方案主要在客户端实现负载均衡，通过 kubernetes API 获取 Service 的 Endpont。客户端和每个 POD 保持一个长连接，然后使用 gRPC Client 的负载均衡策略解决问题。开源项目 [kuberesolver](https://github.com/sercand/kuberesolver) 已经实现了这种方式。在下面的篇幅中会简单分析下该项目的代码。
@@ -46,7 +47,7 @@ gRPC 官方博客的文章 [gRPC Load Balancing](https://grpc.io/blog/grpc-load-
 ![kuberesolver.png](https://wx2.sbimg.cn/2020/06/15/kuberesolver.png)
 
 ##  0x03  代理方案之 Proxy1 - Linkerd
-Linkerd 是一种基于 CNCF 的 Kubernetes 服务网格，它通过 Sidecar 的方式来实现负载均衡。Linkerd 作为 Service Sidecar 部署在 Pod 中，自动检测 HTTP/2 和 HTTP/1.x 并执行 L7 负载平衡。为服务添加 Linkerd，等价于为每个 Pod 添加了一个很小并且很高效的代理，由这些代理来监控 Kubernetes 的 API，并自动实现 gRPC 的负载均衡。
+&emsp;&emsp; Linkerd 是一种基于 CNCF 的 Kubernetes 服务网格，它通过 Sidecar 的方式来实现负载均衡。Linkerd 作为 Service Sidecar 部署在 Pod 中，自动检测 HTTP/2 和 HTTP/1.x 并执行 L7 负载平衡。为服务添加 Linkerd，等价于为每个 Pod 添加了一个很小并且很高效的代理，由这些代理来监控 Kubernetes 的 API，并自动实现 gRPC 的负载均衡。<br>
 
 Linkerd 通过 webhook，在有 Pod 新增的时候，会向 Pod 中注入额外的 Container，以此获取所有的 Pod。当然作为 service mesh，拥有更多的 feature 保证服务之间的调用，如监控、请求状态、Controller 等等。
 
@@ -54,11 +55,12 @@ Linkerd 通过 webhook，在有 Pod 新增的时候，会向 Pod 中注入额外
 
 ##  0x04  代理方案之 Proxy2 - Nginx
 Nginx 1.13.10 版本支持了 HTTP/2 的负载均衡，[Introducing gRPC Support with NGINX 1.13.10](https://www.nginx.com/blog/nginx-1-13-10-grpc/)
+
 它的原理是：gRPC 客户端与 Nginx 建立 HTTP/2 连接后，Nginx 再与后端 server 建立多个 Http/2 连接。
 
 ![image](https://wx1.sbimg.cn/2020/06/16/gRPC-nginx-routing.png)
 
-nginx gRPC 负载均衡的一般配置如下：gRPC 代理要用 `grpc_pass` 指令，协议要用 `grpc://`，同时 `upstream` 机制对 gRPC 也是同样适用的。
+Nginx gRPC 负载均衡的一般配置如下：gRPC 代理要用 `grpc_pass` 指令，协议要用 `grpc://`，同时 `upstream` 机制对 gRPC 也是同样适用的。
 
 ```bash
 worker_processes  4;     # cpu core
@@ -97,7 +99,9 @@ http {
 ```
 
 ##  0x05  代理方案之 Proxy3 - Istio（Envoy）
-同 Nginx 一样，Envoy 也是非常优秀的 Ingress，都是支持 HTTP/2 的 Load Balancer。Envoy 支持多种 [不同的服务发现机制](https://www.servicemesher.com/envoy/intro/arch_overview/service_discovery.html)。在基于 Istio+Envoy 实现的服务网格中，Istio 的角色是控制平面，它是实现了 Envoy 的发现协议集 xDS 的管理服务器端。Envoy 本身则作为网格的数据平面，和 Istio 通信，获得各种资源的配置并更新自身的代理规则。这里以 Istio 配置 gRPC 负载均衡为例：
+&emsp;&emsp; 同 Nginx 一样，Envoy 也是非常优秀的 Ingress，都是支持 HTTP/2 的 Load Balancer。Envoy 支持多种 [不同的服务发现机制](https://www.servicemesher.com/envoy/intro/arch_overview/service_discovery.html)。
+
+在基于 Istio+Envoy 实现的服务网格中，Istio 的角色是控制平面，它是实现了 Envoy 的发现协议集 xDS 的管理服务器端。Envoy 本身则作为网格的数据平面，和 Istio 通信，获得各种资源的配置并更新自身的代理规则。这里以 Istio 配置 gRPC 负载均衡为例：
 
 ![envoy.png](https://wx2.sbimg.cn/2020/06/15/envoy.png)
 
@@ -125,6 +129,7 @@ spec:
 ```
 
 2.  配置一个 Istio Gateway，关联 `ingressgateway` 的 80 端口：
+
 ```yaml
 apiVersion: networking.istio.io/v1alpha3
 kind: Gateway
