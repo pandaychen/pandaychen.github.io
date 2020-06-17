@@ -297,10 +297,13 @@ func main() {
 [`goworker.Worker` 方法](https://github.com/benmanns/goworker/blob/master/goworker.go#L119) 如下，它的逻辑也很清晰：
 1.      `Init()` 方法初始化 Redis 连接池及完成其他一些初始化工作
 2.      `newPoller` 创建 `Pooler`，并创建一个子协程来完成轮询 Redis 的工作，返回一个 `jobs <-chan *Job`，通过此 channel 与 worker 进行交互。`Poller` 向此 channel 中发送 `Job`，然后分发给 `worker` 执行
-3.      根据配置中的 `workerSettings.Concurrency`，创建 `worker` 子协程，并且 **与配置中 `workerSettings.Queues` 的队列 (s) 进行工作绑定**
+3.      根据配置中的 `workerSettings.Concurrency`，创建 `worker` 子协程，并且 ** 与配置中 `workerSettings.Queues` 的队列 (s) 进行工作绑定 **
 4.      `monitor.Wait()` 阻塞等待流程结束，Worker 退出。这里也包含了对退出 signal 的处理
 
 goworker 中的协程并发模型是 `1:N` 的，即一个生产者 `Poller`，多个消费者 `Worker`，看下面的代码，`jobs` 这个 channel 被多个 `worker` 共享，由于 channel 本身是协程安全的，这种也是非常常见的 golang 并发模式：
+
+![image](https://wx1.sbimg.cn/2020/06/17/goworker1.png)
+
 ```golang
 jobs, err := poller.poll(time.Duration(workerSettings.Interval), quit)
 ...
@@ -450,7 +453,7 @@ func (w *worker) run(job *Job, workerFunc workerFunc) {
 ```
 
 ####	Worker 定义
-在 goworker 中，`workers` 是一个全局的 `map`，其中保存了 `name-->callback` 即名字到回调方法的映射关系。在应用中使用 `goworker.Register("Hello", helloWorker)` 来完成相关方法的注册。该名字对应于 `Payload` 结构中的 `CLASS` 属性，这样一个完整的处理流程就成功关联了：**由写入队列的数据决定该数据被哪个回调方法进行处理**，在实际应用中是相当灵活的。
+在 goworker 中，`workers` 是一个全局的 `map`，其中保存了 `name-->callback` 即名字到回调方法的映射关系。在应用中使用 `goworker.Register("Hello", helloWorker)` 来完成相关方法的注册。该名字对应于 `Payload` 结构中的 `CLASS` 属性，这样一个完整的处理流程就成功关联了：** 由写入队列的数据决定该数据被哪个回调方法进行处理 **，在实际应用中是相当灵活的。
 ```golang
 var (
 	workers map[string]workerFunc
