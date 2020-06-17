@@ -24,8 +24,13 @@ goworker 兼容 Resque，所以可以使用 Rails/PHP 和 Resque 推送你的作
 分析此项目，准备从如下两个方面着手：
 1.      封装 Redis 的 LIST 实现的 Queue 模型
 2.      Worker 的并发模型
+3.		golang Select 机制典型的应用
 
 ##      0x01    简单使用
+-	通过
+
+-	使用 `RPUSH` 指令向 Redis 写入数据：`RPUSH resque:queue:myqueue '{"class":"Hello","args":["hi","there"]}'`
+
 
 ##      0x02    整体框架
 goworker 的整体框架大致如下图所示：
@@ -54,7 +59,7 @@ type WorkerSettings struct {
 ##      0x03    基于 Redis 封装的 Queue 分析
 
 ####    Redis 库及连接池
-goworker 的 redis[初始化代码在此](https://github.com/benmanns/goworker/blob/5e68afbc332d07212690694ade6b72167f1be1df/redis.go)，使用在此[](https://github.com/benmanns/goworker/blob/pull-17/redis.go)，它使用了[vitess.io/vitess/go/pools](https://github.com/vitessio/vitess/blob/master/go/pools/resource_pool.go) 构建生成了一个 Redis 连接（资源）池。它提供了两个重要的接口 `GetConn` 和 `PutConn`[代码](https://github.com/benmanns/goworker/blob/master/goworker.go#L71)：
+goworker 的 redis[初始化代码在此](https://github.com/benmanns/goworker/blob/5e68afbc332d07212690694ade6b72167f1be1df/redis.go)，使用在此 [](https://github.com/benmanns/goworker/blob/pull-17/redis.go)，它使用了 [vitess.io/vitess/go/pools](https://github.com/vitessio/vitess/blob/master/go/pools/resource_pool.go) 构建生成了一个 Redis 连接（资源）池。它提供了两个重要的接口 `GetConn` 和 `PutConn`[代码](https://github.com/benmanns/goworker/blob/master/goworker.go#L71)：
 
 -       `GetConn`：从 pool 中取出一个可用连接
 -       `PutConn`：向 pool 中归还连接
@@ -83,6 +88,60 @@ func PutConn(conn *RedisConn) {
 }
 ```
 
+####	Queue 中数据的封装
+从本文开篇的应用测试来看，数据部分 [`Payload`](https://github.com/benmanns/goworker/blob/master/payload.go) 定义为一个 `JSON`，里面包含了 `CLASS` 属性，
+```golang
+type Payload struct {
+	Class string        `json:"class"`
+	Args  []interface{} `json:"args"`
+}
+```
+
+而 `Job` 就是定义为，一个 `Payload` 在哪个 Queue 中将会被处理：
+```golang
+type Job struct {
+	Queue   string
+	Payload Payload
+}
+```
+
+回调函数的定义：
+```golang
+type workerFunc func(string, ...interface{}) error
+```
+
+Poller 的 `getJob` 方法，将 Redis 中 `LPOP` 出来的数据，封装为一个 `Job` 结构：
+```golang
+func (p *poller) getJob(conn *RedisConn) (*Job, error) {
+	for _, queue := range p.queues(p.isStrict) {
+		logger.Debugf("Checking %s", queue)
+
+		// 根据 queue 的名字从这个 LIST 上获取数据
+		reply, err := conn.Do("LPOP", fmt.Sprintf("%squeue:%s", workerSettings.Namespace, queue))
+		if err != nil {
+			return nil, err
+		}
+		if reply != nil {
+			logger.Debugf("Found job on %s", queue)
+
+			job := &Job{Queue: queue}
+
+			decoder := json.NewDecoder(bytes.NewReader(reply.([]byte)))
+			if workerSettings.UseNumber {
+				decoder.UseNumber()
+			}
+
+			if err := decoder.Decode(&job.Payload); err != nil {
+				return nil, err
+			}
+			return job, nil
+		}
+	}
+
+	return nil, nil
+}
+```
+
 ####    Queue 的统计结构 process
 每个 Queue，都附带了一个基于 Redis 的统计接口 [`process`](https://github.com/benmanns/goworker/blob/master/process.go)，统计 Queue 的相关属性及每次消费结果的统计信息。
 
@@ -98,8 +157,14 @@ type process struct {
 整个队列运行的状态都保存在 Redis 中，退出后会被清除，这里需要加入一些持久化的机制。
 
 
-####    Queue 的轮询机制 poller
-goworker 中是通过轮询方式，依次对每个 Redis-LIST 进行 `LPOP` 操作来消费数据的，此流程的 [代码在此](https://github.com/benmanns/goworker/blob/master/poller.go#L54)，
+####    Queue 的轮询机制 Poller
+goworker 中是通过轮询方式，依次对每个 Redis-LIST 进行 `LPOP` 操作来消费数据的，此流程的 [代码在此](https://github.com/benmanns/goworker/blob/master/poller.go#L54)，其核心逻辑在 `for select{...}` 结构中：
+1.	使用 `job, err := p.getJob(conn)` 从 Redis 中获取数据
+2.	使用 `jobs <- job` 将数据封装的 `Job` 分发给 `worker` 协程处理
+3.	退出时的清理工作
+
+PS：这里有个 [小细节](https://github.com/benmanns/goworker/blob/master/poller.go#L106) 需要注意下，当从 channel 中获取到 `job`，收到 `case <-quit` 事件退出前，把 `job` 重新封装为 `Payload`，通过 `LPUSH` 操作写回 Redis 中；另外，这里的 channel `Job` 是无缓冲型的，也就是说当 channel 中的 `Job` 未被取出来之前，第二个 `jobs <- job` 操作会阻塞，也就是 `Poller` 协程会阻塞在 `jobs <- job` 上。
+
 ```golang
 func (p *poller) poll(interval time.Duration, quit <-chan bool) (<-chan *Job, error) {
 	jobs := make(chan *Job)
@@ -141,6 +206,7 @@ func (p *poller) poll(interval time.Duration, quit <-chan bool) (<-chan *Job, er
 					return
 				}
 
+				// 从 Redis 中获取数据
 				job, err := p.getJob(conn)
 				if err != nil {
 					logger.Criticalf("Error on %v getting job from %v: %v", p, p.Queues, err)
@@ -152,6 +218,7 @@ func (p *poller) poll(interval time.Duration, quit <-chan bool) (<-chan *Job, er
 					conn.Flush()
 					PutConn(conn)
 					select {
+					// 向 Jobs channel 中分发数据
 					case jobs <- job:
 					case <-quit:
 						buf, err := json.Marshal(job.Payload)
@@ -171,6 +238,7 @@ func (p *poller) poll(interval time.Duration, quit <-chan bool) (<-chan *Job, er
 						return
 					}
 				} else {
+					// 这里，job 数据格式有错误时，Sleep 下
 					PutConn(conn)
 					if workerSettings.ExitOnComplete {
 						return
@@ -192,7 +260,6 @@ func (p *poller) poll(interval time.Duration, quit <-chan bool) (<-chan *Job, er
 	return jobs, nil
 }
 ```
-
 
 ##      0x04	Worker 分析
 
@@ -227,11 +294,20 @@ func main() {
 }
 ```
 
-[Worker 方法](https://github.com/benmanns/goworker/blob/master/goworker.go#L119) 如下，它的逻辑也很清晰：
-1.      `Init()` 初始化 Redis 连接池及其他一些初始化工作
-2.      `newPoller` 创建 `Pooler`，并创建一个子协程来完成轮询 Redis 的工作，返回一个 `jobs <-chan *Job`，通过此 channel 与 worker 进行交互：向此 channel 中发送 Job，然后分发给 worker 执行
-3.      根据配置中的 `workerSettings.Concurrency`，创建 `worker` 子协程，并且 ** 与配置中 `workerSettings.Queues` 的队列 (s) 进行工作绑定 **
-4.      `monitor.Wait()` 阻塞等待流程结束，Worker 退出。这里也包含了对常用退出 signal 的处理
+[`goworker.Worker` 方法](https://github.com/benmanns/goworker/blob/master/goworker.go#L119) 如下，它的逻辑也很清晰：
+1.      `Init()` 方法初始化 Redis 连接池及完成其他一些初始化工作
+2.      `newPoller` 创建 `Pooler`，并创建一个子协程来完成轮询 Redis 的工作，返回一个 `jobs <-chan *Job`，通过此 channel 与 worker 进行交互。`Poller` 向此 channel 中发送 `Job`，然后分发给 `worker` 执行
+3.      根据配置中的 `workerSettings.Concurrency`，创建 `worker` 子协程，并且 **与配置中 `workerSettings.Queues` 的队列 (s) 进行工作绑定**
+4.      `monitor.Wait()` 阻塞等待流程结束，Worker 退出。这里也包含了对退出 signal 的处理
+
+goworker 中的协程并发模型是 `1:N` 的，即一个生产者 `Poller`，多个消费者 `Worker`，看下面的代码，`jobs` 这个 channel 被多个 `worker` 共享，由于 channel 本身是协程安全的，这种也是非常常见的 golang 并发模式：
+```golang
+jobs, err := poller.poll(time.Duration(workerSettings.Interval), quit)
+...
+for id := 0; id < workerSettings.Concurrency; id++ {
+		worker.work(jobs, &monitor)
+	}
+```
 
 ```golang
 // Work starts the goworker process. Check for errors in
@@ -317,6 +393,7 @@ func (w *worker) work(jobs <-chan *Job, monitor *sync.WaitGroup) {
 				PutConn(conn)
 			}
 		}()
+		// 注意：jobs 是一个只读的 channel
 		for job := range jobs {
 			if workerFunc, ok := workers[job.Payload.Class]; ok {
 				w.run(job, workerFunc)
@@ -338,8 +415,7 @@ func (w *worker) work(jobs <-chan *Job, monitor *sync.WaitGroup) {
 }
 ```
 
-
-`worker.run()` 方法如下：
+上面代码中 `worker.run()` 方法如下，最后调用初始化传入的回调方法 `workerFunc` 执行真正对数据的处理逻辑：
 ```golang
 func (w *worker) run(job *Job, workerFunc workerFunc) {
 	var err error
@@ -372,6 +448,19 @@ func (w *worker) run(job *Job, workerFunc workerFunc) {
 	err = workerFunc(job.Queue, job.Payload.Args...)
 }
 ```
+
+####	Worker 定义
+在 goworker 中，`workers` 是一个全局的 `map`，其中保存了 `name-->callback` 即名字到回调方法的映射关系。在应用中使用 `goworker.Register("Hello", helloWorker)` 来完成相关方法的注册。该名字对应于 `Payload` 结构中的 `CLASS` 属性，这样一个完整的处理流程就成功关联了：**由写入队列的数据决定该数据被哪个回调方法进行处理**，在实际应用中是相当灵活的。
+```golang
+var (
+	workers map[string]workerFunc
+)
+
+func init() {
+	workers = make(map[string]workerFunc)
+}
+```
+
 
 ##  0x05    参考
 -   [goworker Home Page](https://www.goworker.org/)
