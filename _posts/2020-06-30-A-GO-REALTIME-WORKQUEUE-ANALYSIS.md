@@ -311,7 +311,6 @@ func (w *worker) work(jobs <-chan *Job, monitor *sync.WaitGroup) {
 		defer func() {
 			// 完成时收尾工作
 			defer monitor.Done()
-
 			conn, err := GetConn()
 			if err != nil {
 				logger.Criticalf("Error on getting connection in worker %v: %v", w, err)
@@ -324,7 +323,6 @@ func (w *worker) work(jobs <-chan *Job, monitor *sync.WaitGroup) {
 		for job := range jobs {
 			if workerFunc, ok := workers[job.Payload.Class]; ok {
 				w.run(job, workerFunc)
-
 				logger.Debugf("done: (Job{%s} | %s | %v)", job.Queue, job.Payload.Class, job.Payload.Args)
 			} else {
 				errorLog := fmt.Sprintf("No worker for %s in queue %s with args %v", job.Payload.Class, job.Queue, job.Payload.Args)
