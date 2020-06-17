@@ -290,6 +290,54 @@ type worker struct {
 
 `worker.work()` 方法，核心逻辑在 `for job := range jobs { ...}` 里面，当 channel 中有可读事件时，使用 `w.run(job, workerFunc)` 处理数据：
 
+```go
+func (w *worker) work(jobs <-chan *Job, monitor *sync.WaitGroup) {
+	conn, err := GetConn()
+	if err != nil {
+		logger.Criticalf("Error on getting connection in worker %v: %v", w, err)
+		return
+	} else {
+		w.open(conn)
+		PutConn(conn)
+	}
+
+	monitor.Add(1)
+
+	// 创建新的 goroutine
+	go func() {
+		defer func() {
+			// 完成时收尾工作
+			defer monitor.Done()
+			conn, err := GetConn()
+			if err != nil {
+				logger.Criticalf("Error on getting connection in worker %v: %v", w, err)
+				return
+			} else {
+				w.close(conn)
+				PutConn(conn)
+			}
+		}()
+		for job := range jobs {
+			if workerFunc, ok := workers[job.Payload.Class]; ok {
+				w.run(job, workerFunc)
+				logger.Debugf("done: (Job:%s | %s | %v)", job.Queue, job.Payload.Class, job.Payload.Args)
+			} else {
+				errorLog := fmt.Sprintf("No worker for %s in queue %s with args %v", job.Payload.Class, job.Queue, job.Payload.Args)
+				logger.Critical(errorLog)
+				conn, err := GetConn()
+				if err != nil {
+					logger.Criticalf("Error on getting connection in worker %v: %v", w, err)
+					return
+				} else {
+					w.finish(conn, job, errors.New(errorLog))
+					PutConn(conn)
+				}
+			}
+		}
+	}()
+}
+```
+
 
 `worker.run()` 方法如下：
 ```golang
