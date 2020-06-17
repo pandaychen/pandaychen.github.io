@@ -54,10 +54,10 @@ type WorkerSettings struct {
 ##      0x03    基于 Redis 封装的 Queue 分析
 
 ####    Redis 库及连接池
-goworker 的 redis[初始化代码在此](https://github.com/benmanns/goworker/blob/5e68afbc332d07212690694ade6b72167f1be1df/redis.go)，使用在此 [](https://github.com/benmanns/goworker/blob/pull-17/redis.go)，它使用了[vitess.io/vitess/go/pools](https://github.com/vitessio/vitess/blob/master/go/pools/resource_pool.go) 构建生成了一个 Redis 连接（资源）池。它提供了两个重要的接口 `GetConn` 和 `PutConn`[代码](https://github.com/benmanns/goworker/blob/master/goworker.go#L71)：
+goworker 的 redis[初始化代码在此](https://github.com/benmanns/goworker/blob/5e68afbc332d07212690694ade6b72167f1be1df/redis.go)，使用在此[](https://github.com/benmanns/goworker/blob/pull-17/redis.go)，它使用了[vitess.io/vitess/go/pools](https://github.com/vitessio/vitess/blob/master/go/pools/resource_pool.go) 构建生成了一个 Redis 连接（资源）池。它提供了两个重要的接口 `GetConn` 和 `PutConn`[代码](https://github.com/benmanns/goworker/blob/master/goworker.go#L71)：
 
 -       `GetConn`：从 pool 中取出一个可用连接
--       `PutConn`: 向 pool 中归还连接
+-       `PutConn`：向 pool 中归还连接
 
 ```golang
 // GetConn returns a connection from the goworker Redis
@@ -74,8 +74,6 @@ func GetConn() (*RedisConn, error) {
 	}
 	return resource.(*RedisConn), nil
 }
-
-
 // PutConn puts a connection back into the connection pool.
 // Run this as soon as you finish using a connection that
 // you got from GetConn. Expect this API to change
@@ -84,7 +82,6 @@ func PutConn(conn *RedisConn) {
 	pool.Put(conn)
 }
 ```
-
 
 ####    Queue 的统计结构 process
 每个 Queue，都附带了一个基于 Redis 的统计接口 [`process`](https://github.com/benmanns/goworker/blob/master/process.go)，统计 Queue 的相关属性及每次消费结果的统计信息。
@@ -293,54 +290,6 @@ type worker struct {
 
 `worker.work()` 方法，核心逻辑在 `for job := range jobs { ...}` 里面，当 channel 中有可读事件时，使用 `w.run(job, workerFunc)` 处理数据：
 
-```golang
-func (w *worker) work(jobs <-chan *Job, monitor *sync.WaitGroup) {
-	conn, err := GetConn()
-	if err != nil {
-		logger.Criticalf("Error on getting connection in worker %v: %v", w, err)
-		return
-	} else {
-		w.open(conn)
-		PutConn(conn)
-	}
-
-	monitor.Add(1)
-
-	// 创建新的 goroutine
-	go func() {
-		defer func() {
-			// 完成时收尾工作
-			defer monitor.Done()
-			conn, err := GetConn()
-			if err != nil {
-				logger.Criticalf("Error on getting connection in worker %v: %v", w, err)
-				return
-			} else {
-				w.close(conn)
-				PutConn(conn)
-			}
-		}()
-		for job := range jobs {
-			if workerFunc, ok := workers[job.Payload.Class]; ok {
-				w.run(job, workerFunc)
-				logger.Debugf("done: (Job{%s} | %s | %v)", job.Queue, job.Payload.Class, job.Payload.Args)
-			} else {
-				errorLog := fmt.Sprintf("No worker for %s in queue %s with args %v", job.Payload.Class, job.Queue, job.Payload.Args)
-				logger.Critical(errorLog)
-
-				conn, err := GetConn()
-				if err != nil {
-					logger.Criticalf("Error on getting connection in worker %v: %v", w, err)
-					return
-				} else {
-					w.finish(conn, job, errors.New(errorLog))
-					PutConn(conn)
-				}
-			}
-		}
-	}()
-}
-```
 
 `worker.run()` 方法如下：
 ```golang
