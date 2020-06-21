@@ -255,11 +255,11 @@ def main():
         print i.value
 ```
 
-##  Kafka 的应用场景
+##  0x09    Kafka 的应用场景
 项目使用的 Kafka 整体模型如下图所示，N 个生产者，针对每个 Topic 默认开启 2 个消费者组来消费：
 ![image](https://wx1.sbimg.cn/2020/06/19/kafka.png)
 
-##  0x04    参考
+##  0x10    参考
 -   [Understanding Kafka Topics and Partitions](https://stackoverflow.com/questions/38024514/understanding-kafka-topics-and-partitions)
 -   [KafkaConsumer](https://kafka-python.readthedocs.io/en/master/apidoc/KafkaConsumer.html)
 -   [通过 python 操作 kafka](https://juejin.im/entry/5be53704f265da615e04f86c)
