@@ -14,7 +14,7 @@ tags:
 `validator` 的意义是什么，简言之，在协议字段定义规则，使得开发者在代码中简化对字段的验证逻辑。
 ![image](https://wx1.sbimg.cn/2020/06/22/phpisbestlanguage.jpg)
 
-##  0x01
+##  0x01    使用 validator
 简单的来说，开启 gRPC 中的协议字段校验需要如下两步：
 1.  proto 协议中按照指定 validator 包的规则定义字段的校验规则
 2.  在 gRPC 的 server 端、client 端中开启 validator 的拦截器，对 pb 协议中的字段进行校验
@@ -248,7 +248,7 @@ func main() {
 }
 ```
 
-##  0x07    参考
+##  0x06    参考
 -   [结构字段验证－－validator.v9](https://www.cnblogs.com/zhzhlong/p/10033234.html)
 -   [Go 语言高级编程 - 5.4 validator 请求校验](https://chai2010.gitbooks.io/advanced-go-programming-book/content/ch5-web/ch5-04-validator.html)
 -   [validator.v9 DOC](https://godoc.org/gopkg.in/go-playground/validator.v9)
