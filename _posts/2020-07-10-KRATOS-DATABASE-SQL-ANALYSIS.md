@@ -79,7 +79,7 @@ type Config struct {
 
 ##	0x03	Kratos的封装
 关于 Kratos 的 Mysql 封装，可以按照如下几点着手分析：
-1.	`conn` 封装了 `sql.DB` 的接口
+1.	`conn` 封装了原生库的 `sql.DB` 的接口
 2.	`DB` 封装了 `conn`，有点像 `conn` 的集合，使得 `DB` 表现为一个可配置的 MYSQL 主从集群
 3.	`DB` 中封装了对外的接口（方法），大部分方法都是直接调用 `conn` 封装的方法
 4.	熔断器封装的层次、Tracing 封装的层次、Metrics 封装的层次（和哪个属性相关联？`conn` 还是 `row`）
