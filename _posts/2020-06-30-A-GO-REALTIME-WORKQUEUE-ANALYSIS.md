@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      GoWorker 高性能队列分析
-subtitle:   分析一个基于 Go 后台队列任务执行框架
+subtitle:   分析一款基于 Golang 后台队列任务执行框架
 date:       2020-06-30
 author:     pandaychen
 header-img:
