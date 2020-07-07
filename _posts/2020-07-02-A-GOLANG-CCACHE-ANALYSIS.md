@@ -17,6 +17,8 @@ tags:
 3.  支持多级 Cache，如 LayeredCache 和 SecondaryCache
 4.  采用分段锁及其他一些优化策略来降低锁冲突（Competition）
 
+在项目，用此库来缓存那些不经常改动且有大量读请求的场景。
+
 ##  0x01  CCache 的使用
 
 
@@ -25,7 +27,7 @@ tags:
 ####  分段锁
 第一次接触 Golang 的这个概念，是在 [goim](https://github.com/Terry-Mao/goim/blob/master/internal/comet/bucket.go) 的代码中：
 
-注意看 `Server` 的 `buckets` 成员，就是一个典型的分段锁的实现（只在每个 `Bucket` 中绑定一个读写锁 `sync.RWMutex`），用来保护并发读写的安全性。在 Ccache 中也是 [类似做法](https://github.com/karlseguin/ccache/blob/master/cache.go)，将一个 HashTable 根据 key 拆分成多个 HashTable，每个 HashTable 对应一个锁，锁粒度更细，冲突的概率也就相应的降低了。
+注意看 `Server` 的 `buckets` 成员，就是一个典型的分段锁的实现（只在每个 `Bucket` 中绑定一个读写锁 `sync.RWMutex`），用来保护并发读写的安全性。在 CCache 中也是 [类似做法](https://github.com/karlseguin/ccache/blob/master/cache.go)，将一个 HashTable 根据 key 拆分成多个 HashTable，每个 HashTable 对应一个锁，锁粒度更细，冲突的概率也就相应的降低了。
 
 goim 中的分段锁定义如下：
 ```golang
@@ -54,7 +56,7 @@ type Bucket struct {
 }
 ```
 
-在CCache中，通过FNV算法，根据Key来获取到具体存储到哪个Bucket中：
+在 CCache 中，通过 FNV 算法，根据 Key 来获取到具体存储到哪个 Bucket 中：
 ```golang
 func (c *Cache) bucket(key string) *bucket {
 	h := fnv.New32a()
