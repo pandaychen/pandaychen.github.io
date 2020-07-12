@@ -10,7 +10,7 @@ tags:
 ---
 
 ##  0x00    前言
-分析下 Kratos 框架中的服务注册与发现的代码。准备分为两篇文章，一篇介绍 Naming 的公共接口及基于 Etcd 的 naming 机制实现，另一篇文章介绍 Warden 库是如何使用 Naming 的接口来完成服务注册与发现机制。总体而言，Kratos 的 Naming 逻辑分为如下几块：
+&emsp;&emsp; 分析下 Kratos 框架中的服务注册与发现的代码。准备分为两篇文章，一篇介绍 Naming 的公共接口及基于 Etcd 的 naming 机制实现，另一篇文章介绍 Warden 库是如何使用 Naming 的接口来完成服务注册与发现机制。总体而言，Kratos 的 Naming 逻辑分为如下几块：
 -	公共的 `Naming` 逻辑与接口封装
 	-	`Naming` 的接口实例化：如 `ETCD`、`Zookeeper` 的实现
 -	Warden 库基于 gRPC 接口实现的 `Resovler` 逻辑封装，调用 `Naming` 的提供接口完成，将从 `Naming` 获取的结果通过 gRPC 的接口通知上层
@@ -19,22 +19,22 @@ tags:
 
 这样，对于不同的框架，模块的内聚性更强。换句话说，对于 gRPC，它无需关注服务发现及注册的细节，以及使用何种服务治理的中介，只需要调用相关接口，获取结果并调用 gRPC 的用户接口更新即可。
 
-##  0x01   Naming 包的公共接口
-Kratos 的 [Naming 模块](https://github.com/go-kratos/kratos/blob/master/pkg/naming/naming.go)，是装饰器模式（Decorator）的典型实现。它封装了三个通用的方法：
+##  0x01   Naming 包的公共（抽象）接口
+&emsp;&emsp; Kratos 的 [Naming 模块](https://github.com/go-kratos/kratos/blob/master/pkg/naming/naming.go)，是装饰器模式（Decorator）的典型实现。它封装了三个通用的方法：
 `naming.Resolver`、`naming.Registry` 及 `naming.Builder`:
 
 -   `Resolver`，解析器的实现，包含三个方法：
-    -   `Fetch`：
-    -   `Watch`：
-    -   `Close`：
+    -   `Fetch`：从注册中心获取服务发现的结果
+    -   `Watch`：监控注册中心 KV 值的变化
+    -   `Close`：关闭服务发现
 
 -   `Registry`，注册器的实现，包含两个方法：
-    -   `Register`：
-    -   `Close`：
+    -   `Register`：实现 Service 的注册功能
+    -   `Close`：注册关闭，清理
 
 -   `Builder`：该方法生成（构造）一个 Resolver，包含两个方法：
-    -   `Build`：
-    -   `Scheme`：
+    -   `Build`：创建一个服务发现的 Builder
+    -   `Scheme`：服务发现的名字
 
 `Naming.Resolver` 的定义：
 ```golang
@@ -64,7 +64,7 @@ type Registry interface {
 }
 ```
 
-`Naming.Builder` 的定义，和 gRPC 的 [`resolver.Builder`](https://godoc.org/google.golang.org/grpc/resolver#Builder) 的定义一样，可以互转：
+`Naming.Builder` 的定义，和 gRPC 的 [`resolver.Builder`](https://godoc.org/google.golang.org/grpc/resolver#Builder) 的定义一样，可以互相转化：
 ```golang
 /*
 对应于 resolver 的实现逻辑（grpc 接口）
@@ -83,11 +83,16 @@ type Builder interface {
 使用过 Etcd 的同学们应该知道，Etcd 是非常典型的 CP 系统，客户端可以通过 Watcher 机制来实现对 1 个（或多个）Key 前缀节点的动态监听，所有发生的改变客户端都可以获取到。所以，Kratos 基于 Etcd 的 Naming 实现，是非常的经典的多消费者订阅 - Watcher 模型，大概思路如下：
 ![image](https://wx1.sbimg.cn/2020/06/12/4ccdbe50e68dd4e5269b30016737d876.png)
 
+如上图所示，几个关键点：
+1.	`Resovler` 中包含的 Mailbox，实现了 `notify` 功能
+2.	有了 `notify` 之后，触发 `Resovler` 通过 `fetch` 机制拿到动态改变的数据
+不过在 Etcd 中，这两个步骤可以在同一个方法中完成。
+
 ##  0x03    Etcd 的 Naming 实现
 基于 Etcd 的封装 [代码在此](https://github.com/go-kratos/kratos/blob/master/pkg/naming/etcd/etcd.go)。本小节来分析下其封装实现。
 
 ####    核心结构
-`etcd.EtcdBuilder` 实现了 `Naming.Registry` 及 `Naming.Builder` 的 `interface{}` 定义的方法，而 `etcd.Resolve` 则实现了 `naming.Resolver` 定义的方法：
+&emsp;&emsp; `etcd.EtcdBuilder` 实现了 `Naming.Registry` 及 `Naming.Builder` 的 `interface{}` 定义的方法，而 `etcd.Resolve` 则实现了 `naming.Resolver` 定义的方法：
 注意：`EtcdBuilder` 包含了 map 型的成员 `apps     map[string]*appInfo`，意为 `EtcdBuilder` 可以实现对多个 key 的监听，key 对应的结果保存在 `appInfo` 中
 ```golang
 // EtcdBuilder is a etcd clientv3 EtcdBuilder
@@ -97,18 +102,20 @@ type EtcdBuilder struct {
 	cancelFunc context.CancelFunc
 
 	mutex    sync.RWMutex
-	apps     map[string]*appInfo
+	apps     map[string]*appInfo	// 多个 appInfo
 	registry map[string]struct{}
 }
 ```
 
-而 appInfo 的结构如下，注意 `ins	atomic.Value`
+而 appInfo 的结构如下，注意 `ins	atomic.Value` 和 `resolver map[*Resolve]struct{}` 的用法：
+-	`resolver map[*Resolve]struct{}`：一个 `appInfo` 可以被多个 `Resolve` 所监听
+-	`ins	atomic.Value`：
 
 ```golang
 type appInfo struct {
 	resolver map[*Resolve]struct{}
 	ins      atomic.Value
-	e        *EtcdBuilder
+	e        *EtcdBuilder	// 指向属于哪个 EtcdBuilder
 	once     sync.Once
 }
 ```
@@ -116,14 +123,16 @@ type appInfo struct {
 ```golang
 // Resolve etch resolver.
 type Resolve struct {
-	id    string
-	event chan struct{}
+	id    string		//id 实际上就是 appid，标识是监听哪个 resovler
+	event chan struct{}		// 实现 notify 机制
 	e     *EtcdBuilder
 	opt   *naming.BuildOptions
 }
 ```
 
-####    初始化
+##	0x04	Naming.Builder 实现
+
+####    `EtcdBuilder` 初始化
 初始化的部分比较简单，就是构造一个 `EtcdBuilder` 对象，里面包含 etcdv3 的客户端及 `apps` 和 `registry` 两个 `map`：
 ```golang
 // New is new a etcdbuilder
@@ -146,11 +155,10 @@ func New(c *clientv3.Config) (e *EtcdBuilder, err error) {
 ```golang
 func (e *EtcdBuilder) Scheme() string {
 	return "etcd"
-
 }
 ```
 
-`EtcdBuilder.Build` 方法完成如下的事情：
+`EtcdBuilder.Build` 方法，完成如下的事情：
 1.	创建以 `appid string` 为 key 的消费者 `r`，`r` 是 `etcd.Resolve` 结构，并返回
 2.	构建映射关系，主要是 `EtcdBuilder` <---> `appid` <---> `appInfo` <---> `Resolve`(EtcdBuilder)
 3.	使用 `sync.Once` 针对 `appid` 开启唯一的 `watcher` 协程
@@ -194,6 +202,9 @@ func (e *EtcdBuilder) Build(appid string, opts ...naming.BuildOpt) naming.Resolv
 	return r
 }
 ```
+
+##	0x05	Naming.Registry 实现
+
 ####	实现 `naming.Registry` 的方法
 `EtcdBuilder.Registry` 用来完成将服务的注册到 Etcd 及 TTL 续期，`Register` 方法主要用于提供给服务端进行服务注册，基于先前的经验，此方法必须实现如下的逻辑：
 1.  向注册中心标识自己的服务名字（ServiceNameId）
@@ -283,12 +294,23 @@ func (e *EtcdBuilder) unregister(ins *naming.Instance) (err error) {
 }
 ```
 
-实现 `Close` 方法，常用的套路，调用 `e.cancelFunc()` 取消所有的子协程，配合 `case <-ctx.Done()` 使用：
+实现 `Registry` 的 `Close` 方法，常用的套路，调用 `e.cancelFunc()` 取消所有的子协程，配合 `case <-ctx.Done()` 使用：
 ```golang
 // Close stop all running process including etcdfetch and register
 func (e *EtcdBuilder) Close() error {
 	e.cancelFunc()
 	return nil
+}
+```
+
+##	0x06	appInfo 封装
+appInfo的结构如下，其中`ins`中存储了`naming.InstancesInfo`。`naming.InstancesInfo`一般理解为服务后端节点。
+```golang
+type appInfo struct {
+	resolver map[*Resolve]struct{}
+	ins      atomic.Value
+	e        *EtcdBuilder
+	once     sync.Once
 }
 ```
 
@@ -358,6 +380,8 @@ func (a *appInfo) paserIns(resp *clientv3.GetResponse) (ins *naming.InstancesInf
 }
 ```
 
+##	0x07	Naming.Resolver 实现
+
 ####	实现 `naming.Resolver` 方法
 ```golang
 
@@ -389,6 +413,25 @@ func (r *Resolve) Close() error {
 }
 ```
 
+##	0x08	其他细节
+注意，etcd.go 中的初始化是以对外接口的方式提供的，[`_builder`](https://github.com/go-kratos/kratos/blob/master/pkg/naming/etcd/etcd.go#L4) 是一个全局变量，通过 `etcd.Builder` 方法初始化。而 `etcd.Build` 创建了一个 `naming.Resolver` 对象，常用于客户端代码。
+```golang
+// Builder return default etcd resolver builder.
+func Builder(c *clientv3.Config) naming.Builder {
+	_once.Do(func() {
+		_builder, _ = New(c)
+	})
+	return _builder
+}
 
-##	参考
+// Build register resolver into default etcd.
+func Build(c *clientv3.Config, id string) naming.Resolver {
+	return Builder(c).Build(id)
+}
+```
+
+
+##	0x09	参考
 - [Warden resovler](https://github.com/go-kratos/kratos/blob/master/doc/wiki-cn/warden-resolver.md)
+- [naming.go](https://github.com/go-kratos/kratos/blob/master/pkg/naming/naming.go)
+- [etcd.go](https://github.com/go-kratos/kratos/blob/master/pkg/naming/etcd/etcd.go)
