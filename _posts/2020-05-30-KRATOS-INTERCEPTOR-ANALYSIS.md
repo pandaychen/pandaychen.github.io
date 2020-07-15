@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      Kratos 源码分析（2）：gRPC-Warden 拦截器（链）及实现
+title:      Kratos 源码分析：gRPC-Warden 拦截器（链）及实现
 subtitle:   Kratos 框架分析
 date:       2020-05-30
 author:     pandaychen

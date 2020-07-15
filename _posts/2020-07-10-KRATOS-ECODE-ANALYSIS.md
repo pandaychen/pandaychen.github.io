@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      Kratos 源码分析：ecode 错误代码
+title:      Kratos 源码分析：Ecode 错误代码
 subtitle:   分析 Kratos 的 Error-code
 date:       2020-07-10
 header-img: img/golang-tools-fun.png
