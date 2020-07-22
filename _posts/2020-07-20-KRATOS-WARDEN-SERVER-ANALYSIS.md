@@ -17,7 +17,7 @@ Kratos 的 Warden 框架 [server.go](https://github.com/go-kratos/kratos/blob/ma
 -	过载保护实现
 
 ##  0x01	Server 端拦截器
-服务端的拦截器的顺序如下图所示：
+Kratos 的拦截器链实现非常典型，实际项目可以借鉴。Warden 服务端的拦截器的顺序如下图所示：
 ![image](https://wx1.sbimg.cn/2020/05/12/grpc-server-.png)
 
 ##  0x02    Server 配置
@@ -63,7 +63,7 @@ type ServerConfig struct {
 }
 ```
 
-##  0x02	Server运行分析
+##  0x03	Server运行分析
 `warden.Server` 结构如下，其封装了 `grpc.Server`，值得注意的是 `handlers []grpc.UnaryServerInterceptor` 结构，这里存储了**服务端的拦截器数组**：
 ```golang
 // Server is the framework's server side instance, it contains the GrpcServer, interceptor and interceptors.
@@ -311,7 +311,7 @@ func (s *Server) Use(handlers ...grpc.UnaryServerInterceptor) *Server {
 
 ```
 
-##  服务端调用实例
+##  0x04	服务端调用实例
 这里给出一个使用 Etcd 作为服务发现的服务端实例应用：
 ```golang
 import (
@@ -453,5 +453,5 @@ func signalHandler(s *warden.Server) {
 }
 ```
 
-##  参考
+##  0x05	参考
 -   [warden-quickstart.md](https://github.com/go-kratos/kratos/blob/master/doc/wiki-cn/warden-quickstart.md)
