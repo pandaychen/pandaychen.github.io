@@ -14,12 +14,13 @@ Kratos 的 Warden 框架 [server.go](https://github.com/go-kratos/kratos/blob/ma
 -   服务端的启动 & 配置流程
 -   拦截器链的 "安装" 顺序
 -   `tracer`、`metrics` 以及 `limiter` 与 `grpc.Server` 的结合
+-	过载保护实现
 
-##  0x01
+##  0x01	Server 端拦截器
 服务端的拦截器的顺序如下图所示：
-![image]()
+![image](https://wx1.sbimg.cn/2020/05/12/grpc-server-.png)
 
-##  0x02    配置
+##  0x02    Server 配置
 默认配置如下，需要注意的是这里的 Keepalive 相关的配置：
 ```golang
 defaultSerConf = &ServerConfig{
@@ -62,8 +63,8 @@ type ServerConfig struct {
 }
 ```
 
-##  0x02
-`warden.Server` 结构如下，封装了 `grpc.Server`，值得注意的是 `handlers` 结构，这里存储了服务端的拦截器数组：
+##  0x02	Server运行分析
+`warden.Server` 结构如下，其封装了 `grpc.Server`，值得注意的是 `handlers []grpc.UnaryServerInterceptor` 结构，这里存储了**服务端的拦截器数组**：
 ```golang
 // Server is the framework's server side instance, it contains the GrpcServer, interceptor and interceptors.
 // Create an instance of Server, by using NewServer().
@@ -118,6 +119,9 @@ func NewServer(conf *ServerConfig, opt ...grpc.ServerOption) (s *Server) {
 	})
 	opt = append(opt, keepParam, grpc.UnaryInterceptor(s.interceptor))
 	s.server = grpc.NewServer(opt...)
+
+	//初始化拦截器数组
+	//s.recovery()必须要在第一个
 	s.Use(s.recovery(), s.handle(), serverLogging(conf.LogFlag), s.stats(), s.validate())
 	s.Use(ratelimiter.New(nil).Limit())
 	return
@@ -164,6 +168,21 @@ func (s *Server) Serve(lis net.Listener) error {
 }
 ```
 
+以 `addr` 直接启动服务器，使用 `Run` 方法：
+```golang
+// Run create a tcp listener and start goroutine for serving each incoming request.
+// Run will return a non-nil error unless Stop or GracefulStop is called.
+func (s *Server) Run(addr string) error {
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		err = errors.WithStack(err)
+		log.Error("failed to listen: %v", err)
+		return err
+	}
+	reflection.Register(s.server)
+	return s.Serve(lis)
+}
+```
 
 关闭服务器：调用 `server.GracefulStop()` 或者 `s.server.Stop()` 来结束服务端运行：
 ```golang
@@ -186,6 +205,7 @@ func (s *Server) Shutdown(ctx context.Context) (err error) {
 }
 ```
 
+####	Server的拦截器操作
 
 ```golang
 // handle return a new unary server interceptor for OpenTracing\Logging\LinkTimeout.
@@ -289,18 +309,6 @@ func (s *Server) Use(handlers ...grpc.UnaryServerInterceptor) *Server {
 	return s
 }
 
-// Run create a tcp listener and start goroutine for serving each incoming request.
-// Run will return a non-nil error unless Stop or GracefulStop is called.
-func (s *Server) Run(addr string) error {
-	lis, err := net.Listen("tcp", addr)
-	if err != nil {
-		err = errors.WithStack(err)
-		log.Error("failed to listen: %v", err)
-		return err
-	}
-	reflection.Register(s.server)
-	return s.Serve(lis)
-}
 ```
 
 ##  服务端调用实例
@@ -312,12 +320,6 @@ import (
         "github.com/bilibili/kratos/pkg/naming"
         "github.com/bilibili/kratos/pkg/naming/etcd"
         "github.com/bilibili/kratos/pkg/net/rpc/warden"
-        xtime "github.com/bilibili/kratos/pkg/time"
-        pb "github.com/pandaychen/goes-wrapper/pymicrosvc/testproto"
-        "google.golang.org/grpc/metadata"
-        //"github.com/bilibili/kratos/pkg/net/rpc/warden/resolver"
-        "go.etcd.io/etcd/clientv3"
-        "google.golang.org/grpc"
 )
 
 var Gaddr = flag.String("addr", "127.0.0.1:8081", "listen addr")
