@@ -70,6 +70,20 @@ best = least_connection_choice([nodeA, nodeB])
 
 $$\frac{success*metaWeight}{cpu*\sqrt{lag}*(inflight+1)}$$
 
+####	EWMA 算法简介
+P2C 代码实现中大量使用了 EWMA 算法（指数加权移动平均算法），此算法，是对观察值分别给予不同的权数，按不同权数求得移动平均值，并以最后的移动平均值为基础，确定预测值的方法。采用加权移动平均法，是因为观察期的近期观察值对预测值有较大影响，它更能反映近期变化的趋势。
+-	指数移动加权平均法，是指各数值的加权系数随时间呈指数式递减，越靠近当前时刻的数值加权系数就越大
+-	指数移动加权平均较传统的平均法来说，一是不需要保存过去所有的数值；二是计算量显著减小
+
+感兴趣的可以阅读这篇文章：[指数加权移动平均法（EWMA）](https://www.cnblogs.com/jiangxinyang/p/9705198.html)
+
+EWMA 算法的修正（预测）公式是：
+$$Z_i=w*X_{cur} + (1-w)*Z_{i-1}$$
+
+其中，在 P2C 算法中，w 系数按照下面的规则获取：
+`w := math.Exp(float64(-td) / float64(tau))`
+
+预测的方法是，每隔一段时间进行一次采样，每次采样完成之后，就对预测值进行一次修正，这种方法的特点是近期的采样值对预测值的影响大，远期的影响较小。从算法应用场景可知，和 P2C 算法计算场景比较类似，这里针对 `p2c.subConn` 结构使用 EWMA 算法，只需要保存上一次计算拿到的结果即可。
 
 ##  0x04	代码分析
 
@@ -86,6 +100,13 @@ const (
 ```
 
 `p2c.subConn`，封装了 `balancer.SubConn`，代表了 Client 到 Server 的一条长连接，封装了核心属性（计算权重需要）：
+其中重要的字段说明如下（牢记一个 subConn 代表了客户端到某个服务端 Node 的唯一属性）：
+-	`meta`：在服务发现（Etcd）中设置的 Node 的去那种值
+-	`lag`：请求延迟（用于与下次实现加权计算）
+-	`success`：使用加权算法拿到的客户端 RPC 调用成功率
+-	`inflight`：当前正在处理的请求数
+-	`svrCPU`：保存了服务端返回的最近一段时间的 CPU 使用率
+-	`stamp`：保存上次计算权重的时间戳（Nano）
 
 ```golang
 type subConn struct {
@@ -335,6 +356,7 @@ func (p *p2cPicker) pick(ctx context.Context, opts balancer.PickInfo) (balancer.
 		success = uint64(float64(oldSuc)*w + float64(success)*(1.0-w))
 		atomic.StoreUint64(&pc.success, success)
 
+		// 从服务端的 Trailer 中拿到 CPU 的值
 		trailer := di.Trailer
 		if strs, ok := trailer[wmd.CPUUsage]; ok {
 			if cpu, err2 := strconv.ParseUint(strs[0], 10, 64); err2 == nil && cpu > 0 {
@@ -351,6 +373,79 @@ func (p *p2cPicker) pick(ctx context.Context, opts balancer.PickInfo) (balancer.
 	}, nil
 }
 ```
+
+这里我们把 RPC 调用成功时的回调逻辑简单分析下：
+```golang
+start := time.Now().UnixNano()
+...
+return pc.conn, func(di balancer.DoneInfo) {
+	// 当前正在处理的请求数减 1，好理解
+	atomic.AddInt64(&pc.inflight, -1)
+
+	// 取当前的时间戳（Nano）
+	now := time.Now().UnixNano()
+	// get moving average ratio w
+	// 获取 && 设置上次测算的时间点，将 pc.stamp 的值更新为 now
+	stamp := atomic.SwapInt64(&pc.stamp, now)
+
+	// 获取时间间隔
+	td := now - stamp
+	if td < 0 {
+		td = 0
+	}
+
+	// 获取时间衰减系数
+	w := math.Exp(float64(-td) / float64(tau))
+
+	// 获得本次延迟数据 1（注意 start 是在 pick 开始计时的）
+	lag := now - start
+	if lag < 0 {
+		lag = 0
+	}
+
+	// 获取上次保存的延迟数据 2
+	oldLag := atomic.LoadUint64(&pc.lag)
+	if oldLag == 0 {
+		w = 0.0
+	}
+
+	// 延迟数据 1 与延迟数据 2，计算出平均延迟（EWMA）
+	lag = int64(float64(oldLag)*w + float64(lag)*(1.0-w))
+
+	// 保存本地计算出的延迟数据
+	atomic.StoreUint64(&pc.lag, uint64(lag))
+
+	success := uint64(1000) // error value ,if error set 1
+	if di.Err != nil {
+		if st, ok := status.FromError(di.Err); ok {
+			// only counter the local grpc error, ignore any business error
+			if st.Code() != codes.Unknown && st.Code() != codes.OK {
+				success = 0
+			}
+		}
+	}
+	oldSuc := atomic.LoadUint64(&pc.success)
+	success = uint64(float64(oldSuc)*w + float64(success)*(1.0-w))
+	atomic.StoreUint64(&pc.success, success)
+
+	// 从服务端的 Trailer 中拿到 CPU 的值
+	trailer := di.Trailer
+	if strs, ok := trailer[wmd.CPUUsage]; ok {
+		if cpu, err2 := strconv.ParseUint(strs[0], 10, 64); err2 == nil && cpu > 0 {
+			atomic.StoreUint64(&pc.svrCPU, cpu)
+		}
+	}
+
+	logTs := atomic.LoadInt64(&p.logTs)
+	if now-logTs > int64(time.Second*3) {
+		// 超过一个 3s 的周期，尝试打印当前状态
+		if atomic.CompareAndSwapInt64(&p.logTs, logTs, now) {
+			p.printStats()
+		}
+	}
+}, nil
+```
+
 
 
 ###	统计节点
@@ -408,4 +503,5 @@ func (p *p2cPicker) printStats() {
 
 
 ##  0x06	参考
+-	[指数加权移动平均法（EWMA）](https://www.cnblogs.com/jiangxinyang/p/9705198.html)
 -	[Warden Balancer DOC](https://github.com/go-kratos/kratos/blob/master/doc/wiki-cn/warden-balancer.md)
