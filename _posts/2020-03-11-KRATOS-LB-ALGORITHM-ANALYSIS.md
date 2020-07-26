@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      分析 Kratos 中的 Dynamic-Wrr 负载均衡算法的实现
+title:      Kratos源码分析：分析 Kratos 中的 Dynamic-Wrr 负载均衡算法的实现
 subtitle:   Kratos 中的 Wrr 算法代码分析
 date:       2020-03-11
 author:     pandaychen

@@ -12,8 +12,16 @@ tags:
 
 ##  0x00    前言
 Warden 框架默认实现了两种负载均衡算法：
-1.  WRR：Weight Round Robin
+1.  WRR：Weight Round Robin（Dynamic）
 2.  P2C：Power of Two Choice
+
+之前的文章[Kratos源码分析：分析 Kratos 中的 Dynamic-Wrr 负载均衡算法的实现](https://pandaychen.github.io/2020/03/11/KRATOS-LB-ALGORITHM-ANALYSIS/)，简单分析了WRR算法的实现思路及解决的场景。那么WRR算法存在哪些问题呢？
+
+从B站的实践经验来看，动态感知的 WRR 算法，利用每次 RPC 请求返回的 Response 夹带 CPU 使用率，尽可能感知到服务负载，并且每隔一段时间整体调整一次节点的权重分数，虽然解决了原生WRR的权重固定的问题，但是存在羊群效应问题：["发现其实是信息滞后和分布式带来的羊群效应"](https://mp.weixin.qq.com/s/OAjcQdQxQzTRRv6q52JPNg)，即
+
+> 就是WRR版本的负载均衡算法虽然会自动刷新权重值，但是在刷新时无法做到完全的实时，再快也不可能超过一个 RTT，都会存在一些信息延迟差。当后台资源比较稀缺时，遇到网络抖动时，就可能会把该节点炸掉，但是在监控上面是感觉不到的，因为 CPU 已经被平均掉了。
+
+从上面的描述看，问题的本质在于gRPC的负载均衡是在客户端实现的，客户端每次请求完获取到服务端CPU数据，可能会存在延迟，在延迟的空档期，大量请求涌入，导致某个后端Node接收大量请求，从而不可用的问题。
 
 ####	WRR (Weighted Round Robin)
 该算法在加权轮询法基础上增加了动态调节权重值，用户可以在为每一个节点先配置一个初始的权重分，之后算法会根据节点 cpu、延迟、服务端错误率、客户端错误率动态打分，在将打分乘用户自定义的初始权重分得到最后的权重值。
@@ -24,6 +32,7 @@ Power of Two Choices (P2C，两次随机选择) 负载均衡算法，主要用�
 
 1.  从可用后端节点列表中做 `2` 次选择操作（随机算法 or 依据一定策略来选择），得到节点 `nodeA`、`nodeB`
 2.  比较 `nodeA`、`nodeB` 两个节点，选出负载最低（一般是正在处理的连接数 / 请求数最少）的节点作为被选中的节点
+
 伪代码如下：
 ```golang
 nodeA = random_choice(nodes)
@@ -78,6 +87,7 @@ P2C 代码实现中大量使用了 EWMA 算法（指数加权移动平均算法�
 感兴趣的可以阅读这篇文章：[指数加权移动平均法（EWMA）](https://www.cnblogs.com/jiangxinyang/p/9705198.html)
 
 EWMA 算法的修正（预测）公式是：
+
 $$Z_i=w*X_{cur} + (1-w)*Z_{i-1}$$
 
 其中，在 P2C 算法中，w 系数按照下面的规则获取：
@@ -267,7 +277,7 @@ func (p *p2cPicker) prePick() (nodeA *subConn, nodeB *subConn) {
 ```
 `picker` 的实现如下，重要部分已加了注释，需要关注的有如下几点信息：
 1.	`DoneInfo()` 是在 RPC 方法执行完成后的回调，主要用于在 gRPC 的 `Trailer` 返回的 `pc` 对应的服务端 CPU 信息，根据此 CPU 信息，更新 `pc` 这个 `subConn` 的相关信息
-2.
+2.	计算权重分数的方法，每次请求来时我们都会更新延迟，并且把之前获得的时间延迟进行权重的衰减，新获得的时间提高权重，这样就实现了滚动更新
 
 ```golang
 func (p *p2cPicker) Pick(ctx context.Context, opts balancer.PickInfo) (balancer.SubConn, func(balancer.DoneInfo), error) {
@@ -505,3 +515,4 @@ func (p *p2cPicker) printStats() {
 ##  0x06	参考
 -	[指数加权移动平均法（EWMA）](https://www.cnblogs.com/jiangxinyang/p/9705198.html)
 -	[Warden Balancer DOC](https://github.com/go-kratos/kratos/blob/master/doc/wiki-cn/warden-balancer.md)
+-	[一场跨年晚会挣了50亿，B站在微服务治理中如何探索与实践？](https://mp.weixin.qq.com/s/OAjcQdQxQzTRRv6q52JPNg)
