@@ -1,10 +1,10 @@
 ---
 layout:     post
 title:      理解 Prometheus 的基本数据类型
-subtitle:
+subtitle:   Prometheus 介绍及基础应用
 date:       2020-04-11
 author:     pandaychen
-header-img:
+header-img: golang-horse-fly.png
 catalog: true
 category:   false
 tags:
@@ -15,7 +15,7 @@ tags:
 这篇文章来分析下 Prometheus 中常用的 Metrics，Metrics 是一种采样数据的总称，是一种对于度量计算单位的抽象。Prometheus 中常见的 Metrics，如 Counters、Counters、Histograms。
 
 ##  0x01    Gauges
-Gauges 理解为（待监控的）瞬时状态，如当前时刻 CPU 的使用率、内存的使用量、硬盘的容量等等。因为此类型的特点是随着时间的推移不断，值（相对而言）没有规则的变化。
+Gauges 理解为（待监控的）瞬时状态，如当前时刻 CPU 的使用率、内存的使用量、硬盘的容量等等。因为此类型的特点是随着时间的推移不断，值（相对而言）没有规则的变化。在Kratos框架中，针对RPC每次请求的延迟（latency）就是一个Gauges，一段时间内的Gauges就组合成了一个[RollingGauges](https://github.com/go-kratos/kratos/blob/master/pkg/stat/metric/rolling_gauge.go#L10)
 
 ![image](https://s1.ax1x.com/2020/04/12/GLSUx0.jpg)
 
@@ -33,6 +33,19 @@ Counter 就是计数器，从数据量 0 开始累计计算，只能增加，或
 
 ![image](https://s1.ax1x.com/2020/04/12/GLilND.png)
 
+同样的，在Kratos中，每个连接上RPC请求的总次数和错误次数，就是一个[Counters](https://github.com/go-kratos/kratos/blob/master/pkg/stat/metric/rolling_counter.go)。
+
+一定要注意的是：不要使用计数器来监控可能减少的值。例如，不要使用计数器来处理当前正在运行的进程数，而应该用Gauge。Counter主要有两个方法：
+```go
+//将counter值加1
+Inc()
+// 将指定值加到counter值上，如果指定值< 0会panic.
+Add(float64)
+```
+
+####    创建Counter
+
+
 ##  0x03    Histograms
 Histograms 意为直方图，Histogram 会在一段时间范围内对数据进行采样（通常是请求持续时间或响应大小等），并将其计入可配置的存储桶（bucket）中。
 
@@ -45,3 +58,5 @@ Histograms的应用意义是什么？
 ##  0x04    参考
 -   [一文搞懂 Prometheus 的直方图](https://juejin.im/post/5d492d1d5188251dff55b0b5)
 -   [如何区分 prometheus 中 Histogram 和 Summary 类型的 metrics？](https://www.cnblogs.com/aguncn/p/9920545.html)
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
