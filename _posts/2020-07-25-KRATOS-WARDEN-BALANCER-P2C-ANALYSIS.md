@@ -76,8 +76,10 @@ best = least_connection_choice([nodeA, nodeB])
 * client_success: 加权移动平均算法计算出的请求成功率（只记录 gRPC 内部错误，比如 context deadline）
 
 ####	权重计算
-
+计算权重的公式如下：
 $$\frac{success*metaWeight}{cpu*\sqrt{lag}*(inflight+1)}$$
+
+这个公式的含义很直观，对权重有积极影响的因子，如成功率，初始权重等，位于分子；对权重有消极影响的因子，如cpu负载（过高）、lag延迟（过大）、以及积压的请求数inflight，放在分母的位置。（为了防止除法溢出，inflight做了加`1`处理）
 
 ####	EWMA 算法简介
 P2C 代码实现中大量使用了 EWMA 算法（指数加权移动平均算法），此算法，是对观察值分别给予不同的权数，按不同权数求得移动平均值，并以最后的移动平均值为基础，确定预测值的方法。采用加权移动平均法，是因为观察期的近期观察值对预测值有较大影响，它更能反映近期变化的趋势。
@@ -236,7 +238,11 @@ func (*p2cPickerBuilder) Build(readySCs map[resolver.Address]balancer.SubConn) b
 `p2c.Picker` 实现了负载均衡的选择逻辑：
 1.	`Pick`：主方法入口
 2.	先调用 `prePick`，选择两个随机的 node
-3.
+3.	最后从上一步的 node 列表中选取一个合适的 node，返回其对应的`subConn`，执行 RPC 请求
+4.	根据RPC请求结果及 node 回带的服务端 CPU 字段信息，更新本 `subConn` 的核心因子信息
+	-	`stamp`
+	-	`success`
+	-	`lag`
 
 `p2cPicker` 结构：
 ```golang
@@ -506,9 +512,6 @@ func (p *p2cPicker) printStats() {
 
 ##	0x05	测试
 我们给关键路径加上日志，看下这里具体参数和值的变化过程，这样对算法能够有更为直观的理解，我们以 etcd 为注册服务，启动三个后端（单个单个启动），观察下数据的变化。
-1.	启动节点 node3（127.0.0.1::8083），再启动客户端：（客户端的日志）
-```bash
-```
 
 
 
