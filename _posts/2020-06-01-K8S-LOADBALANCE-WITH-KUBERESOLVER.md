@@ -42,7 +42,7 @@ gRPC 官方博客的文章 [gRPC Load Balancing](https://grpc.io/blog/grpc-load-
 
 设想一下，有没有一种方法，可以使得我们像使用 Etcd 的 Watch 方法那样，可以监听在某个事件（在 Kubernetes 环境为 Pod）的增删上面呢？翻阅下 Kubernetes 的手册，发现提供查询的 API`/api/v1/watch/namespaces/{namespace}/endpoints/${service}`，这样使得我们可以主动监听某个 Service 下面的 Podlist 变化。
 
-这种方案就是 Watch Endpoint 方式，该方案主要在客户端实现负载均衡，通过 kubernetes API 获取 Service 的 Endpont。客户端和每个 POD 保持一个长连接，然后使用 gRPC Client 的负载均衡策略解决问题。开源项目 [kuberesolver](https://github.com/sercand/kuberesolver) 已经实现了这种方式。在下面的篇幅中会简单分析下该项目的代码。
+这种方案就是 Watch Endpoint 方式，该方案主要在客户端实现负载均衡，通过 kubernetes API 获取 Service 的 Endpont。**客户端和每个 POD 保持一个长连接***，然后使用 gRPC Client 的负载均衡策略解决问题。开源项目 [kuberesolver](https://github.com/sercand/kuberesolver) 已经实现了这种方式。在下面的篇幅中会简单分析下该项目的代码。
 
 ![kuberesolver.png](https://wx2.sbimg.cn/2020/06/15/kuberesolver.png)
 
