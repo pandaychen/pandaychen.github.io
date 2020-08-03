@@ -53,23 +53,17 @@ http://localhost:3033
 http://localhost:3034
 ```
 
-####    ReverseProxy 的使用
-负载均衡器的作用是将流量负载分发到后端的服务器上，并将结果返回给客户端。Golang 标准库中的 ReverseProxy 就是这么一种 HTTP 处理器，它接收入向请求，将请求发送给另一个服务器，然后将响应发送回客户端。
-						使用 ReverseProxy
-			之前说过，负载均衡器的作用是将流量负载分发到后端的服务器上，并将结果返回给客户端。
-			根据 Go 语言文档的描述：
-			ReverseProxy 是一种 HTTP 处理器，它接收入向请求，将请求发送给另一个服务器，然后将响应发送回客户端。
-			这刚好是我们想要的，所以我们没有必要重复发明轮子。我们可以直接使用 ReverseProxy 来中继初始请求。
-			u, _ := url.Parse("http://localhost:8080")
-			rp := httputil.NewSingleHostReverseProxy(u)
+####    ReverseProxy 的用法
+负载均衡器的作用是将流量负载分发到后端的服务器上，并将结果返回给客户端。Golang 标准库中的 ReverseProxy 就是这么一种 HTTP 处理器，它接收入向请求，将请求发送给另一个服务器，然后将响应发送回客户端。根据 Golang 文档的 [描述](https://golang.org/src/net/http/httputil/reverseproxy.go)：
 
-			// 初始化服务器，并添加处理器
-			http.HandlerFunc(rp.ServeHTTP)
-			我们使用 httputil.NewSingleHostReverseProxy(url) 初始化一个反向代理，这个反向代理可以将请求中继到指定的 url。在上面的例子中，所有的请求都会被中继到 localhost:8080，结果被发送给初始客户端。
-			如果看一下 ServeHTTP 方法的签名，我们会发现它返回的是一个 HTTP 处理器，所以我们可以将它传给 http 的 HandlerFunc。
-			在我们的例子中，可以使用 Backend 里的 URL 来初始化 ReverseProxy，这样反向代理就会把请求路由给指定的 URL。
+```golang
+u, _ := url.Parse("http://localhost:8080")
+rp := httputil.NewSingleHostReverseProxy(u)
+// 初始化服务器，并添加处理器
+http.HandlerFunc(rp.ServeHTTP)
+```
 
-
+如上面的例子，使用 `httputil.NewSingleHostReverseProxy(url)` 初始化一个反向代理，这个反向代理可以将请求中继到指定的 url。在上面的例子中，所有的请求都会被中转到 `localhost:8080`，结果被发送给初始客户端。如果看一下 `ServeHTTP` 方法的签名，我们会发现它返回的是一个 HTTP 处理器，所以我们可以将它传给 http 的 `HandlerFunc`。在上面的例子中，可以使用 Backend 后端节点中的 url 来初始化 `ReverseProxy`，这样反向代理就会把请求路由给指定的 url
 
 ##  0x03    Http-Gateway 代码分析
 我们按照如下的模块来分析：
