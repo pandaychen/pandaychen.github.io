@@ -17,7 +17,7 @@ tags:
 ![image](https://wx2.sbimg.cn/2020/05/22/http-lb1.png)
 
 ##  0x01    目标拆解
-我们从要实现的功能及目标出发，来拆解一个 ** 高可用 ** 的（反向代理）网关，需要支持哪些功能？
+我们从要实现的功能及目标出发，来拆解一个 **高可用** 的（反向代理）网关，需要支持哪些功能？
 
 ![image](https://wx2.sbimg.cn/2020/05/22/http-lb-all-part.png)
 
@@ -40,12 +40,12 @@ tags:
 ##  0x02    Http-Gateway 及使用
 [Let's Create a Simple Load Balancer With Go](https://kasvith.me/posts/lets-create-a-simple-lb-go/) 实现了一个短小精悍的 HTTP 反向代理网关，它所采用的技术有如下几点：
 1.  使用 Go 语言标准库的 `ReverseProxy` 作为代理逻辑（可以自行实现）
-2.  使用闭包和递归方式完成`ReverseProxy`的错误重试逻辑
+2.  使用闭包和递归方式完成 `ReverseProxy` 的错误重试逻辑
 3.  实现了主动和被动的健康度检查机制
 
 
 ####    使用
-创建`4`个后端节点，使用`./simplelb --backends=http://localhost:3031,http://localhost:3032,http://localhost:3033,http://localhost:3034`启动代理网关。
+创建 `4` 个后端节点，使用 `./simplelb --backends=http://localhost:3031,http://localhost:3032,http://localhost:3033,http://localhost:3034` 启动代理网关。
 ```bash
 http://localhost:3031
 http://localhost:3032
@@ -53,9 +53,23 @@ http://localhost:3033
 http://localhost:3034
 ```
 
-####    ReverseProxy的使用
+####    ReverseProxy 的使用
 负载均衡器的作用是将流量负载分发到后端的服务器上，并将结果返回给客户端。Golang 标准库中的 ReverseProxy 就是这么一种 HTTP 处理器，它接收入向请求，将请求发送给另一个服务器，然后将响应发送回客户端。
-这刚好是我们想要的，所以我们没有必要重复发明轮子。我们可以直接使用 ReverseProxy 来中继初始请求。
+						使用 ReverseProxy
+			之前说过，负载均衡器的作用是将流量负载分发到后端的服务器上，并将结果返回给客户端。
+			根据 Go 语言文档的描述：
+			ReverseProxy 是一种 HTTP 处理器，它接收入向请求，将请求发送给另一个服务器，然后将响应发送回客户端。
+			这刚好是我们想要的，所以我们没有必要重复发明轮子。我们可以直接使用 ReverseProxy 来中继初始请求。
+			u, _ := url.Parse("http://localhost:8080")
+			rp := httputil.NewSingleHostReverseProxy(u)
+
+			// 初始化服务器，并添加处理器
+			http.HandlerFunc(rp.ServeHTTP)
+			我们使用 httputil.NewSingleHostReverseProxy(url) 初始化一个反向代理，这个反向代理可以将请求中继到指定的 url。在上面的例子中，所有的请求都会被中继到 localhost:8080，结果被发送给初始客户端。
+			如果看一下 ServeHTTP 方法的签名，我们会发现它返回的是一个 HTTP 处理器，所以我们可以将它传给 http 的 HandlerFunc。
+			在我们的例子中，可以使用 Backend 里的 URL 来初始化 ReverseProxy，这样反向代理就会把请求路由给指定的 URL。
+
+
 
 ##  0x03    Http-Gateway 代码分析
 我们按照如下的模块来分析：
@@ -144,21 +158,91 @@ func (s *ServerPool) HealthCheck() {
 
 ####  主入口
 主函数的逻辑如下：
-1.  遍历初始化传入的后端节点`serverList`，初始化`proxy`及错误处理函数`proxy.ErrorHandler`
+1.  遍历初始化传入的后端节点 `serverList`，初始化 `proxy` 及错误处理函数 `proxy.ErrorHandler`
 2.  初始化代理服务
-3.  开启健康探测子goroutine
+3.  开启健康探测子 goroutine
 4.  启动代理服务网关
 
+```golang
+func main() {
+	// 遍历传入的后端节点
+	for _, tok := range tokens {
+		serverUrl, err := url.Parse(tok)
+		if err != nil {
+			log.Fatal(err)
+		}
 
-####   出错重试 
+		// 初始化服务器，并添加处理器
+        proxy := httputil.NewSingleHostReverseProxy(serverUrl)
+        // 在发生错误时，ReverseProxy 会触发 ErrorHandler 回调函数，我们可以利用它来检查故障及实现重试逻辑
+		proxy.ErrorHandler = func(writer http.ResponseWriter, request *http.Request, e error) {
+			log.Printf("[%s] %s\n", serverUrl.Host, e.Error())
+            retries := GetRetryFromContext(request)
+            // 检查是否达到了最大的重试上限
+            // 检查重试次数，如果小于 3，就把同一个请求发送给同一个后端服务器
+			if retries < 3 {
+                // 从请求里拿到重试次数，如果已经达到最大上限，就终结这个请求
+				select {
+                case <-time.After(10 * time.Millisecond):
+                    // 进行重试的逻辑
+                    // 因为服务器可能会发生临时错误，在经过短暂的延迟（比如服务器没有足够的 socket 来接收请求）之后，服务器又可以继续处理请求
+                    // 这里使用了 case 计时器触发的逻辑，把重试时间间隔设定在 10 ms 左右，10ms 后 case 被触发执行
+					ctx := context.WithValue(request.Context(), Retry, retries+1)
+					proxy.ServeHTTP(writer, request.WithContext(ctx))
+				}
+				return
+			}
 
-在发生错误时，ReverseProxy 会触发 ErrorHandler 回调函数，本文利用它来检查故障。这里我们详细分析下`ReverseProxy`的`proxy.ErrorHandler`的定义，在这里完成对出错重试的核心逻辑。代码如下：
+			// 在三次重试之后，把这个后端标记为宕机
+			serverPool.MarkBackendStatus(serverUrl, false)
+
+			// if the same request routing for few attempts with different backends, increase the count
+			//// 同一个请求在尝试了几个不同的后端之后，增加计数
+			attempts := GetAttemptsFromContext(request)
+            log.Printf("%s(%s) Attempting retry %d\n", request.RemoteAddr, request.URL.Path, attempts)、
+            // 使用 context 来维护重试次数，在增加重试次数后，我们把它传回 lb，选择一个新的后端来处理请求
+			ctx := context.WithValue(request.Context(), Attempts, attempts+1)
+
+			// 注意这个 lb 方法，采用了递归方式来处理重试逻辑！
+			lb(writer, request.WithContext(ctx))
+		}
+
+		serverPool.AddBackend(&Backend{
+			URL:          serverUrl,
+			Alive:        true,
+			ReverseProxy: proxy,
+		})
+		log.Printf("Configured server: %s\n", serverUrl)
+	}
+
+	// create http server
+	server := http.Server{
+		Addr: fmt.Sprintf(":%d", port),
+		// 这个方法可以作为 HandlerFunc 传给 http 服务器
+		Handler: http.HandlerFunc(lb),
+	}
+
+	// start health checking
+	// 使用单独的 goroutine 来执行
+	go healthCheck()
+
+	log.Printf("Load Balancer started at :%d\n", port)
+	if err := server.ListenAndServe(); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+
+####   出错重试
+
+在发生错误时，ReverseProxy 会触发 ErrorHandler 回调函数，本文利用它来检查故障。这里我们详细分析下 `ReverseProxy` 的 `proxy.ErrorHandler` 的定义，在这里完成对出错重试的核心逻辑。代码如下：
 重试的逻辑是：
-1.  获取一个后端节点BackendNode1
-2.  使用重试`GetRetryFromContext`加上`proxy.ServeHTTP(writer, request.WithContext(ctx))`的方法尝试代理请求
-3.  在第`2`步出错时，主动标识此后端节点BackendNode1为`Failed`
-4.  利用递归的方式，使用RoundRobin方法拿到下一个后端节点BackendNode2，然后再使用`lb`方法继续尝试代理请求，直到尝试完所有的节点或者成功时，退出
-（第`4`步是在`lb`方法中，获取到其他的后端节点BackendNode2，然后执行和`proxy.ErrorHandler`中相同的逻辑）
+1.  获取一个后端节点 BackendNode1
+2.  使用重试 `GetRetryFromContext` 加上 `proxy.ServeHTTP(writer, request.WithContext(ctx))` 的方法尝试代理请求
+3.  在第 `2` 步出错时，主动标识此后端节点 BackendNode1 为 `Failed`
+4.  利用递归的方式，使用 RoundRobin 方法拿到下一个后端节点 BackendNode2，然后再使用 `lb` 方法继续尝试代理请求，直到尝试完所有的节点或者成功时，退出
+（第 `4` 步是在 `lb` 方法中，获取到其他的后端节点 BackendNode2，然后执行和 `proxy.ErrorHandler` 中相同的逻辑）
 
 ```golang
 serverUrl, err := url.Parse("代理的后端节点")
@@ -189,7 +273,7 @@ proxy.ErrorHandler = func(writer http.ResponseWriter, request *http.Request, e e
 ```
 
 上面这段代码，有几点是可以借鉴的：
--   对`context`的使用，使用`context`保存了递归调用的（变量）信息，如下：
+-   对 `context` 的使用，使用 `context` 保存了递归调用的（变量）信息，如下：
 更新数据：`ctx := context.WithValue(request.Context(), Retry, retries+1)`
 读取数据：
 
@@ -198,7 +282,7 @@ const (
 	Attempts int = iota
 	Retry
 )
-//取数据
+// 取数据
 func GetRetryFromContext(r *http.Request) int {
   if retry, ok := r.Context().Value(Retry).(int); ok {
     return retry
@@ -214,8 +298,14 @@ func GetAttemptsFromContext(r *http.Request) int {
 }
 ```
 
-##  健康度检查
-在主函数中开启了单独的 routine 来实现健康度检查，`healthCheck`：
+####  健康度检查
+本项目中实现了两种健康检查机制：
+-   主动（Active）方式：在处理当前请求时，如果发现当前的后端节点没有响应，就把它标记为已宕机
+-   被动（Passive）方式：定时内对后端节点执行 ping 操作，以此来检查（并更新）服务器的状态
+
+主动方式是上面 `proxy.ErrorHandler` 中定义的 `MarkBackendStatus` 方式，这里看下被动方式的实现：
+
+在主函数中开启了单独的 goroutine 来实现健康度检查，`healthCheck`：
 ```golang
 // healthCheck runs a routine for check status of the backends every 2 mins
 // healthCheck 返回一个 routine，每 2 分钟检查一次后端的状态
@@ -226,7 +316,7 @@ func healthCheck() {
 		select {
 		case <-t.C:
             log.Println("Starting health check...")
-            //调用serverpool的HealthCheck实现
+            // 调用 serverpool 的 HealthCheck 实现
 			serverPool.HealthCheck()
 			log.Println("Health check completed")
 		}
@@ -234,20 +324,19 @@ func healthCheck() {
 }
 ```
 
-此外，本文提供了健康度检查的被动方式`isBackendAlive`，被动模式就是定时对后端执行 ping 操作，以此来检查后端节点的状态：
-1.  提供了简单的端口拨测来验证BackendNode的连通性
-2.  
+被动方式的实现 `isBackendAlive`，定时对后端执行 `Dial` 操作，以此来检查后端节点的状态（当然也可以使用 `wget`，在主函数中实现健康检查的 CGI 逻辑即可）
+1.  提供了简单的端口拨测来验证 BackendNode 的连通性
+2.  执行完操作后要关闭连接，避免消耗服务端的资源
+3.  注意控制健康检查的频率（不加控制的话有可能会影响服务端的正常服务）
+
 ```golang
-我们通过建立 TCP 连接来执行 ping 操作。如果后端及时响应，我们就认为它还活着。
-当然，如果你喜欢，也可以改成直接调用某个端点，比如 /status。
-切记，在执行完操作后要关闭连接，避免给服务器造成额外的负担，否则服务器会一直维护连接，最后把资源耗尽。
 // isAlive 通过建立 TCP 连接检查后端是否还活着
 func isBackendAlive(u *url.URL) bool {
 	timeout := 2 * time.Second
-	//只是简单的dial，可以加上更多逻辑，如自定义url，cpu、memory使用率等
+	// 只是简单的 dial，可以加上更多逻辑，如自定义 url，cpu、memory 使用率等
 	conn, err := net.DialTimeout("tcp", u.Host, timeout)
 	if err != nil {
-		log.Println("Site unreachable, error: ", err)
+		log.Println("Site unreachable, error:", err)
 		return false
 	}
 	_ = conn.Close() // 不需要维护连接，把它关闭
@@ -255,13 +344,13 @@ func isBackendAlive(u *url.URL) bool {
 }
 ```
 
-####    LB负载均衡的实现
-在主入口中定义了负载均衡的逻辑`lb`，`lb` 对入向请求进行负载均衡，这个方法可以作为 HandlerFunc 传给 http 服务器。
-`lb`的核心逻辑是从`serverPool`中拿到一个可用的后端节点`peer`，然后代理真正的请求`peer.ReverseProxy.ServeHTTP(w, r)`，通过`GetAttemptsFromContext`来实现错误的重试逻辑
+####    LB 负载均衡的实现
+在主入口中定义了负载均衡的逻辑 `lb`，`lb` 对入向请求进行负载均衡，这个方法可以作为 HandlerFunc 传给 http 服务器。
+`lb` 的核心逻辑是从 `serverPool` 中拿到一个可用的后端节点 `peer`，然后代理真正的请求 `peer.ReverseProxy.ServeHTTP(w, r)`，通过 `GetAttemptsFromContext` 来实现错误的重试逻辑
 ```golang
 server := http.Server{
     Addr:    fmt.Sprintf(":%d", port),
-    Handler: http.HandlerFunc(lb),		//lb的参数，为输入和输出
+    Handler: http.HandlerFunc(lb),		//lb 的参数，为输入和输出
 }
 
 
@@ -273,9 +362,10 @@ func lb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+    // GetNextPeer 返回下一个可用的服务器
 	peer := serverPool.GetNextPeer()
 	if peer != nil {
-		//注意，这里使用了递归（实现使用了递归）
+		// 注意，这里使用了递归（实现使用了递归）
 		peer.ReverseProxy.ServeHTTP(w, r)
 		return
 	}
@@ -283,63 +373,41 @@ func lb(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-serverPool提供的`GetNextPeer`方法如下：
+serverPool 提供的 `GetNextPeer` 方法使用 RoundRobin 方式选择下一个节点，使用 `atomic` 操作来保证操作 `s.current` 的原子性：`atomic.AddUint64(&s.current, uint64(1))`，使用 `IsAlive` 方法来确定当前的节点是否 ok，选中节点后再次调用 `atomic` 更新 `s.current` 的值：
 ```golang
-
-// NextIndex atomically increase the counter and return an index
-//遍历一遍 slice，如上图所示，我们将从 next 位置开始遍历整个列表，但在选择索引时，需要保证它处在 slice 的长度之内，这个可以通过取模运算来保证。
-
 func (s *ServerPool) NextIndex() int {
-	/*
-			在选择下一个服务器时，我们需要跳过已经死掉的服务器，但不管怎样，我们都需要一个计数器。
-		因为有很多客户端连接到负载均衡器，所以发生竟态条件是不可避免的。为了防止这种情况，我们需要使用 mutex 给 ServerPool 加锁。但这样做对性能会有影响，更何况我们并不是真想要给 ServerPool 加锁，我们只是想要更新计数器。
-		最理想的解决方案是使用原子操作，Go 语言的 atomic 包为此提供了很好的支持。
-		我们通过原子操作递增 current 的值，并通过对 slice 的长度取模来获得当前索引值。所以，返回值总是介于 0 和 slice 的长度之间，毕竟我们想要的是索引值，而不是总的计数值。
-	*/
 	return int(atomic.AddUint64(&s.current, uint64(1)) % uint64(len(s.backends)))
 }
-// GetNextPeer returns next active peer to take a connection
-/*
-	我们需要循环将请求路由到后端的每一台服务器上，但要跳过已经死掉的服务。
-GetNext() 方法总是返回一个介于 0 和 slice 长度之间的值，如果这个值对应的服务器不可用，我们需要遍历一遍 slice。
-
-遍历一遍 slice
-如上图所示，我们将从 next 位置开始遍历整个列表，但在选择索引时，需要保证它处在 slice 的长度之内，这个可以通过取模运算来保证。
-在找到可用的服务器后，我们将它标记为当前可用服务器。
-*/
-// GetNextPeer 返回下一个可用的服务器
-//选择可用的后端，我们需要循环将请求路由到后端的每一台服务器上，但要跳过已经死掉的服务。GetNext() 方法总是返回一个介于 0 和 slice 长度之间的值，如果这个值对应的服务器不可用，我们需要遍历一遍 slice。
 
 func (s *ServerPool) GetNextPeer() *Backend {
 	// loop entire backends to find out an Alive backend
 	// 遍历后端列表，找到可用的服务器
 	next := s.NextIndex()
-	l := len(s.backends) + next // start from next and move a full cycle
+	l := len(s.backends) + next
 	// 从 next 开始遍历
 	for i := next; i < l; i++ {
-		idx := i % len(s.backends) // take an index by modding
+		idx := i % len(s.backends)
 		// 通过取模计算获得索引
 		// 如果找到一个可用的服务器，将它作为当前服务器。如果不是初始的那个，就把它保存下来
-		if s.backends[idx].IsAlive() { // if we have an alive backend, use it and store if its not the original one
+		if s.backends[idx].IsAlive() {
 			// 标记当前可用服务器
 			if i != next {
-				//在找到可用的服务器后，我们将它标记为当前可用服务器。
-				atomic.StoreUint64(&s.current, uint64(idx)) //标记当前可用服务器
+				// 在找到可用的服务器后，我们将它标记为当前可用服务器。
+				atomic.StoreUint64(&s.current, uint64(idx)) // 标记当前可用服务器
 			}
 			return s.backends[idx]
 		}
 	}
 	return nil
 }
-
 ```
 
-##  总结
-本文介绍了实现代理均衡网关的一般思路及模块拆解，分析了一款开源的反向代理网关的实现。不过本文介绍的网关实现不太适合在现网使用，现网的LB网关使用的话推荐一下几个项目（基于golang）：
+##  0x04    总结
+本文介绍了实现代理均衡网关的一般思路及模块拆解，分析了一款开源的反向代理网关的实现。不过本文介绍的网关实现不太适合在现网使用，现网的 LB 网关使用的话推荐一下几个项目（基于 golang）：
 -   [manba：Manba is a restful API gateway based on HTTP, which can be used as a unified API access layer.](https://github.com/fagongzi/manba)
 -   [Vulcand Gateway](https://github.com/vulcand/vulcand)
 
-##  参考
+##  0x05    参考
 -   [Let's Create a Simple Load Balancer With Go](https://kasvith.me/posts/lets-create-a-simple-lb-go/)
 -   [Gobetween - Introduction](http://gobetween.io/documentation.html)
 -   [Yet another load balancer](https://github.com/onestraw/golb)
