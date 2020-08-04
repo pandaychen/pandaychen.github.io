@@ -4,30 +4,41 @@ title:      一个安全的 Web-Console 的实现思路
 subtitle:   使用 xterm.js+Go-gin 实现 Web-Console 的 SSH 登录
 date:       2019-10-29
 author:     pandaychen
+header-img: img/super-mario.jpg
 catalog:    true
 tags:
     - WebConsole
 ---
 
 ##  0x00    基础
-本文将描述如何实现一个具备安全认证的 WebConsole，基于 Golang-SSH 库实现。WebConsole 的核心实现是打通了 WebSocket`+`SSH 的输入输出流，非常适合于轻便运维的场景。WebSocket 基于 TCP 传输协议，并复用 HTTP 的握手通道。
+本文将描述如何实现一个具备安全认证的 WebConsole，基于 [Golang-SSH 库](https://godoc.org/golang.org/x/crypto/ssh) 实现。WebConsole 的核心实现是打通了 WebSocket`+`SSH 的输入输出流，使得用户直接使用浏览器就可以运行 SSH 终端，非常适合于轻便运维的场景。WebSocket 基于 TCP 传输协议，并复用 HTTP 的握手通道，关于 WebSocket 和 Golang 的开发可以参见：[How to Use Websockets in Golang: Best Tools and Step-by-Step Guide](https://yalantis.com/blog/how-to-build-websockets-in-go/)。
 
-##  Web-console 数据流
+##  0x01    WebConsole 数据流
 一个具备远程登陆的功能的 Web-Console，其数据流向大概如下：<br>
-User<--->Browser<--->WebSocket<--->SSH<--->(TTY)RemoteServer
+User`<--->`Browser`<--->`WebSocket`<--->`SSH`<--->`(TTY)RemoteServer
 
-## 认证
-作为一个 SSH 登陆系统，认证是及其重要的一环，我们将上面的数据流扩展下：<br>
+####    数据流
+中间的 Proxy 代理层，负责将 websocket 流转换为 SSH 流（核心是输入和输出的转发）：
+
+![image](https://s2.ax1x.com/2019/11/06/MP6Zfs.png)
+
+![image](https://wx1.sbimg.cn/2020/08/04/oMP4j.png)
+
+
+
+
+##  0x02    实现
+作为一个 SSH 登陆系统，认证是及其重要的一环，我们将上面的数据流扩展下，加入必要的身份 / 票据认证：<br>
 (少一张图)
 
-##  实现组件
+####  组件
 
 1.  CGI+WEB，采用开源的框架 [Gin](https://github.com/gin-gonic/gin) 实现
 2.  [Websocket](https://github.com/gorilla/websocket)
 3.  [SSH](https://godoc.org/golang.org/x/crypto/ssh)
 4.  认证我们采用临时（一次性）Token 兑换真实 Token（如 SSH 证书 / 秘钥 / 口令等）的方式，这种方式简单易理解，当然了也可以使用 OAuth2/OpenID 这种标准协议
 
-##  基本实现流程
+####  基本实现流程
 1.  用户 A 申请某一台机器的登录权限，后台服务返回一个一次性 token 构造的 url 给用户，如 `https://1.2.3.4/cgi-bin/webconsole/check?token=token1`（这里假设以 GET 方式请求）；
 
 2.  在 IOA 认证（为了获取合法用户的身份信息）的前提下，用户使用浏览器访问上述登录 url, 后台服务先校验用户 cookies 及 HTTP 签名，然后再校验 token1 是否合法（使用次数 + 有效时间）；
@@ -43,12 +54,12 @@ User<--->Browser<--->WebSocket<--->SSH<--->(TTY)RemoteServer
 6.  后台服务从 SSH Channel 中拿到按照终端大小的标准输出后又通过 Socket 连接将输出返回给浏览器，至此一个 Web Terminal 建立成功。
 
 
-##  一些实现代码细节
+##  0x03    一些实现代码细节
 
-对 tcp 连接的升级，这是 Golang 非常常见的用法
 
-### 升级 TCP 连接为 SSH 连接
-``` go
+####    升级 TCP 连接为 SSH 连接
+对 Tcp 连接进行升级，这是 Golang 中非常常见的做法：
+```golang
 tcpConn, err := listener.Accept()
 if err != nil {
     log.Printf("failed to accept incoming connection (%s)", err)
@@ -62,7 +73,7 @@ if err != nil {
 }
 ```
 
-### 升级 HTTP 连接为 Web Socket
+####    升级 HTTP 连接为 Web Socket
 定义常量，web socket 升级器:
 ``` go
 var upgrader = websocket.Upgrader{
@@ -80,31 +91,31 @@ if err != nil {
 }
 ```
 
-###  WebTerminal 数据流
-![image](https://s2.ax1x.com/2019/11/06/MP6Zfs.png)
 
-### SSH 的 Client/Channel/Request
+####    SSH 的层次结构 Client/Channel/Request
 下图直观展示了 SSH 的架构：
-![image](https://s2.ax1x.com/2019/11/05/KzgajS.png)
--   Client:
-实现了 SSH 抽象的客户端
 
+![image](https://s2.ax1x.com/2019/11/05/KzgajS.png)
+
+-   Client: 实现了 SSH 抽象的客户端
 -   Channel 和 Request:
-[SSH Channel 的实现](https://github.com/golang/crypto/blob/master/ssh/connection.go#L50)
-[SSH Requests 的实现](https://github.com/golang/crypto/blob/57b3e21c3d5606066a87e63cfe07ec6b9f0db000/ssh/messages.go)
-[SSH Conection 的实现](https://github.com/golang/crypto/blob/master/ssh/connection.go)
+    -   [SSH Channel 的实现](https://github.com/golang/crypto/blob/master/ssh/connection.go#L50)
+    -   [SSH Requests 的实现](https://github.com/golang/crypto/blob/master/ssh/messages.go)
+    -   [SSH Conection 的实现](https://github.com/golang/crypto/blob/master/ssh/connection.go)
+
 这二者是 SSH 协议里面的链接层, 该层主要是将多个加密隧道分成逻辑通道，通道可以复用
 常见通道类型有：`session`、`x11`、`forwarded-tcpip`、`direct-tcpip`。通道里面的 Requests 是用于接收创建 SSH Channel 的请求的，而 SSH Channel 就是里面的 Connection, 数据的交互基于 Connection 完成。<br>
 
-### 构建非交互式 SSH 客户端
+####    构建非交互式 SSH 客户端
 现在看下如何创建一个非交互式的 SSH 客户端，作为 WebConsole 和用户的交互模块
 
 1. 通过 `ssh.Dial()` 创建一个 SSH 客户端连接
-``` go
+``` golang
 sshclient,err = ssh.Dial("tcp", addr, clientConfig)
 ```
+
 2. 通过 SSH 客户端创建 SSH Channel, 并请求一个 pty 伪终端, 并开启用户的默认 Shell
-``` go
+``` golang
 channel, inRequests, err := sshclient.OpenChannel("session", nil)
 if err != nil {
     log.Println(err)
@@ -123,10 +134,10 @@ if !ok || err != nil {
 }
 ```
 
-### Remote Server 与 Browser 实时数据交换
+####    Remote Server 与 Browser 实时数据交换
 现在为止建立了两个 `IO` 通道，一个是 WebSocket，另外一个是 SSH Channel。由于需要双向转发数据，这里新建 `2` 个 `groutine`, `groutine1` 不停的从 WebSocket 通道里读取用户的输入, 并通过 SSH Channel 传给远程主机。`groutine2` 负责将远程主机的数据（主要是终端屏显数据）传递给浏览器。
 -   groutine1
-``` go
+``` golang
 go func() {
     for {
         // p 为用户输入
@@ -143,7 +154,7 @@ go func() {
 }()
 ```
 -   groutine2:
-``` go
+``` golang
 go func() {
     br := bufio.NewReader(this.channel)
     buf := []byte{}
@@ -199,13 +210,14 @@ go func() {
 }()
 ```
 
-##  登录效果验证
+##  0x04    登录效果验证
 直接在浏览器中输入已认证的 url，成功通过 WebConsole 连上远端的 SSH 服务器，大功告成 <br>
 ![image](https://s2.ax1x.com/2019/11/01/KHvxHS.png)
 
 
-##  后记
+##  0x05    总结
 1.  在整个系统中，最关键的点是怎样防止用户的身份被伪造，直观点，就是在第 2 步中，后台服务如何确定，当前的接口调用方就是用户 A。另外，我们如何解决共享权限的场景，假设 A 申请了某台机器的登录权限，假设 A 授权 B 也可以使用该票据登录，那么我们的系统的认证如何完成呢？这个是很有趣的问题，待后面在工作中慢慢思考和实现吧。
 2.  此外，作为 SSH 连接代理的服务（本文中以 `CGI` 服务承担）的稳定性也很重要，因为 WebConsole 的所有流量都会经由 SSH 连接代理转发，TCP 连接也由代理维持，一旦代理故障，所有的 WebConsole 连接都会断开，所以可用性的设计也是非常重要的一环。
+
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
