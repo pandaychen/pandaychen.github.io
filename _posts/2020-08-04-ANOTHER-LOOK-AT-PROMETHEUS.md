@@ -166,7 +166,8 @@ func main() {
 ```
 
 ##  0x05	抽象 Exportor 的实现步骤
-1、定义指标及初始化方法
+1、定义指标及初始化方法<br>
+
 定义指标就是创建指标的描述符，通常把要采集的指标描述符放在一个结构体里，如下我们定义了一个指标 `fooCollector`，其中包含了两种类型的数据 `fooMetric` 和 `barMetric`：
 
 ```golang
@@ -231,7 +232,7 @@ func (collector *fooCollector) Collect(ch chan<- prometheus.Metric) {
 }
 ```
 
-三、注册指标及启动 `promHTTP` 服务
+3、注册指标及启动 `promHTTP` 服务
 这里在主函数中注册上面自定义的指标，注册成功之后，启动 HTTP 服务器，这样就完成了自定义的 Exportor 服务。
 ```golang
 func main() {
