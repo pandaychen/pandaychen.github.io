@@ -93,8 +93,7 @@ expire of key is 100
 ```
 
 
-不过，在 [V7 版本](https://github.com/go-redis/redis/blob/736fa2865992feedee4f744ff3e6e5d2c27a17f3/CHANGELOG.md) 中，该方法已经被替换为 [`AddHook`](
-(https://github.com/go-redis/redis/blob/master/redis.go#L44)：
+不过，在 [V7 版本](https://github.com/go-redis/redis/blob/736fa2865992feedee4f744ff3e6e5d2c27a17f3/CHANGELOG.md) 中，该方法已经被替换为 [`AddHook`](https://github.com/go-redis/redis/blob/master/redis.go#L44)：
 >   WrapProcess is replaced with more convenient AddHook that has access to context.Context.
 
 ```golang
