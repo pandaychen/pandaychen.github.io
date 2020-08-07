@@ -23,7 +23,8 @@ Prometheus 的应用接入其实并不复杂，通常按照如下几个步骤来
 以上几步即可完成在项目应用中将指标暴露给 Prometheus。
 
 ##	0x02	Exporter 简介
-Exporter 是一个采集监控数据并通过 Prometheus 监控规范对外提供数据的组件，它负责从目标处（Your 服务）搜集数据，并将其转化为 Prometheus 支持的格式。Prometheus 会周期性地调用 Exporter 提供的 metrics 数据接口来获取数据。那么使用 Exporter 的好处是什么？<br>
+Exporter 是一个采集监控数据并通过 Prometheus 监控规范对外提供数据的组件，它负责从目标处（Your 服务）搜集数据，并将其转化为 Prometheus 支持的格式。Prometheus 会周期性地调用 Exporter 提供的 metrics 数据接口来获取数据。那么使用 Exporter 的好处是什么？
+<br><br>
 举例来说，如果要监控 Mysql/Redis 等数据库，我们必须要调用它们的接口来获取信息（前提要有），这样每家都有一套接口，这样非常不通用。所以 Prometheus 做法是每个软件做一个 Exporter，Prometheus 的 Http 读取 Exporter 的信息（将监控指标进行统一的格式化并暴露出来）。简单类比，Exporter 就是个翻译，把各种语言翻译成一种统一的语言。
 
 
@@ -165,7 +166,7 @@ func main() {
 ```
 
 ##  0x05	抽象 Exportor 的实现步骤
-1.  定义指标及初始化方法
+-	定义指标及初始化方法
 定义指标就是创建指标的描述符，通常把要采集的指标描述符放在一个结构体里，如下我们定义了一个指标 `fooCollector`，其中包含了两种类型的数据 `fooMetric` 和 `barMetric`：
 
 ```golang
@@ -198,7 +199,7 @@ func newFooCollector() *fooCollector {
 }
 ```
 
-2.  实现数据采集（核心）
+-	实现数据采集（核心）
 数据采集需要实现 Collector 的两个接口：
 -   `Describe`：告诉 `prometheus` 我们定义了哪些 `prometheus.Desc` 结构，通过 `channel` 传递给上层
 -   `Collect`：真正实现数据采集的功能，将采集数据结果通过 channel 传递给上层
@@ -234,7 +235,7 @@ func (collector *fooCollector) Collect(ch chan<- prometheus.Metric) {
 }
 ```
 
-3.  注册指标及启动 `promHTTP` 服务
+-	注册指标及启动 `promHTTP` 服务
 这里在主函数中注册上面自定义的指标，注册成功之后，启动 HTTP 服务器，这样就完成了自定义的 Exportor 服务。
 ```golang
 func main() {
@@ -256,7 +257,7 @@ func main() {
 
 ##  0x07	参考
 -   [WRITING EXPORTERS](https://prometheus.io/docs/instrumenting/writing_exporters/)
--   [](https://prometheus.io/docs/guides/go-application/)
+-   [INSTRUMENTING A GO APPLICATION FOR PROMETHEUS](https://prometheus.io/docs/guides/go-application/)
 -   [EXPORTERS AND INTEGRATIONS](https://prometheus.io/docs/instrumenting/exporters/)
 -   [Go 语言开发 Prometheus Exporter 示例](https://blog.csdn.net/lisong694767315/article/details/81743555)
 -   [Building a custom Prometheus exporter](https://blog.skyrise.tech/custom-prometheus-exporter)
