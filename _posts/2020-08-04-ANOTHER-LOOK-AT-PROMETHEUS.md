@@ -166,7 +166,7 @@ func main() {
 ```
 
 ##  0x05	抽象 Exportor 的实现步骤
--	定义指标及初始化方法
+1、定义指标及初始化方法
 定义指标就是创建指标的描述符，通常把要采集的指标描述符放在一个结构体里，如下我们定义了一个指标 `fooCollector`，其中包含了两种类型的数据 `fooMetric` 和 `barMetric`：
 
 ```golang
@@ -199,7 +199,7 @@ func newFooCollector() *fooCollector {
 }
 ```
 
--	实现数据采集（核心）
+2、实现数据采集（核心）
 数据采集需要实现 Collector 的两个接口：
 -   `Describe`：告诉 `prometheus` 我们定义了哪些 `prometheus.Desc` 结构，通过 `channel` 传递给上层
 -   `Collect`：真正实现数据采集的功能，将采集数据结果通过 channel 传递给上层
@@ -207,11 +207,9 @@ func newFooCollector() *fooCollector {
 注意：`Collect` 中完成的就是每个指标的采集，必须保证这里的数据是动态更新的，每一次调用 `curl http://127.0.0.1:8080/metrics` 都会触发对 `Collect` 方法的调用
 
 ```golang
-
 //Each and every collector must implement the Describe function.
 //It essentially writes all descriptors to the prometheus desc channel.
 func (collector *fooCollector) Describe(ch chan<- *prometheus.Desc) {
-
 	//Update this section with the each metric you create for a given collector
 	ch <- collector.fooMetric
 	ch <- collector.barMetric
@@ -219,7 +217,6 @@ func (collector *fooCollector) Describe(ch chan<- *prometheus.Desc) {
 
 //Collect implements required collect function for all promehteus collectors
 func (collector *fooCollector) Collect(ch chan<- prometheus.Metric) {
-
 	//Implement logic here to determine proper metric value to return to prometheus
 	//for each descriptor or call other functions that do so.
 	var metricValue float64
@@ -231,11 +228,10 @@ func (collector *fooCollector) Collect(ch chan<- prometheus.Metric) {
 	//Note that you can pass CounterValue, GaugeValue, or UntypedValue types here.
 	ch <- prometheus.MustNewConstMetric(collector.fooMetric, prometheus.CounterValue, metricValue)
 	ch <- prometheus.MustNewConstMetric(collector.barMetric, prometheus.CounterValue, metricValue)
-
 }
 ```
 
--	注册指标及启动 `promHTTP` 服务
+三、注册指标及启动 `promHTTP` 服务
 这里在主函数中注册上面自定义的指标，注册成功之后，启动 HTTP 服务器，这样就完成了自定义的 Exportor 服务。
 ```golang
 func main() {
