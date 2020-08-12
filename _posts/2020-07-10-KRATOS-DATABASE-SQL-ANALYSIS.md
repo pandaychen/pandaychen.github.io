@@ -46,6 +46,7 @@ if err != nil {
 }
 ```
 
+
 ##	0x02	Kratos 的 Mysql 配置
 Kratos 的 Mysql 的配置结构 [定义如下](https://github.com/go-kratos/kratos/blob/master/pkg/database/sql/mysql.go)，定义了 master、slave 的 addr 信息、熔断器的配置以及连接地址 addr、连接池的闲置连接数 idle、最大连接数 active 以及各类超时。：
 
@@ -77,16 +78,81 @@ type Config struct {
 	tranTimeout = "400ms"
 ```
 
-##	0x03	Kratos的封装
+##	0x03	Kratos 的封装
+Kratos 的封装主要针对了如下的原生的常用方法：
+```golang
+import "database/sql"
+import _ "github.com/go-sql-driver/mysql"
+```
+
+1、连接数据库
+```golang
+// 来源："database/sql"
+// 原型：func Open(driverName, dataSourceName string) (*DB, error)
+db, err := sql.Open("mysql", "root:@tcp(127.0.0.1:3306)/test?charset=utf8")
+```
+
+2、执行写入操作`Exec`方法
+```golang
+result, err := db.Exec(
+    "INSERT INTO users (name, age) VALUES (?, ?)",
+    "gopher",
+    27,
+)
+```
+
+3、查询`Query`方法
+```golang
+rows, err := db.Query("SELECT name FROM users WHERE age = ?", age)
+if err != nil {
+    log.Fatal(err)
+}
+//调用rows.Next()遍历结果每一行
+for rows.Next() {
+    var name string
+    if err := rows.Scan(&name); err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf("%s is %d\n", name, age)
+}
+if err := rows.Err(); err != nil {
+    log.Fatal(err)
+}
+```
+
+4、查询单行`QueryRow`
+```golang
+var age int64
+row := db.QueryRow("SELECT age FROM users WHERE name = ?", name)
+err := row.Scan(&age)
+```
+
+5、Prepared statements
+```golang
+age := 27
+stmt, err := db.Prepare("SELECT name FROM users WHERE age = ?")
+if err != nil {
+    log.Fatal(err)
+}
+rows, err := stmt.Query(age)
+// process rows
+```
+
+6、事务操作
+
+
+##	0x03	理解 Kratos 的封装
 关于 Kratos 的 Mysql 封装，可以按照如下几点着手分析：
-1.	`conn` 封装了原生库的 `sql.DB` 的接口
+1.	`conn` 封装了原生库的 `sql.DB` 的接口（`conn` 的方法均为调用 `sql.DB` 的方法）
 2.	`DB` 封装了 `conn`，有点像 `conn` 的集合，使得 `DB` 表现为一个可配置的 MYSQL 主从集群
 3.	`DB` 中封装了对外的接口（方法），大部分方法都是直接调用 `conn` 封装的方法
 4.	熔断器封装的层次、Tracing 封装的层次、Metrics 封装的层次（和哪个属性相关联？`conn` 还是 `row`）
+5.	Kratos 中的 db 封装逻辑的执行顺序，如操作耗时，超时传递以及熔断判定及上报等
 
-####	基础数据结构
+##	0x04	核心数据结构
 
-[`sql.DB`](https://golang.org/src/database/sql/sql.go?s=21595:21652#L402)的结构定义在此。在 Golang 中访问数据库需要用到 `sql.DB` 接口：它可以创建语句 (Statement) 和事务 (Transaction)，执行查询，获取结果。
+####	sql.DB
+[`sql.DB`](https://golang.org/src/database/sql/sql.go?s=21595:21652#L402) 的结构定义在此。在 Golang 中访问数据库需要用到 `sql.DB` 接口：它可以创建语句 (Statement) 和事务 (Transaction)，执行查询，获取结果。
 `sql.DB` 并不是数据库连接，也并未在概念上映射到特定的数据库 (Database) 或模式 (Schema)。它只是一个抽象的接口，不同的具体驱动有着不同的实现方式。
 
 通常而言，`sql.DB` 会处理一些重要而麻烦的事情，例如操作具体的驱动打开 / 关闭实际底层数据库的连接，按需管理连接池。`sql.DB` 这一抽象让用户不必考虑如何管理并发访问底层数据库的问题。当一个连接在执行任务时会被标记为正在使用。用完之后会放回连接池中。不过用户如果用完连接后忘记释放，就会产生大量的连接，极可能导致资源耗尽（建立太多连接，打开太多文件，缺少可用网络端口）。
@@ -138,7 +204,18 @@ type conn struct {
 	*sql.DB				// 继承了 sql.DB
 	breaker breaker.Breaker	// 熔断器
 	conf    *Config			//MYSQL 配置
-	addr    string			// conn对应的服务端地址
+	addr    string			// conn 对应的服务端地址
+}
+```
+
+而 Kratos 的 `DB` 结构对 `conn` 结构进行了封装，使得 `DB` 看起来是 One Writer,multiple Reader 的集群化结构：
+```golang
+// DB database.
+type DB struct {
+	write  *conn		// 一写
+	read   []*conn		// 多读
+	idx    int64
+	master *DB			// 链表结构
 }
 ```
 
@@ -147,8 +224,8 @@ type conn struct {
 // Row row.
 type Row struct {
 	err error
-	*sql.Row
-	db     *conn
+	*sql.Row			// 原生的 sql.Row
+	db     *conn		// 指向哪个 conn
 	query  string
 	args   []interface{}
 	t      trace.Trace
@@ -156,13 +233,38 @@ type Row struct {
 }
 ```
 
-其中`sql.Row`代表了Query的一行数据：
+其中 `sql.Row` 代表了 Query 的一行数据：
 ```golang
 // Row is the result of calling QueryRow to select a single row.
 type Row struct {
 	// One of these two will be non-nil:
 	err  error // deferred error for easy chaining
 	rows *Rows
+}
+```
+
+####	Stmt 结构
+`Stmt` 封装了
+```golang
+// Stmt prepared stmt.
+type Stmt struct {
+	db    *conn
+	tx    bool
+	query string
+	stmt  atomic.Value
+	t     trace.Trace
+}
+```
+
+##	0x05	公共方法
+
+##
+```GOLANG
+func slowLog(statement string, now time.Time) {
+	du := time.Since(now)
+	if du > _slowLogDuration {
+		log.Warn("%s slow log statement: %s time: %v", _family, statement, du)
+	}
 }
 ```
 
@@ -203,7 +305,7 @@ func Open(c *Config) (*DB, error) {
 }
 ```
 
-上面代码中，`open` 方法打开一个 SQL 连接：
+上面代码中，`Open` 方法中调用 `connect` 方法打开（创建）一个 SQL 连接，这里是调用了原生的 `sql.Open` 方法来新建，同时设置 mysql 的连接属性：
 ```golang
 func connect(c *Config, dataSourceName string) (*sql.DB, error) {
 	d, err := sql.Open("mysql", dataSourceName)
@@ -218,7 +320,7 @@ func connect(c *Config, dataSourceName string) (*sql.DB, error) {
 }
 ```
 
-##	0x04	DB 结构及封装
+##	0x06	DB 结构及封装
 真正对外暴露的接口是 `DB` 及其封装的方法，[`DB` 结构](https://github.com/go-kratos/kratos/blob/master/pkg/database/sql/sql.go#L38) 如下，从结构看，Kratos 的 Mysql 结构可以定义为一主多从的 Mysql 集群方式。
 ```golang
 // DB database.
@@ -239,7 +341,7 @@ func (db *DB) Begin(c context.Context) (tx *Tx, err error) {
 }
 ```
 
--
+2、`Exec` 方法，执行写入数据，实际封装了调用 `db.write.exec`：
 
 ```golang
 // Exec executes a query without returning any rows.
@@ -277,13 +379,49 @@ func (db *DB) Query(c context.Context, query string, args ...interface{}) (rows 
 }
 ```
 
--
+
+##	conn 封装的方法
+`conn` 的 `exec` 方法的上层方法是 `db.Exec`，[](https://golang.org/pkg/database/sql/#DB.ExecContext)，实现代码如下：
+```golang
+func (db *conn) exec(c context.Context, query string, args ...interface{}) (res sql.Result, err error) {
+	now := time.Now()
+	defer slowLog(fmt.Sprintf("Exec query(%s) args(%+v)", query, args), now)
+	if t, ok := trace.FromContext(c); ok {
+		t = t.Fork(_family, "exec")
+		t.SetTag(trace.String(trace.TagAddress, db.addr), trace.String(trace.TagComment, query))
+		defer t.Finish(&err)
+	}
+	if err = db.breaker.Allow(); err != nil {
+		_metricReqErr.Inc(db.addr, db.addr, "exec", "breaker")
+		return
+	}
+	_, c, cancel := db.conf.ExecTimeout.Shrink(c)
+	res, err = db.ExecContext(c, query, args...)
+	cancel()
+	db.onBreaker(&err)
+	_metricReqDur.Observe(int64(time.Since(now)/time.Millisecond), db.addr, db.addr, "exec")
+	if err != nil {
+		err = errors.Wrapf(err, "exec:%s, args:%+v", query, args)
+	}
+	return
+}
+```
+简单梳理下 `exec` 的流程：
+![image](https://wx2.sbimg.cn/2020/08/12/oxaQN.png)
 
 ```golang
-
+// Stmt prepared stmt.
+type Stmt struct {
+	db    *conn
+	tx    bool
+	query string
+	stmt  atomic.Value
+	t     trace.Trace
+}
 ```
 
-##  0x05	Metrics 统计
+
+##  0x07	Metrics 统计
 Metrics 的定义的结构 [代码在此](https://github.com/go-kratos/kratos/blob/master/pkg/database/sql/metrics.go)，包含了下面几个维度：
 1.	`_metricReqDur`
 2.	`_metricReqErr`
@@ -324,10 +462,10 @@ var (
 )
 ```
 
-##	0x06	Tracing 的封装
+##	0x08	Tracing 的封装
 
 
-##	0x07	熔断 Breaker 机制嵌入
+##	0x09	熔断 Breaker 机制嵌入
 首先，看下在 `Row` 类似的方法 `Scan`，它封装了 `sql.Row` 的 `Scan` 方法，根据 `r.db.onBreaker` 返回的结果，使用 `	r.db.onBreaker(&err)` 进行状态上报。
 数据上报到滑动窗口中进行统计。然后在 `Allow()` 方法中进行熔断状态判定。
 
@@ -370,7 +508,101 @@ func (db *conn) onBreaker(err *error) {
 }
 ```
 
+##	0x10	Row 及封装
+`sql.Row` 代表了单行查询结果：Row is the result of calling QueryRow to select a single row.<br>
+原生的 `sql.Row`[定义](https://golang.org/src/database/sql/sql.go?s=91483:91600#L3175) 及提供的 [两个方法](https://golang.org/pkg/database/sql/#Row)：
+```golang
+// Row is the result of calling QueryRow to select a single row.
+type Row struct {
+	// One of these two will be non-nil:
+	err  error // deferred error for easy chaining
+	rows *Rows
+}
 
-##  0x08	参考
+func (r *Row) Err() error
+func (r *Row) Scan(dest ...interface{}) error
+```
+
+Kratos 封装了 `sql.Row`，结构如下，注意这里是以 `*sql.Row` 方式封装的，所以，修改需要改动的方法即可，不需要调整的方法则使用 `sql.Row` 原生的方法即可：
+
+```golang
+// Row row.
+type Row struct {
+	err error
+	*sql.Row		// 封装了原生的 sql.Row
+	db     *conn
+	query  string
+	args   []interface{}
+	t      trace.Trace
+	cancel func()
+}
+```
+
+`Scan` 方法，该方法用来获取单行数据，我们先看下 [原生的实现](https://golang.org/src/database/sql/sql.go?s=91886:91931#L3186)：
+```golang
+func (r *Row) Scan(dest ...interface{}) error {
+	if r.err != nil {
+		return r.err
+	}
+
+	defer r.rows.Close()
+	for _, dp := range dest {
+		if _, ok := dp.(*RawBytes); ok {
+			return errors.New("sql: RawBytes isn't allowed on Row.Scan")
+		}
+	}
+
+	if !r.rows.Next() {
+		if err := r.rows.Err(); err != nil {
+			return err
+		}
+		return ErrNoRows
+	}
+	err := r.rows.Scan(dest...)
+	if err != nil {
+		return err
+	}
+	// Make sure the query can be processed to completion with no errors.
+	return r.rows.Close()
+}
+```
+
+再看下修改封装后的实现，对 `Scan` 方法的封装主要多了两点，（这里有疑问是为何没有进行熔断器的判定逻辑）：
+1.	使用 `defer slowLog` 计算耗时
+2.	使用 `r.db.onBreaker(&err)` 上传熔断器统计状态
+
+```golang
+// Scan copies the columns from the matched row into the values pointed at by dest.
+func (r *Row) Scan(dest ...interface{}) (err error) {
+	defer slowLog(fmt.Sprintf("Scan query(%s) args(%+v)", r.query, r.args), time.Now())
+	if r.t != nil {
+		defer r.t.Finish(&err)
+	}
+	if r.err != nil {
+		err = r.err
+	} else if r.Row == nil {
+		err = ErrStmtNil
+	}
+	if err != nil {
+		return
+	}
+	// 调用原生的 Scan 方法获取数据
+	err = r.Row.Scan(dest...)
+	if r.cancel != nil {
+		r.cancel()
+	}
+	// 根据 err 上报熔断器统计状态
+	r.db.onBreaker(&err)
+	if err != ErrNoRows {
+		err = errors.Wrapf(err, "query %s args %+v", r.query, r.args)
+	}
+	return
+}
+```
+
+##	0x11	总结
+本文从代码层面分析了 Kratos 对 `sql.DB` 库的封装逻辑，通过本篇文章，对微服务与 Orm 的应用结合有了更加深入的认知。
+
+##  0x12	参考
 
 
