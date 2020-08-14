@@ -185,7 +185,7 @@ type Resolver struct {
 ```
 
 再看下 Resovler 实现的方法：
--	`Close()` 方法：退出解析，当 `r.quit` 这个 channel 被触发时，调用 `nr.Close()` 方法通知 Naming 退出
+`Close` 方法：退出解析，当 `r.quit` 这个 channel 被触发时，调用 `nr.Close()` 方法通知 Naming 退出
 ```golang
 // Close is a noop for Resolver.
 func (r *Resolver) Close() {
@@ -196,7 +196,7 @@ func (r *Resolver) Close() {
 	}
 }
 ```
-
+`nr.Close`方法如下：
 ```golang
 // Close close resolver.
 func (r *Resolve) Close() error {
@@ -209,7 +209,7 @@ func (r *Resolve) Close() error {
 }
 ```
 
--	`updateproc` 方法，以独立的 goroutine 执行 Wacher 逻辑：
+`updateproc` 方法，以独立的 goroutine 执行 Wacher 逻辑：
 1.	调用 `naming.Resolver` 实现的 Watch() 方法获取一个接收通知的 channel-event
 2.	以 `for...select` 模型监听 `event`、`quit` 等 channel，如果 `event` 有通知，通过 `naming.Resolver` 的 `Fetch()` 方法拿到结果
 3.	上一步获取结果，调用 gRPC 的通知方法通知上层，完成一次 `watcher()` 工作，周而复始
@@ -240,7 +240,7 @@ func (r *Resolver) updateproc() {
 ```
 
 `newAddress` 的作用，主要是将 `instances []*naming.Instance` 中获取的后端实例，封装为 `resolver.Address` 列表，通过 `grpc.ClientConn` 的接口 `r.cc.NewAddress(addrs)`，发送给 gRPC 上层进行更新：
-从测试来看，每一次后端 Backend 节点有变化（增加或减少），都会触发 gRPC 返回当前全部存活的 Backend 列表。另外，`resolver.Address{}` 的 [定义](https://godoc.org/google.golang.org/grpc/resolver#Address) 中，提供了 `Metadata`，让用户可以保存更多需要的字段信息。在这里保存的 `Metadata` 数据，在 `gRPC.balancer` 的相关接口会返回给用户。
+从测试来看，每一次后端 Backend 节点有变化（增加或减少），都会触发 gRPC 返回当前全部存活的 Backend 列表。另外，`resolver.Address{}` 的 [定义](https://godoc.org/google.golang.org/grpc/resolver#Address) 中，提供了 `Metadata`，让用户可以保存更多需要的字段信息。在这里保存的 `Metadata` 数据，在 `gRPC.balancer` 的相关接口会返回给用户。<br>
 
 在 Warden 的 `Metadata` 中，`Weight` 为权重，`Color` 为蓝绿标识，用于发布时使用（试想这样一种场景，刚部署的服务器，希望按照一定的策略或比率将在线流量导入），权重主要在负载均衡的算法中使用，这个在另外的文章进行分析。
 ```javascript
