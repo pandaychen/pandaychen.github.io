@@ -68,6 +68,21 @@ blademaster 的主要流程也是如此：
 请求处理的流程中也可以使用 `Render` 来辅助渲染 `Response`，比如对于不同的请求需要响应不同的数据格式 `JSON`、`XML`，此时可以使用不同的 `Render` 来简化逻辑。
 
 
+####    代码组织
+blademaster 的代码组织及功能简介如下：
+*   [server.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/server.go)：核心server结构定义
+*   [routergroup.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/routergroup.go)
+*   [tree.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/tree.go)：CGI目录树的算法实现
+*   [trace.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/trace.go)：加入链路追踪的逻辑
+*   [recovery.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/recovery.go)：core处理中间件，简化版
+*   [ratelimit.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/ratelimit.go)：限流器中间件，采用BBR限流
+*   [prometheus.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/prometheus.go)：Prometheus-httpserver
+*   [perf.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/perf.go)：性能统计中间件
+*   [metrics.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/metrics.go)：metrics定义
+*   [metadata.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/metadata.go)：cgi的元数据定义
+*   [logger.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/logger.go)：日志中间件，记录核心日志
+*   [cors.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/cors.go)：跨域组件
+
 ##  0x03    Metrics 统计
 blademaster 默认提供了如下几个维度的 metrics[监控采集数据](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/metrics.go)：
 -   `_metricServerReqDur `：`NewHistogramVec` 类型
