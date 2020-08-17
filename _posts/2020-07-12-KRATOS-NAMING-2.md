@@ -284,7 +284,7 @@ func (r *Resolver) newAddress(instances []*naming.Instance) {
 }
 ```
 
-##	0x06	应用
+##	0x06	Naming 应用
 这里介绍使用 Etcd 来实现调用 Naming 包的例子。包含服务注册和服务发现两个部分：
 
 ####	服务注册（服务端）
@@ -381,8 +381,8 @@ func NewClient(cfg *warden.ClientConfig, opts ...grpc.DialOption) (DemoClient, e
 3. `naming/etcd.Build` 对象基于 `appid` 就知道要获取哪个服务的实例信息
 
 
-##	0x06	总结
+##	0x07	总结
 本文是 Kratos 的 Naming 机制分析的第二篇，通过这两篇文章，对 Kratos 的服务发现逻辑有了一个比较清晰的理解。
 
-##	0x07	参考
+##	0x08	参考
 -	[warden-resolver-resolver.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/resolver/resolver.go)
