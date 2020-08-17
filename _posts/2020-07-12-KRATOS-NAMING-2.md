@@ -26,7 +26,7 @@ Warden 的 resolver 封装主要目的有两点：
 
 
 前面文章 [gRPC 源码分析之 Resolver 篇](https://pandaychen.github.io/2019/11/11/GRPC-RESOLVER-DEEP-ANALYSIS/) 分析了 gRPC 的 Resolver 的实现，这里再简单回顾下。
-gRPC 暴露了 [服务发现的接口](https://github.com/grpc/grpc-go/blob/master/resolver/resolver.go)：`resolver.Builder` 和 `resolver.ClientConn` 和 `resolver.Resolver`，为了近距离观察下 Kratos 对 Resolver 的封装，这里还是贴下 gRPC 的主要结构定义：
+gRPC 暴露了 [服务发现的接口](https://github.com/grpc/grpc-go/blob/master/resolver/resolver.go)：`resolver.Builder` 和 `resolver.ClientConn` 和 `resolver.Resolver`，为了详细分析下 Kratos 对 Resolver 的封装，这里还是贴下 gRPC 的主要结构定义：
 
 ```golang
 // Builder creates a resolver that will be used to watch name resolution updates.
@@ -196,7 +196,7 @@ func (r *Resolver) Close() {
 	}
 }
 ```
-`nr.Close`方法如下：
+`nr.Close` 方法如下：
 ```golang
 // Close close resolver.
 func (r *Resolve) Close() error {
@@ -283,6 +283,102 @@ func (r *Resolver) newAddress(instances []*naming.Instance) {
 	r.cc.NewAddress(addrs)
 }
 ```
+
+##	0x06	应用
+这里介绍使用 Etcd 来实现调用 Naming 包的例子。包含服务注册和服务发现两个部分：
+
+####	服务注册（服务端）
+客户端使用了 Etcd 进行服务发现，服务端启动后必须将自己的服务信息注册到 Etcd<br>
+
+相对服务发现来讲，服务注册较为简单，[`naming/etcd/etcd.go`](https://github.com/go-kratos/kratos/blob/master/pkg/naming/etcd/etcd.go) 内的代码实现了 `naming/naming.go` 内的 [`Register` 接口](https://github.com/go-kratos/kratos/blob/master/pkg/naming/etcd/etcd.go#L162)，服务端启动时可以参考下面代码进行注册：
+注意：这里的 `appID` 是共同服务的前缀，依靠 `Hostname` 做唯一的服务区分标识：
+```golang
+func runServer(addr, svcid string) *warden.Server {
+	server := warden.NewServer(&warden.ServerConfig{
+		// 服务端每个请求的默认超时时间
+		Timeout: xtime.Duration(time.Second),
+	})
+
+	//start warden service registry
+	config := &clientv3.Config{
+		Endpoints:   []string{"127.0.0.1:2379"},
+		DialTimeout: time.Second * 5,
+		DialOptions: []grpc.DialOption{grpc.WithBlock()},
+	}
+	etcd_builder, err := etcd.New(config)
+
+	if err != nil {
+		fmt.Println(err)
+		return nil
+	}
+
+	//kratos-etcd-key: ratos_etcd/app1/h1
+	var localaddr []string
+	localaddr = append(localaddr, fmt.Sprintf("grpc://%s", addr))
+	_, err = etcd_builder.Register(context.Background(), &naming.Instance{
+		AppID:    "app1",
+		Hostname: svcid,
+		Zone:     "zone01",
+		Addrs:    localaddr,
+	})
+
+	server.Use(middleware()).Use(middleware()).Use(stats())
+	pb.RegisterGreeterServer(server.Server(), &helloServer{addr: addr})
+	go func() {
+		err := server.Run(addr)
+		if err != nil {
+			panic("run server failed!" + err.Error())
+		}
+	}()
+	return server
+}
+```
+
+####	服务发现（客户端）
+使用 `etcd` 进行服务发现的方式，需要在业务的 `NewClient` 前进行注册并启动内置的 Resolver，客户端的参考代码如下：<br>
+注意，在 `init` 中实现上面的注册逻辑，在 `client.Dial` 方法中传入参数 `etcd://default/"+AppID` 告诉 gRPC，使用 Resolver 的名字
+
+```golang
+import (
+	"context"
+	"github.com/go-kratos/kratos/pkg/naming/etcd"
+	"github.com/go-kratos/kratos/pkg/net/rpc/warden"
+	"github.com/go-kratos/kratos/pkg/net/rpc/warden/resolver"
+	"google.golang.org/grpc"
+)
+
+// AppID your appid, ensure unique.
+const AppID = "demo.service" // NOTE: example
+
+func init(){
+	// NOTE: 注意这段代码，表示要使用 etcd 进行服务发现 , 其他事项参考 discovery 的说明
+    // NOTE: 在启动应用时，可以通过 flag(-etcd.endpoints) 或者 环境配置 (ETCD_ENDPOINTS) 指定 etcd 节点
+    // NOTE: 如果需要自己指定配置时 需要同时设置 DialTimeout 与 DialOptions: []grpc.DialOption{grpc.WithBlock()}
+	resolver.Register(etcd.Builder(nil))
+}
+
+// NewClient new member grpc client
+func NewClient(cfg *warden.ClientConfig, opts ...grpc.DialOption) (DemoClient, error) {
+	client := warden.NewClient(cfg, opts...)
+  	// 这里使用 etcd scheme
+	conn, err := client.Dial(context.Background(), "etcd://default/"+AppID)
+	if err != nil {
+		return nil, err
+	}
+	// 注意替换这里：
+	// NewDemoClient 方法是在 "api" 目录下代码生成的
+	// 对应 proto 文件内自定义的 service 名字，请使用正确方法名替换
+	return NewDemoClient(conn), nil
+}
+```
+
+> 注意：`resolver.Register` 是全局行为，建议放在包加载阶段或 main 方法开始时执行，该方法执行后会在 gRPC 内注册构造方法
+
+`target` 是 `etcd://default/${appid}`，当 gRPC 内进行解析后会得到 `scheme`=`etcd` 和 `appid`，然后进行以下逻辑：
+
+1. `warden/resolver.Builder` 会通过 `scheme` 获取到 `naming/etcd.Builder` 对象（靠 `resolver.Register` 注册过的）
+2. 拿到 `naming/etcd.Builder` 后执行 `Build(appid)` 构造 `naming/etcd.Discovery`
+3. `naming/etcd.Build` 对象基于 `appid` 就知道要获取哪个服务的实例信息
 
 
 ##	0x06	总结
