@@ -1,7 +1,7 @@
 ---
 layout:     post
-title:      Go-redis：高级用法（未完）
-subtitle:   go-redis With SLA
+title:      Go-redis with Metrics
+subtitle:   go-redis 的 Metrcis 改造篇
 date:       2020-08-20
 header-img: img/super-mario.jpg
 author:     pandaychen
@@ -108,7 +108,7 @@ func (hs *hooks) AddHook(hook Hook) {
 
 我们按照前文 [Prometheus 应用接入：使用 Prometheus 开发 Exporter](https://pandaychen.github.io/2020/07/13/ANOTHER-LOOK-AT-PROMETHEUS/) 中定义的 `4` 步来实现这个 `Exporter`：
 
-1.	实现定好需要采集哪些指标，如成功率，延迟，分布数据等
+1.	预先规划好需要采集哪些指标，如成功率，延迟，分布数据等
 2.	将指标转换为 Prometheus 的 Metrics 类型（或者直接使用 Prometheus 的内置类型）并完成注册
 3.	在代码逻辑中加入 Metrics 的 "打点" 调用
 4.	启动 `PrometheusHttp` 服务，暴露自己的采集的指标
