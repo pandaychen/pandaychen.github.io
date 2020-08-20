@@ -29,7 +29,7 @@ SSH 的基础架构图如下，进行项目开发之前，首先需要对 SSH �
 -   TCP 层: 建立传输层链接, 然后进行 SSH 协议处理
 -   Handshake 层: SSH 协议里面的传输层, 该层主要提供加密传输
 -   Authentication 层: 用户认证层 [`SSH-USERAUTH`], 主要提供用户认证
--   Channel && Request: SSH 协议里面的链接层 [`SSH-CONNECT`], 该层主要是将多个加密隧道分成逻辑通道, 可以复用通道, 常见的类型：`session`、`x11`、`forwarded-tcpip`、`direct-tcpip`, 通道里面的 `Requests` 是用于接收创建 ssh channel 的请求的, 而 ssh channel 就是里面的 connection, 数据的交互基于 connection 交互
+-   `Channel` && `Request`: SSH 协议里面的链接层 [`SSH-CONNECT`], 该层主要是将多个加密隧道分成逻辑通道, 可以复用通道, 常见的类型：`session`、`x11`、`forwarded-tcpip`、`direct-tcpip`, 通道里面的 `Requests` 是用于接收创建 ssh channel 的请求的, 而 ssh channel 就是里面的 connection, 数据的交互基于 connection 交互
 
 ##  0x02    构建 SSHD
 
@@ -91,7 +91,7 @@ config := &ssh.ServerConfig{
 1、SSH-Server 配置认证回调及其他配置
 注意配置中的 `NoClientAuth: true`，即任何客户端都可以连，一般不建议开启。此外，回调方法 `func` 中的 [`ConnMetadata`](https://godoc.org/golang.org/x/crypto/ssh#ConnMetadata) 结构保存了 ssh 连接的相关属性信息，可以用于会话追踪及 Debug 等。<br>
 
-从 SSH 库暴露给用户的接口来看，这里可以很容易的实现统一认证的代码，非常灵活，现网中比较常用的有远程验证及 Pam 方式。
+从 SSH 库暴露给用户的接口来看，这里可以很容易的实现统一认证的代码，非常灵活，现网中比较常用的有远程验证及 `PAM` 方式。
 
 ```golang
 config := &ssh.ServerConfig{
@@ -310,15 +310,15 @@ if err != nil {
 ```
 
 ####    实现数据交互
-我们知道，交互式 tty 是打开一个终端 tty，然后在 tty 上通过键盘输入命令，回车执行，那么数据交互的过程就是打通 tty 和 bash 的通道。<br>
-首先，使用 `exec.Command` 打开一个 `bash`， 然后将 `bash` 与 SSH Channel 对接, 从而实现和 `bash` 的远程交互。注意：这里可以使用定制化 tty（比如 `git` 也可通过 ssh 连接来交互）。的 [sshd](https://github.com/gliderlabs/ssh/blob/master/_examples/ssh-pty/pty.go) 代码，对外提供了 pty 接口，使用 `github.com/kr/pty` 包来实现 sshd 的 tty 交互功能。
+我们知道，交互式 `tty` 是打开一个终端 `tty`，然后在 `tty` 上通过键盘输入命令，回车执行，那么数据交互的过程就是打通 `tty` 和 `bash` 的通道。<br>
+首先，使用 `exec.Command` 打开一个 `bash`， 然后将 `bash` 与 SSH Channel 对接, 从而实现和 `bash` 的远程交互。注意：这里可以使用定制化 `tty`（比如 `git` 也可通过 ssh 连接来交互）。比如，gliderlabs 的 [sshd 库](https://github.com/gliderlabs/ssh/blob/master/_examples/ssh-pty/pty.go) 代码，对外提供了 `pty` 接口，该库使用 `github.com/kr/pty` 包来实现 `sshd` 的 `tty` 交互功能。
 
-PS：这里如果直接将 `bash` 的输入和输出对接 `terminal` 这将失败, 因为 `bash` 没有运行在 `tty` 中, 因此这里需要一个模拟 `tty` 来运行 `bash`。
+PS：这里如果直接将 `bash` 的输入和输出直接对接 `terminal`，这是错误的操作， 因为 `bash` 没有运行在 `tty` 中，这里需要一个模拟 `tty` 来运行 `bash`。<br>
 
 `tty` 和 `bash` 的关系如下图所示，这样就方便理解了。
-![img]()
+![img](https://wx2.sbimg.cn/2020/08/20/3Nm3N.jpg)
 
-最后需要将 `bash` 的管道（输入和输出）和 `Connection` 的管道对接，即完成了 SSHD 的 tty 实现逻辑。
+最后需要将 `bash` 的管道（输入和输出）和 `Connection` 的管道对接，即完成了 SSHD 的 `tty` 实现逻辑。
 ```golang
 // Fire up bash for this session
 bash := exec.Command("bash")
@@ -357,12 +357,12 @@ go func() {
 
 ####    实现指令交互
 这里主要处理以下几种类型的 Request:
--   `shell/exec/subsystem`: channel request type for shell, 这几类主要是用于区分 connection 链接的程序,
-    -   shell：后面启动的一个程序或者 shell,
-    -   exec 指后面启动的是用户的默认 shell,
-    -   subsystem 是在后面启动一个子程序来执行 connection 里面的命令（比如 `sftp`）
--   `pty-req`: 准备一个 pty 等待输入
--   `window-change`: 监听 tty 窗口改变事件，及时更新 tty size
+-   `shell/exec/subsystem`: channel request type for shell
+    -   shell：启动的一个程序或者 `shell`
+    -   exec：启动的是用户的默认 `shell`
+    -   subsystem：启动一个子程序来执行 connection 里面的命令（比如 `sftp`）
+-   `pty-req`: 准备一个 `pty` 等待输入
+-   `window-change`: 监听 `tty` 窗口改变事件，及时更新 tty size
 
 ```golang
 // Sessions have out-of-band requests such as "shell", "pty-req" and "env"
@@ -390,7 +390,7 @@ go func() {
 }()
 ```
 
-以上，我们就实现了一个简单的交互式的 SSH Server
+以上，我们就实现了一个简单的交互式的 SSH Server。
 
 ##  0x03    构建 SSH 客户端
 SSH 常见的方式有交互式和命令执行两种：
