@@ -247,7 +247,7 @@ Etcd 的 lease 可以用来做心跳，监控模块存活状态。Lease 的存�
 Etcd 提供了 watcher，来监控集群 kv 的变化。这个在开发 gRPC 服务发现的 ClientConn 实时更新接口时，必不可少。但是 Watch 返回的 WatchChan 有可能在运行过程中失败而关闭，此时 WatchResponse.Canceled 会被置为 true，WatchResponse.Err() 也会返回具体的错误信息。所以在 range WatchChan 的时候，每一次循环都要检查 WatchResponse.Canceled，在关闭的时候重新发起 Watch 或报错。
 
 
-##  0x10    参考文档
+##  0x0A    参考文档
 -   [Godoc - package clientv3](https://godoc.org/github.com/Etcd-io/Etcd/clientv3)
 -   [etcd/Documentation/op-guide/maintenance.md](https://github.com/Etcd-io/Etcd/blob/master/Documentation/op-guide/maintenance.md)
 

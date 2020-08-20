@@ -114,7 +114,7 @@ serv-ca.nspace.svc.cluster.local service = 0 25 8088 172-16-1-18.serv-ca.nspace.
 ```
 可以发现这个 `serv-ca` 的服务有 4 个 `pod`，给出了分别对应的 `IP` 以及对应端口是 `8088`。于是通过将服务地址配置为服务端地址后，就可以很简单地实现负载均衡了，Here We Go！！
 
-## 0x10 gRPC+Headless Service 应用
+## 0x0A gRPC+Headless Service 应用
 接上篇，如何将 `gRPC`、`CoreDNS`（集群中的默认 `DNS` 插件）和 `Headless Service` 这三者融合起来，实现长连接 + 负载均衡呢？
 答案就是 [gRPC-DnsResolver](https://github.com/grpc/grpc-go/blob/master/internal/resolver/dns/dns_resolver.go)，默认的 DNS 查询时间是 `30s`
 
