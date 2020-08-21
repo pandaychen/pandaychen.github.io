@@ -13,7 +13,7 @@ tags:
 
 ##  0x00    前言
 
-业余时间利用 gRPC`+`Consul 实现的服务发现一个项目 [grpclb2consul](https://github.com/pandaychen/grpclb2consul/)。这篇文章，总结下我在开发和 Consul 使用过程中的一些经验 < br>
+业余时间利用 gRPC`+`Consul 实现的服务发现一个项目 [grpclb2consul](https://github.com/pandaychen/grpclb2consul/)。这篇文章，总结下我在开发和 Consul 使用过程中的一些经验 <br>
 
 ##  0x01    Consul 介绍
 

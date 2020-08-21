@@ -65,7 +65,7 @@ tags:
 
 ##  0x06  Loadbalancer In Kubernetes
 
-引用一下 GKE 的图:<br>
+引用一下 GKE 的图：<br>
 
 ![image](https://s2.ax1x.com/2019/10/22/KG5E5D.png)
 
@@ -80,7 +80,7 @@ tags:
 既然在 `HTTP/2` 中存在了这样一个特性，那么 `gRPC` 如何与 `Kubernetes` 进行整合呢？我们从 `Kubernetes Service` 的几个类型中来寻找解决 `LB` 问题的方案
 
 ## 0x08 再看 Headless Service
-如前所说，`Kubernetes` 提供了一个基础的 `Pod` 控制方式给用户，[Headless Services](https://kubernetes.io/docs/concepts/services-networking/service/#headless-services)
+如前所说，`Kubernetes` 提供了一个基础的 `Pod` 控制方式给用户，参加官方文档 [Headless Services](https://kubernetes.io/docs/concepts/services-networking/service/#headless-services)
 
 `Headless Service` 需要将 `spec.clusterIP` 设置成 `None`，因为没有 `ClusterIP`，`Kube-proxy` 并不处理此类服务，因为没有 `Load balancing` 或 `proxy` 代理设置，在访问服务的时候回返回后端的全部的 `Pods IP` 地址，主要用于开发者自己根据 pods 进行负载均衡器的开发（设置了 `selector`）
 
