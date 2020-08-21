@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      Kubernetes 应用改造（三）-- 负载均衡
+title:      Kubernetes 应用改造（三）：负载均衡
 subtitle:   Kubernetes 中的负载均衡总结
 date:       2020-06-01
 header-img: img/super-mario.jpg
@@ -105,7 +105,7 @@ http {
 
 ![envoy.png](https://wx2.sbimg.cn/2020/06/15/envoy.png)
 
-- 配置一个常规的 Kubernetes Service，作为 Backend：
+1、配置一个常规的 Kubernetes Service，作为 Backend：
 
 ```yaml
 apiVersion: v1
@@ -128,7 +128,7 @@ spec:
   type: ClusterIP
 ```
 
-- 配置一个 Istio Gateway，关联 `ingressgateway` 的 80 端口：
+2、配置一个 Istio Gateway，关联 `ingressgateway` 的 80 端口：
 
 ```yaml
 apiVersion: networking.istio.io/v1alpha3
@@ -149,7 +149,7 @@ spec:
       protocol: HTTP
 ```
 
-- 配置一个 Istio VirtualService，将 Istio Gateway 与 Kubernetes service 关联：
+3、配置一个 Istio VirtualService，将 Istio Gateway 与 Kubernetes service 关联：
 
 ```yaml
 apiVersion: networking.istio.io/v1alpha3
