@@ -133,7 +133,10 @@ if !ok || err != nil {
 ```
 
 ####    Remote Server 与 Browser 实时数据交换
-现在为止建立了两个 `IO` 通道，一个是 `WebSocket` 通道，另外一个是 SSH `Channel`。由于需要双向转发数据，这里新建 `2` 个 `groutine`, `groutine1` 不停的从 WebSocket 通道里读取用户的输入, 并通过 SSH Channel 传给远程主机。`groutine2` 负责将远程主机的数据（主要是终端屏显数据）传递给浏览器。
+现在为止建立了两个 `IO` 通道，一个是 `WebSocket` 通道，另外一个是 SSH `Channel`。由于需要双向转发数据，这里新建 `2` 个 `groutine`：<br>
+-   `groutine1` 不停的从 WebSocket 通道里读取用户的输入, 并通过 SSH Channel 传给远程主机
+-   `groutine2` 负责将远程主机的数据（主要是终端屏显数据）传递给浏览器
+
 1、`groutine1` 主要完成从 `Websocket` 中读取数据，通过 ssh 的 `Channel` 发送到目标服务器
 ```golang
 go func() {
