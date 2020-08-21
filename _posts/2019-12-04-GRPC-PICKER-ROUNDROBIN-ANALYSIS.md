@@ -1,7 +1,7 @@
 ---
 layout:     post
-title:      gRPC源码分析之官方Picker实现
-subtitle:   gRPC客户端选择器分析（Picker With RoundRobin）
+title:      gRPC 源码分析之官方 Picker 实现
+subtitle:   gRPC 客户端选择器分析（Picker With RoundRobin）
 date:       2019-12-06
 author:     pandaychen
 header-img: img/encryption.jpg
@@ -12,7 +12,7 @@ tags:
 ---
 
 ##	0x00	前言
-&emsp;&emsp;gRPC官方提供了基于[RoundRobin轮询算法](https://en.wikipedia.org/wiki/Round-robin_scheduling)的[Picker](https://github.com/grpc/grpc-go/blob/dc49de8acd511e4d47ad0cbf58bd77f4775c165f/balancer/roundrobin/roundrobin.go)实现。这篇文章简单分析下其源码，理解此过程，可以很轻易的实现自定义的负载均衡逻辑。前面文章已经介绍了Balancer和Picker的内部实现机制，本篇就在此基础上进行分析。官方给出的Picker接口实例化，整体逻辑比较直观，先贴下源码：
+&emsp;&emsp;gRPC 官方提供了基于 [RoundRobin 轮询算法](https://en.wikipedia.org/wiki/Round-robin_scheduling) 的[Picker](https://github.com/grpc/grpc-go/blob/dc49de8acd511e4d47ad0cbf58bd77f4775c165f/balancer/roundrobin/roundrobin.go)实现。这篇文章简单分析下其源码，理解此过程，可以很轻易的实现自定义的负载均衡逻辑。前面文章已经介绍了 Balancer 和 Picker 的内部实现机制，本篇就在此基础上进行分析。官方给出的 Picker 接口实例化，整体逻辑比较直观，先贴下源码：
 ```go
 package roundrobin
 
@@ -77,8 +77,8 @@ func (p *rrPicker) Pick(balancer.PickInfo) (balancer.PickResult, error) {
 
 ```
 
-## 0x01	初始化
-&emsp;&emsp;首先，定义Picker的名字和结构，`rrPickerBuilder`需要实现如何根据当前活跃的连接`info.ReadySCs`，生成初始化的ConnectionPool（可以看出gRPC提供了非常灵活的LB实现接口），`rrPicker`结构用来从ConnectionPool中，按照一定的策略来选择单个连接，给上层
+##	0x01	初始化
+&emsp;&emsp; 首先，定义 Picker 的名字和结构，`rrPickerBuilder` 需要实现如何根据当前活跃的连接 `info.ReadySCs`，生成初始化的 ConnectionPool（可以看出 gRPC 提供了非常灵活的 LB 实现接口），`rrPicker` 结构用来从 ConnectionPool 中，按照一定的策略来选择单个连接，给上层
 ```go
 const Name = "round_robin"
 type rrPickerBuilder struct{}
@@ -93,28 +93,29 @@ type rrPicker struct {
 	next int
 }
 ```
-在`rrPicker`的`Pick`方法中，返回`balancer.PickResult`：
-```go
+在 `rrPicker` 的 `Pick` 方法中，返回 `balancer.PickResult`：
+```golang
 return balancer.PickResult{SubConn: sc}
 ```
 
 ## 0x02	注册  Picker
-&emsp;&emsp;使用`NewBalancerBuilderV2`来实现将我们实现的Picker逻辑嵌入（注册）到Balancer中，同时提供一个Picker的名字（关联对应的`balancer.Builder`），将其注册到Balancer的全局map中。
+&emsp;&emsp; 使用 `NewBalancerBuilderV2` 来实现将我们实现的 Picker 逻辑嵌入（注册）到 Balancer 中，同时提供一个 Picker 的名字（关联对应的 `balancer.Builder`），将其注册到 Balancer 的全局 map 中。
 
-包初始化方法`init`：
-```go
+包初始化方法 `init`：
+```golang
 func init() {
 	balancer.Register(newBuilder())
 }
 
 ```
-生成`balancer.Builder`的方法：
-```go
+
+生成 `balancer.Builder` 的方法：
+```golang
 func newBuilder() balancer.Builder {
 	return base.NewBalancerBuilderV2(Name, &rrPickerBuilder{}, base.Config{HealthCheck: true})
 }
 ```
-`NewBalancerBuilderV2`方法，返回`balancer.Builder`：
+`NewBalancerBuilderV2` 方法，返回 `balancer.Builder`：
 ```go
 // NewBalancerBuilderV2 returns a base balancer builder configured by the provided config.
 func NewBalancerBuilderV2(name string, pb V2PickerBuilder, config Config) balancer.Builder {
@@ -126,7 +127,7 @@ func NewBalancerBuilderV2(name string, pb V2PickerBuilder, config Config) balanc
 }
 ```
 
-看下[`baseBuilder`](https://github.com/grpc/grpc-go/blob/dc49de8acd511e4d47ad0cbf58bd77f4775c165f/balancer/base/balancer.go)的结构：
+看下 [`baseBuilder`](https://github.com/grpc/grpc-go/blob/dc49de8acd511e4d47ad0cbf58bd77f4775c165f/balancer/base/balancer.go) 的结构：
 ```go
 type baseBuilder struct {
 	name            string
@@ -136,7 +137,7 @@ type baseBuilder struct {
 }
 ```
 
-当然了，按照`balancer.Builder`的要求，需要实现`Build`和`Name`方法：
+当然了，按照 `balancer.Builder` 的要求，需要实现 `Build` 和 `Name` 方法：
 ```go
 func (bb *baseBuilder) Build(cc balancer.ClientConn, opt balancer.BuildOptions) balancer.Balancer {
 	bal := &baseBalancer{
@@ -166,12 +167,12 @@ func (bb *baseBuilder) Name() string {
 ```
 
 
-## 0x03 生成balancer.V2Picker
+##	0x03 生成 balancer.V2Picker
 
 
 
-##	0x04 构建负载均衡选择器rrPicker
-&emsp;&emsp;这里选择官方的`V2Picker`来作为Picker，只需要实现`Pick`方法就ok：
+##	0x04 构建负载均衡选择器 rrPicker
+&emsp;&emsp; 这里选择官方的 `V2Picker` 来作为 Picker，只需要实现 `Pick` 方法就 ok：
 ```go
 type V2Picker interface {
 	// Pick returns the connection to use for this RPC and related information.
@@ -198,30 +199,30 @@ type V2Picker interface {
 }
 ```
 
-此步骤为最后一步，就是构建负载均衡算法的实现，最终只需要返回`balancer.PickResult`给调用方，就大功告成了。看下RR算法的实现代码：
+此步骤为最后一步，就是构建负载均衡算法的实现，最终只需要返回 `balancer.PickResult` 给调用方，就大功告成了。看下 RR 算法的实现代码：
 ```go
 type rrPicker struct {
 	// subConns is the snapshot of the roundrobin balancer when this picker was
 	// created. The slice is immutable. Each Get() will do a round robin
 	// selection from it and return the selected SubConn.
-	subConns []balancer.SubConn		//保存了Conntion Pool（可以有重复长连接）
+	subConns []balancer.SubConn		// 保存了 Conntion Pool（可以有重复长连接）
 
-	mu   sync.Mutex					//一般需要加锁访问
-	next int						//rr算法需要一个全局的index
+	mu   sync.Mutex					// 一般需要加锁访问
+	next int						//rr 算法需要一个全局的 index
 }
 ```
-实现`V2Picker`的`Pick`方法：
+实现 `V2Picker` 的 `Pick` 方法：
 ```go
 func (p *rrPicker) Pick(balancer.PickInfo) (balancer.PickResult, error) {
 	p.mu.Lock()
-	sc := p.subConns[p.next]		//选择一个活跃的连接
-	p.next = (p.next + 1) % len(p.subConns)		//更新全局index
+	sc := p.subConns[p.next]		// 选择一个活跃的连接
+	p.next = (p.next + 1) % len(p.subConns)		// 更新全局 index
 	p.mu.Unlock()
-	return balancer.PickResult{SubConn: sc}, nil		//返回结果
+	return balancer.PickResult{SubConn: sc}, nil		// 返回结果
 }
 ```
 
-其中，`PickResult`的结构如下：
+其中，`PickResult` 的结构如下：
 ```go
 // PickResult contains information related to a connection chosen for an RPC.
 type PickResult struct {
@@ -239,8 +240,8 @@ type PickResult struct {
 }
 ```
 
-##	0x05	回看`Picker`
-虽然`Picker`结构已经被官方标识为Deprecated了，不过我们仍然可以简单的分析下[它的结构](https://godoc.org/google.golang.org/grpc/balancer#Picker)：
+##	0x05	回看 `Picker`
+虽然 `Picker` 结构已经被官方标识为 Deprecated 了，不过我们仍然可以简单的分析下 [它的结构](https://godoc.org/google.golang.org/grpc/balancer#Picker)：
 ```golang
 type Picker interface {
     // Pick returns the SubConn to be used to send the RPC.
@@ -278,7 +279,7 @@ type Picker interface {
     Pick(ctx context.Context, info PickInfo) (conn SubConn, done func(DoneInfo), err error)
 }
 ```
-首先，`Picker`是一个`interface{}`，从字面上理解，该结构就是（Picker）返回一个可用的连接（`conn SubConn`）。而我比较好奇的是另外一个返回值`done func(DoneInfo)`，从文档的解释看，这个是当RPC请求成功时，会返回RPC的调用状态。它的参数[`DoneInfo`](https://godoc.org/google.golang.org/grpc/balancer#DoneInfo)的结构如下：
+首先，`Picker` 是一个 `interface{}`，从字面上理解，该结构就是返回一个可用的连接（`conn SubConn`）。而我比较好奇的是另外一个返回值 `done func(DoneInfo)`，从文档的解释看，这个是当 RPC 请求成功时，会返回 RPC 的调用状态。它的参数 [`DoneInfo`](https://godoc.org/google.golang.org/grpc/balancer#DoneInfo) 的结构如下：
 ```golang
 //DoneInfo contains additional information for done.
 type DoneInfo struct {
@@ -297,9 +298,9 @@ type DoneInfo struct {
     ServerLoad interface{}
 }
 ```
-对gRPC有开发经验的同学，一眼就看出了`Trailer metadata.MD`这个选项，可以在服务端RPC实现中，通过`grpc.UnaryServerInterceptor`将某些服务端的状态（如CPU，内存信息）、请求时延等，写入`Trailer`，这样当客户端成功的调用RPC后，就可以从`Trailer`中读出这些信息，作为下一次负载均衡算法的选取依据。有兴趣的可以看B站实现的[wrr算法](https://github.com/bilibili/kratos/blob/master/pkg/net/rpc/warden/balancer/wrr/wrr.go)，它就是这么做的。
+对 gRPC 有开发经验的同学，一眼就看出了 `Trailer metadata.MD` 这个选项，可以在服务端 RPC 实现中，通过 `grpc.UnaryServerInterceptor` 将某些服务端的状态（如 CPU，内存信息）、请求时延等，写入 `Trailer`，这样当客户端成功的调用 RPC 后，就可以从 `Trailer` 中读出这些信息，作为下一次负载均衡算法的选取依据。有兴趣的可以看 B 站实现的 [wrr 算法](https://github.com/bilibili/kratos/blob/master/pkg/net/rpc/warden/balancer/wrr/wrr.go)，它就是这么做的。
 
 ##	0x06	总结
-&emsp;&emsp;可以看出，gRPC的`Picker`结构实现，还是非常友好的。只要理解了代码的流程，很容易的可以写出自己的负载均衡实现逻辑，下一篇文章，再聊聊目前比较流行的负载均衡算法，如待权重的rr、P2C、随机、一致性hash、会话保持等实现。
+&emsp;&emsp; 可以看出，gRPC 的 `Picker` 结构实现，还是非常友好的。只要理解了代码的流程，很容易的可以写出自己的负载均衡实现逻辑，下一篇文章，再聊聊目前比较流行的负载均衡算法，如待权重的 rr、P2C、随机、一致性 hash、会话保持等实现。
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
