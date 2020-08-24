@@ -25,8 +25,6 @@ User`<--->`Browser`<--->`WebSocket`<--->`SSH`<--->`(TTY)RemoteServer
 ![image](https://wx1.sbimg.cn/2020/08/04/oMP4j.png)
 
 
-
-
 ##  0x02    实现
 作为一个 SSH 登陆系统，认证是及其重要的一环，我们将上面的数据流扩展下，加入必要的身份 / 票据认证：<br>
 (少一张图)
@@ -54,7 +52,7 @@ User`<--->`Browser`<--->`WebSocket`<--->`SSH`<--->`(TTY)RemoteServer
 6.  后台服务从 SSH Channel 中拿到按照终端大小的标准输出后又通过 Socket 连接将输出返回给浏览器，至此一个 Web Terminal 建立成功。
 
 
-##  0x03    一些实现代码细节
+##  0x03    一些代码细节
 
 
 ####    升级 TCP 连接为 SSH 连接
@@ -75,7 +73,7 @@ if err != nil {
 
 ####    升级 HTTP 连接为 Web Socket
 定义常量，web socket 升级器:
-``` go
+```golang
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
@@ -104,18 +102,18 @@ if err != nil {
     -   [SSH Conection 的实现](https://github.com/golang/crypto/blob/master/ssh/connection.go)
 
 这二者是 SSH 协议里面的链接层, 该层主要是将多个加密隧道分成逻辑通道，通道可以复用
-常见通道类型有：`session`、`x11`、`forwarded-tcpip`、`direct-tcpip`。通道里面的 Requests 是用于接收创建 SSH Channel 的请求的，而 SSH Channel 就是里面的 Connection, 数据的交互基于 Connection 完成。<br>
+常见通道类型有：`session`、`x11`、`forwarded-tcpip`、`direct-tcpip`。通道里面的 `Requests` 是用于接收创建 SSH `Channel` 的请求的，而 SSH `Channel` 就是里面的 `Connection`, 数据的交互是基于 `Connection` 完成。<br>
 
 ####    构建非交互式 SSH 客户端
-现在看下如何创建一个非交互式的 SSH 客户端，作为 WebConsole 和用户的交互模块
+现在看下如何创建一个非交互式的 SSH 客户端，作为 WebConsole 和用户的交互模块：
 
-1. 通过 `ssh.Dial()` 创建一个 SSH 客户端连接
-``` golang
+1、通过 `ssh.Dial()` 创建一个 SSH 客户端连接
+```golang
 sshclient,err = ssh.Dial("tcp", addr, clientConfig)
 ```
 
-2. 通过 SSH 客户端创建 SSH Channel, 并请求一个 pty 伪终端, 并开启用户的默认 Shell
-``` golang
+2、通过 SSH 客户端创建 SSH Channel, 并请求一个 pty 伪终端, 并开启用户的默认 Shell
+```golang
 channel, inRequests, err := sshclient.OpenChannel("session", nil)
 if err != nil {
     log.Println(err)
@@ -135,9 +133,12 @@ if !ok || err != nil {
 ```
 
 ####    Remote Server 与 Browser 实时数据交换
-现在为止建立了两个 `IO` 通道，一个是 WebSocket，另外一个是 SSH Channel。由于需要双向转发数据，这里新建 `2` 个 `groutine`, `groutine1` 不停的从 WebSocket 通道里读取用户的输入, 并通过 SSH Channel 传给远程主机。`groutine2` 负责将远程主机的数据（主要是终端屏显数据）传递给浏览器。
--   groutine1
-``` golang
+现在为止建立了两个 `IO` 通道，一个是 `WebSocket` 通道，另外一个是 SSH `Channel`。由于需要双向转发数据，这里新建 `2` 个 `groutine`：<br>
+-   `groutine1` 不停的从 WebSocket 通道里读取用户的输入, 并通过 SSH Channel 传给远程主机
+-   `groutine2` 负责将远程主机的数据（主要是终端屏显数据）传递给浏览器
+
+1、`groutine1` 主要完成从 `Websocket` 中读取数据，通过 ssh 的 `Channel` 发送到目标服务器
+```golang
 go func() {
     for {
         // p 为用户输入
@@ -153,8 +154,9 @@ go func() {
     }
 }()
 ```
--   groutine2:
-``` golang
+
+2、`groutine2` 主要完成从 SSH `Channel` 中读取数据，写入 `Websocket`，这样用户在浏览器上可以看到操作回显了：
+```golang
 go func() {
     br := bufio.NewReader(this.channel)
     buf := []byte{}
@@ -211,13 +213,14 @@ go func() {
 ```
 
 ##  0x04    登录效果验证
-直接在浏览器中输入已认证的 url，成功通过 WebConsole 连上远端的 SSH 服务器，大功告成 <br>
+直接在浏览器中输入已认证的 `url`，成功通过 `WebConsole` 连上远端的 SSH 服务器，大功告成 <br>
 ![image](https://s2.ax1x.com/2019/11/01/KHvxHS.png)
 
 
 ##  0x05    总结
 1.  在整个系统中，最关键的点是怎样防止用户的身份被伪造，直观点，就是在第 2 步中，后台服务如何确定，当前的接口调用方就是用户 A。另外，我们如何解决共享权限的场景，假设 A 申请了某台机器的登录权限，假设 A 授权 B 也可以使用该票据登录，那么我们的系统的认证如何完成呢？这个是很有趣的问题，待后面在工作中慢慢思考和实现吧。
 2.  此外，作为 SSH 连接代理的服务（本文中以 `CGI` 服务承担）的稳定性也很重要，因为 WebConsole 的所有流量都会经由 SSH 连接代理转发，TCP 连接也由代理维持，一旦代理故障，所有的 WebConsole 连接都会断开，所以可用性的设计也是非常重要的一环。
+3.  整个 Web 页面需要前置认证机制，比如接入 github 的 Oauth、Onelogin 等等
 
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
