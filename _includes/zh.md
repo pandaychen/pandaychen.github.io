@@ -9,9 +9,9 @@ Hey，这里是熊喵君的博客，后台程序员，现居深圳。
 
 ##### 工作经历
 -   2012.3 至 2015.9<br>
-	腾讯（Tencent），后台开发
+	腾讯（Tencent），后台开发工程师
 -   2015.9 至 2018.5<br>
-	大疆创新（DJI），后台开发
+	大疆创新（DJI），后台开发工程师
 -   2018.5 至今 <br>
 	腾讯（Tencent），高级运营开发工程师
 
@@ -33,6 +33,9 @@ Hey，这里是熊喵君的博客，后台程序员，现居深圳。
 
 ##### 个人推荐
 -	微服务框架：[Kratos](https://github.com/go-kratos/kratos)
+-	CGI框架：[gin](https://zhuanlan.zhihu.com/p/107751040)
+-	微服务网关：[vulcand](https://github.com/vulcand/vulcand)
+-	SSH堡垒机：[teleport](https://github.com/gravitational/teleport)
 
 ##### 个人作品
 -	[论持久战——带你走进腾讯 DDoS 防护体系](https://security.tencent.com/index.php/blog/msg/71)
