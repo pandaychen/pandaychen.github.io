@@ -129,22 +129,19 @@ func (t *Timer) Add(namespace, queue, jobID string, delaySecond uint32, tries ui
 1、创建 namespace 和 token, 注意这里使用管理端口 `7778`
 ```javascript
 $ ./scripts/token-cli -c -n test_ns -p default -D "test ns apply by @hulk" 127.0.0.1:7778
-
 {
     "token": "01DT9323JACNBQ9JESV80G0000"
 }
-``
+```
 
 2、写入内容为 value 的任务，延迟（delay）为 `1s`
 ```javascript
 $ curl -XPUT -d "value" -i "http://127.0.0.1:7777/api/test_ns/q1?tries=3&delay=1&token=01DT931XGSPKNB7E2XFKPY3ZPB"
-
 {"job_id":"01DT9323JACNBQ9JESV80G0000","msg":"published"}
 ```
 3、消费任务
 ```javascript
 $ curl -i "http://127.0.0.1:7777/api/test_ns/q1?ttr=30&timeout=3&&token=01DT931XGSPKNB7E2XFKPY3ZPB"
-
 {"data":"value","elapsed_ms":272612,"job_id":"01DT9323JACNBQ9JESV80G0000","msg":"new job","namespace":"test_ns","queue":"q1","ttl":86127}
 ```
 
@@ -158,5 +155,6 @@ Golang 客户端接口 [在此](https://github.com/bitleak/lmstfy/tree/master/cl
 
 
 ##  0x05	参考
+-	[lmstfy HTTP API](https://github.com/bitleak/lmstfy/blob/master/doc/API.md)
 -   [千万级延时任务队列如何实现，看美图开源的 - LMSTFY](https://zhuanlan.zhihu.com/p/94082947)
 -   [有赞延迟队列设计](https://tech.youzan.com/queuing_delay/)
