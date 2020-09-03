@@ -10,11 +10,16 @@ tags:
     - gRPC
 ---
 
-##  背景
-在实现 RPC 时，如果想在 RPC 方法的前或后做某些事情，怎么实现？gRPC 提供了拦截器（Interceptor），就可以完成这个功能。比如一个典型的应用场景是，当客户端进行 RPC 请求时，先对请求中的某些字段（如 MetaInfo）进行验证，验证通过再执行相应的 RPC 方法。
+##  0x00    背景
+在实现 RPC 服务时，如果想在调用 RPC 方法的前或后做某些事情，怎么实现？gRPC 提供了拦截器（Interceptor）机制，可以完成这个功能。<br>
+比如一个典型的应用场景是，当客户端进行 RPC 请求时，先对请求中的某些字段（如 MetaInfo）进行验证，验证通过再执行相应的 RPC 方法。
 
-##  Interceptor 的结构体
--   一元拦截器（grpc.UnaryInterceptor）<br>
+拦截器（Interceptor） 类似于 HTTP 应用中的 中间件（Middleware），能够让你在真正调用 RPC 方法前，进行身份认证、日志、限流等通用操作，和 Python 的装饰器（Decorator） 的作用相同。
+
+gRPC 中使用 `UnaryInterceptor` 来实现 Unary RPC 一元拦截器，使用 `StreamInterceptor` 来实现 Stream RPC 流式的拦截器，而且既可以在客户端进行拦截，也可以对服务器端进行拦截。
+
+##  0x01    结构体
+1、一元拦截器（grpc.UnaryInterceptor）<br>
 包含服务端 `UnaryServerInterceptor` 和客户端 `UnaryClientInterceptor`，这里我们分析 `UnaryServerInterceptor`:
 ```go
 func UnaryInterceptor(i UnaryServerInterceptor) ServerOption {
@@ -94,7 +99,7 @@ type StreamServerInterceptor func(srv interface{}, ss ServerStream, info *Stream
 
 ##  如何实现多个拦截器
 [WithUnaryInterceptor](https://godoc.org/google.golang.org/grpc#WithUnaryInterceptor)
-```go
+```golang
 // WithUnaryInterceptor returns a DialOption that specifies the interceptor for
 // unary RPCs.
 func WithUnaryInterceptor(f UnaryClientInterceptor) DialOption {
@@ -108,6 +113,63 @@ func WithUnaryInterceptor(f UnaryClientInterceptor) DialOption {
 -   数组依次调用
 
 ##  已有的方案
+[mercari：go-grpc-interceptor](https://github.com/mercari/go-grpc-interceptor/tree/master/multiinterceptor) 项目给出了基于数组方式的 [实现](https://github.com/mercari/go-grpc-interceptor/blob/master/multiinterceptor/interceptor.go)，主要实现代码如下：
+```golang
+type multiUnaryServerInterceptor struct {
+	uints []grpc.UnaryServerInterceptor
+}
+
+func NewMultiUnaryServerInterceptor(uints ...grpc.UnaryServerInterceptor) grpc.UnaryServerInterceptor {
+    // 返回 gen 方法的结果
+	return (&multiUnaryServerInterceptor{uints: uints}).gen
+}
+
+func (m *multiUnaryServerInterceptor) gen(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	return m.chain(0, ctx, req, info, handler)
+}
+
+func (m *multiUnaryServerInterceptor) chain(i int, ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	if i == len(m.uints) {
+		return handler(ctx, req)
+	}
+	return m.uints[i](ctx, req, info, func(ctx2 context.Context, req2 interface{}) (interface{}, error) {
+		return m.chain(i+1, ctx2, req2, info, handler)
+	})
+}
+```
+它的调用顺序如下图所示：
+![image]()
+
+
+使用拦截器链的方式如下：
+```golang
+import (
+        "fmt"
+        multiint "github.com/mercari/go-grpc-interceptor/multiinterceptor"
+        "golang.org/x/net/context"
+        "google.golang.org/grpc"
+)
+
+func fooUnaryInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+        fmt.Println("foo")
+        newctx := context.WithValue(ctx, "some_key", "some_value")
+        return handler(newctx, req)
+}
+
+func barUnaryInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+        fmt.Println("bar")
+        newctx := context.WithValue(ctx, "some_key", "some_value")
+        return handler(newctx, req)
+}
+
+func main() {
+        uIntOpt := grpc.UnaryInterceptor(multiint.NewMultiUnaryServerInterceptor(
+                fooUnaryInterceptor,
+                barUnaryInterceptor,
+        ))
+        grpc.NewServer(uIntOpt)
+}
+```
 
 ### go-grpc-middleware 的 Chain 实现
 ```go
@@ -123,7 +185,7 @@ myServer := grpc.NewServer(
 )
 ```
 看看 `ChainUnaryServer` 方法的实现，在 [chain.go](https://github.com/grpc-ecosystem/go-grpc-middleware/blob/master/chain.go) 的实现：
-```go
+```golang
 // ChainUnaryServer creates a single interceptor out of a chain of many interceptors.
 //
 // Execution is done in left-to-right order, including passing of context.
@@ -152,6 +214,86 @@ func ChainUnaryServer(interceptors ...grpc.UnaryServerInterceptor) grpc.UnarySer
 ```
 从实现上看，它采用了回调函数调用的方式，调用链为 `chainedHandler[n-1]`-->`chainedHandler[n-2]`-->`...`-->`chainedHandler[0]`-->`handler`
 
+##  拦截器的执行流程
+![img](https://wx1.sbimg.cn/2020/08/28/6gzXJ.png)
+我们从下面的例子来看下这个执行流程：
+
+####    服务端
+```golang
+func main() {
+	flag.Parse()
+
+	lis, err := net.Listen("tcp", *port)
+	if err != nil {
+		log.Fatalf("failed to listen: %v", err)
+	}
+	s := grpc.NewServer(grpc.StreamInterceptor(StreamServerInterceptor),
+		grpc.UnaryInterceptor(UnaryServerInterceptor))
+	pb.RegisterGreeterServer(s, &server{})
+
+	reflection.Register(s)
+	if err := s.Serve(lis); err != nil {
+		log.Fatalf("failed to serve: %v", err)
+	}
+}
+
+func UnaryServerInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	log.Printf("before handling. Info: %+v", info)
+	resp, err := handler(ctx, req)
+	log.Printf("after handling. resp: %+v", resp)
+	return resp, err
+}
+
+// StreamServerInterceptor is a gRPC server-side interceptor that provides Prometheus monitoring for Streaming RPCs.
+func StreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	log.Printf("before handling. Info: %+v", info)
+	err := handler(srv, ss)
+	log.Printf("after handling. err: %v", err)
+	return err
+}
+```
+
+####    客户端
+```golang
+
+func main() {
+	flag.Parse()
+
+	// 连接服务器
+	conn, err := grpc.Dial(*address, grpc.WithInsecure(), grpc.WithUnaryInterceptor(UnaryClientInterceptor),
+		grpc.WithStreamInterceptor(StreamClientInterceptor))
+
+	if err != nil {
+		log.Fatalf("faild to connect: %v", err)
+	}
+	defer conn.Close()
+
+	c := pb.NewGreeterClient(conn)
+
+	r, err := c.SayHello(context.Background(), &pb.HelloRequest{Name: *name})
+	if err != nil {
+		log.Fatalf("could not greet: %v", err)
+	}
+	log.Printf("Greeting: %s", r.Message)
+}
+
+func UnaryClientInterceptor(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+	log.Printf("before invoker. method: %+v, request:%+v", method, req)
+	err := invoker(ctx, method, req, reply, cc, opts...)
+	log.Printf("after invoker. reply: %+v", reply)
+	return err
+}
+
+func StreamClientInterceptor(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+	log.Printf("before invoker. method: %+v, StreamDesc:%+v", method, desc)
+	clientStream, err := streamer(ctx, desc, cc, method, opts...)
+	log.Printf("before invoker. method: %+v", method)
+	return clientStream, err
+}
+```
+
 ##  参考
+-   [gRPC 之 Interceptors](https://www.do1618.com/archives/1467/grpc-%E4%B9%8B-interceptors/)
+-   [gRPC server insterceptor for golang](https://github.com/mercari/go-grpc-interceptor)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
