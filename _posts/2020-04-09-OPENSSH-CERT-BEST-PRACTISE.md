@@ -21,8 +21,9 @@ tags:
 -       `Cert` 的其他知识点
 
 ##  0x01     `Cert` VS 公钥
-首先，这两者是不相同的，但是其实在 OpenSSH 的处理逻辑中，是在相同的流程中处理的逻辑。OpenSSH `Cert` 也是基于密钥认证的, `Cert` 是经过 CA 签名后的公钥（回顾上一篇文章的内容）：
-$$ 证书 = 公钥 + 元数据 (公钥指纹 / 签发 CA / 序列号 / 有效日期 / Principals 等)$$
+首先，这两者是不相同的，但是其实在 OpenSSH 的处理逻辑中，是在相同的流程中处理的逻辑。OpenSSH `Cert` 也是基于密钥认证的, `Cert` 是经过 CA 签名后的公钥（回顾上一篇文章的内容）：<br>
+
+$$ 证书 = 公钥 + 元数据 (公钥指纹 / 签发 CA / 序列号 / 有效日期 / 登录用户等)$$
 
 ####    算法安全
 
@@ -34,9 +35,7 @@ $$ 证书 = 公钥 + 元数据 (公钥指纹 / 签发 CA / 序列号 / 有效日
 
 在安全性上，`DSA` 和 `RSA` 是易于对两个极大质数乘积做质因数分解的困难度，而 `ECDSA`, `ED25519` 则是基于椭圆曲线的离散对数难题。
 
-总结来说：这 4 种算法的推荐排序如下（推荐使用 `ED25519` 算法）：
-Your SSH keys might use one of the following algorithms:
-
+总结来说：这 4 种算法的推荐排序如下（推荐使用 `ED25519` 算法）：<br>
 🚨 DSA: It’s unsafe and even no longer supported since OpenSSH version 7, you need to upgrade it!
 
 ⚠️ RSA: It depends on key size. If it has 3072 or 4096-bit length, then you’re good. Less than that, you probably want to upgrade it. The 1024-bit length is even considered unsafe.
@@ -49,7 +48,7 @@ Your SSH keys might use one of the following algorithms:
 基于 OpenSSH 证书签发 CA, 与我们所熟知的 HTTPS 证书的签发使用的 `X.509` 体系不同, 它不支持 证书链（Cert Chain） 和 可信商业 CA。在项目实践中，我们基于 OpenSSH 证书做了大量的安全性提升的工作。
 
 ####    用户认证
-基于 CA 签发的用户证书主要用于 SSH 登录，如下面一个证书，我们可以基于 `key ID` 或者 `Critical Options` 这个字段做些额外的工作。此外，作为登录使用的证书对，建议满足如下几点：
+基于 CA 签发的用户证书主要用于 SSH 登录，如下面一个证书，我们可以基于 `key ID` 或者 `Critical Options` 这个字段做些额外的工作。此外，作为登录使用的证书对，建议满足如下几点（提升证书使用的安全性）：
 1.      证书签发的生效时间区间尽量缩短（快速过期）
 2.      证书的登录用户唯一（最小化签发）
 3.      一次一签 VS 一机一证书
@@ -93,10 +92,22 @@ ssh_host_ecdsa_key-cert.pub:
 ```
 
 ####    其他安全特性
-由于证书的不可伪造性（Unforgeability），我们可以利用证书的内置字段或结构来提升证书使用的安全性。此外，OpenSSH 还支持多个 CA 共用的（虽然不推荐这样配置）
+由于证书的不可伪造性（Unforgeability），我们可以利用证书的内置字段或结构来提升证书使用的安全性。此外，OpenSSH 还支持多个 CA （公钥）共用（虽然不推荐这样配置）
 
 ##      0x03    `Cert` 和 SSO 的结合（零信任方案）
-CloudFlare 的 OpenSSH 实践：[Public keys are not enough for SSH security](https://blog.cloudflare.com/public-keys-are-not-enough-for-ssh-security/)，文中给出了一个非常值得借鉴的 OpenSSH 证书架构体系。
+CloudFlare 的 OpenSSH 实践：[Public keys are not enough for SSH security](https://blog.cloudflare.com/public-keys-are-not-enough-for-ssh-security/)，文中给出了一个非常值得借鉴的 OpenSSH 证书架构与 SSO 结合的安全登录体系。整体架构图如下：
+
+![img](https://blog-cloudflare-com-assets.storage.googleapis.com/2019/10/Short-lived-Cert@2x.png)
+
+图中的流程大致如下：
+1.      用户发起 SSH 登录请求
+2.      Cloudflare Access 的认证流程，这里可以采用 Oauth、OneLogin 等等开放的认证体系来完成，另外推荐也加入 2FA
+3.      Cloudflare Access 为用户生成 JWT 票据
+4.      Cloudflare CA 验证 JWT 票据，验证 ok 后请求签发新的客户端 SSH 登录证书
+5.      Cloudflare CA 完成签发证书并返回
+6.      日志审计
+7.      此时用户可以使用 JWT 票据 +`short-lived certificates` 登录服务器（当然管理员需要实现在目标服务器上部署证书的公钥）
+
 
 ##  0x04    `Cert` 的安全性及不足
 
