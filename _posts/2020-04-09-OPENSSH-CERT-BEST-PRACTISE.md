@@ -23,7 +23,7 @@ tags:
 ##  0x01     `Cert` VS 公钥
 首先，这两者是不相同的，但是其实在 OpenSSH 的处理逻辑中，是在相同的流程中处理的逻辑。OpenSSH `Cert` 也是基于密钥认证的, `Cert` 是经过 CA 签名后的公钥（回顾上一篇文章的内容）：<br>
 
-$$ 证书 = 公钥 + 元数据 (公钥指纹 / 签发 CA / 序列号 / 有效日期 / 登录用户等)$$
+$$ 证书 = 公钥 + 元数据 (公钥指纹 / 签发 CA / 序列号 / 证书有效日期 / 登录用户等)$$
 
 ####    算法安全
 
@@ -36,6 +36,7 @@ $$ 证书 = 公钥 + 元数据 (公钥指纹 / 签发 CA / 序列号 / 有效日
 在安全性上，`DSA` 和 `RSA` 是易于对两个极大质数乘积做质因数分解的困难度，而 `ECDSA`, `ED25519` 则是基于椭圆曲线的离散对数难题。
 
 总结来说：这 4 种算法的推荐排序如下（推荐使用 `ED25519` 算法）：<br>
+<br>
 🚨 DSA: It’s unsafe and even no longer supported since OpenSSH version 7, you need to upgrade it!
 
 ⚠️ RSA: It depends on key size. If it has 3072 or 4096-bit length, then you’re good. Less than that, you probably want to upgrade it. The 1024-bit length is even considered unsafe.
@@ -48,10 +49,8 @@ $$ 证书 = 公钥 + 元数据 (公钥指纹 / 签发 CA / 序列号 / 有效日
 基于 OpenSSH 证书签发 CA, 与我们所熟知的 HTTPS 证书的签发使用的 `X.509` 体系不同, 它不支持 证书链（Cert Chain） 和 可信商业 CA。在项目实践中，我们基于 OpenSSH 证书做了大量的安全性提升的工作。
 
 ####    用户认证
-基于 CA 签发的用户证书主要用于 SSH 登录，如下面一个证书，我们可以基于 `key ID` 或者 `Critical Options` 这个字段做些额外的工作。此外，作为登录使用的证书对，建议满足如下几点（提升证书使用的安全性）：
-1.      证书签发的生效时间区间尽量缩短（快速过期）
-2.      证书的登录用户唯一（最小化签发）
-3.      一次一签 VS 一机一证书
+基于 CA 签发的用户证书主要用于 SSH 登录，如下面这个用户证书，我们可以基于 `key ID` 或者 `Critical Options` 这个字段做些额外的工作。
+
 ```javascript
  Type: ssh-ed25519-cert-v01@openssh.com user certificate
         Public key: ED25519-CERT SHA256:wdzTWhCrVeJrxRIC1KU5nJr8FbxxCUJt1IVeG7HYjmc
@@ -70,6 +69,11 @@ $$ 证书 = 公钥 + 元数据 (公钥指纹 / 签发 CA / 序列号 / 有效日
                 permit-pty
                 permit-user-rc
 ```
+
+此外，作为登录使用的证书对，建议满足如下几点（提升证书使用的安全性）：
+1.      证书签发的生效时间区间尽量缩短（快速过期）
+2.      证书的登录用户唯一（最小化签发）
+3.      一次一签 VS 一机一证书
 
 ####    主机认证
 主机证书主要用于替换服务器的 Hostkey 认证，用于服务端告诉客户端，我是经由 CA 签发（认证）的合法服务器：
@@ -117,6 +121,8 @@ CloudFlare 的 OpenSSH 实践：[Public keys are not enough for SSH security](ht
 2.      CA 私钥的定期轮换机制
 
 ##      0x05    `Cert` 的其他知识点
+
+####    OpenSSH Cert With Ldap
 
 
 ##  0x06    参考
