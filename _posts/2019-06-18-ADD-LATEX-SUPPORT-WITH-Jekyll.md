@@ -33,8 +33,7 @@ markdown: kramdown
 ```
 
 ##  0x02  数学公式的例子
-1.
-$E=mc^2$
+1.$E=mc^2$
 
 2.
 $$
