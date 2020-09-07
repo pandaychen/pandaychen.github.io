@@ -229,10 +229,8 @@ func main() {
 另外一个有趣的方法是 `io.Pipe`，其实现 [在此](https://golang.org/src/io/pipe.go?s=4903:4941#L187)，有点像 Linux 的 Pipe。其官方描述如下，简言之，就是提供了一个单工的数据传输管道。
 读端只可以读，写端只可以写。
 
-> Pipe creates a synchronous in-memory pipe. It can be used to connect code expecting an io.Reader with code expecting an io.Writer.
-
+> 	Pipe creates a synchronous in-memory pipe. It can be used to connect code expecting an io.Reader with code expecting an io.Writer.	
 >	Reads and Writes on the pipe are matched one to one except when multiple Reads are needed to consume a single Write. That is, each Write to the PipeWriter blocks until it has satisfied one or more Reads from the PipeReader that fully consume the written data. The data is copied directly from the Write to the corresponding Read (or Reads); there is no internal buffering.
-
 >	It is safe to call Read and Write in parallel with each other or with Close. Parallel calls to Read and parallel calls to Write are also safe: the individual calls will be gated sequentially.
 
 ```golang
