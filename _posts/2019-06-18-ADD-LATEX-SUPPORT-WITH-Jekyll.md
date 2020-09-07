@@ -34,7 +34,7 @@ markdown: kramdown
 
 ##  0x02  数学公式的例子
 1.
-$$E=mc^2$$
+$E=mc^2$
 
 2.
 $$
@@ -44,6 +44,7 @@ $$
 $$
 
 3.
+
 $$
 R_{\mu \nu} - {1 \over 2}g_{\mu \nu}\,R + g_{\mu \nu} \Lambda
 = {8 \pi G \over c^4} T_{\mu \nu}
