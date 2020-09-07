@@ -4,7 +4,7 @@ title:      OpenSSH Certificate 最佳实践
 subtitle:
 date:       2020-04-09
 author:     pandaychen
-header-img: golang-fly-horse.png
+header-img: img/golang-fly-horse.png
 catalog: true
 category:   false
 tags:
