@@ -119,7 +119,7 @@ grpclog.Errorf("err %v", err)
 
 ![image](https://wx2.sbimg.cn/2020/06/07/_20200604104623.jpg)
 
-##  参考
+##  0x04  参考
 -   [从 Go 高性能日志库 zap 看如何实现高性能 Go 组件](https://mp.weixin.qq.com/s/i0bMh_gLLrdnhAEWlF-xDw)
 -   [在 Go 语言项目中使用 Zap 日志库](https://www.liwenzhou.com/posts/Go/zap/)
 
