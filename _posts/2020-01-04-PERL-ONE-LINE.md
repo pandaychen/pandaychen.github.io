@@ -99,9 +99,9 @@ while(<>){
 	print "$F[0]\n"
 }
 ```
-上面这段代码相当于 `perl -alne 'print $F[0]'`
-9、其他一些例子
+上面这段代码相当于 `perl -alne 'print $F[0]'`<br>
 
+9、其他一些例子
 ```perl
 #输入数字的行，使用正则匹配
 perl -ne 'print if /^\d+$/'
