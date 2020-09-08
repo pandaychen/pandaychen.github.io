@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      Perl 单行特技（One-Line）
-subtitle:   神奇的胶水语言
+subtitle:   神奇的胶水语言 Perl 文本处理
 date:       2020-01-04
 author:     pandaychen
 catalog:    true
@@ -55,44 +55,42 @@ ls -l | perl -pe 's/\S+ //'
 
 ##  0x02    处理文件的快捷操作
 
-1. 在多个文件中处理替换
+1、在多个文件中处理替换
 ```perl
 perl -pi -e 's/test1/test2/g' file1 file2 file3
 ```
-2.  处理文件时匹配指定的行，然后进行替换
+2、处理文件时匹配指定的行，然后进行替换
 ```perl
 #把 file 文件中包含 hello 这行中的 test1 全部替换成 test2
 perl -pi -e 's/test1/test2/g if /hello/' file
 #把 file 文件中匹配到包含数字的行全部把 test2 替换成 test1
 perl -pi -e 's/test1/test2/g if /\d/' file
 ```
-
-3. 文件的行去重（hash）
+3、文件的行去重（hash）
 ```perl
 perl -ne 'print if $a{$_}++' file
 ```
-
-4. 打印行号
+4、打印行号
 ```perl
 perl -ne 'print"$. $_"'
 #使用 - p 的方式实现，修改默认的 $_变量
 perl -pe '$_ ="$. $_"'
 ```
 
-5.	输出重复行，并且打印重复行的行号
+5、输出重复行，并且打印重复行的行号
 ```perl
 perl -ne 'print"$. $_"if $a{$_}++' file
 ```
 
-6.	`perl -pe` 可用于读取文件每行，并按照给定的命令进行处理，最后输出
+6、`perl -pe` 可用于读取文件每行，并按照给定的命令进行处理，最后输出
 ```perl
 perl -pe 's/aaa/AAA/g' file
 ```
 	> 注意：使用 `-p` 选项比 `-n` 更为直观一些
 
-7.	`perl -l` 参数几乎可以跟 `-n` 搭配代替 perl 经常用的 `while(<>){chomp;}` 语法
+7、`perl -l` 参数几乎可以跟 `-n` 搭配代替 perl 经常用的 `while(<>){chomp;}` 语法
 
-8.	重点! 如果需要处理 tab 分割的文件的每一行内容，那么 `perl -alne` 参数几乎可以说是必备的
+8、重点! 如果需要处理 tab 分割的文件的每一行内容，那么 `perl -alne` 参数几乎可以说是必备的
 例如，
 ```perl
 while(<>){
@@ -102,7 +100,7 @@ while(<>){
 }
 ```
 上面这段代码相当于 `perl -alne 'print $F[0]'`
-9.	其他一些例子
+9、其他一些例子
 
 ```perl
 #输入数字的行，使用正则匹配
