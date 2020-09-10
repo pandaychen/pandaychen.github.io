@@ -53,6 +53,7 @@ tags:
 
 ##	其他
 -	[structs](https://github.com/fatih/structs)，该库提供了比较丰富的函数，让我们可以像 python 中一样轻松的获取所有的 key 值（如 `structs.Names(server)`），所有的 value 值（如 `structs.Values(server)`），甚至直接进行类型判断（如 `structs.IsZero(server)`）等等。
+-	[croc - Easily and securely send things from one computer to another](https://github.com/schollz/croc)
 
 ##	参考
 -	https://www.cnblogs.com/davygeek/p/4634919.html
