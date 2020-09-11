@@ -2,7 +2,7 @@
 layout:     post
 title:      Golang 并发协程池实现分析（二）
 subtitle:   分析 Fasthttp 的 goroutine pool
-date:       2020-03-08
+date:       2020-10-09
 author:     pandaychen
 header-img: img/golang-horse-fly.png
 catalog: true
