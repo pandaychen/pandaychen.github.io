@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      OpenSSH Certificate 最佳实践
+title:      OpenSSH Certificate 证书最佳实践
 subtitle:
 date:       2020-04-09
 author:     pandaychen
