@@ -34,14 +34,16 @@ bigCache 本地缓存库以其快速、并发和高性能著称，它可以存�
 由于 bigCache 的巧妙设计，这样 GC 就变成了 `map` 无指针结构 和 `[]byte` 结构的扫描问题了，因此性能会高出很多。
 
 ####    底层依然 map 存储
+> GC ignore maps with no pointers
+
 bigCache 的底层仍然用 `map` 存储，为何使用 `map` 呢？GoLang 1.5 版本的优化说明: 如果 `map` 的 key 或 value 中都不含指针, GC 便会忽略这个 `map`。此外，`map` 本身的性能并不差，`map` 与 `O(1)` 的效率还是还是值得一用的。
 
 ##  0x02    用户数据（数据序列化 / pack）
 在许多高性能的组件实现，针对数据部分的存储大都会将其由 `string` 类型按照一定的 pack 格式转为 `binary` 类型以减少内存占用，在 bigCache 也是类似做法，每个要插入的 key-value 由 `5` 部分组成，分别是：
--   时间戳 （8byte）：使用时间戳来实现到期后的 `expire` 功能
--   key 的 hash 值 （8byte）：
--   key 的长度 （2byte）
--   key 的值以及 value 的值
+-   时间戳 （`8`byte）：使用时间戳来实现到期后的 `expire` 功能
+-   key 的 hash 值 （`8`byte）
+-   key 的长度 （`2`byte）
+-   key 的值以及 value 的值：根据各自的长度申请
 
 序列化时采用 `LittleEndian` 小端序。对 timestamp 和 hash 和 key 和 value 封装在一起。这种形式的存储和 `leveldb` 的实现类似。<br>
 
@@ -55,7 +57,7 @@ const (
 )
 ```
 最终的存储 Unit 如下图所示：
-![img]()
+![img](https://wx2.sbimg.cn/2020/09/17/G2DyJ.png)
 
 `wrapEntry` 完成的上述 pack 的过程（通用的方法），将 key 和 value 都 pack：
 ```golang
@@ -100,7 +102,7 @@ func resetKeyFromEntry(data []byte) {
 }
 ```
 
-最终是通过 `binary.PutUvarint`+`BytesQueue.copy` 方法，将 pack 后的数据及长度写入到 `bytesQueue.array` 中：
+最终是通过 `binary.PutUvarint` + `BytesQueue.copy` 方法，将 pack 后的数据及长度写入到 `bytesQueue.array` 中：
 `binary.PutUvarint`，该方法主要是将 `uint64` 类型放入 buf 中，并返回写入的字节数。如果 buf 过小，PutUvarint 将抛出 panic。
 ```golang
 func (q *BytesQueue) push(data []byte, len int) {
@@ -109,7 +111,7 @@ func (q *BytesQueue) push(data []byte, len int) {
     headerEntrySize := binary.PutUvarint(q.headerBuffer, uint64(len))
     // 复制长度
 	q.copy(q.headerBuffer, headerEntrySize)
-    // 复制pack后的数据
+    // 复制 pack 后的数据
 	q.copy(data, len)
 
 	if q.tail > q.head {
@@ -127,18 +129,18 @@ func (q *BytesQueue) copy(data []byte, len int) {
 }
 ```
 
-关于bigCache的数据序列化存储可参见下图：
+关于 bigCache 的数据序列化存储可参见下图：
 
 ![img](https://wx1.sbimg.cn/2020/09/17/G25NT.png)
 
-##	0x02	核心结构
-bigCache 的核心结构如下图所示：
+##	0x03	核心数据结构
+bigCache 的核心数据结构如下图所示：
 
-![img]()
+![img](https://wx1.sbimg.cn/2020/09/17/GCx8j.png)
 
 1.  `bigCache`：管理节点
-2.  `cacheShard`：分段缓存
-3.  [`queue.BytesQueue`](https://github.com/allegro/bigcache/blob/master/queue/bytes_queue.go)：核心的存储结构，真正的数据以二进制序列化后存储的位置
+2.  `cacheShard`：分段（shard）缓存
+3.  [`BytesQueue`](https://github.com/allegro/bigcache/blob/master/queue/bytes_queue.go)：核心的存储结构，真正的数据以二进制序列化后存储的位置
 
 ```golang
 // BytesQueue is a non-thread safe queue type of fifo based on bytes array.
@@ -146,25 +148,25 @@ bigCache 的核心结构如下图所示：
 type BytesQueue struct {
 	full            bool
 	array           []byte      // 真正存储数据的地方
-	capacity        int
-	maxCapacity     int
+	capacity        int			// array 的容量
+	maxCapacity     int			// array 可申请的最大容量
 	head            int
-	tail            int
-	count           int
+	tail            int 		// 下次可以插入 item 的位置
+	count           int			// 当前插入的 item 数量
 	rightMargin     int
 	headerBuffer    []byte		// 插入前做临时 buffer 所用（slice-copy）
 	verbose         bool        // 打印 log 开关
-	initialCapacity int
+	initialCapacity int			// BytesQueue 创建时，array 的初始容量
 }
 ```
 
 在 bigCache 中，所有的 value 都是存在一个 `BytesQueue` 中的，从实现可知，所有的用户存储数据经由序列化后存入 `array []byte`，有点像 `TLV + RingBuffer` 的实现（不完全是）。
 
-下面章节就这 `3` 种数据结构实现及接口调用过程来分析。
+下面章节就这 `3` 种数据结构实现及接口调用过程来分析。我们先从 `BytesQueue` 开始。
 
-##  0x03    BytesQueue 实现
+##  0x04    BytesQueue 实现
 前文说到，`BytesQueue` 是 bigCache 的真正存储。通过维护下面几个变量来实现存储位移及标识：
--   `head`：起始位置
+-   `head`：起始位置（也可以理解为，当前最老的数据的位置，删除的逻辑从这个位置开始）
 -   `tail`：下次可以插入 item 的位置
 -   `capacity`：标识 `array` 的容量
 -   `count`：当前已经插入的 item 的数量
@@ -172,7 +174,7 @@ type BytesQueue struct {
 -   `rightMargin`：用于标识队列中最后一个元素的位置，是一个绝对位置。
 -   `leftMarginIndex`：常量，值为 `1`，标识队列的开头位置（`0` 号不用）
 
-注意， `head` 和 `tail` 以及 `rightMargin` 的初始值都是 `leftMarginIndex`
+注意， `head` 和 `tail` 以及 `rightMargin` 的初始值都是 `leftMarginIndex`。`BytesQueue` 使用 `[]byte` 类型来模拟队列，插入数据从 `tail` 位置，删除数据从 `head` 位置。有些像低配版本的 `bytes.Buffer`。
 1、当插入 item 时，`tail` 累加，见 [`bytesQueue.copy` 方法](https://github.com/allegro/bigcache/blob/master/queue/bytes_queue.go#L155)：
 ```golang
 func (q *BytesQueue) copy(data []byte, len int) {
@@ -206,13 +208,15 @@ func (q *BytesQueue) Pop() ([]byte, error) {
 	return data, nil
 }
 ```
-3、`head` 和 `tail` 都是相对位置，`head` 不一定一直在 `tail` 的前面，比如随着数据的插入，`tail` 已处于 `BytesQueue.array` 的最后面，此时 bigCache 会尝试从 `head` 前面查找是否还有可以插入的位置，如果插入成功，则 `head` 就会在 `tail` 的后面，如下图所示：
+3、注意：`head` 和 `tail` 都是相对位置，`head` 不一定一直在 `tail` 的前面，比如随着数据的插入，`tail` 已处于 `BytesQueue.array` 的最后面，此时 bigCache 会尝试从 `head` 前面查找是否还有可以插入的位置，如果插入成功，则 `head` 就会在 `tail` 的后面，如下图所示：
 
 ![img]()
 
 4、`BytesQueue` 不同于队列，`head` 所指向的元素不一定是最早插入的元素，`tail` 指向的元素也不是最晚插入 `BytesQueue` 的，它们可能会因为扩容是发生变化。因此它们的作用不是用来判断数据的新旧程度，而是用来判断是否可以插入新的元素，判断数据是否过期是使用的元素中的 `timestamp` 字段。
 
-5、`BytesQueue` 实现了如下对外接口：
+5、每次插入 item 时，bigCache 会根据插入的 key 和 value 在 `BytesQueue` 结构申请固定大小的空间。key 和 value 都会被写入到 `array` 中
+
+6、`BytesQueue` 实现了如下对外接口：
 -   `Reset`
 -   `Push`
 -   `Pop`
@@ -220,7 +224,7 @@ func (q *BytesQueue) Pop() ([]byte, error) {
 -   `Capacity`
 -   `Len`
 
-##  0x04    bigCache && cacheShard 分片
+##  0x05    bigCache && cacheShard 分片
 针对并发降低锁粒度而做的分片 shard 优化，已经是 Golang 的常用套路了。为了避免协程并发访问，单个锁成为系统的瓶颈，bigCache 亦采用 shards 的方式来解决：它将全部要存储的数据划分成若干个 shard 独立管理，而每一个 shard 都拥有一个锁，这样每个锁只负责一部分的数据，这样能够减少并发读写对 `sync.RWMutex` 的调用。
 
 ```golang
@@ -239,7 +243,8 @@ type BigCache struct {
 再看看 `cacheShard` 结构，单个 shard 的 [结构](https://github.com/allegro/bigcache/blob/master/shard.go) 如下：
 ```golang
 type cacheShard struct {
-	hashmap     map[uint64]uint32		 // 存储数据在 entries 中具体位置, key 为数据 key 的 hash，value 为位置（key -> value index）
+	hashmap     map[uint64]uint32
+	// 存储数据在 entries 中具体位置, key 为数据 key 的 hash，value 为位置（key -> value index）
 	entries     queue.BytesQueue		// 数据最终存储的位置
 	lock        sync.RWMutex
 	entryBuffer []byte
@@ -256,13 +261,13 @@ type cacheShard struct {
 }
 ```
 
-这里注意看 `cacheShard` 中的 `hashmap` 结构，其类型为 `map[uint64]uint32`，完全和 `string` 扯不上关系。有经验的开发者一眼就看出这其实是个索引，`hashmap` 的 `key` 为用户 key 的 `hash` 值，`hashmap` 的 value 则指向存储部分的位置（有点像多级 hashtable+ringQueue 的经典存储结构）。<br>
+这里注意看 `cacheShard` 中的 `hashmap` 结构，其类型为 `map[uint64]uint32`，完全和 `string` 扯不上关系。有经验的开发者一眼就看出这其实是个索引，`hashmap` 的 `key` 为用户 key 的 `hash` 值，`hashmap` 的 value 则指向存储部分的位置（有点像多级 hashtable + ringQueue 的经典存储结构）。<br>
 
 所有的用户 value（其实也包含了用户 key） 都保存在一个 `BytesQueue` 里 , 然后保存这个 value 的头部所在的索引值, 通过索引值来访问（索引值为 uint32 类型），这样在 bigCache 中，核心的映射关系就使用一个 `map[uint64]uint32` 来存储了，这样即不存储指针，也不存储符合结构，使得 gc 对 bigCache 的影响降到最小。<br>
 
 每一个缓存分片 `cacheShard` 里都会有一个 `map[uint64]uint32` 来保存 `hash(key) ==> valueIndex` 的关系, 并且每个 `cacheShard` 里都会有一个 `BytesQueue` 来储存 value。
 
-##  0x05    bigCache 对外接口
+##  0x06    bigCache 对外接口
 本小节，我们看下 bigCache 的数据操作过程。<br>
 
 BigCache 对外提供了若干个方法：
@@ -314,12 +319,13 @@ func (c *BigCache) Set(key string, entry []byte) error {
 }
 ```
 
-再看下 `cacheShard.set` 的实现逻辑：
+再看下 `cacheShard.set` 的实现逻辑（由于 `cacheShard` 中的 `hashmap` 存放 value 在 BytesQueue 中具体位置，所以我们要做的事情就是寻找到这个位置并插入 item）：
 1.  首先根据 key 的 `hashedKey` 在 `cacheShard.hashmap` 中进行冲突检测，检测 `hashmap` 中此 key 是不是已经存在，如果发现 key 已经存在，bigCache 会将之前插入 item 的 `hashKey` 字段（通过 `s.entries.Get(int(previousIndex))` 方法获取到之前插入 item 的位置引用，`[]byte` 类型）置为 0，即 `resetKeyFromEntry` 的逻辑
 2.  每次插入新数据时，bigCache 都会获取 `BytesQueue` 头部数据，然后判断数据是否过期，如果过期则删除，这也是个很不错的设计考虑
 3.  使用 `wrapEntry` 对用户传入的 key 和 value 进行序列化
 4.  序列化完成后，调用 `BytesQueue.Push` 方法插入此 `binary` 数据
 5.  在插入数据时，如果插入失败了，bigCache 会将 `BytesQueue` 的头部数据删除掉，尝试通过删除已插入的数据来解决因 `BytesQueue` 存储不足而插入失败的情况，然后重新尝试 `BytesQueue.Push` 操作（`for` 循环）。如果再次失败了，bigCache 会继续尝试，直到 bigCache 中已无可删除的数据了为止
+6.	数据插入成功后，在 `hashmap` 存储这个 `index` 位置
 
 ```golang
 func (s *cacheShard) set(key string, hashedKey uint64, entry []byte) error {
@@ -343,7 +349,7 @@ func (s *cacheShard) set(key string, hashedKey uint64, entry []byte) error {
     // 这里是个 for 循环
     for {
         if index, err := s.entries.Push(w); err == nil {
-            s.hashmap[hashedKey] = uint32(index)    // 最终 hashmap 中保存的是 index
+            s.hashmap[hashedKey] = uint32(index)    // 插入成功！最终 hashmap 中保存的是 index
             // 即插入前 q.tail 的位置
             s.lock.Unlock()
             return nil
@@ -382,7 +388,7 @@ func (q *BytesQueue) Push(data []byte) (int, error) {
 
 	q.push(data, dataLen)
 
-	//返回index，hashmap保存的正是此位置
+	// 返回 index，hashmap 保存的正是此位置
 	return index, nil
 }
 
@@ -537,11 +543,137 @@ func (q *BytesQueue) peek(index int) ([]byte, int, error) {
 }
 ```
 
-####    bigCache 定时删除
+####    bigCache 定时删除逻辑
+bigCache 可以为插入的数据设置过期时间，但是缺点是所有数据的过期时间都是一样的。bigCache 中自动删除数据有两种场景：
+1.	在插入数据时删除过期数据（为了不影响插入性能，每次最多删除一条数据，前文已描述）
+2.	通过设置 `CleanWindow`，启动 goroutine 后台定时批量删除过期数据
+
+```golang
+...
+if config.CleanWindow > 0 {
+    go func() {
+        ticker := time.NewTicker(config.CleanWindow)
+        defer ticker.Stop()
+        for {
+            select {
+            case t := <-ticker.C:
+                cache.cleanUp(uint64(t.Unix()))
+            case <-cache.close:
+                return
+            }
+        }
+    }()
+}
+...
+```
+真正执行删除的逻辑比较简单，就是遍历各个 `cacheShard`，从 `q.head` 的位置（这个位置指向的数据必定是最先插入的）开始检查，如果有超时的 item 就直接删除：
+```golang
+func (c *BigCache) cleanUp(currentTimestamp uint64) {
+	for _, shard := range c.shards {
+		shard.cleanUp(currentTimestamp)
+	}
+}
+
+func (s *cacheShard) cleanUp(currentTimestamp uint64) {
+	s.lock.Lock()
+	for {
+		if oldestEntry, err := s.entries.Peek(); err != nil {
+			break
+		} else if evicted := s.onEvict(oldestEntry, currentTimestamp, s.removeOldestEntry); !evicted {
+			break
+		}
+	}
+	s.lock.Unlock()
+}
+
+// Peek reads the oldest entry from list without moving head pointer
+func (q *BytesQueue) Peek() ([]byte, error) {
+	data, _, err := q.peek(q.head)
+	return data, err
+}
+```
+
+##	0x07	bigCache 扩容
+`BytesQueue` 初始化时会设置 `maxCacacity`，而真正用来存数据的数组会先初始化到一个比较小的值，在使用的过程中动态扩容. 每次扩容的容量都是前一次的 `2` 倍（直到最大 size）<br>
+注意下面代码中的 `rightMargin`，用于标识队列中最后一个元素的位置，是一个绝对位置，当队列需要扩容时，会 copy 该位置之前的所有元素。
+```golang
+func (q *BytesQueue) allocateAdditionalMemory(minimum int) {
+    start := time.Now()
+    if q.capacity < minimum {
+        q.capacity += minimum
+    }
+    q.capacity = q.capacity * 2
+    if q.capacity > q.maxCapacity && q.maxCapacity > 0 {
+        q.capacity = q.maxCapacity
+    }
+    oldArray := q.array
+    q.array = make([]byte, q.capacity)
+    if leftMarginIndex != q.rightMargin {
+        copy(q.array, oldArray[:q.rightMargin])
+        if q.tail < q.head {
+            emptyBlobLen := q.head - q.tail - headerEntrySize
+            q.push(make([]byte, emptyBlobLen), emptyBlobLen)
+            q.head = leftMarginIndex // head 指向了后插入的数据
+            q.tail = q.rightMargin
+        }
+    }
+}
+```
+
+##	0x08	其他细节
+
+####    fnv 算法
+bigCache 在计算 `hash(key)` 时, 使用的是 [FNV 算法](https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function)。这个算法有两个优点：
+1.  所有操作均在栈上进行，节省内存
+2.  效率较高
+3.	适合 `string` 到 `uint64` 的 hash 转换
+
+```golang
+type fnv64a struct{}
+
+const (
+	// offset64 FNVa offset basis. See https://en.wikipedia.org/wiki/Fowler–Noll–Vo_hash_function#FNV-1a_hash
+	offset64 = 14695981039346656037
+	// prime64 FNVa prime value. See https://en.wikipedia.org/wiki/Fowler–Noll–Vo_hash_function#FNV-1a_hash
+	prime64 = 1099511628211
+)
+
+// Sum64 gets the string and returns its uint64 hash value.
+func (f fnv64a) Sum64(key string) uint64 {
+	var hash uint64 = offset64
+	for i := 0; i <len(key); i++ {
+		hash ^= uint64(key[i])
+		hash *= prime64
+	}
+
+	return hash
+}
+```
+
+####	fnv 冲突的处理
+这里有个问题，在计算用户 key 的 hash 值时，结果冲突了如何处理？从 bigCache 的处理看，也是容忍了这样的操作，直接返回失败：
+```golang
+...
+// 从序列化的存储中抽取 key 并比较
+if entryKey := readKeyFromEntry(wrappedEntry); key != entryKey {
+	if s.isVerbose {
+		s.logger.Printf("Collision detected. Both %q and %q have the same hash %x", key, entryKey, hashedKey)
+	}
+	s.lock.RUnlock()
+	s.collision()
+	return nil, ErrEntryNotFound
+}
+...
+```
+
+####	bigCache 数据更新
+bigCache 为何不提供更新的操作？其实这是显而易见的 <br>
+每次插入元素，bigCache 会根据插入的 key 和 value 在 BytesQueue 中申请一个固定大小的空间。因为无法保证更新的 value 值和旧的 value 长度相同（这也是数据定长存储的劣势），这样对 bigCache 来说，按照时间顺序的 `head` 和 `tail` 索引值会乱掉，所以干脆就不提供更新接口了。
 
 
-##  0x06    总结
+##  0x09    总结 && 使用场景
 从开源的实现来看，相较于 `sync.Map`，更多的作者更偏爱使用 `shard map` + `RWMutex` 实现缓存。
 
-##	0x07	参考
+
+##	0x0A	参考
 -	[本地缓存 BigCache](https://neojos.com/blog/2018/08-19-%E6%9C%AC%E5%9C%B0%E7%BC%93%E5%AD%98bigcache/)
