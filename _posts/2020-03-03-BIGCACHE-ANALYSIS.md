@@ -100,6 +100,37 @@ func resetKeyFromEntry(data []byte) {
 }
 ```
 
+最终是通过 `binary.PutUvarint`+`BytesQueue.copy` 方法，将 pack 后的数据及长度写入到 `bytesQueue.array` 中：
+`binary.PutUvarint`，该方法主要是将 `uint64` 类型放入 buf 中，并返回写入的字节数。如果 buf 过小，PutUvarint 将抛出 panic。
+```golang
+func (q *BytesQueue) push(data []byte, len int) {
+    // 得到 binary 的长度（uint64(len)）
+    // 其中 len 为 pack 后的数据长度
+    headerEntrySize := binary.PutUvarint(q.headerBuffer, uint64(len))
+    // 复制长度
+	q.copy(q.headerBuffer, headerEntrySize)
+    // 复制pack后的数据
+	q.copy(data, len)
+
+	if q.tail > q.head {
+		q.rightMargin = q.tail
+	}
+	if q.tail == q.head {
+		q.full = true
+	}
+
+	q.count++
+}
+
+func (q *BytesQueue) copy(data []byte, len int) {
+	q.tail += copy(q.array[q.tail:], data[:len])
+}
+```
+
+关于bigCache的数据序列化存储可参见下图：
+
+![img](https://wx1.sbimg.cn/2020/09/17/G25NT.png)
+
 ##	0x02	核心结构
 bigCache 的核心结构如下图所示：
 
@@ -312,7 +343,8 @@ func (s *cacheShard) set(key string, hashedKey uint64, entry []byte) error {
     // 这里是个 for 循环
     for {
         if index, err := s.entries.Push(w); err == nil {
-            s.hashmap[hashedKey] = uint32(index)
+            s.hashmap[hashedKey] = uint32(index)    // 最终 hashmap 中保存的是 index
+            // 即插入前 q.tail 的位置
             s.lock.Unlock()
             return nil
         }
@@ -345,11 +377,12 @@ func (q *BytesQueue) Push(data []byte) (int, error) {
 		}
 	}
 
-    // 插入的位置
+    // 插入的位置（保存插入前的位置）
 	index := q.tail
 
 	q.push(data, dataLen)
 
+	//返回index，hashmap保存的正是此位置
 	return index, nil
 }
 
