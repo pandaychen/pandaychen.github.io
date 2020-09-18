@@ -15,7 +15,9 @@ tags:
 
 gRPC 提供了拦截器（Interceptor）机制，可以完成这个功能。<br>
 
-拦截器（Interceptor） 类似于 HTTP 应用的中间件（Middleware），能够让你在真正调用 RPC 方法前，进行身份认证、日志、限流等通用操作，和 Python 的装饰器（Decorator） 的作用基本相同。在实际项目开发中，可以将许多共性的功能放在拦截器的逻辑中实现，此外利用 `defer` 关键字还能够方便的实现 RPC 拦截器计时的功能。
+拦截器（Interceptor） 类似于 HTTP 应用的中间件（Middleware），能够让你在真正调用 RPC 方法前，进行身份认证、日志、限流、异常捕获、参数校验等通用操作，和 Python 的装饰器（Decorator） 的作用基本相同。<br>
+
+在实际项目开发中，可以将许多共性的功能放在拦截器的逻辑中实现，此外利用 `defer` 关键字还能够方便的实现 RPC 拦截器计时的功能。
 
 ##  0x01    Interceptor 分析
 gRPC 中使用 `UnaryInterceptor` 来实现 Unary RPC 一元拦截器，使用 `StreamInterceptor` 来实现 Stream RPC 流式的拦截器，而且既可以在客户端进行拦截，也可以对服务器端进行拦截。
@@ -50,6 +52,11 @@ type UnaryServerInterceptor func(
     )(resp interface{}, err error)
 ```
 
+在上面 `UnaryServerInterceptor` 的定义中，其中 `handler UnaryHandler` 是具体的 RPC 方法，会在拦截器最后调用，其定义为如下，可以看出 `UnaryHandler` 与 `UnaryServerInterceptor` 相比，少了 `info` 和 `handler` 两个参数。
+```golang
+type UnaryHandler func(ctx context.Context, req interface{}) (interface{}, error)
+```
+
 上面 `UnaryServerInterceptor` 的参数 `UnaryServerInfo` 的结构如下：
 ```golang
 // UnaryServerInfo consists of various information about a unary RPC on
@@ -71,9 +78,10 @@ var interceptor grpc.UnaryServerInterceptor
 
 // 实现 grpc.UnaryServerInterceptor
 interceptor = func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
-    fmt.Printf("Before RPC handling. Info: %+v", info)
     // 前置逻辑, 实现我们需要的通用逻辑，如对 req 中的签名进行验证，成功继续，失败返回 error
-	resp, err := handler(ctx, req)	//handler 是客户端原来打算调用的方法，如果验证成功（在上面的逻辑），执行真正的方法
+	fmt.Printf("Before RPC handling. Info: %+v", info)
+	//handler 是客户端原来打算调用的方法，如果验证成功（在上面的逻辑），执行真正的方法
+	resp, err := handler(ctx, req)
 	fmt.Printf("After RPC handling. resp: %+v", resp)
 	// 后置逻辑，如计算耗时，Metrics 上报等等
     return resp, err
@@ -100,11 +108,13 @@ server.Serve(listener)
 
 ####  	Warning
 注意，在 gRPC 中，服务器本身只能设置一个 `UnaryServerInterceptor` 和 `StreamServerInterceptor`。客户端亦是如此，虽然不会报错，但是只有最后一个才起作用。那么如何配置多个拦截器呢？<br>
+
 不难想到我们可以把拦截器串联起来，利用 Golang 的闭包 / 递归特性，将第一个位置的拦截器传给 `grpc.UnaryInterceptor`，作为选项 `grpc.ServerOption` 传入。<br>
+
 下面我们分析下如何实现拦截器链。
 
 
-##  0x02	拦截器链
+##		0x02	拦截器链
 基于开发的经验，不难想到，多个 Interceptor 的模式可以如下图所示去实现（经典的洋葱模式）：
 ![img](https://wx1.sbimg.cn/2020/09/18/GoHgw.png)
 
@@ -112,11 +122,34 @@ server.Serve(listener)
 -   闭包方式调用：类似 `f = interceptor1(ctx,f1);f1 = interceptor2(ctx,f2);....;fn = RPC(ctx)` 这样的方式
 -   数组依次调用：将拦截器组织成 `[]interceptor` 方式，按照数组的顺序依次执行下去，完成拦截器的功能
 
+简单来说，对于普通的一元拦截器都是在拦截处理的代码之后，再对 handler 进行了调用：
+```golang
+func OneInterceptor() grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
+		defer func() {
+			if err := recover(); err != nil {
+				fmt.Println("fatal error:", err,string(debug.Stack()))
+			}
+		}()
+		fmt.Println("before handler")
+		// do real RPC
+		res, err := handler(ctx, req)
+		fmt.Println("after handler")
+		return res, err
+	}
+}
+```
+那么根据以上特点，我们可以将 `handler` 继续传入拦截器，再利用 Golang 的闭包性质将拦截器打包成新的 `handler`，然后再将新的 `handler` 传入下一个拦截器，下一个拦截器继续打包成 `handler`，再依次传递下去，形成链式关系（interceptor chain）。通过这种方式可以将单个拦截器扩展为链式拦截器，实现与 HTTP 中间件数组（如 `gin`）相同的效果。
+
+![img]()
+
 下面给出两个开源的实现：
-####  go-grpc-interceptor的实现
-[mercari：go-grpc-interceptor](https://github.com/mercari/go-grpc-interceptor/tree/master/multiinterceptor) 项目给出了基于数组方式的 [实现](https://github.com/mercari/go-grpc-interceptor/blob/master/multiinterceptor/interceptor.go)，主要实现代码如下：
+####  go-grpc-interceptor 的实现
+mercari 的 [go-grpc-interceptor](https://github.com/mercari/go-grpc-interceptor/tree/master/multiinterceptor) 项目给出了基于数组方式的 [实现](https://github.com/mercari/go-grpc-interceptor/blob/master/multiinterceptor/interceptor.go)，主要实现代码如下：
+
 ```golang
 type multiUnaryServerInterceptor struct {
+	// 存储拦截器的数组
 	uints []grpc.UnaryServerInterceptor
 }
 
@@ -141,7 +174,7 @@ func (m *multiUnaryServerInterceptor) chain(i int, ctx context.Context, req inte
 它的调用顺序如下图所示：
 ![image]()
 
-使用该拦截器链的方式如下：
+使用该拦截器链的方式如下，例子来源于此 [server.go](https://github.com/pandaychen/grpc_in_action/blob/master/chain_interceptor/server.go)：
 ```golang
 import (
         "fmt"
@@ -151,15 +184,19 @@ import (
 )
 
 func fooUnaryInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-        fmt.Println("foo")
-        newctx := context.WithValue(ctx, "some_key", "some_value")
-        return handler(newctx, req)
+	fmt.Println("foo")
+	newctx := context.WithValue(ctx, "foo_key", "foo_value")
+	rsp, err := handler(newctx, req)
+	fmt.Printf("after foo,rsp=%v,err=%v\n", rsp, err)
+	return rsp, err
 }
 
 func barUnaryInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-        fmt.Println("bar")
-        newctx := context.WithValue(ctx, "some_key", "some_value")
-        return handler(newctx, req)
+	fmt.Println("bar")
+	newctx := context.WithValue(ctx, "bar_key", "bar_value")
+	rsp, err := handler(newctx, req)
+	fmt.Printf("after bar,rsp=%v,err=%v\n", rsp, err)
+	return rsp, err
 }
 
 func main() {
@@ -169,6 +206,15 @@ func main() {
         ))
         grpc.NewServer(uIntOpt)
 }
+```
+上面这个例子输出的结果如下，和我们预期一致（先进后出）：
+```javascript
+foo
+bar
+context.Background.WithCancel.WithValue(type peer.peerKey, val <not Stringer>).WithValue(type metadata.mdIncomingKey, val <not Stringer>).WithValue(type grpc.streamKey, val <not Stringer>).WithValue(type string, val foo_value).WithValue(type string, val bar_value)
+foo_value bar_value
+after bar,rsp=message:"Hello pandaychen." ,err=<nil>
+after foo,rsp=message:"Hello pandaychen." ,err=<nil>
 ```
 
 ####	go-grpc-middleware 的实现
@@ -185,6 +231,7 @@ myServer := grpc.NewServer(
     )),
 )
 ```
+
 再看看 `grpc_middleware.ChainUnaryServer` 方法的实现，在 [chain.go](https://github.com/grpc-ecosystem/go-grpc-middleware/blob/master/chain.go) 中：
 ```golang
 // ChainUnaryServer creates a single interceptor out of a chain of many interceptors.
@@ -215,7 +262,7 @@ func ChainUnaryServer(interceptors ...grpc.UnaryServerInterceptor) grpc.UnarySer
 ```
 从实现上看，它采用了回调函数调用的方式，调用链为 `chainedHandler[n-1]`-->`chainedHandler[n-2]`-->`...`-->`chainedHandler[0]`-->`handler`
 
-####  拦截器链的执行顺序
+##	0x03  拦截器链的执行顺序
 拦截器的执行顺序与请求处理和响应处理的顺序相反，
 ```javescript
 const promiseClient = new MyServicePromiseClient(
@@ -302,7 +349,7 @@ func StreamClientInterceptor(ctx context.Context, desc *grpc.StreamDesc, cc *grp
 }
 ```
 
-##  参考
+##  0x04	参考
 -   [gRPC 之 Interceptors](https://www.do1618.com/archives/1467/grpc-%E4%B9%8B-interceptors/)
 -   [gRPC server insterceptor for golang](https://github.com/mercari/go-grpc-interceptor)
 
