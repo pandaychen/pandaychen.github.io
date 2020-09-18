@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      gRPC 之 Interceptor 实战篇
-subtitle:   如何优雅的实现 gRPC 拦截器链
+subtitle:   如何优雅的使用 gRPC 拦截器
 date:       2019-11-20
 author:     pandaychen
 header-img:
@@ -11,17 +11,20 @@ tags:
 ---
 
 ##  0x00    背景
-在实现 RPC 服务时，如果想在调用 RPC 方法的前或后做某些事情，怎么实现？gRPC 提供了拦截器（Interceptor）机制，可以完成这个功能。<br>
-比如一个典型的应用场景是，当客户端进行 RPC 请求时，先对请求中的某些字段（如 MetaInfo）进行验证，验证通过再执行相应的 RPC 方法。
+在实现 RPC 服务时，如果想在调用 RPC 方法的前 or 后做某些（如服务器登录鉴权、Tracing、耗时统计等等）事情，比如一个典型的应用场景是，当客户端进行 RPC 请求时，先对请求中的某些字段（`Metadata`）进行验证，验证通过再执行相应的 RPC 方法。怎么实现？<br>
 
-拦截器（Interceptor） 类似于 HTTP 应用中的 中间件（Middleware），能够让你在真正调用 RPC 方法前，进行身份认证、日志、限流等通用操作，和 Python 的装饰器（Decorator） 的作用相同。
+gRPC 提供了拦截器（Interceptor）机制，可以完成这个功能。<br>
 
+拦截器（Interceptor） 类似于 HTTP 应用的中间件（Middleware），能够让你在真正调用 RPC 方法前，进行身份认证、日志、限流等通用操作，和 Python 的装饰器（Decorator） 的作用基本相同。在实际项目开发中，可以将许多共性的功能放在拦截器的逻辑中实现，此外利用 `defer` 关键字还能够方便的实现 RPC 拦截器计时的功能。
+
+##  0x01    Interceptor 分析
 gRPC 中使用 `UnaryInterceptor` 来实现 Unary RPC 一元拦截器，使用 `StreamInterceptor` 来实现 Stream RPC 流式的拦截器，而且既可以在客户端进行拦截，也可以对服务器端进行拦截。
 
-##  0x01    结构体
-1、一元拦截器（grpc.UnaryInterceptor）<br>
-包含服务端 `UnaryServerInterceptor` 和客户端 `UnaryClientInterceptor`，这里我们分析 `UnaryServerInterceptor`:
-```go
+####	一元拦截器（grpc.UnaryInterceptor）
+gRPC 的一元拦截器包含服务端 `UnaryServerInterceptor` 和客户端 `UnaryClientInterceptor`，这里我们分析 `UnaryServerInterceptor`:
+
+从 `grpc.NewServer(opts...)` 注册开始，`grpc.UnaryInterceptor` 函数的唯一参数是一个 `grpc.UnaryServerInterceptor`，`UnaryInterceptor` 返回的 `ServerOption` 作为 `grpc.NewServer` 的参数。
+```golang
 func UnaryInterceptor(i UnaryServerInterceptor) ServerOption {
     return func(o *options) {
         if o.unaryInt != nil {
@@ -31,8 +34,10 @@ func UnaryInterceptor(i UnaryServerInterceptor) ServerOption {
     }
 }
 ```
-其中，要实现一个一元 Interceptor，必须实现参数 `UnaryServerInterceptor`。`UnaryServerInterceptor` 在服务端对于一次 RPC 调用进行拦截。`UnaryServerInterceptor` 是一个函数指针，当客户端进行 RPC 调用的时候，首先并不执行用户调用的方法，而是先执行 `UnaryServerInterceptor` 所指的函数，随后再进入真正要执行的函数。其定义如下：
-```go
+
+从上面的定义看，要实现一个一元拦截器 Interceptor，必须实现 `i UnaryServerInterceptor`，`UnaryServerInterceptor` 的作用是在服务端对于一次 RPC 调用进行拦截。<br>
+下面看下 `UnaryServerInterceptor` 的定义，它是一个函数指针，当客户端进行 RPC 调用的时候，首先并不执行用户的 RPC 方法，而是先执行 `UnaryServerInterceptor` 所指的函数，随后再进入真正要执行的函数 `handler UnaryHandler`，如下：
+```golang
 // UnaryServerInterceptor provides a hook to intercept the execution of a unary RPC on the server. info
 // contains all the information of this RPC the interceptor can operate on. And handler is the wrapper
 // of the service method implementation. It is the responsibility of the interceptor to invoke handler
@@ -44,8 +49,9 @@ type UnaryServerInterceptor func(
             handler UnaryHandler        //RPC 方法本身 (客户端此次实际要调用的函数)
     )(resp interface{}, err error)
 ```
-`UnaryServerInfo` 的结构如下：
-```go
+
+上面 `UnaryServerInterceptor` 的参数 `UnaryServerInfo` 的结构如下：
+```golang
 // UnaryServerInfo consists of various information about a unary RPC on
 // server side. All per-rpc information may be mutated by the interceptor.
 type UnaryServerInfo struct {
@@ -57,62 +63,57 @@ type UnaryServerInfo struct {
 	FullMethod string
 }
 ```
-所以说，如果需要进行服务端方法调用之前需要实现既定方法验签的话，Interceptor 可以这么写：
-```go
+
+所以说，如果需要在服务端 RPC 方法之前或之后实现某些功能的话，Interceptor 可以这么写：
+```golang
+// 定义一个 grpc.UnaryServerInterceptor
 var interceptor grpc.UnaryServerInterceptor
+
+// 实现 grpc.UnaryServerInterceptor
 interceptor = func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
     fmt.Printf("Before RPC handling. Info: %+v", info)
-    /*
-        ...
-        这里实现我们需要的通用逻辑，如对 req 中的签名进行验证，成功继续，失败返回 error
-    */
-    //handler 是客户端原来打算调用的方法，如果验证成功（在上面的逻辑），执行真正的方法
-	resp, err := handler(ctx, req)
+    // 前置逻辑, 实现我们需要的通用逻辑，如对 req 中的签名进行验证，成功继续，失败返回 error
+	resp, err := handler(ctx, req)	//handler 是客户端原来打算调用的方法，如果验证成功（在上面的逻辑），执行真正的方法
 	fmt.Printf("After RPC handling. resp: %+v", resp)
+	// 后置逻辑，如计算耗时，Metrics 上报等等
     return resp, err
 }
 ```
-相应的 gRPC 服务端代码大致如下：
-``` golang
+
+相应的 gRPC 服务端的启动代码大致如下：
+```golang
 listener, err := net.Listen("tcp", fmt.Sprintf(":%s", port))
 if err != nil {
     panic(err)
     return
 }
 var opts []grpc.ServerOption
+// 注册我们实现的 interceptor
 opts = append(opts, grpc.UnaryInterceptor(interceptor))
 server := grpc.NewServer(opts...)
 chatprt.RegisterHelloServer()
 server.Serve(listener)
 ```
 
--   流式拦截器（grpc.StreamInterceptor）
-适用于 gRPC 的流式方法，`StreamServerInterceptor` 与 `UnaryServerInterceptor` 使用基本一样。
-```go
-func StreamInterceptor(i StreamServerInterceptor) ServerOption
-type StreamServerInterceptor func(srv interface{}, ss ServerStream, info *StreamServerInfo, handler StreamHandler) error
-```
+####	流式拦截器（grpc.StreamInterceptor）
+适用于 gRPC 的流式拦截器定义，`StreamServerInterceptor` 与 `UnaryServerInterceptor` 使用基本一样，这里不过多描述。
 
-##  Warning
-在 gRPC 中，服务器本身只能设置一个 `UnaryServerInterceptor` 和 `StreamServerInterceptor`。客户端亦是如此，虽然不会报错，但是只有最后一个才起作用。那么如何配置多个拦截器呢？ 下面我们从拦截器的实现代码入手分析下如何实现多个拦截器。
+####  	Warning
+注意，在 gRPC 中，服务器本身只能设置一个 `UnaryServerInterceptor` 和 `StreamServerInterceptor`。客户端亦是如此，虽然不会报错，但是只有最后一个才起作用。那么如何配置多个拦截器呢？<br>
+不难想到我们可以把拦截器串联起来，利用 Golang 的闭包 / 递归特性，将第一个位置的拦截器传给 `grpc.UnaryInterceptor`，作为选项 `grpc.ServerOption` 传入。<br>
+下面我们分析下如何实现拦截器链。
 
 
-##  如何实现多个拦截器
-[WithUnaryInterceptor](https://godoc.org/google.golang.org/grpc#WithUnaryInterceptor)
-```golang
-// WithUnaryInterceptor returns a DialOption that specifies the interceptor for
-// unary RPCs.
-func WithUnaryInterceptor(f UnaryClientInterceptor) DialOption {
-	return newFuncDialOption(func(o *dialOptions) {
-		o.unaryInt = f
-	})
-}
-```
+##  0x02	拦截器链
+基于开发的经验，不难想到，多个 Interceptor 的模式可以如下图所示去实现（经典的洋葱模式）：
+![img](https://wx1.sbimg.cn/2020/09/18/GoHgw.png)
+
 设想下，如何设计链式的 Interceptor？我脑海中浮现两个方案：
--   回调方式调用
--   数组依次调用
+-   闭包方式调用：类似 `f = interceptor1(ctx,f1);f1 = interceptor2(ctx,f2);....;fn = RPC(ctx)` 这样的方式
+-   数组依次调用：将拦截器组织成 `[]interceptor` 方式，按照数组的顺序依次执行下去，完成拦截器的功能
 
-##  已有的方案
+下面给出两个开源的实现：
+####  go-grpc-interceptor的实现
 [mercari：go-grpc-interceptor](https://github.com/mercari/go-grpc-interceptor/tree/master/multiinterceptor) 项目给出了基于数组方式的 [实现](https://github.com/mercari/go-grpc-interceptor/blob/master/multiinterceptor/interceptor.go)，主要实现代码如下：
 ```golang
 type multiUnaryServerInterceptor struct {
@@ -140,8 +141,7 @@ func (m *multiUnaryServerInterceptor) chain(i int, ctx context.Context, req inte
 它的调用顺序如下图所示：
 ![image]()
 
-
-使用拦截器链的方式如下：
+使用该拦截器链的方式如下：
 ```golang
 import (
         "fmt"
@@ -171,8 +171,9 @@ func main() {
 }
 ```
 
-### go-grpc-middleware 的 Chain 实现
-```go
+####	go-grpc-middleware 的实现
+首先，看下调用方式，和第一种方式大同小异：
+```golang
 import "github.com/grpc-ecosystem/go-grpc-middleware"
 
 myServer := grpc.NewServer(
@@ -184,7 +185,7 @@ myServer := grpc.NewServer(
     )),
 )
 ```
-看看 `ChainUnaryServer` 方法的实现，在 [chain.go](https://github.com/grpc-ecosystem/go-grpc-middleware/blob/master/chain.go) 的实现：
+再看看 `grpc_middleware.ChainUnaryServer` 方法的实现，在 [chain.go](https://github.com/grpc-ecosystem/go-grpc-middleware/blob/master/chain.go) 中：
 ```golang
 // ChainUnaryServer creates a single interceptor out of a chain of many interceptors.
 //
@@ -214,7 +215,16 @@ func ChainUnaryServer(interceptors ...grpc.UnaryServerInterceptor) grpc.UnarySer
 ```
 从实现上看，它采用了回调函数调用的方式，调用链为 `chainedHandler[n-1]`-->`chainedHandler[n-2]`-->`...`-->`chainedHandler[0]`-->`handler`
 
-##  拦截器的执行流程
+####  拦截器链的执行顺序
+拦截器的执行顺序与请求处理和响应处理的顺序相反，
+```javescript
+const promiseClient = new MyServicePromiseClient(
+    host, creds, {'unaryInterceptors': [interceptor1, interceptor2, interceptor3]});
+
+
+const client = new MyServiceClient(
+    host, creds, {'streamInterceptors': [interceptor1, interceptor2, interceptor3]});
+```
 ![img](https://wx1.sbimg.cn/2020/08/28/6gzXJ.png)
 我们从下面的例子来看下这个执行流程：
 
