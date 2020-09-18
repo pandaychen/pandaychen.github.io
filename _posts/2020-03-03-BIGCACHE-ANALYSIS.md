@@ -36,7 +36,7 @@ bigCache 本地缓存库以其快速、并发和高性能著称，它可以存�
 ####    底层依然 map 存储
 > GC ignore maps with no pointers
 
-bigCache 的底层仍然用 `map` 存储，为何使用 `map` 呢？GoLang 1.5 版本的优化说明: 如果 `map` 的 key 或 value 中都不含指针, GC 便会忽略这个 `map`。此外，`map` 本身的性能并不差，`map` 与 `O(1)` 的效率还是还是值得一用的。
+bigCache 的底层仍然用 `map` 存储，为何使用 `map` 呢？GoLang 1.5 版本的[优化说明](https://github.com/golang/go/issues/9477): 如果 `map` 的 key 或 value 中都不含指针, GC 便会忽略这个 `map`。
 
 ##  0x02    用户数据（数据序列化 / pack）
 在许多高性能的组件实现，针对数据部分的存储大都会将其由 `string` 类型按照一定的 pack 格式转为 `binary` 类型以减少内存占用，在 bigCache 也是类似做法，每个要插入的 key-value 由 `5` 部分组成，分别是：
