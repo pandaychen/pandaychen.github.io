@@ -180,7 +180,7 @@ Transfer-Encoding: chunked
 通过上面的例子对 kuberesolver 中 HTTP 接口返回的接口解析部分的代码有所帮助。
 
 ##  0x03	看看 kuberesolver
-先简单介绍下 kuberesolver 的使用方法，在客户端做如下形式的调用：
+先简单介绍下 kuberesolver 的使用方法，在 gRPC 客户端做如下形式的调用：
 ```golang
 import "github.com/sercand/kuberesolver/v3"
 
@@ -678,8 +678,10 @@ func (sw *streamWatcher) Decode() (Event, error) {
 }
 ```
 
+##	0x08	总结
+本文分析了使用 Kubernetes API 的方式来实现 gRPC 负载均衡的一种思路，项目中我们也是这么使用来实现 Kubernetes Service 的负载均衡的。
 
-##	0x08	参考
+##	0x09	参考
 -   [理解 K8S 的设计精髓之 list-watch](http://wsfdl.com/kubernetes/2019/01/10/list_watch_in_k8s.html)
 -   [kubernetes 代码阅读 - apiserver 之 list-watch 篇](https://developer.aliyun.com/article/680204)
 -	[Kubernetes API Watcher Design](https://docs.openstack.org/kuryr/0.2.0/devref/k8s_api_watcher_design.html)
