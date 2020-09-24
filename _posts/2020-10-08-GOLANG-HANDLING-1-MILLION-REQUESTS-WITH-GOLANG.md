@@ -118,7 +118,8 @@ func (w Worker) Start() {
 	go func() {
 		for {
             // register the current worker into the worker queue
-            // 将当前 worker 的 JobChannel 注册到 WorkerPool 中，告诉 WorkerPool 自己可以处理 Job
+			// 将当前 worker 的 JobChannel 注册到 WorkerPool 中，告诉 WorkerPool 自己可以处理 Job
+			// 工作者的 JOB 队列再放回工作者池
 			w.WorkerPool <- w.JobChannel
 
 			select {
@@ -222,5 +223,35 @@ func (d *Dispatcher) dispatch()  {
 }
 ```
 
-##  0x04    参考
+##	0x04	控制生产者速率
+上一小节说到，此模型还有一个不足之处，如果有大量的任务（`Job`）同时涌入，会发生什么样的结果。大量的 goroutine 会阻塞等待可用的 `Worker`，即 <br>
+```golang
+jobChannel := <- d.WorkerPool
+```
+
+本模型中的生产者调度也是在不断的创建协程等待空闲的 `Worker`，如何控制生产者速率的，最直接想到的方式就是令牌，使用一个带缓冲的 Channel 作为令牌桶，控制并发执行的任务数：
+1.	有 Job 生成时，向 `TokenBucket` 放置一个令牌，如 `TokenBucket <- struct{}{}`，这样当 `TokenBucket` 满了之后，`Job` 便排队等待放入
+2.	获取 `Job` 的 `Worker` 完成工作之后，释放令牌，如 `<- TokenBucket`
+
+```golang
+// 用于控制并发的 goroutine（生产者）
+const (
+	MAX_GOROUTINE_NUM = 2000
+)
+var TokenBucket = make(chan struct{}, MAX_GOROUTINE_NUM)
+
+func Limiter(job Job) {
+    select {
+    case TokenBucket <- struct{}{}:
+		// 任务放入任务队列 channal
+		jobChannel := <- d.WorkerPool
+      	jobChannel <- work
+		return
+	case <-time.After(time.Millisecond * 200):
+    	return
+   }
+}
+```
+
+##  0x05    参考
 -   [Handling 1 Million Requests per Minute with Go](http://marcio.io/2015/07/handling-1-million-requests-per-minute-with-golang/)
