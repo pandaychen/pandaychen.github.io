@@ -309,7 +309,7 @@ func (b *kubeBuilder) Build(target resolver.Target, cc resolver.ClientConn, opts
 }
 ```
 
-此方法的核心步骤（通用范式）是：
+此方法的核心步骤（通用范式）是：<br>
 1、首先，解析 `parseResolverTarget` 传入的地址，本项目中支持如下格式
 ```javascript
 kubernetes:///service-name:8080
