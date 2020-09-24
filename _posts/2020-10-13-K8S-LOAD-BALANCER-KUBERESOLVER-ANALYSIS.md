@@ -41,6 +41,7 @@ Kubernetes 提供的 Watch 功能是建立在对 Etcd 的 Watch 之上的，当 
 ##	Watch 的实现机制
 通常我们使用使用 HTTP 大都是短连接方式，那么 Watch 是如何通过 HTTP 长连接获取 APIServer 发来的资源变更事件呢？答案就是 [Chunked transfer encoding](https://zh.wikipedia.org/zh-hans/%E5%88%86%E5%9D%97%E4%BC%A0%E8%BE%93%E7%BC%96%E7%A0%81)。如下，注意看 HTTP Response 中的 `Transfer-Encoding: chunked`：
 
+
 ```javascript
 $ curl -i http://{kube-api-server-ip}:8080/api/v1/watch/pods?watch=yes
 HTTP/1.1 200 OK
@@ -53,6 +54,8 @@ Transfer-Encoding: chunked
 {"type":"ADDED", "object":{"kind":"Pod","apiVersion":"v1",...}}
 {"type":"MODIFIED", "object":{"kind":"Pod","apiVersion":"v1",...}}
 ```
+
+![http_transfer_encoding](https://wx2.sbimg.cn/2020/09/24/GzAxK.png)
 
 下面给出两个实际的查询例子：
 
@@ -213,7 +216,7 @@ kubernetes://service-name.namespace:8080/
 2.	实现 `Watcher`（一般作为 `Resolver` 的子协程单独创建）：接收 Kubernetes 的 `API` 的改变通知并调用 gRPC 的接口通知 gRPC 内部
 
 kuberesolver 的整体项目架构如下所示：
-![img]()
+![kuberesolver整体架构](https://wx1.sbimg.cn/2020/09/24/GzRmG.png)
 
 下面按照架构图的模块对源码进一步分析。
 
