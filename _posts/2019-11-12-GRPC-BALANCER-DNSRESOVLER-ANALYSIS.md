@@ -2,7 +2,7 @@
 layout:     post
 title:      gRPC 源码分析之 DnsResolver 篇
 subtitle:   如何使用内置的 DNS 负载均衡器
-date:       2019-07-11
+date:       2019-11-12
 author:     pandaychen
 header-img:
 catalog: true
@@ -19,16 +19,16 @@ Resolver（解析器）在 `gRPC` 中完成了这样一个过程，它对来自�
 
 `gRPC` 支持 `DNS` 作为默认的 `Name Resolver`，如果配置的域名指向多个合法的 `DNS` 记录（如 `A`、`TXT` 等），则使用 `DnsResolver` 的 `gRPC` 请求将在多个 `IP` 之间轮转。客户端的调用形式如下：
 
-``` golang
+```golang
 conn, err := grpc.Dial(
         "dns:///test-service-domain:8080",
         grpc.WithBalancerName(roundrobin.Name),
         grpc.WithInsecure())
 ```
 
-如果去除 "dns:///", 仅仅是域名加端口的形式，则只会请求同一个实例。只有当该实例 Shutdown 或者下线后才会切换到另一个实例。
+如果去除 `dns:///`, 仅仅是域名加端口的形式，则只会请求同一个实例。只有当该实例 Shutdown 或者下线后才会切换到另一个实例。
 
-``` golang
+```golang
 conn, err := grpc.Dial(
         "test-service-domain:8081",
         grpc.WithBalancerName(roundrobin.Name),
@@ -41,7 +41,7 @@ conn, err := grpc.Dial(
 `gRPC` 支持 `DNS` 作为默认 `Naming` 系统，同时也提供了实现 `Naming` 系统乃至 `LoadBalance` 功能的用户侧接口。所以，第三方注册中心，如 `Etcd`、`Consul`、`Zookeeper` 都可以作为非常优秀的 `gRPC` 负载均衡实现。
 `gRPC Name Resolution` 常用如下格式，scheme 表示要使用的 `Naming` 方式。目前常用的 schemes 有（`DNS` 是内置的方案）：
 
-``` golang
+```javascript
 scheme://authority/endpoint_name
 
 dns (例: dns://8.8.8.8/www.qq.com)
@@ -51,7 +51,7 @@ ipv6 (IPv6 地址 例: ipv6:///2607:f8b0:400a:801::1001)
 
 ##  0x02	resolver.go
 
-``` go
+``` golang
 // Package resolver defines APIs for name resolution in gRPC.
 // All APIs in this package are experimental.
 package resolver
@@ -522,9 +522,9 @@ func parseTarget(target string) (host, port string, err error) {
 ```
 
 ##	0x05	DnsResolver 的应用
-在项目中，`DnsResolver` 与 [CoreDNS](https://github.com/coredns/coredns) 搭配是一个不错的选择，不过需要注意的是，解析 DNS 的时间，`DnsResolver` 中默认是 30 分钟，个人感觉可以优化下。
+在项目中，`DnsResolver` 与 [CoreDNS](https://github.com/coredns/coredns) 搭配是一个不错的选择，不过需要注意的是，解析 `DNS` 的时间，`DnsResolver` 中默认是 30 分钟，个人感觉可以优化下。
 
-笔者的项目部署在 TKE 上，使用 CoreDNS 作为服务发现媒介，gRPC 使用 DnsResolver 作为解析器：
+笔者的项目部署在 TKE 上，使用 CoreDNS 作为服务发现媒介，gRPC 使用 `DnsResolver` 作为解析器：
 
 集群的 CoreDNS 部署情况，通过 Deployment 方式部署，分配的集群内 IP 地址为：`172.16.0.3` 和 `172.16.1.2`：
 ![image](https://wx2.sbimg.cn/2020/04/29/coredns-1.png)
