@@ -15,7 +15,7 @@ tags:
 
 ##  0x01 负载均衡 && 服务发现
 
-### 基础
+#### 基础
 &emsp;&emsp; **负载均衡**，顾名思义，是通过某种手段将流量 / 请求分配到不通的服务器上去，保证后台的每个服务收到的请求都尽可能保持平衡 <br>
 &emsp;&emsp; **服务发现**，就是指客户端按照某种约定的方式主动去（注册中心）寻找服务，然后再连接相应的服务 <br>
 &emsp;&emsp; 关于负载均衡的构建与实现，可以看下这几篇文章：
@@ -23,14 +23,14 @@ tags:
 -   [gRPC Load Balancing](https://gRPC.io/blog/loadbalancing/)
 -	[Load Balancing in gRPC](https://github.com/grpc/grpc/blob/master/doc/load-balancing.md)
 
-### 服务发现概念
+#### 服务发现概念
 
 &emsp;&emsp; 我们说的服务发现，一般理解为客户端如何发现 (并连接到) 服务，这里一般包含三个组件：
 1. 服务消费者：一般指客户端（可以是简单的 TCP-Client 或者是 RPC-Client ）
 2. 服务提供者：一般指服务提供方，如传统服务，微服务等
 3. 服务注册中心：用来存储（Key-Value）服务提供者的服务，一般以 DNS/HTTP/RPC 等方式对外暴露接口
 
-### 负载均衡概念
+#### 负载均衡概念
 我们把 LB 看作一个组件，根据组件位置的不同，大致上分为三种：
 ####    集中式 LB（Proxy Model）
 &emsp;&emsp; 独立的 LB, 可以是硬件实现，如 F5，或者是 nginx 这种内置 Proxy-pass 或者 upstream 功能的网关，亦或是 LVS/HAPROXY，之前也使用 [DPDK](http://core.dpdk.org/doc/quick-start/) 开发过类似的专用网关。<br>
