@@ -508,7 +508,7 @@ func (db *conn) onBreaker(err *error) {
 }
 ```
 
-##	0x10	Row 及封装
+##	0x0A	Row 及封装
 `sql.Row` 代表了单行查询结果：Row is the result of calling QueryRow to select a single row.<br>
 原生的 `sql.Row`[定义](https://golang.org/src/database/sql/sql.go?s=91483:91600#L3175) 及提供的 [两个方法](https://golang.org/pkg/database/sql/#Row)：
 ```golang
@@ -600,9 +600,9 @@ func (r *Row) Scan(dest ...interface{}) (err error) {
 }
 ```
 
-##	0x11	总结
+##	0x0B	总结
 本文从代码层面分析了 Kratos 对 `sql.DB` 库的封装逻辑，通过本篇文章，对微服务与 Orm 的应用结合有了更加深入的认知。
 
-##  0x12	参考
+##  0x0C	参考
 
 
