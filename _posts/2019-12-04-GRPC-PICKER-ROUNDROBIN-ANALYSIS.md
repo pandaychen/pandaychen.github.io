@@ -106,7 +106,6 @@ return balancer.PickResult{SubConn: sc}
 func init() {
 	balancer.Register(newBuilder())
 }
-
 ```
 
 生成 `balancer.Builder` 的方法：

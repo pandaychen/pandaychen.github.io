@@ -224,7 +224,7 @@ EtcdV3 中提供了自动续期的函数 [Lease.KeepAlive](https://github.com/Et
 Etcd 的 lease 可以用来做心跳，监控模块存活状态。Lease 的存活时间决定了发现服务异常的及时性，太长会较晚才能发现服务异常，较短容易受网络波动的影响。另外一种解决的思路是结合心跳和探测。把 Lease 设置为一个较小的值，在发现心跳消失的时候，做网络探测，确实不通了，再判定为不可用。需要注意的是，上报心跳的进程要对 lease not found 这种情况做处理，重新生成一个 lease 进行上报。
 
 以下上 GODOC 中对 KeepAlive 方法的说明：
-```
+```bash
    // KeepAlive attempts to keep the given lease alive forever. If the keepalive responses posted
     // to the channel are not consumed promptly the channel may become full. When full, the lease
     // client will continue sending keep alive requests to the Etcd server, but will drop responses
