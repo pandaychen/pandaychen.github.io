@@ -230,7 +230,7 @@ jobChannel := <- d.WorkerPool
 ```
 
 本模型中的生产者调度也是在不断的创建协程等待空闲的 `Worker`，如何控制生产者速率的，最直接想到的方式就是令牌，使用一个带缓冲的 Channel 作为令牌桶，控制并发执行的任务数：
-1.	有 Job 生成时，向 `TokenBucket` 放置一个令牌，如 `TokenBucket <- struct{}{}`，这样当 `TokenBucket` 满了之后，`Job` 便排队等待放入
+1.	有 `Job` 生成时，向 `TokenBucket` 放置一个令牌，如 `TokenBucket <- struct{}{}`，这样当 `TokenBucket` 满了之后，`Job` 便排队等待放入
 2.	获取 `Job` 的 `Worker` 完成工作之后，释放令牌，如 `<- TokenBucket`
 
 ```golang
@@ -241,15 +241,14 @@ const (
 var TokenBucket = make(chan struct{}, MAX_GOROUTINE_NUM)
 
 func Limiter(job Job) {
-    select {
-    case TokenBucket <- struct{}{}:
+	select {
+	case TokenBucket <- struct{}{}:
 		// 任务放入任务队列 channal
-		jobChannel := <- d.WorkerPool
-      	jobChannel <- work
+		JobQueue  <- work
 		return
 	case <-time.After(time.Millisecond * 200):
-    	return
-   }
+		return
+	}
 }
 ```
 
