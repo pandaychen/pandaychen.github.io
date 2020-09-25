@@ -1,13 +1,12 @@
 ---
-layout:		post
-title:		Golang 中的 Slice 那些事
-subtitle:	Slice 踩坑
+layout:     post
+title:      Golang Slice 那些事
+subtitle:   Slice 最佳实践
 date:       2020-01-06
-header-img: img/super-mario.jpg
 author:     pandaychen
 catalog:    true
 tags:
-	- Golang
+    - Golang
 ---
 
 > `Golang` 是宣扬实用主义的语言，很多时候都把 `C` 中的最佳实践直接规定成语法了。Slice 就是其一，简单但是及易踩坑
