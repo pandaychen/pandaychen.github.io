@@ -2,6 +2,7 @@
 layout:		post
 title:		Golang 中的 Slice 那些事
 subtitle:	Slice 踩坑
+date:       2020-01-06
 header-img: img/super-mario.jpg
 author:     pandaychen
 catalog:    true
