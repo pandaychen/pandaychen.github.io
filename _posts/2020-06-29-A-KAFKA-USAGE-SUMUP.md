@@ -32,6 +32,7 @@ Kakfa 的生产者流程如下：
 ![image](https://wx2.sbimg.cn/2020/06/21/kafka.jpg)
 
 ##      0x03    Kafka 消费者（组）
+待补充
 
 ####    消费者组
 消费者组（Consumer Group）是由一个或多个消费者实例组成的 Group，具有可扩展性和可容错性的一种机制。消费者组内的消费者共享一个消费者组 ID，这个 ID 也叫做 Group ID，组内的消费者共同对一个主题进行订阅和消费，同一个组中的消费者只能消费一个分区的消息，多余的消费者会空闲。
@@ -175,7 +176,6 @@ print count
 ```
 
 ##	0x08    Python-kafka 库的基础用法
-其中返回的 Message 为一个生成器，其中元素的 type 为 <class 'kafka.consumer.fetcher.ConsumerRecord'>
 
 ####	生产者
 Kafka 的生产者代码如下：其中调用了 `send` 方法向 Kafka 写入数据，该方法的 [原型如下](https://kafka-python.readthedocs.io/en/master/apidoc/KafkaProducer.html)：
@@ -225,6 +225,8 @@ class Kafka_consumer():
 
     def consume_data(self):
         try:
+            #其中返回的 message 为一个生成器
+            #其中元素的 type 为 <class 'kafka.consumer.fetcher.ConsumerRecord'>
             for message in self.consumer:
                 # print json.loads(message.value)
                 yield message
