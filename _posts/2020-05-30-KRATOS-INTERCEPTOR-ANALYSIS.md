@@ -446,7 +446,7 @@ func serverLogging() grpc.UnaryServerInterceptor {
 ##	0x09	总结
 本文是 Kratos 框架分析的第二篇，主要介绍了 Warden 框架中的拦截器的实现及使用。
 
-##  0x10	参考
+##  0x0A	参考
 -   [Warden 拦截器文档](https://github.com/go-kratos/kratos/blob/master/doc/wiki-cn/warden-mid.md)
 -	[Golang: Creating gRPC interceptors](https://davidsbond.github.io/2019/06/14/creating-grpc-interceptors-in-go.html)
 
