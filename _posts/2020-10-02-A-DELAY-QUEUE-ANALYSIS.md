@@ -43,6 +43,56 @@ tags:
 ####    为什么不使用 kafka？
 也考虑过类似基于 kafka/rocketmq 等消息队列作为存储的方案，最后从存储设计模型和团队技术栈等原因决定选择基于 redis 作为存储来实现任务队列的功能。举个例子，假设以 Kafka 这种消息队列存储来实现延时功能，每个队列的时间都需要创建一个单独的 topic(如: Q1-1s, Q1-2s..)。这种设计在延时时间比较固定的场景下问题不太大，但如果是延时时间变化比较大会导致 topic 数目过多，会把磁盘从顺序读写会变成随机读写从导致性能衰减，同时也会带来其他类似重启或者恢复时间过长的问题。
 
+####	使用 Redis 实现延时队列
+延迟队列主要使用了 Redis 的数据结构：Sorted Set<br>
+
+Sorted Set 是一个有序的 Set，Set 内元素的排序基于其加入集合时指定的 Score。通过 `ZRANGEBYSCORE` ，可以得到基于 Score 在指定区间内的元素（排序）。基于 Sorted Set 的延时队列模型如下：
+-	SortSet 的 key 作为业务维度的属性（队列）名字，比如一种命名方式为 <业务: 命名空间: 队列名>
+-	SortSet 中的元素做为任务消息，Score 视为本任务延迟的时间（戳）
+
+举例来说，假设我们有个延迟队列的 SortSet，名为 `def:dely-queue-1`，简单描述下生产消费过程，假设当前时间为 `Sun Sep 27 06:37:32 UTC 2020`，时间戳为 `1601188690`：
+1、生产者通过 `ZADD` 将任务 1（当前时间戳 +`100s`）发送到延时队列中，意为 `100s` 之后需要执行任务 1， 将任务 2（当前时间戳 +`120s`）发送到延时队列中，意为 `120s` 之后需要执行任务 2：
+```bash
+127.0.0.1:6379> ZADD def:delay-queue-1 1601188790 "doing job-1"
+(integer) 1
+
+127.0.0.1:6379> ZADD def:delay-queue-1 1601188810 "doing job-2"
+(integer) 1
+```
+
+2、消费者通过 `ZRANGEBYSCORE` 获取任务。以当前时间戳为 Score 的比较基准，如果时间戳未到（上一步写入的时间戳），将得不到消息；当时间已到或已超时情况下，都可以取到延时任务：
+
+未达到延迟队列的时间戳：
+```bash
+127.0.0.1:6379> ZRANGEBYSCORE def:delay-queue-1 -inf 1601188780 Withscores
+(empty list or set)
+```
+
+已超时情况下，获取到任务：
+```bash
+127.0.0.1:6379> ZRANGEBYSCORE def:delay-queue-1 -inf 1601188820 Withscores
+1) "doing job-1"
+2) "1601188790"
+3) "doing job-2"
+4) "1601188810"
+```
+
+注意：`ZRANGEBYSCORE` 的指令是：`ZRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count]`，其中 `min` 和 `max` 可以是 `-inf` 和 `+inf` ，它提供了可以在不知道 SortSet 的最低和最高 Score 值的情况下获取到我们需要的排序结果。
+
+另外，还有两个细节需要考虑：
+1、使用 `ZRANGEBYSCORE` 获取到任务后，任务并没有从集合中删除。这样需要使用 `ZREM` 指令，删除这条任务，以达到队列模拟 `Pop` 的效果
+
+2、此外，由于多消费者组合使用 `ZRANGEBYSCORE` 和 `ZREM` 的过程并非原子的，当有多个消费者时会存在竞争，可能使得一条消息被消费多次。在现网项目中，需要保证多消费者操作的原子性，解决方法是使用 [Lua 原子脚本封装](https://github.com/bitleak/lmstfy/blob/master/engine/redis/timer.go#L19)：
+```lua
+local message = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'WITHSCORES', 'LIMIT', 0, 1);
+if #message > 0 then
+  redis.call('ZREM', KEYS[1], message[1]);
+  return message;
+else
+  return {};
+end
+```
+
 ##	0x02	设计模块
 从通用的设计来看，延迟队列也需要数据平面、管理平面及对外接口三个维度：
 -	数据平面：负责存储任务
