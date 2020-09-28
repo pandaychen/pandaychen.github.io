@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      一个安全的 Web-Console 的实现思路
-subtitle:   使用 xterm.js+Go-gin 实现 Web-Console 的 SSH 登录
+subtitle:   使用 xterm.js+Go-Gin 实现 Web-Console 的 SSH 登录
 date:       2019-10-29
 author:     pandaychen
 header-img: img/super-mario.jpg
@@ -26,34 +26,33 @@ User`<--->`Browser`<--->`WebSocket`<--->`SSH`<--->`(TTY)RemoteServer
 
 
 ##  0x02    实现
-作为一个 SSH 登陆系统，认证是及其重要的一环，我们将上面的数据流扩展下，加入必要的身份 / 票据认证：<br>
-(少一张图)
+作为一个 SSH 远程登陆系统，认证是及其重要的一环，我们将上面的数据流扩展下，加入必要的身份及票据认证，如下图<br>
+![webconsoleWithAuth](https://wx2.sbimg.cn/2020/09/29/GYLLa.png)
 
 ####  组件
 
 1.  CGI+WEB，采用开源的框架 [Gin](https://github.com/gin-gonic/gin) 实现
 2.  [Websocket](https://github.com/gorilla/websocket)
 3.  [SSH](https://godoc.org/golang.org/x/crypto/ssh)
-4.  认证我们采用临时（一次性）Token 兑换真实 Token（如 SSH 证书 / 秘钥 / 口令等）的方式，这种方式简单易理解，当然了也可以使用 OAuth2/OpenID 这种标准协议
+4.  认证我们采用临时（一次性）Token 兑换真实 Token（如 SSH 证书 / 秘钥 / 口令等）的方式，这种方式简单易理解，当然了也可以使用 `OAuth2/OpenID` 这种开放认证协议
 
 ####  基本实现流程
-1.  用户 A 申请某一台机器的登录权限，后台服务返回一个一次性 token 构造的 url 给用户，如 `https://1.2.3.4/cgi-bin/webconsole/check?token=token1`（这里假设以 GET 方式请求）；
+1.  用户 A 申请某一台机器的登录权限，后台服务返回一个一次性 token 构造的 url 给用户，如 `https://1.2.3.4/cgi-bin/webconsole/check?token=token1`（这里假设以 GET 方式请求）
 
-2.  在 IOA 认证（为了获取合法用户的身份信息）的前提下，用户使用浏览器访问上述登录 url, 后台服务先校验用户 cookies 及 HTTP 签名，然后再校验 token1 是否合法（使用次数 + 有效时间）；
+2.  在 IOA 认证（为了获取合法用户的身份信息，或者 `Oauth2` 认证）的前提下，用户使用浏览器访问上述登录 url, 后台服务先校验用户 `cookies` 及 HTTP 签名，然后再校验 `token1` 是否合法（使用次数 + 有效时间）
 
-3.  当前一步的认证通过后，后台服务返回 websocket 的地址，再加上一次性 token2，如 `ws://1.2.3.4/cgi-bin/webconsole/login?token=token2`
+3.  当前一步的认证通过后，后台服务返回 Websocket 的地址，再加上另一个一次性票据，如 `token2`，如 `ws://1.2.3.4/cgi-bin/webconsole/login?token=token2`，改地址返回给用户端浏览器
 
-4.  当 Websocket 请求到达后端，服务校验 token2，校验通过后，后台将 HTTP 请求升级为 WebSocket 协议, 后续的数据交换则遵照 WebSocket 协议（这里就得到一个和浏览器数据交换的连接通道）；
+4.  当 Websocket 请求（上一步的Response）到达后端，服务校验票据 `token2`，校验通过后，后台将 HTTP 请求升级为 WebSocket 协议, 后续的数据交换则遵照 WebSocket 协议（这里就得到一个和浏览器数据交换的连接通道）
 
-4.  后台服务使用 token2 换取真实票据后, 与远端 Server 建立一个 SSH Channel。然后后台将终端的大小等信息通过 SSH Channel 请求远程主机创建 PTY, 请求启动默认 Shell；
+4.  后台服务使用 `token2` 换取真实票据后, 与远端 Server 建立一个 SSH Channel。然后后台将终端的大小等信息通过 SSH `Channel` 请求远程主机创建 `PTY`, 请求启动默认 `Shell`
 
-5.  后台服务通过 Socket 连接通道获取用户（键盘）输入, 再通过 SSH Channel 将输入传给 PTY, PTY 将这些数据交给远程主机处理后按照前面指定的终端标准输出到 SSH Channel 中；
+5.  后台服务通过 Socket 连接通道获取用户（键盘）输入, 再通过 SSH `Channel` 将输入传给 `PTY`, `PTY` 将这些数据交给远程主机处理后按照前面指定的终端标准输出到 SSH `Channel` 中
 
-6.  后台服务从 SSH Channel 中拿到按照终端大小的标准输出后又通过 Socket 连接将输出返回给浏览器，至此一个 Web Terminal 建立成功。
+6.  后台服务从 SSH `Channel` 中拿到按照终端大小的标准输出后又通过 Socket 连接将输出返回给浏览器，至此一个 Web Terminal 建立成功
 
 
 ##  0x03    一些代码细节
-
 
 ####    升级 TCP 连接为 SSH 连接
 对 Tcp 连接进行升级，这是 Golang 中非常常见的做法：
@@ -88,7 +87,6 @@ if err != nil {
     return
 }
 ```
-
 
 ####    SSH 的层次结构 Client/Channel/Request
 下图直观展示了 SSH 的架构：
@@ -220,7 +218,7 @@ go func() {
 ##  0x05    总结
 1.  在整个系统中，最关键的点是怎样防止用户的身份被伪造，直观点，就是在第 2 步中，后台服务如何确定，当前的接口调用方就是用户 A。另外，我们如何解决共享权限的场景，假设 A 申请了某台机器的登录权限，假设 A 授权 B 也可以使用该票据登录，那么我们的系统的认证如何完成呢？这个是很有趣的问题，待后面在工作中慢慢思考和实现吧。
 2.  此外，作为 SSH 连接代理的服务（本文中以 `CGI` 服务承担）的稳定性也很重要，因为 WebConsole 的所有流量都会经由 SSH 连接代理转发，TCP 连接也由代理维持，一旦代理故障，所有的 WebConsole 连接都会断开，所以可用性的设计也是非常重要的一环。
-3.  整个 Web 页面需要前置认证机制，比如接入 github 的 Oauth、Onelogin 等等
+3.  整个 Web 页面需要前置认证机制，比如接入 Github 的 `Oauth`、`Onelogin` 等等
 
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
