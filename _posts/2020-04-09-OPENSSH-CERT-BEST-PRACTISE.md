@@ -25,6 +25,8 @@ tags:
 
 $$ 证书（Certificate） = 公钥（PublicKey） + 元数据 (公钥指纹 / 签发 CA / 序列号 / 证书有效日期 / 登录用户等)$$
 
+![pubkeyVScert](https://wx1.sbimg.cn/2020/09/28/GWGHw.png)
+
 ####    算法安全
 常用的 SSH 登录秘钥生成算法有如下四种：
 -   `DSA`
