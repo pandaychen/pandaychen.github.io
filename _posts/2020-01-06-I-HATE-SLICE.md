@@ -16,7 +16,7 @@ tags:
 > `Golang` 里面所有的类型都是值类型，之所以有些用起来像引用，是在于该类型内部是用指针实现的，但是其本质就是包含指针的结构体
 
 ##	0x00	Slice 与 Array
-Slice 与 Array 的区别在于，Slice 是 <font color="#dd0000"> 指针 </font>，Array 存储实体
+Slice 与 Array 的区别在于，Slice 是 <font color="#dd0000"> 指针 </font>，Array 是存储实体
 
 ####	Array 类型
 Array 是固定长度的（数组），使用前必须确定数组长度
