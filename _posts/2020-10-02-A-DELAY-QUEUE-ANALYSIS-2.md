@@ -21,6 +21,7 @@ tags:
 
 美图开源了一款基于 Golang 实现的延迟队列 [lmstfy：Let Me Schedule Tasks For You](https://github.com/bitleak/lmstfy/)：基于 Redis 实现的简单任务队列（Task Queue）服务。主要提供以下特性:
 
+本文分析基于的版本是 [fcef927](https://github.com/bitleak/lmstfy/commit/fcef927604861f308a5688f08f576b4cd27df35c)
 
 ##	0x01
 我们从官方的架构图出发来分析整个代码的实现：
@@ -118,7 +119,8 @@ func NewRedisClient(conf *config.RedisConf, opt *redis.Options) *redis.Client {
 }
 ```
 
-##	0x02	Engine
+##	0x02	Engine 结构
+lmstfy 的任务存取及相关的逻辑处理都封装在 [engine](https://github.com/bitleak/lmstfy/tree/master/engine) 中。<br>
 核心接口 `Engine`，`Engine` 是一个抽象的 `interface`。此外定义了 `EnginePool` 和全局变量 `engines`，`engines` 是一个二级 map，定义如下：
 -   一级 key 为：
 
@@ -151,7 +153,7 @@ type Engine interface {
 ```
 
 ##  0x03    JOB 结构
-Job 结构的 [定义在此]()，包含两个重要结构，`Job` 为抽象接口 `interface`，`jobImpl` 为具体的 `Job` 结构实现：
+Job 结构的 [定义在此](https://github.com/bitleak/lmstfy/blob/master/engine/job.go#L12)，包含两个重要结构，`Job` 为抽象接口 `interface`，`jobImpl` 为具体的 `Job` 结构实现：
 ```golang
 type Job interface {
 	Namespace() string
@@ -182,7 +184,7 @@ type jobImpl struct {
 -   `namespace`：用来隔离业务，每个业务是独立的 `namespace`，该 job 属于哪个 namespace
 -   queue - 队列名称，用区分同一业务不同消息类型
 -   job - 业务定义的业务，主要包含以下几个属性:
--   id: 任务 ID，全局唯一，使用 [`uuid` 库]() 生成
+-   id: 任务 ID，全局唯一，使用 `uuid` 生成
 -   delay: 任务延时下发时间， 单位是秒
 -   tries: 任务最大重试次数，tries = N 表示任务会最多下发 N 次
 -   ttl(time to live): 任务最长有效期，超过之后任务自动消失
@@ -217,8 +219,7 @@ func NewJob(namespace, queue string, body []byte, ttl, delay uint32, tries uint1
 }
 ```
 
-此外，为了减少 job 结构体的内存占用，在存储之前会使用 `MarshalBinary` 对其进行 `pack` 格式化为二进制，[`UnmarshalBinary` 方法](https://github.com/bitleak/lmstfy/blob/master/engine/job.go#L13
-1) 为 `unpack`，这个压缩（解压）逻辑可以抽象到自己项目中使用：
+此外，为了减少 job 结构体的内存占用，在存储之前会使用 `MarshalBinary` 对其进行 `pack` 格式化为二进制，[`UnmarshalBinary` 方法](https://github.com/bitleak/lmstfy/blob/master/engine/job.go#L131) 为 `unpack`，这个压缩（解压）逻辑可以抽象到自己项目中使用：
 ```golang
 // Marshal into binary of the format:
 // {total len: 4 bytes}{ns len: 1 byte}{ns}{queue len: 1 byte}{queue}{id: 16 bytes}{ttl: 4 bytes}{tries: 2 byte}{job data}
@@ -298,6 +299,11 @@ type Engine struct {
 ####    redis.SizeMonitor 成员
 
 ####    redis 的 Metrics 上报
+
+
+
+##
+
 
 
 
