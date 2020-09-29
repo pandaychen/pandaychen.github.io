@@ -27,9 +27,20 @@ tags:
 我们从官方的架构图出发来分析整个代码的实现：
 ![image](https://raw.githubusercontent.com/bitleak/lmstfy/master/doc/job-flow.png)
 
-1.	[`engine`](https://github.com/bitleak/lmstfy/tree/master/engine)：封装了 redis 的操作接口
-1.	外部接口部分 (https://github.com/bitleak/lmstfy/blob/master/server/)：主要基于 `gin` 封装了外部的 CGI 接口
-2.	外部接口部分 (https://github.com/bitleak/lmstfy/tree/master/engine)，
+生产者到消费者的流程图如下：
+![img](https://pic2.zhimg.com/v2-459b195bafcab737e7d8b6451b08a17f_r.jpg)
+
+1.	[外部接口部分](https://github.com/bitleak/lmstfy/blob/master/server/)：主要基于 `gin` 封装了外部的 CGI 接口
+2.	[存储接口部分](https://github.com/bitleak/lmstfy/tree/master/engine)：封装了 redis 底层的操作接口（如 List/Hash/Sortset 等），部分需要原子执行的操作采用 Lua 脚本进行了二次封装，主要被 `gin` 实现的 cgi 方法所调用，完成相关的存取逻辑
+
+从上图中看，整个 Redis 存储被划分为 `4` 块：
+1、`Pool KV`：存储 `Job`，Job 创建代码 [在此](https://github.com/bitleak/lmstfy/blob/master/engine/job.go#L41)，`jobid`[生成方法](https://github.com/bitleak/lmstfy/blob/master/engine/job.go#L42)，实现 [在此](https://github.com/bitleak/lmstfy/blob/master/uuid/uuid.go#L32)，采用了 `sync.Pool` 实现对象复用。`key` 为 jobid 的 [复合结构](https://github.com/bitleak/lmstfy/blob/master/engine/redis/pool.go#L23)，加入了业务、`namespace`，队列名字等属性，如 `/PoolPrefix/Namespace/Queue/JobID`<br>
+
+2、`SortSet`：所有 `delay!=0` 的任务都被被放入 `Sortset` 中，在 `Timer` 的 [`pump` 逻辑](https://github.com/bitleak/lmstfy/blob/master/engine/redis/timer.go#L118)，会开启单独的协程，监听这个 SortSet，把过期的 `Job` 从 `SortSet` 取出，放入 `FIFO` 队列
+
+3、`FIFO` 队列，存放计时触发的 `Job` 或者 `delay==0` 的 `Job`，本质上是个 `Redis` 的 `List` 结构，`FIFO` 队列实现 [代码在此](https://github.com/bitleak/lmstfy/blob/master/engine/redis/queue.go)，消费者在任务队列的队头轮询获取 `Job`，消费者的主要实现方法为 [`Engine.consume`](https://github.com/bitleak/lmstfy/blob/master/engine/redis/engine.go#L127)
+
+4、`DeadLetter` 队列，是一定容灾机制的考虑
 
 ##	0x02	配置
 lmstfy 的核心存储是 redis，先看下官方提供的示例配置如下，这里我比较感兴趣的是 redis 的配置，`Pool.default`、`Pool.migrate` 及 `Pool.mysentinel`：
@@ -257,7 +268,9 @@ func (j *jobImpl) MarshalBinary() (data []byte, err error) {
 type EnginePool map[string]Engine
 var engines = make(map[string]EnginePool)
 ```
-![img]()
+
+Engine 结构的主要封装如下图所示：
+![lmsfty.engine](https://wx1.sbimg.cn/2020/09/29/GYEwY.png)
 
 如上图中，每个 `redis.Engine` 包含了如下成员：
 -   redis   *RedisInstance  // 包含了 name 和具体的 redis 连接句柄
