@@ -27,7 +27,8 @@ tags:
 而 gin 框架就是满足如上特性的一款十分优秀的 Web 框架，blademaster 正是由 gin 精简而成。
 
 ##  0x02    blademaster 设计思路
-本小节源自 blademaster 的 [官方文档](https://github.com/go-kratos/kratos/blob/master/doc/wiki-cn/blademaster.md)。<br>
+本小节源自 blademaster 的 [官方文档](https://github.com/go-kratos/kratos/blob/master/doc/wiki-cn/blademaster.md)。<br><br>
+
 在像微服务这样的分布式架构中，经常会有一些需求需要你调用多个服务，但是还需要确保服务的安全性、统一化每次的请求日志或者追踪用户完整的行为等等。要实现这些功能，你可能需要在所有服务中都设置一些相同的属性，虽然这个可以通过一些明确的接入文档来描述或者准入规范来界定，但是这么做的话还是有可能会有一些问题：
 
 1. 你很难让每一个服务都实现上述功能。因为对于开发者而言，他们应当注重的是实现功能。很多项目的开发者经常在一些日常开发中遗漏了这些关键点，经常有人会忘记去打日志或者去记录调用链。但是对于一些大流量的互联网服务而言，一个线上服务一旦发生故障时，即使故障时间很小，其影响面会非常大。一旦有人在关键路径上忘记路记录日志，那么故障的排除成本会非常高，那样会导致影响面进一步扩大。
@@ -85,10 +86,12 @@ blademaster 的主要代码组织及功能简介如下：
 *   [logger.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/logger.go)：日志中间件，记录核心日志
 *   [cors.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/cors.go)：跨域组件
 
+此外，blademaster 还提供了 HTTP 的 client 封装：位于此 [client.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/client.go)，客户端默认加载了熔断器 breaker。
+
 
 ##  0x03    分析流程
 本系列准备按照如下流程来分析整个 bm 框架的实现：
-1.  核心数据结构：基于 `http.Server` 的包装及改造
+1.  核心数据结构：基于 `http.Server` 的包装及改造，`Engine`、`Context`、`Route` 等
 2.  HTTP 从 Request 处理到 Response 完成的整体流程：当请求到达时，gin 如何处理请求；在处理完成后，如何将响应数据返回给请求方
 3.  路由处理：Radix 树
 4.  拦截器（中间件）：洋葱模式
@@ -96,6 +99,7 @@ blademaster 的主要代码组织及功能简介如下：
 6.  监听请求：gin 是如何开启服务及监听请求的
 7.  Web 框架收集监控的指标（Metrics）
 8.  HTTP-Tracing
+9.	bm 框架提供的客户端封装
 
 ##  0x04    从 net.http 开始
 
@@ -136,7 +140,34 @@ func (engine *Engine) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 ####	Context 结构
 在 `net.http` 的实现中，上面这两个对象 `Request` 和 `ResponseWriter` 往往是需要同时存在的，为了避免很多函数都需要写这两个参数，我们不如封装一个结构来把这两个对象放在里面，于是就引出了 [`Context` 结构](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/context.go)<br>
 
-一个 `Context` 就是一次 HTTP 的请求响应过程。
+一个 `Context` 本质就是对一次 HTTP 的请求响应过程的封装。
+
+```golang
+// Context is the most important part. It allows us to pass variables between
+// middleware, manage the flow, validate the JSON of a request and render a
+// JSON response for example.
+type Context struct {
+	context.Context
+
+	Request *http.Request
+	Writer  http.ResponseWriter
+	......
+}
+```
+
+接下来，bm 框架的实现就围绕着 `Context` 及数据处理流程来进行了。
+
+##	0x05	Bm 框架的核心结构
+
+####	Engine
+
+
+
+####	Context
+[`Context` 结构](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/context.go#L35) 定义如下，从结构不难看出，`Context` 主要完成了如下工作：
+-	超时传递及控制，HTTP 请求周期中的 KeyValue 管理
+-	HTTP 请求的处理
+-	流程控制（拦截器链在 HTTP 请求中的应用、`abort` 等）
 
 ```golang
 // Context is the most important part. It allows us to pass variables between
@@ -161,17 +192,73 @@ type Context struct {
 
 	method string
 	engine *Engine
-
 	RoutePath string
-
 	Params Params
 }
 ```
 
-##  0x05    Bm 框架的 Metrics
+##  0x05    Bm 框架的指标 Metrics
 blademaster 默认提供了如下几个维度的 metrics[监控采集数据](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/metrics.go)：
--   `_metricServerReqDur `：`NewHistogramVec` 类型
+-   `_metricServerReqDur `：`NewHistogramVec` 类型，含义是服务端处理请求的延迟范围（区间）：`http server requests duration(ms)`，统计维度为 `path/caller/method`，单位为 `ms`
+-	`_metricServerReqCodeTotal`：
 
+####	Metrics 的一个细节
+bm 在初始化时默认注册了 [`metrics` 路由](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/server.go#L164)：
+```golang
+// NewServer returns a new blank Engine instance without any middleware attached.
+func NewServer(conf *ServerConfig) *Engine {
+	......
+	engine.RouterGroup.engine = engine
+	// NOTE add prometheus monitor location
+	engine.addRoute("GET", "/metrics", monitor())
+	engine.addRoute("GET", "/metadata", engine.metadata())
+	......
+	return engine
+}
+```
+
+`monitor()` 的 [实现如下](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/prometheus.go)：
+```golang
+func monitor() HandlerFunc {
+	return func(c *Context) {
+		h := promhttp.Handler()
+		h.ServeHTTP(c.Writer, c.Request)
+	}
+}
+```
+
+注意到 `monitor()` 中 `return` 的是一个方法，该方法的参数为 `Context`，这个 `Context` 在哪里初始化传入以及传入何种数据呢？再看 [`engine.addRoute` 方法](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/server.go#L164)：<br>
+
+看到 `prelude`：
+```golang
+func (engine *Engine) addRoute(method, path string, handlers ...HandlerFunc) {
+	if path[0] != '/' {
+		panic("blademaster: path must begin with'/'")
+	}
+	if method == "" {
+		panic("blademaster: HTTP method can not be empty")
+	}
+	if len(handlers) == 0 {
+		panic("blademaster: there must be at least one handler")
+	}
+	if _, ok := engine.metastore[path]; !ok {
+		engine.metastore[path] = make(map[string]interface{})
+	}
+	engine.metastore[path]["method"] = method
+	root := engine.trees.get(method)
+	if root == nil {
+		root = new(node)
+		engine.trees = append(engine.trees, methodTree{method: method, root: root})
+	}
+
+	prelude := func(c *Context) {
+		c.method = method
+		c.RoutePath = path
+	}
+	handlers = append([]HandlerFunc{prelude}, handlers...)
+	root.addRoute(path, handlers)
+}
+```
 
 ##  0x06    核心结构
 本篇先从 [server.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/server.go) 入手，分析下 blademaster 的核心数据结构：
