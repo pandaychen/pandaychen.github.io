@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      Google SRE 弹性熔断算法实现分析
-subtitle:
+subtitle:	Google-SRE-Experience：Handling Overload
 date:       2020-05-10
 author:     pandaychen
 header-img: img/golang-tools-fun.png
@@ -29,7 +29,7 @@ We implemented client-side throttling through a technique we call adaptive throt
 解决的办法就是客户端自行限制请求速度，限制生成请求的数量, 超过这个数量的请求直接在本地回复失败，而不会真是发送到服务端
 
 该算法统计的指标依赖如下两种，每个客户端记录过去两分钟内的以下信息（一般代码中以滑动窗口实现）：
--   $$requests$$（客户端请求总量）：
+-   $requests$（客户端请求总量）：
 The number of requests attempted by the application layer(at the client, on top of the adaptive throttling system)
 
 -   $$accepts$$（成功的请求总量 - 被 accepted）：
@@ -42,13 +42,13 @@ The number of requests accepted by the backend
 -	当客户端主动丢弃请求时，$$requests$$ 值会一直增大，在某个时间点会超过 $$K*accepts$$，使概率 $$p$$ 计算出来的值大于 0，此时客户端会以此概率对请求做主动丢弃
 -	当后端逐渐恢复时，$$accepts$$ 增加，（同时 $$requests$$ 值也会增加，但是由于 $$K$$ 的关系，$$K*accepts$$ 的放大倍数更快），使得 $$\frac{requests-K*accepts}{requests+1}$$ 变为负数，从而概率 $$p==0$$，客户端自适应限流结束
 
-**客户端请求拒绝的概率**（Client request rejection probability）：
+<font color="#dd0000">客户端请求拒绝的概率</font>（Client request rejection probability）：
 基于如下公式计算（其中 $$K$$ 为倍率 - multiplier，常用的值为 `2`）：
 
 $$max(0,\frac{requests-K*accepts}{requests+1})$$
 
 该公式的解释如下：
-当 $$requests-K*accepts>=0$$ 时，概率 $$p==0$$，客户端不会主动丢弃请求；反之，则概率 $$p$$，会随着 $$accepts$$ 值的变小而增加，即成功接受的请求数越少，本地丢弃请求的概率就越高。通俗点说，Client 可以发送请求直到 $$requests = K * accepts$$， 一旦超过限制， 按照 **概率** 进行截流。
+当 $$requests-K*accepts>=0$$ 时，概率 $$p==0$$，客户端不会主动丢弃请求；反之，则概率 $$p$$，会随着 $$accepts$$ 值的变小而增加，即成功接受的请求数越少，本地丢弃请求的概率就越高。通俗点说，Client 可以发送请求直到 $$requests = K * accepts$$， 一旦超过限制， 按照 ** 概率 ** 进行截流。
 
 从 Google 的文档描述中，该算法在实际中使用效果极为良好，可以使整体上保持一个非常稳定的请求速率。对于后端而言，调整 $$K$$ 值可以使得自适应限流算法适配不同的后端。关于 $$K$$ 值的意义，原文描述如下：
 -   Reducing the multiplier will make adaptive throttling behave more aggressively
@@ -91,7 +91,7 @@ func (b *sreBreaker) Allow() error {
 }
 ```
 
-最后，看下 `trueOnProba` 方法的实现，其中 `b.r.Float64()` 的 `r` 为 `*rand.Rand` 类型，此方法返回一个取值范围在`[0.0, 1.0)`的伪随机 Float64 值。
+最后，看下 `trueOnProba` 方法的实现，其中 `b.r.Float64()` 的 `r` 为 `*rand.Rand` 类型，此方法返回一个取值范围在 `[0.0, 1.0)` 的伪随机 Float64 值。
 当 `proba` 越大时，`truth` 为真的概率就越大。
 ```golang
 func (b *sreBreaker) trueOnProba(proba float64) (truth bool) {
