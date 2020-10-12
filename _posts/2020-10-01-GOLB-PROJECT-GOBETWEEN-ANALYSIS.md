@@ -349,6 +349,14 @@ func Create(name string, cfg config.Server) error {
 
 ####	Server 的初始化及启动
 本节以 Tcp 代理的初始化及启动 [代码为例](https://github.com/yyyar/gobetween/blob/master/src/server/tcp/server.go)，先看下 `tcp.Server` 的结构体定义，从此结构入手来分析一个代理的实现要素：
+
+这里列举下 `tcp.Server` 的结构中比较重要的成员：<br>
+-	`scheduler`：调度器，负责本代理的（后端选择）负载均衡算法、后端节点的服务发现、健康度探测以及代理自身的数据指标统计
+-	`clients`：保存了本代理的活跃接入 TCP 连接
+-	`connect/disconnect`：`channel` 类型，用于连接接入 / 退出时的异步通信
+-	`access`：用于代理访问权限检查
+
+具体结构和初始化方法如下代码所示：
 ```golang
 type Server struct {
 	/* Server friendly name */
@@ -361,13 +369,13 @@ type Server struct {
 	cfg config.Server
 
 	/* Scheduler deals with discovery, balancing and healthchecks */
-	scheduler scheduler.Scheduler
+	scheduler scheduler.Scheduler		// 每一个代理结构都包含一个调度器 scheduler
 
 	/* Current clients connection */
-	clients map[string]net.Conn
+	clients map[string]net.Conn			//map 结构保持了 TCP 代理的所有连接（前置）
 
 	/* Stats handler */
-	statsHandler *stats.Handler
+	statsHandler *stats.Handler			// 代理的统计回调
 
 	/* ----- channels ----- */
 
@@ -393,12 +401,164 @@ type Server struct {
 	/* Access module checks if client is allowed to connect */
 	access *access.Access
 }
+
+// 初始化 Server 的方法：
+func New(name string, cfg config.Server) (*Server, error) {
+	......
+	log := logging.For("server")
+
+	var err error = nil
+	statsHandler := stats.NewHandler(name)
+
+	// Create server
+	server := &Server{
+		name:         name,
+		cfg:          cfg,
+		stop:         make(chan bool),
+		disconnect:   make(chan net.Conn),
+		connect:      make(chan *core.TcpContext),
+		clients:      make(map[string]net.Conn),
+		statsHandler: statsHandler,
+		scheduler: scheduler.Scheduler{		// 初始化 scheduler
+			Balancer:     balance.New(cfg.Sni, cfg.Balance),		// 负载均衡器
+			Discovery:    discovery.New(cfg.Discovery.Kind, *cfg.Discovery),	// 服务发现
+			Healthcheck:  healthcheck.New(cfg.Healthcheck.Kind, *cfg.Healthcheck),	// 健康检查
+			StatsHandler: statsHandler,		// 状态上报 & 监控
+		},
+	}
+	......
+}
 ```
 
+初始化 `Server` 代理结构完成之后，接下来就是启动代理工作的流程 [`server.Start()`](https://github.com/yyyar/gobetween/blob/master/src/server/tcp/server.go#L136)，这里主要逻辑如下：
+1.	代理 `server.Start()` 中，启动一个子 routione 完成连接的调度（`server.HandleClientDisconnect` 和 `server.HandleClientConnect` 方法）及退出时资源的回收工作
+2.	启动一个子 goroutine，实现代理状态统计逻辑 [`this.statsHandler.Start()`](https://github.com/yyyar/gobetween/blob/master/src/stats/handler.go#L92)
+3.	启动一个子 goroutine，运行代理的调度器 [`scheduler.Start()`](https://github.com/yyyar/gobetween/blob/master/src/server/scheduler/scheduler.go#L93)
+4.	在主 goroutine 中启动 Tcp 代理的 `Listen` 方法，接收连接事件，若有新连接接入时，通过 `Server.connect` 这个 `chan (*core.TcpContext)` 类型的 channel，将该事件通知到 `1` 中的逻辑，触发对新连接的代理连接逻辑实现
+
+下面是 `server.Start()` 的代码：
+```golang
+func (this *Server) Start() error {
+	var err error
+	this.tlsConfig, err = tlsutil.MakeTlsConfig(this.cfg.Tls, this.GetCertificate)
+	if err != nil {
+		return err
+	}
+
+	// 代理工作的核心循环
+	go func() {
+		for {
+			select {
+				// 处理连接断开的事件
+			case client := <-this.disconnect:
+				this.HandleClientDisconnect(client)
+				// 处理新连接事件
+			case ctx := <-this.connect:
+				this.HandleClientConnect(ctx)
+				// 处理代理退出事件
+			case <-this.stop:
+				this.scheduler.Stop()
+				this.statsHandler.Stop()
+				if this.listener != nil {
+					this.listener.Close()
+					for _, conn := range this.clients {
+						conn.Close()
+					}
+				}
+				this.clients = make(map[string]net.Conn)
+				return
+			}
+		}
+	}()
+
+	// Start stats handler
+	this.statsHandler.Start()
+
+	// Start scheduler
+	this.scheduler.Start()
+
+	// Start listening
+	if err := this.Listen(); err != nil {
+		this.Stop()
+		return err
+	}
+
+	return nil
+}
+```
+
+这里我们先看下 `server.Listen()` 方法：
+```golang
+func (this *Server) Listen() (err error) {
+
+	log := logging.For("server.Listen")
+
+	// create tcp listener
+	this.listener, err = net.Listen("tcp", this.cfg.Bind)
+
+	if err != nil {
+		log.Error("Error starting", this.cfg.Protocol+"server:", err)
+		return err
+	}
+
+	sniEnabled := this.cfg.Sni != nil
+
+	// 在子 goroutine 中接收，不优雅
+	go func() {
+		for {
+			conn, err := this.listener.Accept()
+
+			if err != nil {
+				log.Error(err)
+				return
+			}
+			// 处理新连接
+			go this.wrap(conn, sniEnabled)
+		}
+	}()
+
+	return nil
+}
+
+// 处理新连接的方法
+func (this *Server) wrap(conn net.Conn, sniEnabled bool) {
+	log := logging.For("server.Listen.wrap")
+
+	var hostname string
+	var err error
+
+	if sniEnabled {
+		var sniConn net.Conn
+		sniConn, hostname, err = sni.Sniff(conn, utils.ParseDurationOrDefault(this.cfg.Sni.ReadTimeout, time.Second*2))
+
+		if err != nil {
+			log.Error("Failed to get / parse ClientHello for sni:", err)
+			conn.Close()
+			return
+		}
+
+		conn = sniConn
+	}
+
+	if this.tlsConfig != nil {
+		conn = tls.Server(conn, this.tlsConfig)
+	}
+
+	// 将新连接封装为 core.TcpContext 结构，放入 channel
+	this.connect <- &core.TcpContext{
+		hostname,
+		conn,
+	}
+}
+```
+
+下面一篇文章，再分析下 gobetween 代理实现的部分代码细节。下一小节我们看下 `server.scheduler` 的结构及实现。
+
+##	0x07	Server 代理模块的 Scheduler 结构及实现
 
 
 
-##	0x07	Metrics 模块
+##	0x08	Metrics 模块
 Metrcis 模块的代码 [位于此](https://github.com/yyyar/gobetween/blob/master/src/metrics/metrics.go)，主要完成了如下事情（较为典型的实现）：<br>
 1.	暴露了给 Prometheus-Client 的采集的 [接口](https://github.com/yyyar/gobetween/blob/master/src/metrics/metrics.go#L188)
 2.	提供给 Manage 模块上报 Prometheus-Vec 的方法：
@@ -426,13 +586,13 @@ backendTxSecond           *prometheus.GaugeVec
 backendLive               *prometheus.GaugeVec
 ```
 
-##	0x08	API 模块
+##	0x09	API 模块
 API 模块的代码 [位于此](https://github.com/yyyar/gobetween/tree/master/src/api)，主要使用 `gin` 构建的 API 管理端。主要提供了如下一些功能：
 -	[Dump current config as TOML](https://github.com/yyyar/gobetween/blob/master/src/api/root.go#L42)：导出当前配置
 -	[Servers Restful api implementation](https://github.com/yyyar/gobetween/blob/master/src/api/servers.go#L21)：通过调用 `manage` 模块提供的接口来操作后端资源及属性
 
 
-##  0x09	参考
+##  0x0A	参考
 -   [golb](https://github.com/onestraw/golb)
 -   [vulcand](https://github.com/vulcand/vulcand)
 -   [gobetween](https://github.com/yyyar/gobetween)
