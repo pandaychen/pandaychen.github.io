@@ -65,18 +65,33 @@ gobetween 的架构图如下：
   * **Leastconn** - select backend with least active connections
   * **Leastbandwidth** -  backends with least bandwidth
 
+从上面的特性中，也可以看出，一个代理网关需要具备的基本要素，在先前这篇文章 [一个 Http(s) 网关的实现分析](https://pandaychen.github.io/2020/03/22/A-GOLANG-HTTP-GATEWAY-ANALYSIS/) 也梳理过：
+-	管理端 API：提供（代理）后端 backend 实时信息、配置、统计信息（metrics）等管理及查询的 Restful 接口
+-	代理网关进行服务发现的机制
+-	对后端 backend 节点的健康检查
+-	负载均衡的策略
+-	代理网关的实现（TCP/UDP/HTTP 等）
+-	易用的负载均衡器配置
 
 ##  0x02   分析路线
 个人比较感兴趣的点有如下几块：
 1.  Gateway 实现的模型，各个子模块之间的联动策略及通信方式
-2.  和 `Consul` 的结合做服务发现
+2.  和 `Consul` 的结合做服务发现（Service Discovery）
 3.  Metrics 指标及采集方法
 4.  配置热重启
 5.  Gateway 的扩展能力及高可用实现
 
 
+##  0x03    代码分析 - 总览
+此外，在 gobetween 的实现中，大部分异步通信都是通过 channel 来完成的，由 scheduler 中的 `for...select` 结构完成大部分核心的事假调度。
 
-##  0x03    代码分析
+核心逻辑罗列如下：
+-	[scheduler](https://github.com/yyyar/gobetween/blob/master/src/server/scheduler/scheduler.go#L93)：负责整个网关各类事件的调度及处理
+-	[discovery](https://github.com/yyyar/gobetween/blob/master/src/discovery/discovery.go)：负责后端 backend 节点的服务发现
+-	[代理实现](https://github.com/yyyar/gobetween/blob/master/src/server/tcp/server.go)
+
+
+下面，我们按照上面的基本要素来分析下 gobetween 的实现：
 
 ####    配置 Config
 gobetween 的 [主要配置结构如下](https://github.com/yyyar/gobetween/blob/master/src/config/config.go)：
@@ -129,8 +144,6 @@ type Server struct {
 	Healthcheck *HealthcheckConfig `toml:"healthcheck" json:"healthcheck"`
 }
 ```
-
-
 
 
 ####    主流程
@@ -224,7 +237,7 @@ type TcpContext struct {
 	Conn net.Conn
 }
 ```
-5、[`Service`结构](https://github.com/yyyar/gobetween/blob/master/src/core/service.go)
+5、[`Service` 结构](https://github.com/yyyar/gobetween/blob/master/src/core/service.go)
 ```golang
 /**
  * Service is a global facility that could be Enabled or Disabled for a number
