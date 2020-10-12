@@ -16,7 +16,7 @@ tags:
 &emsp;&emsp; 来看看 Wikipedia 中对问号（?）的解释：
 >   非贪心量化（Non-greedy quantifiers）：当该字符紧跟在任何一个其他重复修饰符（*,+,?，{n}，{n,}，{n,m}）后面时，匹配模式是非贪婪的。非贪婪模式尽可能少的匹配所搜索的字符串，而默认的贪婪模式则尽可能多的匹配所搜索的字符串。例如，对于字符串 "oooo"，"o+?" 将匹配单个 "o"，而 "o+" 将匹配所有 "o"。
 
-###	基础用法
+####	基础用法
 作为数量词，用在字符或 (...) 之后，匹配前一个字符 `0` 次或 `1` 次
 
 ```python
@@ -29,10 +29,10 @@ str2="defhijkabc"
 print qm_re2.match(str2).group()
 ```
 
-###   ? 开头的组合
+####   ? 开头的组合
 以问号开头的表达式，一定是和圆括号 `(pattern)` 的组合，但并非是分组 `(pattern)` 的概念。 常见有：`(?:pattern)`，`(?<=pattern)`，`(?!pattern)` 及 `(?>!pattern)`
 
--   `(?:pattern)` 模式
+1、`(?:pattern)` 模式<br>
 该模式是针对于 `(pattern)` 而言的，就是你这里需要加括号但是不希望它成为一个分组
 > (pattern)	匹配 pattern 并获取这一匹配的子字符串。该子字符串用于向后引用。所获取的匹配可以从产生的 Matches 集合得到，在 VBScript 中使用 SubMatches 集合，在 JScript 中则使用 $0…$9 属性。要匹配圆括号字符，请使用 "\(" 或 "\)"。可带数量后缀。
 > 匹配 pattern 但不获取匹配的子字符串（shy groups），也就是说这是一个非获取匹配，不存储匹配的子字符串用于向后引用。这在使用或字符 "(|)" 来组合一个模式的各个部分是很有用。例如 `industr(?:y|ies)` 就是一个比 "industry|industries" 更简略的表达式。
@@ -44,7 +44,7 @@ str22="industry#industries"
 print qm_re3.match(str22).groups()
 ```
 
--   `(?=pattern)` 模式
+2、`(?=pattern)` 模式<br>
 此模式 `(?=pattern)` 表示匹配以 `pattern` 结尾的前面部分（匹配到的内容不包含 `pattern`），一般是加在所要匹配内容的后面。如下所示：
 ```python
 qm_re5=re.compile(r'(\w+)(?=xyz)')
@@ -53,7 +53,7 @@ print qm_re5.match(str23).group()
 ```
 输出为 `abcdefghijk`，匹配到了 `xyz` 之前所有的单词字符 `[A-Za-z0-9]`
 
--	`(?<=pattern)` 模式
+3、`(?<=pattern)` 模式<br>
 此模式 `(?<=pattern)` 表示匹配以 `pattern` 结尾的后面部分（匹配到的内容不包含 `pattern`）, 一般是加在所要匹配的内容前面。
 
 ```python
@@ -63,10 +63,10 @@ print re.search(qm_re6,str23).groups()
 ```
 输出为 `('defghijkxyz',)`
 
--	`(?!pattern)` 模式
+4、`(?!pattern)` 模式<br>
 `(?!pattern)` 就是匹配后面不跟 "pattern" 的
 
--	`(?>!pattern)` 模式
+5、`(?>!pattern)` 模式<br>
 `(?>!pattern)` 就是匹配前面不跟 "pattern" 的
 
 
