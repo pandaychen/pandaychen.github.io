@@ -63,7 +63,7 @@ Baggage Items，Trace 的随行数据，是一个键值对集合，它存在于 
 Kratos Tracing 的实现 [目录在此](https://github.com/go-kratos/kratos/tree/master/pkg/net/trace)，主要完成了如下工作：
 1.  实现 Trace 的接口规范
 2.  提供 Trace 对 Tracer 接口的实现，供业务及 Kratos 其他模块接入使用
-3.  本身不提供整套 Trace 数据存储，通过 `Repoter` 接口第三方 Tracing 系统（Zipkin || Jaeger），前提是实现他们的上报协议
+3.  本身不提供整套 Trace 数据存储，通过 `Repoter` 接口第三方 Tracing 系统（`Zipkin`、`Jaeger` 等等），前提是实现它们的上报协议
 
 
 几个要点 && 问题：
@@ -71,6 +71,19 @@ Kratos Tracing 的实现 [目录在此](https://github.com/go-kratos/kratos/tree
 2.  提供了 [`DAPPER`](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/dapper.go) 作为 Tracer 的实例化
 3.  如何提升采样的性能压力
 4.  如何 Mock？
+
+####	代码组织
+-	[config.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/dapper.go)：定义了初始化 Tracing 的方法及 [配置结构 `Config`](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/config.go#L26)，`Config` 中包含了 Tracing 数据落地的地址
+-	[context.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/context.go)：`opentracing.SpanContext` 的实例化实现
+-	[tag.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/tag.go)：包含全局 Tag 的常量字符串定义及 Tag 结构定义，Tag 生成和转化接口
+-	[span.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/span.go)：
+-	[tracer.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/tracer.go)：
+-	[noop.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/noop.go)：此包实现了空的 `trace.Tracer` 和 `trace.Trace` 结构，当用户使用默认的 trace 时（不传入 `reporter`），就会使用此全局变量为 `GlobalTracer`
+-	[sample.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/sample.go)
+-	[dapper.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/dapper.go)
+-	[report.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/report.go)
+-	[propagation.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/propagation.go)
+-	[marshal.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/marshal.go)
 
 ####  概念
 - `Tag`：标签，本质是 KV 字符串
@@ -132,6 +145,9 @@ func TagString(key string, val string) Tag {
 
 ####  SpanContext 结构
 在介绍 Span 之前，先引入 `SpanContext` 的 [概念](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/context.go#L20)，SpanContext 保存了分布式追踪的上下文信息，包括 Trace id，Span id 以及其它需要传递到下游服务的内容。一个 OpenTracing 的实现需要将 SpanContext 通过某种序列化协议 (Wire Protocol) 在进程边界上进行传递，以将不同进程中的 Span 关联到同一个 Trace 上。对于 HTTP 请求来说，SpanContext 一般是采用 HTTP header 进行传递的。
+
+这里 `spanContext` 也可以直观理解为上面 Tracing Tree 的一个 Tree-Node：SpanContext implements opentracing.SpanContext
+
 ```golang
 // SpanContext implements opentracing.SpanContext
 type spanContext struct {
@@ -145,7 +161,7 @@ type spanContext struct {
 
 	// ParentID refers to the ID of the parent span.
 	// Should be 0 if the current span is a root span.
-	ParentID uint64
+	ParentID uint64		// 属于哪个父 SPAN
 
 	// Flags is a bitmap containing such bits as 'sampled' and 'debug'.
 	Flags byte
@@ -158,28 +174,62 @@ type spanContext struct {
 }
 ```
 
-####  跟踪 Span 结构
-这里再回顾下Span：一个具有名称和时间长度的操作，例如一个 REST 调用或者数据库操作等。Span 是分布式追踪的最小跟踪单位，一个 Trace 由多段 Span 组成。追踪信息包含时间戳、 事件、 方法名（Family+Title） 、 注释（TAG/Comment）<br>
-
-客户端和服务器上的时间戳来自不同的主机， 我们必须考虑到时间偏差，RPC 客户端发送一个请求之后， 服务器端才能接收到， 对于响应也是一样的（服务器先响应， 然后客户端才能接收到这个响应） 。这样一来，服务器端的 RPC 就有一个时间戳的一个上限和下限
-
-[](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/span.go)：
+`SpanContext` 的字符串格式如下（方便日志记录）：
 ```golang
-// Span is a trace span.
-type Span struct {
-	dapper        *dapper
-	context       spanContext   //span 对应的上下文
-	operationName string
-	startTime     time.Time
-	duration      time.Duration
-	tags          []Tag     // 包含了若干个 Tag
-	logs          []*protogen.Log
-	childs        int
+func (c spanContext) String() string {
+	base := make([]string, 4)
+	base[0] = strconv.FormatUint(uint64(c.TraceID), 16)
+	base[1] = strconv.FormatUint(uint64(c.SpanID), 16)
+	base[2] = strconv.FormatUint(uint64(c.ParentID), 16)
+	base[3] = strconv.FormatUint(uint64(c.Flags), 16)
+	return strings.Join(base, ":")
 }
 ```
 
+####  Span 结构
+这里再回顾下 Span：一个具有名称和时间长度的操作，例如一个 REST 调用或者数据库操作等。Span 是分布式追踪的最小跟踪单位，一个 Trace 由多段 Span 组成。追踪信息包含时间戳、 事件、 方法名（Family+Title） 、 注释（TAG/Comment）<br>
+
+客户端和服务器上的时间戳来自不同的主机， 我们必须考虑到时间偏差，RPC 客户端发送一个请求之后， 服务器端才能接收到， 对于响应也是一样的（服务器先响应， 然后客户端才能接收到这个响应） 。这样一来，服务器端的 RPC 就有一个时间戳的一个上限和下限
+
+先看下 [Span 结构定义](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/span.go#L18)：
+```golang
+// Span is a trace span.
+type Span struct {
+	dapper        *dapper		// 属于哪个 dapper
+	context       spanContext   // 本 span 对应的上下文（节点信息）
+	operationName string		// 本 span 的名字：通过 SetTitle 方法设置
+	startTime     time.Time		//span 开始时间
+	duration      time.Duration		//span 持续时间
+	tags          []Tag     // 包含了若干个 Tag
+	logs          []*protogen.Log
+	childs        int		// 本 span 的 Fork-child 数量
+}
+```
+
+从 `Span` 结构体定义看，`Span` 是属于某个 `dapper` 的，在微服务中，就是一个完整的（子）调用过程，有调用开始时间 `SetTitle` 和耗时 `duration`，有标记自己唯一属性的上下文结构 `spanContext` 以及 KV 标记 `tags`。<br>
+
+`Span` 实现的几个核心方法如下：
+1、`Span.Fork()`
+```golang
+func (s *Span) Fork(serviceName, operationName string) Trace {
+	if s.childs > _maxChilds {
+		// if child span more than max childs set return noopspan
+		return noopspan{}
+	}
+	s.childs++
+	// 为了兼容临时为 New 的 Span 设置 span.kind
+	return s.dapper.newSpanWithContext(operationName, s.context).SetTag(TagString(TagSpanKind, "client"))
+}
+```
+
+未完待续
+
+
 ##  0x03  Tracer 接口及抽象
 Kratos 的 Tracer 接口定义在 [这里](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/tracer.go#L56)，`Tracer` 和 `Trace`，此外，对外部提供了 [`trace.SetGlobalTracer()` 方法](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/tracer.go#L13)，用于设置自定义的 tracer 对象，如 Kratos 提供了 `zipkin` 的接入。
+
+在 [dapper.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/dapper.go) 中，完整的实现了 `Trace` 这个接口。
+
 ```golang
 // Tracer is a simple, thin interface for Trace creation and propagation.
 type Tracer interface {
@@ -234,10 +284,208 @@ type Trace interface {
 }
 ```
 
+看到这里，产生了一个疑问：<font color="#dd0000">`Tracer` 和 `Trace` 这两个接口的使用场景分别为如何？</font>
+
+
+##	0x04	Dapper 实现
+`Dapper` 是 Kratos 提供的 `trace.Tracer` 接口的实例化实现，是一个全局结构。先看看它的 [定义](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/dapper.go#L38)：
+```golang
+type dapper struct {
+	serviceName   string		// 一个 dapper 对应一个服务名
+	disableSample bool
+	tags          []Tag			//dapper 的 KV 属性
+	reporter      reporter		//dapper 数据存储的实现
+	propagators   map[interface{}]propagator	//dapper 的格式
+	pool          *sync.Pool	// 复用 context，为代码优化所用
+	stdlog        *log.Logger
+	sampler       sampler		// 采样逻辑
+}
+```
+
+通过 `NewTracer` 方法创建一个 `Dapper`，注意这里需要传入 `reporter`，Kratos 提供了基于 `Zipkin` 的 `reporter` 实现：
+```golang
+// NewTracer new a tracer.
+func NewTracer(serviceName string, report reporter, disableSample bool) Tracer {
+	// 初始化采样策略
+	sampler := newSampler(_probability)
+
+	// default internal tags
+	tags := extendTag()
+	stdlog := log.New(os.Stderr, "trace", log.LstdFlags)
+	return &dapper{
+		serviceName:   serviceName,
+		disableSample: disableSample,
+		propagators: map[interface{}]propagator{
+			HTTPFormat: httpPropagator{},
+			GRPCFormat: grpcPropagator{},
+		},
+		reporter: report,
+		sampler:  sampler,
+		tags:     tags,
+		pool:     &sync.Pool{New: func() interface{} { return new(Span) }},
+		stdlog:   stdlog,
+	}
+}
+```
+
+
+####	由 Dapper 创建 Span
+```golang
+func (d *dapper) New(operationName string, opts ...Option) Trace {
+	opt := defaultOption
+	for _, fn := range opts {
+		fn(&opt)
+	}
+	traceID := genID()
+	var sampled bool
+	var probability float32
+	if d.disableSample {
+		sampled = true
+		probability = 1
+	} else {
+		sampled, probability = d.sampler.IsSampled(traceID, operationName)
+	}
+	pctx := spanContext{TraceID: traceID}
+	if sampled {
+		pctx.Flags = flagSampled
+		pctx.Probability = probability
+	}
+	if opt.Debug {
+		pctx.Flags |= flagDebug
+		return d.newSpanWithContext(operationName, pctx).SetTag(TagString(TagSpanKind, "server")).SetTag(TagBool("debug", true))
+	}
+	// 为了兼容临时为 New 的 Span 设置 span.kind
+	return d.newSpanWithContext(operationName, pctx).SetTag(TagString(TagSpanKind, "server"))
+}
+
+func (d *dapper) newSpanWithContext(operationName string, pctx spanContext) Trace {
+	sp := d.getSpan()
+	// is span is not sampled just return a span with this context, no need clear it
+	//if !pctx.isSampled() {
+	//	sp.context = pctx
+	//	return sp
+	//}
+	if pctx.Level > _maxLevel {
+		// if span reach max limit level return noopspan
+		return noopspan{}
+	}
+	level := pctx.Level + 1
+	nctx := spanContext{
+		TraceID:  pctx.TraceID,
+		ParentID: pctx.SpanID,
+		Flags:    pctx.Flags,
+		Level:    level,
+	}
+	if pctx.SpanID == 0 {
+		nctx.SpanID = pctx.TraceID
+	} else {
+		nctx.SpanID = genID()
+	}
+	sp.operationName = operationName
+	sp.context = nctx
+	sp.startTime = time.Now()
+	sp.tags = append(sp.tags, d.tags...)
+	return sp
+}
+```
+
+####	Inject
+
+```golang
+func (d *dapper) Inject(t Trace, format interface{}, carrier interface{}) error {
+	// if carrier implement Carrier use direct, ignore format
+	carr, ok := carrier.(Carrier)
+	if ok {
+		t.Visit(carr.Set)
+		return nil
+	}
+	// use Built-in propagators
+	pp, ok := d.propagators[format]
+	if !ok {
+		return ErrUnsupportedFormat
+	}
+	carr, err := pp.Inject(carrier)
+	if err != nil {
+		return err
+	}
+	if t != nil {
+		t.Visit(carr.Set)
+	}
+	return nil
+}
+
+func (d *dapper) Extract(format interface{}, carrier interface{}) (Trace, error) {
+	sp, err := d.extract(format, carrier)
+	if err != nil {
+		return sp, err
+	}
+	// 为了兼容临时为 New 的 Span 设置 span.kind
+	return sp.SetTag(TagString(TagSpanKind, "server")), nil
+}
+
+func (d *dapper) extract(format interface{}, carrier interface{}) (Trace, error) {
+	// if carrier implement Carrier use direct, ignore format
+	carr, ok := carrier.(Carrier)
+	if !ok {
+		// use Built-in propagators
+		pp, ok := d.propagators[format]
+		if !ok {
+			return nil, ErrUnsupportedFormat
+		}
+		var err error
+		if carr, err = pp.Extract(carrier); err != nil {
+			return nil, err
+		}
+	}
+	pctx, err := contextFromString(carr.Get(KratosTraceID))
+	if err != nil {
+		return nil, err
+	}
+	// NOTE: call SetTitle after extract trace
+	return d.newSpanWithContext("", pctx), nil
+}
+```
+
+####	report 上报数据
+```golang
+func (d *dapper) report(sp *Span) {
+	if sp.context.isSampled() {
+		if err := d.reporter.WriteSpan(sp); err != nil {
+			d.stdlog.Printf("marshal trace span error: %s", err)
+		}
+	}
+	d.putSpan(sp)
+}
+```
+
+####	sync.Pool 复用 span
+`dapper` 的内部方法 `putSpan` 及 `getSpan`，利用 `sync.Pool` 对 `Span` 结构进行复用，以提高采集效率：
+```golang
+func (d *dapper) putSpan(sp *Span) {
+	if len(sp.tags) > 32 {
+		sp.tags = nil
+	}
+	if len(sp.logs) > 32 {
+		sp.logs = nil
+	}
+	d.pool.Put(sp)
+}
+
+func (d *dapper) getSpan() *Span {
+	sp := d.pool.Get().(*Span)
+	sp.dapper = d
+	sp.childs = 0
+	sp.tags = sp.tags[:0]
+	sp.logs = sp.logs[:0]
+	return sp
+}
+```
+
 Kratos 默认提供了 `Zipkin` 的接入方法，实现 [在此](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/zipkin/config.go#L22)，需要完成如下步骤：
 1.  实现 [`reporter` 接口](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/report.go#L22)，其中包含了 `WriteSpan` 和 `Close` 两个方法
-2.  通过 `trace.NewTracer` 构造 dapper 跟踪对象
+2.  通过 `trace.NewTracer` 构造 `dapper` 跟踪对象
 3.  通过 `trace.SetGlobalTracer` 将全局 tracer 初始化为我们设置的对象
+
 ```golang
 // Init init trace report.
 func Init(c *Config) {
@@ -364,10 +612,32 @@ type spanContext struct {
 }
 ```
 
+##	0x0	其他
+在 [util.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/util.go) 文件中，定义了全局 context-Key 及生成方法：
+```golang
+var _ctxkey ctxKey = "kratos/pkg/net/trace.trace"
+
+// FromContext returns the trace bound to the context, if any.
+func FromContext(ctx context.Context) (t Trace, ok bool) {
+	t, ok = ctx.Value(_ctxkey).(Trace)
+	return
+}
+
+// NewContext new a trace context.
+// NOTE: This method is not thread safe.
+func NewContext(ctx context.Context, t Trace) context.Context {
+	return context.WithValue(ctx, _ctxkey, t)
+}
+```
+
+##	0x0	小结
+基于上面的分析，我们小结下 Kratos 的 Tracing 实现：
+![tracing-kratos]()
+
 
 ##  0x0 Trace 实例化应用
 我们以 Warden 模块的 [客户端的实现 client.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/client.go#L101) 为例，看下 Tracing 如何使用。<br>
-具体在 client 的拦截器中：
+具体在 client 的拦截器 `handle()` 方法中，如下：
 ```golang
 func (c *Client) handle() grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) (err error) {
@@ -446,7 +716,6 @@ func (c *Client) handle() grpc.UnaryClientInterceptor {
 }
 ```
 
-
 1、调用 [`trace.FromContext()` 方法](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/util.go#L50)：
 ```golang
 type ctxKey string
@@ -461,32 +730,28 @@ func FromContext(ctx context.Context) (t Trace, ok bool) {
 }
 ```
 
-
-
 ##  0x06  第三方 Tracing 兼容
 kratos 本身不提供整套 `trace` 数据方案，但在 `net/trace/report.go` 内声明了 `repoter` 接口，可以简单的集成现有开源系统，比如：`zipkin` 和 `jaeger`。
 
-#### zipkin 使用
-可以看 [zipkin](https://github.com/bilibili/kratos/tree/master/pkg/net/trace/zipkin) 的协议上报实现，具体使用方式如下：
+####	zipkin + Kratos
+可以看 [`Zipkin`](https://github.com/bilibili/kratos/tree/master/pkg/net/trace/zipkin) 的协议上报实现，具体使用方式如下：
 
-1. 前提是需要有一套自己搭建的 `zipkin` 集群
-2. 在业务代码的 `main` 函数内进行初始化，代码如下：
+1. 搭建可用 `Zipkin` 集群
+2. 在业务代码的 `main` 函数内进行初始化，如下：
 
-```go
-// 忽略其他代码
+```golang
 import "github.com/bilibili/kratos/pkg/net/trace/zipkin"
-// 忽略其他代码
+
 func main(){
-    // 忽略其他代码
+	......
     zipkin.Init(&zipkin.Config{
         Endpoint: "http://localhost:9411/api/v2/spans",
     })
-    // 忽略其他代码
+    ......
 }
 ```
 
-#### zipkin 效果图
-
+####	zipkin 效果图
 ![zipkin](/doc/img/zipkin.jpg)
 
 ##  0x07  参考
