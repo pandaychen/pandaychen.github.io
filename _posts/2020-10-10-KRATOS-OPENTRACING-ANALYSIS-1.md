@@ -302,7 +302,7 @@ type dapper struct {
 }
 ```
 
-通过 `NewTracer` 方法创建一个 `Dapper`，注意这里需要传入 `reporter`，Kratos 提供了基于 `Zipkin` 的 `reporter` 实现：
+通过 `NewTracer` 方法创建一个 `Dapper`，注意这里需要传入 `reporter`（Kratos 提供了基于 `Zipkin` 的 `reporter` 实现），初始化`Dapper`的方法如下：
 ```golang
 // NewTracer new a tracer.
 func NewTracer(serviceName string, report reporter, disableSample bool) Tracer {
@@ -313,7 +313,7 @@ func NewTracer(serviceName string, report reporter, disableSample bool) Tracer {
 	tags := extendTag()
 	stdlog := log.New(os.Stderr, "trace", log.LstdFlags)
 	return &dapper{
-		serviceName:   serviceName,
+		serviceName:   serviceName,		//服务名（dapper）
 		disableSample: disableSample,
 		propagators: map[interface{}]propagator{
 			HTTPFormat: httpPropagator{},
@@ -322,7 +322,7 @@ func NewTracer(serviceName string, report reporter, disableSample bool) Tracer {
 		reporter: report,
 		sampler:  sampler,
 		tags:     tags,
-		pool:     &sync.Pool{New: func() interface{} { return new(Span) }},
+		pool:     &sync.Pool{New: func() interface{} { return new(Span) }},	//初始化sync.Pool，复用Span
 		stdlog:   stdlog,
 	}
 }
