@@ -91,6 +91,7 @@ Kratos Tracing 的实现 [目录在此](https://github.com/go-kratos/kratos/tree
 - `Tree`：
 - `Annotation`：
 
+![Tracing-basic](https://b1.sbimg.org/file/chevereto-jia/2020/10/14/GE9nY.png)
 
 从上图可以看出，一个跟踪树结构是由多个 `Span` 构成的，每个 `Span` 代表了一次方法的运行周期；
 

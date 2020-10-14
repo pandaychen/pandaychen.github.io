@@ -19,7 +19,7 @@ Metrics 和 Window 的用途如下：
 
 ##  0x01    滑动窗口的结构
 和 Hystrix-Go 实现不同，Kratos 中的滑动窗口是通过单链表结构实现的。如下图所示：
-![image](https://s1.ax1x.com/2020/04/14/Gzf51U.jpg)
+![image](https://b1.sbimg.org/file/chevereto-jia/2020/10/14/GEQXA.png)
 
 下面看看 Window 的数据结构及封装的主要操作方法：
 
