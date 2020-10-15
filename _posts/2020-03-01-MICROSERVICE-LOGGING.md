@@ -271,7 +271,6 @@ func DefaultErrorToCode(err error) codes.Code {
 
 此外，还提供了 `DefaultCodeToLevel` 和 `DefaultClientCodeToLevel` 方法，用于将 `grpc.codes` 转为 zap 的输出的日志 `level`：
 ```golang
-// DefaultCodeToLevel is the default implementation of gRPC return codes and interceptor log level for server side.
 func DefaultCodeToLevel(code codes.Code) zapcore.Level {
 	switch code {
 	case codes.OK:
@@ -313,7 +312,6 @@ func DefaultCodeToLevel(code codes.Code) zapcore.Level {
 	}
 }
 
-// DefaultClientCodeToLevel is the default implementation of gRPC return codes to log levels for client side.
 func DefaultClientCodeToLevel(code codes.Code) zapcore.Level {
 	switch code {
 	case codes.OK:
