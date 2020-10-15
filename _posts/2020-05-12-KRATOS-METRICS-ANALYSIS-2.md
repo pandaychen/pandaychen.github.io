@@ -1,14 +1,14 @@
 ---
 layout:     post
-title:      理解 Kratos 的数据统计类型 Metrics（二）
-subtitle:   分析 Kratos 框架中的 Metrics
+title:      Kratos 源码分析：理解 Kratos 的数据统计类型 Metrics（二）
+subtitle:   分析 Kratos 框架中的 Metrics：LB 算法中的应用
 date:       2020-05-12
 author:     pandaychen
 header-img:
 catalog: true
 category:   false
 tags:
-    - Metrics
+    - Kratos
 ---
 
 ##  0x00    前言
@@ -100,7 +100,7 @@ conn.err.Add(ev)
 
 最后，再看下 `subConn.err` 提供的 `Reduce()` 归约方法，它有两个返回值，`err` 代表滑动窗口中错误的总计数，`req` 代表滑动窗口中请求的总计数。那么基于滑动窗口计算的错误率就是：
 
-$$cs = 1- \frac{float64(errc)}{float64(req)}$$
+$cs = 1- \frac{float64(errc)}{float64(req)}$
 
 ```golang
 ......
