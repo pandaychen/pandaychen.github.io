@@ -762,3 +762,4 @@ func main(){
 -   [opentracing](https://github.com/opentracing-contrib/opentracing-specification-zh/blob/master/specification.md)
 -   [dapper](https://bigbully.github.io/Dapper-translation/)
 -   [bilibili 毛剑 - B 站微服务链路监控实践](https://myslide.cn/slides/8297)
+-	[Open-zipkin：b3-propagation](https://github.com/openzipkin/b3-propagation)
