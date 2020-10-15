@@ -1,7 +1,7 @@
 ---
 layout:     post
-title:      Kratos源码分析：分析 Kratos 中的 Dynamic-Wrr 负载均衡算法的实现
-subtitle:   Kratos 中的 Wrr 算法代码分析
+title:      Kratos 源码分析：分析 Warden 框架 Dynamic-WRR 负载均衡算法的实现
+subtitle:   Warden 框架中的 WRR 算法代码分析
 date:       2020-03-11
 author:     pandaychen
 header-img:
@@ -13,16 +13,15 @@ tags:
 ---
 
 ##	0x00	前言
+回顾下在先前的文章 [gRPC 源码分析之官方 Picker 实现](https://pandaychen.github.io/2019/12/06/GRPC-PICKER-ROUNDROBIN-ANALYSIS/) 中，分析过实现自定义 gRPC Balancer 算法的三个步骤：
 
-回顾下在先前的文章[gRPC源码分析之官方Picker实现](https://pandaychen.github.io/2019/12/06/GRPC-PICKER-ROUNDROBIN-ANALYSIS/)中，分析过实现自定义 gRPC Balancer 算法的三个步骤：
-
-1.	注册 Balancer 的名字
-2.	实现 PickerBuild 及 Builder() 方法，用于当 resolver 解析器发生解析变更时（后端节点增删）时，更新 Picker 使用的 LB-Pool
-3.	实现 Picker 及 Picker() 方法，用于客户端每次 RPC 调用时，进行 LoadBalance 算法的 Choice
+1.	注册 `Balancer` 的名字
+2.	实现 `PickerBuild` 及 `Builder()` 方法，用于当 resolver 解析器发生解析变更时（后端节点增删）时，更新 `Picker` 使用的 LoadBalance-Pool
+3.	实现 `Picker` 及 `Picker()` 方法，用于客户端每次 RPC 调用时，进行 LoadBalance 算法的 Choice
 
 
 ##  0x01	Kratos 的 WRR 算法
-Kratos 在传统的 [Nginx-WRR 算法](https://tenfy.cn/2018/11/12/smooth-weighted-round-robin/) 的基础上，为加权轮询算法增加了 **动态调节权重值**，用户可以在为每一个 Backend 先配置一个初始的权重分，之后算法会根据 Backend 节点 CPU、延迟、服务端错误率、客户端错误率动态打分，（每一次 RPC 调用后）在将打分乘用户自定义的初始权重分得到最后的权重值。
+Kratos 在传统的 [Nginx-WRR 算法](https://tenfy.cn/2018/11/12/smooth-weighted-round-robin/) 的基础上，为加权轮询算法增加了 <font color="#dd0000"> 动态调节权重值 </font>，用户可以在为每一个 Backend 先配置一个初始的权重分，之后算法会根据 Backend 节点 CPU、延迟、服务端错误率、客户端错误率动态打分，（每一次 RPC 调用后）在将打分乘用户自定义的初始权重分得到最后的权重值。
 
 ##  0x02	WRR 的实现
 
@@ -58,7 +57,7 @@ type subConn struct {
 
 ####  LB 算法
 自定义 LB 实现的组件，wrrPickerBuilder 以及 wrrPickerBuilder.Build() 方法，wrrPicker 以及 wrrPicker.Pick() 方法：
-```go
+```golang
 type wrrPickerBuilder struct{}
 
 type wrrPicker struct {
@@ -75,7 +74,7 @@ type wrrPicker struct {
 ```
 
 再看下 wrrPickerBuilder.Build()，该方法由参数的 readySCs，根据权重，构造出给 wrrPicker 选择的初始化连接集合：
-这里有一个细节需要注意，在 gRPC 中，当 Resolver 中的监听器**监控到后端节点发生了改变（下线或上线）**时，才会触发下面 Build() 的调用：
+这里有一个细节需要注意，在 gRPC 中，当 Resolver 中的监听器 <font color="#dd0000"> 监控到后端节点发生了改变（下线或上线）</font > 时，才会触发下面 Build() 的调用：
 ```golang
 func (*wrrPickerBuilder) Build(readySCs map[resolver.Address]balancer.SubConn) balancer.Picker {
     //readySCs 是从 gRPC 的 conn-pool 拿到的最新的可用连接池（每次 watcher 触发都会调用，如果 readyScs 后端无改动，则不会）
@@ -131,32 +130,32 @@ func (*wrrPickerBuilder) Build(readySCs map[resolver.Address]balancer.SubConn) b
 ```
 
 ####	节点权重的计算公式
-先看下在代码中，权重的更新值是如何计算的。[核心代码](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/balancer/wrr/wrr.go#L261)在此：
-$$peer.Score=\frac{succrate}{latency*cpuUsage}$$
+先看下在代码中，权重的更新值是如何计算的。[核心代码](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/balancer/wrr/wrr.go#L261) 在此：
+$peer.Score=\frac{succrate}{latency*cpuUsage}$
 
 ![image](https://s1.ax1x.com/2020/04/10/GorC8J.png)
 
 ```golang
-...
+......
 for i, conn := range p.subConns {
 	cpu := float64(atomic.LoadInt64(&conn.si.cpu))
 	ss := math.Float64frombits(atomic.LoadUint64(&conn.si.success))
 
-	//从滑动窗口中获取错误总数和请求总数
+	// 从滑动窗口中获取错误总数和请求总数
 	errc, req := conn.errSummary()
-	// 从滑动窗口计算平均req延迟
+	// 从滑动窗口计算平均 req 延迟
 	lagv, lagc := conn.latencySummary()
 
 	if req > 0 && lagc > 0 && lagv > 0 {
 		// client-side success ratio
 		cs := 1 - (float64(errc) / float64(req))
-		//成功率校正
+		// 成功率校正
 		if cs <= 0 {
 			cs = 0.1
 		} else if cs <= 0.2 && req <= 5 {
 			cs = 0.2
 		}
-		//根据下式得到conn（也就是node）的打分，1e9=10^9
+		// 根据下式得到 conn（也就是 node）的打分，1e9=10^9
 		conn.score = math.Sqrt((cs * ss * ss * 1e9) / (lagv * cpu))
 		stats[i] = statistics{cs: cs, ss: ss, lantency: lagv, cpu: cpu, req: req}
 	}
@@ -167,7 +166,7 @@ for i, conn := range p.subConns {
 		count++
 	}
 }
-...
+......
 ```
 
 
@@ -296,9 +295,9 @@ func (p *wrrPicker) pick(ctx context.Context, opts balancer.PickOptions) (balanc
 
 ##	0x03	总结
 通过阅读 Kratos 这部分代码，有如下收获：
-1.	错误率和延迟的计算，采用滑动窗口得到更平滑（精确）的取值 
-2.	对 balancer.SubConn 的封装，将 WRR 算法需要的权重数据完美的封装在自定义的结构中
-3.	通过 gRPC 的 Tailer() 机制返回节点的 CPU 利用率，动态更新 WRR 算法中定义的节点权重值
+1.	错误率和延迟的计算，采用滑动窗口得到更平滑（精确）的取值
+2.	对 `balancer.SubConn` 的封装，将 WRR 算法需要的权重数据完美的封装在自定义的结构中
+3.	通过 gRPC 的 `Tailer()` 机制返回节点的 CPU 利用率，动态更新 WRR 算法中定义的节点权重值
 
 ##  0x04	参考
 -	[Upstream: smooth weighted round-robin balancing.](https://github.com/phusion/nginx/commit/27e94984486058d73157038f7950a0a36ecc6e35)
