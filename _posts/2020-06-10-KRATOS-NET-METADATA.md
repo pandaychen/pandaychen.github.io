@@ -1,7 +1,7 @@
 ---
 layout:     post
-title:      Kratos 源码分析（二）：Kratos 中的 Metadata 元数据
-subtitle:   一种全局变量的存储方式
+title:      Kratos 源码分析：Kratos 中的 Metadata 元数据
+subtitle:   一种全局变量的存储方式：Metadata
 date:       2020-06-10
 author:     pandaychen
 catalog:    true
