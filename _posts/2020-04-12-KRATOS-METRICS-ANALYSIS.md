@@ -8,7 +8,6 @@ header-img:
 catalog: true
 category:   false
 tags:
-	- Metrics
 	- Kratos
 ---
 
