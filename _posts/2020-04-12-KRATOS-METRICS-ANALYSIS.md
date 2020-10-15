@@ -4,11 +4,9 @@ title:      Kratos 源码分析：理解 Kratos 的数据统计类型 Metrics（
 subtitle:   分析 Kratos 框架中的 Metrics：滑动窗口
 date:       2020-04-12
 author:     pandaychen
-header-img:
-catalog: true
-category:   false
+catalog:    true
 tags:
-	- Kratos
+    - Kratos
 ---
 
 ##  0x00    前言
@@ -138,7 +136,7 @@ func (w *Window) Iterator(offset int, count int) Iterator {
 ```
 
 ##	0x02	window 的迭代（遍历）器实现
-Window 提供了 [iterator 的封装](https://github.com/go-kratos/kratos/blob/master/pkg/stat/metric/iterator.go)，用于滑动窗口的遍历。遍历的目的是为了对窗口的数据做提取和计算；比如，计算截至当前时间滑动窗口的请求失败率，就需要遍历从窗口 start 位置到目前时间的所有 Bucket 的 $$\frac{错误总数}{请求总数}$$。
+Window 提供了 [iterator 的封装](https://github.com/go-kratos/kratos/blob/master/pkg/stat/metric/iterator.go)，用于滑动窗口的遍历。遍历的目的是为了对窗口的数据做提取和计算；比如，计算截至当前时间滑动窗口的请求失败率，就需要遍历从窗口 start 位置到目前时间的所有 Bucket 的 $\frac{错误总数}{请求总数}$。
 
 遍历器的结构如下：
 
