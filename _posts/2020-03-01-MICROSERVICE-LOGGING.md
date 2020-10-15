@@ -137,7 +137,7 @@ grpclog.Errorf("err %v", err)
 ```
 
 比如，日志的输出实例：
-```json
+```javascript
 {
 	"level": "info",
 	"ts": "2020-10-15T07:51:43.384Z",
@@ -358,7 +358,7 @@ func DefaultClientCodeToLevel(code codes.Code) zapcore.Level {
 
 ####  日志输出
 使用了 Zap 拦截器的输出如下，示例代码 [在此](https://github.com/pandaychen/grpc_in_action/tree/master/zaplogger)：
-```json
+```javascript
 {
 	"level": "info",
 	"ts": "2020-10-15T09:05:17.877Z",
