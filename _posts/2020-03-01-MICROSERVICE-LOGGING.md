@@ -206,7 +206,8 @@ func ToContext(ctx context.Context, logger *zap.Logger) context.Context {
 3.  调用 `newLoggerForCall` 方法，将 `grpc.start_time`、`grpc.request.deadline` 及 `grpc.method` 等 fields 登记在 `logger *zap.Logger` 中，然后通过 `context.WithValue(ctx, ctxMarkerKey, l)` 构建出一个新的 `context` 返回
 4.  `resp, err := handler(newCtx, req)` 执行完剩下的拦截器和 RPC 方法
 5.  注意最后 `o.messageFunc(newCtx, "finished unary call with code"+code.String(), level, code, err, duration)` 这个方法，zap 中是调用了 [`zap.DefaultMessageProducer` 方法](https://github.com/grpc-ecosystem/go-grpc-middleware/blob/master/logging/zap/options.go#L201)，该方法将第 `3` 步注入到 `context` 的 `zap.Logger` 取出，然后最终输出打印结果
-<br>
+
+<br><br>
 为何要做的如此复杂？从实现上看是为了捕获到由 [`grpc_ctxtags`](https://github.com/grpc-ecosystem/go-grpc-middleware/blob/master/tags) 这款拦截器生成的 kv 字段（在当前的拦截器流程到执行完 RPC 方法这段期间发生的改变），所以在 `ctxzap.Extract` 中会调用 `grpc_ctxtags.Extract` 先拿到这些增加的 kv 字段，然后再打印。由此可见，作者对细节的考虑还是相当全面的。
 
 ```golang
