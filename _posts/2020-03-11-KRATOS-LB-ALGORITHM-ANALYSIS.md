@@ -35,7 +35,7 @@ type serverInfo struct {
 }
 ```
 
-封装的 balancer.Subconn 结构，加入了对此连接的属性
+封装的 `balancer.Subconn` 结构，加入了对此连接的属性
 ```golang
 type subConn struct {
 	conn balancer.SubConn       // 一个 conn 代表到一个 backend 的长连接
@@ -56,7 +56,7 @@ type subConn struct {
 
 
 ####  LB 算法
-自定义 LB 实现的组件，wrrPickerBuilder 以及 wrrPickerBuilder.Build() 方法，wrrPicker 以及 wrrPicker.Pick() 方法：
+自定义 LB 实现的组件，`wrrPickerBuilder` 以及 `wrrPickerBuilder.Build()` 方法，`wrrPicker` 以及 `wrrPicker.Pick()` 方法：
 ```golang
 type wrrPickerBuilder struct{}
 
@@ -73,8 +73,8 @@ type wrrPicker struct {
 }
 ```
 
-再看下 wrrPickerBuilder.Build()，该方法由参数的 readySCs，根据权重，构造出给 wrrPicker 选择的初始化连接集合：
-这里有一个细节需要注意，在 gRPC 中，当 Resolver 中的监听器 <font color="#dd0000"> 监控到后端节点发生了改变（下线或上线）</font > 时，才会触发下面 Build() 的调用：
+再看下 `wrrPickerBuilder.Build()`，该方法由参数的 `readySCs`，根据权重，构造出给 `wrrPicker` 选择的初始化连接集合：
+这里有一个细节需要注意，在 gRPC 中，当 `Resolver` 中的监听器 <font color="#dd0000"> 监控到后端节点发生了改变（下线或上线）</font > 时，才会触发下面 Build() 的调用：
 ```golang
 func (*wrrPickerBuilder) Build(readySCs map[resolver.Address]balancer.SubConn) balancer.Picker {
     //readySCs 是从 gRPC 的 conn-pool 拿到的最新的可用连接池（每次 watcher 触发都会调用，如果 readyScs 后端无改动，则不会）

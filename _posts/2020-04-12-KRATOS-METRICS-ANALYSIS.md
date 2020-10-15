@@ -1,14 +1,15 @@
 ---
 layout:     post
-title:      理解 Kratos 的数据统计类型 Metrics（一）
-subtitle:   分析 Kratos 框架中的 Metrics
+title:      Kratos 源码分析：理解 Kratos 的数据统计类型 Metrics（一）
+subtitle:   分析 Kratos 框架中的 Metrics：滑动窗口
 date:       2020-04-12
 author:     pandaychen
 header-img:
 catalog: true
 category:   false
 tags:
-    - Metrics
+	- Metrics
+	- Kratos
 ---
 
 ##  0x00    前言
@@ -299,7 +300,7 @@ func (r *RollingPolicy) Reduce(f func(Iterator) float64) (val float64) {
 ![image](https://wx2.sbimg.cn/2020/05/08/reduce1.png)
 
 2、计算需要遍历的 Bucket 个数，如图（所有深绿色的部分，滑动窗口中的旧数据，都是需要遍历累计计算值的）
-$$count = r.size - r.timespan()$$
+$count = r.size - r.timespan()$
 
 ![image](https://wx1.sbimg.cn/2020/05/08/reduce2.png)
 
