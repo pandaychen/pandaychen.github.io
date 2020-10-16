@@ -1,7 +1,7 @@
 ---
 layout:     post
-title:      微服务基础之 链路追踪（OpenTracing）
-subtitle:
+title:      微服务基础之链路追踪（OpenTracing）
+subtitle:   Opentracing 的基础理论介绍
 date:       2020-02-23
 author:     pandaychen
 header-img:
@@ -13,6 +13,10 @@ tags:
 
 ##	0x00	背景
 &emsp;&emsp; 在微服务项目的构建中，存在这样一种场景，当对项目组件进行微服务化拆分后，一个客户端发起的请求将会经过多个微服务模块处理之后再返回，假如在请求的链路上某个服务出现访问故障时，（如何）排查故障将会比较困难。一种排查方式是，需要将请求经过的服务，挨个分析日志，查看是否是请求故障的原因，这种方式无疑是十分低效的。为了解决这种场景，调用链（OpenTracing）技术应运而生。
+
+在微服务架构中，调用链是漫长而复杂的，要了解其中的每个环节及其性能，最佳方案就是全链路跟踪。追踪的做法是在每个请求开始时生成一个唯一的 RequestID， 并将其传递到整个调用链，用 RequestID 来跟踪整个请求并获得各个调用环节的性能指标。关于 RequestID，要解决下面两个问题：
+1.  如何在应用程序内部传递 RequestID，进程内跟踪（in-process）
+2.  当需要调用另一个微服务接口时，如何通过网络传递 RequestID，跨进程跟踪（cross-process）
 
 ##  0x01	Distributed Tracing 介绍
 &emsp;&emsp; 什么是 Tracing？简单理解是追踪一次请求（操作）的路径上所有的调用情况，包含调用方法，子方法，接口耗时及相关日志等。软件工程中有三个基础概念：Logging、Metrics 和 Tracing。
@@ -64,7 +68,7 @@ Tracing 的流程和基于时间维度的示例如下：
 *	`Trace` : 调用链
 *	`Span`：某个处理阶段（我通常理解为 RPC 方法，但是通常一个 RPC 方法会包含一个或多个 Span），翻译为阶段、或者跨度
 
-**每个调用链由多个 Span 组成。Span 和 Span 的关系称为 Reference。上图中，总共有标号为 A-H 的 8 个 Span。**
+<font color="#dd0000"> 每个调用链由多个 Span 组成。Span 和 Span 的关系称为 Reference。上图中，总共有标号为 A-H 的 8 个 Span。</font>
 
 进一步的，每个 Span 包含如下状态：
 *	操作名称：RPC 方法
@@ -74,6 +78,18 @@ Tracing 的流程和基于时间维度的示例如下：
 *	阶段日志（Span Logs）
 *	阶段上下文（SpanContext），其中包含 Trace ID 和 Span ID（Trace ID 是全局 ID，Span ID 是该 Span 的 ID）
 *	引用关系（References）：有 ChildOf 和 FollowsFrom 两种引用关系。ChildOf 用于表示父子关系，即在某个阶段中发生了另一个阶段，是最常见的阶段关系，典型的场景如调用 RPC 接口、执行 SQL、写数据。FollowsFrom 表示跟随关系，意为在某个阶段之后发生了另一个阶段，用来描述顺序执行关系。
+
+##  0x04
+OpenTracing 建立了一套跟踪库的通用接口，这样你的程序只需要调用这些接口而不被具体的跟踪库绑定，将来可以切换到不同的跟踪库而无需更改代码。常用的 Zipkin 和 Jaeger 都支持 OpenTracing，Kratos 框架也基于 OpenTracing 实现了自己的 [Trace 语义](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/dapper.go)
+
+####    追踪系统的架构
+追踪系统中通常有四个组件，以 Zipkin 为例：
+-   recorder（记录器）：记录跟踪数据
+-   Reporter（collecting agent）：通过报告器（收集代理)，从记录器收集数据并将数据发送到 UI 程序
+-   Tracer：生成跟踪数据
+-   UI：负责在 UI or WEB 中显示跟踪数据
+
+![img](https://jfeng45.github.io/images/microservice/zipkin.png)
 
 ##  0x04	非侵入式的 OpenTracing
 &emsp;&emsp; 上面讨论的方式，是通过修改应用程序代码增加分布式 OpenTracing 的功能。那么当今微服务的领域，也有非侵入式的技术，比如 Service Mesh，它通过 Sidecar 的方式为 Pod 增加一层代理，通过这层网络代理来实现一些服务治理的功能。Istio 则是目前最成熟的 Service Mash 工具，支持启用分布式追踪服务。Istio 会修改微服务之间发送的网络请求，在请求中注入 Trace 和 Span 标记，再将采集到的数据发送到支持 OpenTracing 的分布式追踪服务中，从而拿到请求在微服务中的调用链。
@@ -85,12 +101,18 @@ Tracing 的流程和基于时间维度的示例如下：
 *	数据展示：ELK
 
 这里可以先预想下如何来（查询）追踪日志：
-*	Request ID：对于每一个 RPC 请求，都会有一个贯穿整个请求流程的 Request ID，当然可以采用 gRPC 提供的 Interceptor 实现。在客户端或服务端设置？
-*	Trace ID：这是最核心的一点。<font color="#dd0000"> 在 Trace 的起始处，将 Trace ID 设置为 Request ID，这么一来就打通了日志系统和分布式追踪系统，可以使用同一个 ID 查询请求的事件流和日志流 </font><br/>
+*	Request ID：对于每一个 RPC 请求，都会有一个贯穿整个请求流程的 RequestID，当然可以采用 gRPC 提供的 Interceptor 实现。在客户端或服务端设置？
+*	Trace ID：这是最核心的一点。<font color="#dd0000"> 在 Trace 的起始处，将 TraceID 设置为 RequestID，这么一来就打通了日志系统和分布式追踪系统，可以使用同一个 ID 查询请求的事件流和日志流 </font><br>
 
+##  0x06    总结
+本文梳理了 Opentracing 的基础概念。一般而言全链路跟踪分成三个跟踪级别：
+-   跨进程跟踪
+-   数据库跟踪
+-   进程内部的跟踪
 
+下文会结合 Kratos 中 Opentracing 实现来分析这三块内容。
 
-##  0x06 参考
+##  0x07    参考
 -   [OpenTracing 详解](https://pjw.io/articles/2018/05/08/opentracing-explanations/#section-3)
 -   [Go 微服务全链路跟踪详解](https://jfeng45.github.io/posts/go_opentracing/)
 -   [Istio 中对 grpc 全跟踪](http://www.gameapp.club/2018/11/23/istio-grpc-opentracing/)
