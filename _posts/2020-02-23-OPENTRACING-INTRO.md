@@ -79,7 +79,7 @@ Tracing 的流程和基于时间维度的示例如下：
 *	阶段上下文（SpanContext），其中包含 Trace ID 和 Span ID（Trace ID 是全局 ID，Span ID 是该 Span 的 ID）
 *	引用关系（References）：有 ChildOf 和 FollowsFrom 两种引用关系。ChildOf 用于表示父子关系，即在某个阶段中发生了另一个阶段，是最常见的阶段关系，典型的场景如调用 RPC 接口、执行 SQL、写数据。FollowsFrom 表示跟随关系，意为在某个阶段之后发生了另一个阶段，用来描述顺序执行关系。
 
-##  0x04
+##  0x04    OpenTracing 架构
 OpenTracing 建立了一套跟踪库的通用接口，这样你的程序只需要调用这些接口而不被具体的跟踪库绑定，将来可以切换到不同的跟踪库而无需更改代码。常用的 Zipkin 和 Jaeger 都支持 OpenTracing，Kratos 框架也基于 OpenTracing 实现了自己的 [Trace 语义](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/dapper.go)
 
 ####    追踪系统的架构
