@@ -1,12 +1,13 @@
 ---
 layout:     post
-title:      在Golang中使用Zipkin进行链路追踪
-subtitle:   
+title:      gRPC 微服务构建之链路追踪（OpenTracing）
+subtitle:   在gRPC服务中应用OpenTracing：使用Zipkin进行路追踪
 date:       2020-06-01
 author:     pandaychen
 catalog:    true
 tags:
-    - 
+    - OpenTracing
+    - gRPC
 ---
 
 
