@@ -11,10 +11,12 @@ tags:
 ---
 
 ##  0x00    前言
-本篇文章看下 bm 框架的路由注册及搭配拦截器的路由调用的实现细节。先看下路由是如何注册的，先看下 bm 框架的默认生成 [模板](https://github.com/bilibili/kratos-demo/blob/master/internal/server/http/server.go)：
-1.  Bm 默认创建的 `engine` 及启动
+本篇文章看下 bm 框架的路由注册及搭配拦截器的路由调用的实现细节。先看下路由是如何注册的。
+bm 框架的默认生成 [模板](https://github.com/bilibili/kratos-demo/blob/master/internal/server/http/server.go)：
+
+1.  bm 默认创建的 `Engine` 对象及启动
 2.  `initRouter` 初始化路由的方法及路由（`Group`）的创建
-3.  Bm 的 handler 方法 `ping` 和 `howToStart` 的定义（ `handler` 方法默认传入 bm 的 `Context` 对象）
+3.  bm 的 handler 方法 `ping` 和 `howToStart` 的定义（ `handler` 方法默认传入 bm 的 `Context` 对象）
 
 ```golang
 //bm 默认创建的 engine 及启动代码
@@ -49,121 +51,229 @@ func howToStart(c *bm.Context) {
 }
 ```
 
-##	0x01	gin的路由原理
-注册路由预处理
-我们在使用gin时通过下面的代码注册路由
+此外，先预埋几个问题：
+1.  路由注册的处理过程是如何？
+2.  中间件（拦截器）是如何与路由注册发生交集的？
+3.  常用到的 `c.Next()` 方法的作用是什么？
+4.  路由存储的原理是什么？
 
-普通注册
-router.POST("/somePost", func(context *gin.Context) {
-    context.String(http.StatusOK, "some post")
+##  0x01    bm 路由树结构
+
+`Engine` 结构中包含了两个重要成员：
+先看下 `RouterGroup` 的结构，`RouterGroup` 提供了所有操作 bm 路由的 [方法集合](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/routergroup.go)：
+```golang
+type Engine struct {
+	RouterGroup             // 保存路由的中间件，提供对外操作接口
+    ......
+    trees     methodTrees   // 存储路由 Tree
+}
+```
+
+####    路由结构 RouterGroup
+`RouterGroup` 是对路由树的包装，所有的路由规则最终都通过 `RouterGroup` 提供的方法来进行管理。Engine 结构体继承了 RouterGroup ，所以 Engine 直接具备了 RouterGroup 所有的路由管理功能。
+```golang
+// RouterGroup is used internally to configure router, a RouterGroup is associated with a prefix
+// and an array of handlers (middleware).
+type RouterGroup struct {
+	Handlers   []HandlerFunc
+	basePath   string
+	engine     *Engine
+	root       bool
+	baseConfig *MethodConfig
+}
+```
+`RouterGroup` 对外提供了如下的路由控制方法：
+-   `GET`:
+
+
+####    路由树
+bm 的路由树的结构定义如下, `methodTrees` 和 `Engine` 一一对应，`methodTree` 代表了一棵树的入口，`node` 表示 `methodTree` 树中的节点。<br>
+对 `node` 结构而言，其成员 `children []*node` 表示所有的孩子都放在这个数组里面, 利用 `indices`, `priority` 变相实现了一棵树。<br>
+```golang
+type methodTrees []methodTree
+
+type methodTree struct {
+	method string
+	root   *node
+}
+
+type node struct {
+	path      string
+	indices   string
+	children  []*node
+	handlers  []HandlerFunc     // 该成员的中间件数组
+	priority  uint32
+	nType     nodeType
+	maxParams uint8
+	wildChild bool
+}
+```
+
+
+##	0x02	bm 框架的路由原理
+
+####    注册路由预处理
+如前一节所示，通过下面的代码实现路由注册或者影响到路由的调用，换句话说，下面这些针对路由操作, 最终都会在反应到 bm 的路由树。
+
+1、一般注册方式
+```golang
+router.POST("/somePost", func(context *bm.Context) {
+    ......
 })
-使用中间件
+```
+
+2、使用中间件方式
+```golang
 router.Use(Logger())
-使用Group
+```
+
+3、使用 `bm.Group` 方式构建组
+```golang
 v1 := router.Group("v1")
 {
     v1.POST("login", func(context *gin.Context) {
-        context.String(http.StatusOK, "v1 login")
+        ......
     })
 }
-这些操作, 最终都会在反应到gin的路由树上
+```
 
-具体实现
-// routergroup.go:L72-77
+####    具体实现
+就上面的三种方式来说明下如何操作路由 `RouterGroup`：
+1、一般注册方式，我们以 [`RouterGroup.POST()` 方法](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/routergroup.go#L108) 来分析，此方法会调用 `group.handle()` 方法：
+```golang
+// POST is a shortcut for router.Handle("POST", path, handle).
+func (group *RouterGroup) POST(relativePath string, handlers ...HandlerFunc) IRoutes {
+	return group.handle("POST", relativePath, handlers...)
+}
+
 func (group *RouterGroup) handle(httpMethod, relativePath string, handlers HandlersChain) IRoutes {
-    absolutePath := group.calculateAbsolutePath(relativePath) // <---
-    handlers = group.combineHandlers(handlers) // <---
+    absolutePath := group.calculateAbsolutePath(relativePath)
+    // 中间件合并
+    handlers = group.combineHandlers(handlers)
+    // 调用 addRoute 方法增加路由 httpMethod+absolutePath
     group.engine.addRoute(httpMethod, absolutePath, handlers)
     return group.returnObj()
 }
-在调用POST, GET, HEAD等路由HTTP相关函数时, 会调用handle函数
 
-如果调用了中间件的话, 会调用下面函数
-
-func (group *RouterGroup) Use(middleware ...HandlerFunc) IRoutes {
-    group.Handlers = append(group.Handlers, middleware...)
-    return group.returnObj()
+//combineHandlers
+func (group *RouterGroup) combineHandlers(handlerGroups ...[]HandlerFunc) []HandlerFunc {
+	finalSize := len(group.Handlers)
+	for _, handlers := range handlerGroups {
+		finalSize += len(handlers)
+	}
+	if finalSize >= int(_abortIndex) {
+		panic("too many handlers")
+	}
+	mergedHandlers := make([]HandlerFunc, finalSize)
+	copy(mergedHandlers, group.Handlers)
+	position := len(group.Handlers)
+	for _, handlers := range handlerGroups {
+		copy(mergedHandlers[position:], handlers)
+		position += len(handlers)
+	}
+	return mergedHandlers
 }
-如果使用了Group的话, 会调用下面函数
+```
 
+不仅如此，在调用 `POST`、`GET`、`HEAD` 等路由 HTTP 相关函数时, 会调用 `group.handle()` 方法。上面还列出了 `RouterGroup.combineHandlers()` 方法的实现，该方法将传入的路由处理逻辑 `handlerGroups ...[]HandlerFunc` 与 `group` 中间件的成员 `group.Handlers` 合并并返回，然后通过 `group.engine.addRoute()` 注册到路由树中。
+
+2、以中间件方式调用
+如果调用了中间件的话, 会调用 [`Use` 方法](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/server.go#L388) 或者 `UseFunc` 方法，注意，每次调用这两个方法时都会 `rebuild404Handlers` 及 `rebuild405Handlers`
+```golang
+// Use attachs a global middleware to the router. ie. the middleware attached though Use() will be
+// included in the handlers chain for every single request. Even 404, 405, static files...
+// For example, this is the right place for a logger or error management middleware.
+func (engine *Engine) Use(middleware ...Handler) IRoutes {
+	engine.RouterGroup.Use(middleware...)
+	engine.rebuild404Handlers()
+	engine.rebuild405Handlers()
+	return engine
+}
+
+// UseFunc attachs a global middleware to the router. ie. the middleware attached though UseFunc() will be
+// included in the handlers chain for every single request. Even 404, 405, static files...
+// For example, this is the right place for a logger or error management middleware.
+func (engine *Engine) UseFunc(middleware ...HandlerFunc) IRoutes {
+	engine.RouterGroup.UseFunc(middleware...)
+	engine.rebuild404Handlers()
+	engine.rebuild405Handlers()
+	return engine
+}
+```
+
+3、构建 Group 方式
+如果使用了 `bm.Group` 的话, 会调用 `RouterGroup.Group()` 方法，重点关注 `combineHandlers` 及 `calculateAbsolutePath` 这两个方法（前述）：
+```golang
+// Group creates a new router group. You should add all the routes that have common middlwares or the same path prefix.
+// For example, all the routes that use a common middlware for authorization could be grouped.
 func (group *RouterGroup) Group(relativePath string, handlers ...HandlerFunc) *RouterGroup {
-    return &RouterGroup{
-        Handlers: group.combineHandlers(handlers),
-        basePath: group.calculateAbsolutePath(relativePath),
-        engine:   group.engine,
-    }
+	return &RouterGroup{
+		Handlers: group.combineHandlers(handlers),
+		basePath: group.calculateAbsolutePath(relativePath),
+		engine:   group.engine,
+		root:     false,
+	}
 }
-重点关注下面两个函数:
 
-// routergroup.go:L208-217
-func (group *RouterGroup) combineHandlers(handlers HandlersChain) HandlersChain {
-    finalSize := len(group.Handlers) + len(handlers)
-    if finalSize >= int(abortIndex) {
-        panic("too many handlers")
-    }
-    mergedHandlers := make(HandlersChain, finalSize)
-    copy(mergedHandlers, group.Handlers)
-    copy(mergedHandlers[len(group.Handlers):], handlers)
-    return mergedHandlers
-}
 func (group *RouterGroup) calculateAbsolutePath(relativePath string) string {
     return joinPaths(group.basePath, relativePath)
 }
 
 func joinPaths(absolutePath, relativePath string) string {
-    if relativePath == "" {
-        return absolutePath
-    }
+	if relativePath == "" {
+		return absolutePath
+	}
 
-    finalPath := path.Join(absolutePath, relativePath)
-    appendSlash := lastChar(relativePath) == '/' && lastChar(finalPath) != '/'
-    if appendSlash {
-        return finalPath + "/"
-    }
-    return finalPath
+	finalPath := path.Join(absolutePath, relativePath)
+	appendSlash := lastChar(relativePath) == '/' && lastChar(finalPath) != '/'
+	if appendSlash {
+		return finalPath + "/"
+	}
+	return finalPath
 }
-在joinPaths函数里面有段代码, 很有意思, 我还以为是写错了. 主要是path.Join的用法.
+```
 
-finalPath := path.Join(absolutePath, relativePath)
-appendSlash := lastChar(relativePath) == '/' && lastChar(finalPath) != '/'
-在当路由是/user/这种情况就满足了lastChar(relativePath) == '/' && lastChar(finalPath) != '/'. 主要原因是path.Join(absolutePath, relativePath)之后, finalPath是user
+####    egnine.addRoute 方法
+```golang
+func (engine *Engine) addRoute(method, path string, handlers ...HandlerFunc) {
+	if path[0] != '/' {
+		panic("blademaster: path must begin with'/'")
+	}
+	if method == "" {
+		panic("blademaster: HTTP method can not be empty")
+	}
+	if len(handlers) == 0 {
+		panic("blademaster: there must be at least one handler")
+	}
+	if _, ok := engine.metastore[path]; !ok {
+		engine.metastore[path] = make(map[string]interface{})
+	}
+	engine.metastore[path]["method"] = method
+	root := engine.trees.get(method)
+	if root == nil {
+		root = new(node)
+		engine.trees = append(engine.trees, methodTree{method: method, root: root})
+	}
 
-综合来看, 在预处理阶段
-
-在调用中间件的时候, 是将某个路由的handler处理函数和中间件的处理函数都放在了Handlers的数组中
-在调用Group的时候, 是将路由的path上面拼上Group的值. 也就是/user/:name, 会变成v1/user:name
-真正注册
-// routergroup.go:L72-77
-func (group *RouterGroup) handle(httpMethod, relativePath string, handlers HandlersChain) IRoutes {
-    absolutePath := group.calculateAbsolutePath(relativePath) // <---
-    handlers = group.combineHandlers(handlers) // <---
-    group.engine.addRoute(httpMethod, absolutePath, handlers)
-    return group.returnObj()
+	prelude := func(c *Context) {
+		c.method = method
+		c.RoutePath = path
+	}
+	handlers = append([]HandlerFunc{prelude}, handlers...)
+	root.addRoute(path, handlers)
 }
-调用group.engine.addRoute(httpMethod, absolutePath, handlers)将预处理阶段的结果注册到gin Engine的trees上
+```
 
-gin路由树简单介绍
-gin的路由树算法是一棵前缀树. 不过并不是只有一颗树, 而是每种方法(POST, GET ...)都有自己的一颗树
-
-func (engine *Engine) addRoute(method, path string, handlers HandlersChain) {
-    assert1(path[0] == '/', "path must begin with '/'")
-    assert1(method != "", "HTTP method can not be empty")
-    assert1(len(handlers) > 0, "there must be at least one handler")
-
-    debugPrintRoute(method, path, handlers)
-    root := engine.trees.get(method) // <-- 看这里
-    if root == nil {
-        root = new(node)
-        engine.trees = append(engine.trees, methodTree{method: method, root: root})
-    }
-    root.addRoute(path, handlers)
-}
-gin 路由最终的样子大概是下面的样子
-
-
+####    小结
+这里小结下，bm 框架在调用中间件的时候, 是将某个路由的 `handler` 处理函数和中间件的处理函数合并后，放在了 `Handlers` 的数组中（路由的 `handler` 处理函数在最后位置）；在调用 `Group` 的时候, 是将路由的 `path` 上面拼上 `Group` 的值。举例来说：`GroupPath=/kratos-demo`，`path=/start`, 组合后注册的路由会变成 `/kratos-demo/start`<br>
+真正的注册方法是 [`RouterGroup.handle()` 方法](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/routergroup.go#L74)，它完成了三件小事：
+1.  获取完成的路由信息 `absolutePath`
+2.  合并自身与系统的拦截器数组
+3.  调用 `group.engine.addRoute(httpMethod, absolutePath, handlers)` 将预处理阶段的结果注册到 `bm.Engine` 的 路由树 `trees` 上。树节点的关键信息为 `httpMethod` 及 `absolutePath`
 
 ##  0x05    参考
 -   [blademaster 官方文档](https://github.com/go-kratos/kratos/blob/master/doc/wiki-cn/blademaster.md)
 -   [blademaster](https://github.com/go-kratos/kratos/blob/master/doc/wiki-cn/blademaster-mid.md)
 -   [go 语言框架 gin 的中文文档](https://github.com/skyhee/gin-doc-cn)
 -   [blademaster 官方文档：快速入门](https://github.com/go-kratos/kratos/blob/master/docs/blademaster-quickstart.md)
+-   [gin 框架之路由前缀树初始化分析](https://www.infoq.cn/article/8Tg1alapeyfcAKF6zwGh)
