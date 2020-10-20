@@ -197,6 +197,14 @@ type Context struct {
 }
 ```
 
+##	0x05	
+1.	初始化`Engine`
+2.	向`Engine`的路由树注册路由信息及对应的`handlers`业务逻辑
+3.	
+
+在处理http请求时，先通过path查询到路由树中对应的hanlders，然后进行完整个流程
+
+
 ##  0x05    Bm 框架的指标 Metrics
 blademaster 默认提供了如下几个维度的 metrics[监控采集数据](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/metrics.go)：
 -   `_metricServerReqDur `：`NewHistogramVec` 类型，含义是服务端处理请求的延迟范围（区间）：`http server requests duration(ms)`，统计维度为 `path/caller/method`，单位为 `ms`
@@ -229,7 +237,7 @@ func monitor() HandlerFunc {
 
 注意到 `monitor()` 中 `return` 的是一个方法，该方法的参数为 `Context`，这个 `Context` 在哪里初始化传入以及传入何种数据呢？再看 [`engine.addRoute` 方法](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/server.go#L164)：<br>
 
-看到 `prelude`：
+看到 `prelude`，在调用 `root.addRoute()` 写入路由表之前，设置当前的 `Context` 的 `method` 和 `RoutePath` 信息，然后跟随参数 `handlers` 一起传递到 `root.addRoute()`：
 ```golang
 func (engine *Engine) addRoute(method, path string, handlers ...HandlerFunc) {
 	if path[0] != '/' {
@@ -241,9 +249,11 @@ func (engine *Engine) addRoute(method, path string, handlers ...HandlerFunc) {
 	if len(handlers) == 0 {
 		panic("blademaster: there must be at least one handler")
 	}
+	//以path为key
 	if _, ok := engine.metastore[path]; !ok {
 		engine.metastore[path] = make(map[string]interface{})
 	}
+	//
 	engine.metastore[path]["method"] = method
 	root := engine.trees.get(method)
 	if root == nil {
@@ -251,12 +261,31 @@ func (engine *Engine) addRoute(method, path string, handlers ...HandlerFunc) {
 		engine.trees = append(engine.trees, methodTree{method: method, root: root})
 	}
 
+	// 设置当前 context
 	prelude := func(c *Context) {
 		c.method = method
 		c.RoutePath = path
 	}
+
+	//prelude 和 参数handlers 组成新的Handler一起传入到addRoute
 	handlers = append([]HandlerFunc{prelude}, handlers...)
 	root.addRoute(path, handlers)
+}
+```
+
+回到开始的问题？这里`handlers`中的参数`c *Context`在何处初始化呢？答案就是[`engine.ServeHTTP`](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/server.go#L484)：
+```golang
+// ServeHTTP conforms to the http.Handler interface.
+func (engine *Engine) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	//初始化context
+	c := engine.pool.Get().(*Context)
+	c.Request = req
+	c.Writer = w
+	c.reset()
+
+	engine.handleContext(c)
+	//完成之后回收context
+	engine.pool.Put(c)
 }
 ```
 
