@@ -87,6 +87,10 @@ Trace 表示一次完整的追踪链路，trace 由一个或多个 Span 组成�
          [Span E·······]        [Span F··] [Span G··] [Span H··]
 ```
 
+####	跟踪上下文
+此外，跟踪上下文（Trace Context）也是很重要的场景，它定义了传播跟踪所需的所有信息，例如 traceID，parent-SpanId 等。OpenTracing 提供了两个处理跟踪上下文（Trace Context）的方法：
+-	`Inject(SpanContext,format,carrier)`：Inject 将跟踪上下文放入媒介，来保证跟踪链的连续性，常用于客户端
+-	`Extract(format.Carrier)`：一般从媒介（通常是 HTTP 头）获取跟踪上下文，常用于服务端
 
 ##  0x02	ZipKin-Tracing 的一般流程
 Zipkin 是一款开源的分布式实时数据追踪系统（Distributed Tracking System），由 Twitter 公司开发和贡献。其主要功能是聚合来自各个异构系统的实时监控数据。在链路追踪 Tracing Analysis 中，可以通过 Zipkin 上报 Golang 应用数据。
@@ -288,8 +292,10 @@ func StartSpanFromContextWithTracer(ctx context.Context, tracer Tracer, operatio
 
 小结下上面的过程，如果要确保追踪链在程序中不断开，需要将函数的第一个参数设置为 `context.Context`，通过 `opentracing.ContextWithSpan` 将保存到 context 中，通过 `opentracing.StartSpanFromContext` 开始一个新的子 span，然后设置直到调用流程结束。
 
+假设我们需要在 gRPC 服务中调用另外一个微服务（如 RESTFul 服务），该如何跟踪？简单来说就是使用 HTTP 头作为媒介（Carrier）来传递跟踪信息（traceID）。下一小节，来看下 gRPC 中的 Opentracing 实现。
+
 ##	0x04	gRPC 中的 OpenTracing
-本小节，介绍下 gRPC 与 OpenTracing 的结合使用，跟踪一个完整的 RPC 请求，从客户端到服务端：
+本小节，介绍下 gRPC 与 OpenTracing 的结合使用，跟踪一个完整的 RPC 请求，从客户端到服务端的实现。
 
 ####	客户端
 客户端的实现如下所示：
@@ -407,10 +413,97 @@ func (c *HelloService) RPCMethod(ctx context.Context, req *pb.GetReq) (*pb.GetRe
 }
 ```
 
-下一步，服务端如何实现对 Span 的 Extract 呢？
+前一节，说到跨进程传递 Trace 的时候需要进行的 Inject 和 Extract 操作，上面的示例代码并没有出现。那么客户端 / 服务端如何实现对 Span 的 Inject/Extract 呢？答案就是拦截器 [`otgrpc.OpenTracingServerInterceptor/OpenTracingClientInterceptor` 方法](https://github.com/grpc-ecosystem/grpc-opentracing/tree/master/go/otgrpc)，这里以 `OpenTracingClientInterceptor` 方法为例：
+```golang
+// OpenTracingClientInterceptor returns a grpc.UnaryClientInterceptor suitable
+// for use in a grpc.Dial call.
+//
+// For example:
+//
+//     conn, err := grpc.Dial(
+//         address,
+//         ...,  // (existing DialOptions)
+//         grpc.WithUnaryInterceptor(otgrpc.OpenTracingClientInterceptor(tracer)))
+//
+// All gRPC client spans will inject the OpenTracing SpanContext into the gRPC
+// metadata; they will also look in the context.Context for an active
+// in-process parent Span and establish a ChildOf reference if such a parent
+// Span could be found.
+func OpenTracingClientInterceptor(tracer opentracing.Tracer, optFuncs ...Option) grpc.UnaryClientInterceptor {
+	otgrpcOpts := newOptions()
+	otgrpcOpts.apply(optFuncs...)
+	return func(
+		ctx context.Context,
+		method string,
+		req, resp interface{},
+		cc *grpc.ClientConn,
+		invoker grpc.UnaryInvoker,
+		opts ...grpc.CallOption,
+	) error {
+		var err error
+		var parentCtx opentracing.SpanContext
+		if parent := opentracing.SpanFromContext(ctx); parent != nil {
+			parentCtx = parent.Context()
+		}
+		if otgrpcOpts.inclusionFunc != nil &&
+			!otgrpcOpts.inclusionFunc(parentCtx, method, req, resp) {
+			return invoker(ctx, method, req, resp, cc, opts...)
+		}
+		clientSpan := tracer.StartSpan(
+			method,
+			opentracing.ChildOf(parentCtx),
+			ext.SpanKindRPCClient,
+			gRPCComponentTag,
+		)
+		defer clientSpan.Finish()
+		// 调用 injectSpanContext
+		ctx = injectSpanContext(ctx, tracer, clientSpan)
+		if otgrpcOpts.logPayloads {
+			clientSpan.LogFields(log.Object("gRPC request", req))
+		}
+		err = invoker(ctx, method, req, resp, cc, opts...)
+		if err == nil {
+			if otgrpcOpts.logPayloads {
+				clientSpan.LogFields(log.Object("gRPC response", resp))
+			}
+		} else {
+			SetSpanTags(clientSpan, err, true)
+			clientSpan.LogFields(log.String("event", "error"), log.String("message", err.Error()))
+		}
+		if otgrpcOpts.decorator != nil {
+			otgrpcOpts.decorator(clientSpan, method, req, resp, err)
+		}
+		return err
+	}
+}
+
+//injectSpanContext 方法
+func injectSpanContext(ctx context.Context, tracer opentracing.Tracer, clientSpan opentracing.Span) context.Context {
+	md, ok := metadata.FromOutgoingContext(ctx)
+	if !ok {
+		md = metadata.New(nil)
+	} else {
+		md = md.Copy()
+	}
+	mdWriter := metadataReaderWriter{md}
+	err := tracer.Inject(clientSpan.Context(), opentracing.HTTPHeaders, mdWriter)
+	// We have no better place to record an error than the Span itself :-/
+	if err != nil {
+		clientSpan.LogFields(log.String("event", "Tracer.Inject() failed"), log.Error(err))
+	}
+	return metadata.NewOutgoingContext(ctx, md)
+}
+```
+
+从客户端 `injectSpanContext` 的实现来看，最终在 RPC 调用前，通过 `metadata.NewOutgoingContext` 将 Context 信息（包含了 Tracer），即获取了跟踪上下文并将其注入 HTTP 头，因此我们不需要再次调用 `inject` 函数。而在服务器端，从 HTTP 头中 Extract 跟踪上下文并将其放入 Golang context 中，无须手动调用 Extract 方法。<br>
+
+但对于其他基于 HTTP 的服务（如 RESTFul-API 服务），情况就并非如此，需要写代码从服务器端的 HTTP 头中提取跟踪上下文，亦或也使用拦截器实现，如 Kratos 的 bm 框架的 [Trace 拦截器](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/trace.go)
 
 
-##  0x05    参考
+##	0x05	数据库追踪
+待续....
+
+##  0x06    参考
 -	[OpenTracing API for Go](https://github.com/opentracing/opentracing-go)
 -   [阿里云：通过 Zipkin 上报 Go 应用数据](https://www.alibabacloud.com/help/zh/doc-detail/96334.htm)
 -   [Go 集成 Opentracing（分布式链路追踪）](https://juejin.im/post/6844903942309019661)
