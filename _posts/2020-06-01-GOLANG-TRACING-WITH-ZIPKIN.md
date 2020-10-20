@@ -26,39 +26,39 @@ tags:
 
 详细说明下上面的字段：
 
-1、Tags
+1、Tags<br>
 Tags 是一个 K/V 类型的键值对，用户可以自定义该标签并保存。主要用于链路追踪结果对查询过滤。例如：·http.method="GET",http.status_code=200。其中 key 值必须为字符串，value 必须是字符串，布尔型或者数值型。span 中的 tag 仅自己可见，不会随着 SpanContext 传递给后续 span
 ```golang
 span.SetTag("http.method","GET")
 span.SetTag("http.status_code",200)
 ```
 
-2、Logs
+2、Logs<br>
 Logs 也是一个 K/V 类型的键值对，与 Tags 不同的是，Logs 还会记录写入 Logs 的时间，因此 Logs 主要用于记录某些事件发生的时间。
 ```golang
 span.LogFields(
-  			log.String("database","mysql"),
-  			log.Int("used_time":5),
-  			log.Int("start_ts":1596335100),
+	log.String("database","mysql"),
+	log.Int("used_time":5),
+	log.Int("start_ts":1596335100),
 )
 ```
 PS：Opentracing 给出了一些惯用的 Tags 和 Logs，[链接](https://github.com/opentracing/specification/blob/master/semantic_conventions.md)
 
-3、SpanContext（核心字段）
+3、SpanContext（核心字段）<br>
 SpanContext 携带着一些用于跨服务通信的（跨进程）数据，主要包含：
 -   该 Span 的唯一标识信息，如：`span_id`、`trace_id`
 -   Baggage Items，为整条追踪连保存跨服务（跨进程）的 K/V 格式的用户自定义数据
 
-4、Baggage Items
+4、Baggage Items<br>
 Baggage Items 与 Tags 类似，也是 K/V 键值对。与 tags 不同的是：Baggage Items 的 Key 和 Value 都只能是 string 格式，Baggage items 不仅当前 Span 可见，其会随着 SpanContext 传递给后续所有的子 Span。要小心谨慎的使用 Baggage Items：因为在所有的 span 中传递这些 Key/Value 会带来不小的网络和 CPU 开销
 
-5、References（引用关系）
+5、References（引用关系）<br>
 Opentracing 定义了两种引用关系: ChildOf 和 FollowFrom，分别来看：
 -	ChildOf: 父 Span 的执行依赖子 Span 的执行结果时，此时子 span 对父 span 的引用关系是 ChildOf。比如对于一次 RPC 调用，服务端的 Span（子 Span）与客户端调用的 Span（父 Span）是 ChildOf 关系。
 -	FollowFrom：父 Span 的执不依赖子 Span 执行结果时，此时子 Span 对父 Span 的引用关系是 FollowFrom。FollowFrom 常用于异步调用的表示，例如消息队列中 Consumerspan 与 Producerspan 之间的关系。
 
-6、Trace
-Trace 表示一次完整的追踪链路，trace 由一个或多个 Span 组成。下图示例表示了一个由 8 个 Span 组成的 trace:
+6、Trace<br>
+Trace 表示一次完整的追踪链路，trace 由一个或多个 Span 组成。它表示从头到尾的一个请求的调用链，它的标识符是 traceID。 下图示例表示了一个由 8 个 Span 组成的 trace:
 
 ```javascript
         [Span A]  ←←←(the root span)
@@ -77,7 +77,7 @@ Trace 表示一次完整的追踪链路，trace 由一个或多个 Span 组成�
 ```
 
 以时间轴的展现方式如下：
-```golang
+```javascript
 ––|–––––––|–––––––|–––––––|–––––––|–––––––|–––––––|–––––––|–> time
 
  [Span A···················································]
@@ -230,7 +230,7 @@ func initJaeger(service string) io.Closer {
 }
 ```
 
-3、创建 tracer，生成 root span，下面这段代码创建了一个 root span，并将该 span 通过 context 传递给 `Foo` 方法，以便在 `Foo` 方法中将追踪链继续延续下去：
+3、创建 tracer，生成 Root Span，下面这段代码创建了一个 Root span，并将该 Span 通过 `context` 传递给 `Foo` 方法，以便在 `Foo` 方法中将追踪链继续延续下去：
 ```golang
 func main() {
 	closer := initJaeger("in-process")
@@ -246,7 +246,8 @@ func main() {
 	Foo(ctx)
 }
 ```
-4、`Foo`、`Bar` 方法模拟了独立的子操作 Span，`Foo` 方法调用了 `Bar`，假设在 `Bar` 中发生了一些错误，可以通过 `span.LogFields` 和 `span.SetTag` 将错误记录在追踪链中。`StartSpanFromContext` 这个方法看起来是直接从 `ctx` 中拿到 span 并继承？
+
+4、`Foo`、`Bar` 方法模拟了独立的子操作 Span，`Foo` 方法调用了 `Bar`，假设在 `Bar` 中发生了一些错误，可以通过 `span.LogFields` 和 `span.SetTag` 将错误记录在追踪链中。`StartSpanFromContext` 这个方法看起来是直接从 `ctx` 中拿到 Span 并继承？
 ```golang
 func Foo(ctx context.Context) {
     // 开始一个 span, 设置 span 的 operation_name=Foo
@@ -288,6 +289,126 @@ func StartSpanFromContextWithTracer(ctx context.Context, tracer Tracer, operatio
 小结下上面的过程，如果要确保追踪链在程序中不断开，需要将函数的第一个参数设置为 `context.Context`，通过 `opentracing.ContextWithSpan` 将保存到 context 中，通过 `opentracing.StartSpanFromContext` 开始一个新的子 span，然后设置直到调用流程结束。
 
 ##	0x04	gRPC 中的 OpenTracing
+本小节，介绍下 gRPC 与 OpenTracing 的结合使用，跟踪一个完整的 RPC 请求，从客户端到服务端：
+
+####	客户端
+客户端的实现如下所示：
+```golang
+const (
+    endpoint_url = "http://localhost:9411/api/v1/spans"		//Zipkin-UI 的 URL
+    host_url = "localhost:5051"		// 作为标识
+    service_name_cache_client = "cache service client"
+    service_name_call_get = "callGet"
+)
+
+func newTracer () (opentracing.Tracer, zipkintracer.Collector, error) {
+	// 创建 HTTP Collector，用来收集跟踪数据并将其发送到 Zipkin-UI
+	collector, err := openzipkin.NewHTTPCollector(endpoint_url)
+	if err != nil {
+		return nil, nil, err
+	}
+	// 创建了一个记录器 (recorder) 来记录端口上的信息
+	recorder :=openzipkin.NewRecorder(collector, true, host_url, service_name_cache_client)
+
+	// 使用记录器 recorder 创建了一个新的跟踪器 (tracer)
+	tracer, err := openzipkin.NewTracer(
+		recorder,
+		openzipkin.ClientServerSameSpan(true))
+
+	if err != nil {
+		return nil,nil,err
+	}
+
+	// 设置全局 tracer
+	opentracing.SetGlobalTracer(tracer)
+
+	return tracer,collector, nil
+}
+
+
+func DoRPCMethods(c pb.HelloServiceClient) ( []byte, error) {
+    span := opentracing.StartSpan("RPC-CALL-METHOD-NAME")
+    defer span.Finish()
+    time.Sleep(5*time.Millisecond)
+	// Put root span in context so it will be used in our calls to the client
+	// 通过 opentracing.ContextWithSpan 拿到传递的 ctx
+    ctx := opentracing.ContextWithSpan(context.Background(), span)
+    //ctx := context.Background()
+    getReq:=&pb.RPCMethodReq{}
+    getResp, err :=RPCMethod(ctx, getReq)
+    value := getResp.Value
+    return value, err
+}
+
+func main(){
+	// 初始化 tracer
+	tracer, collector, err :=newTracer()
+	if err != nil {
+		panic(err)
+	}
+	defer collector.Close()
+	// 注意这里使用了拦截器 OpenTracingClientInterceptor
+	connection, err := grpc.Dial(host_url,
+		grpc.WithInsecure(), grpc.WithUnaryInterceptor(otgrpc.OpenTracingClientInterceptor(tracer, otgrpc.LogPayloads())),
+		)
+	if err != nil {
+		panic(err)
+	}
+	defer connection.Close()
+	client := pb.NewHelloServiceClient(connection)
+	err := DoRPCMethods(client)
+	......
+}
+```
+####	服务端实现
+下面是服务端代码，同样使用拦截器 `OpenTracingServerInterceptor` 来构建，服务端的 RPC 方法中包含了一次对 Database 的请求。
+```golang
+func main(){
+    connection, err := net.Listen(network, host_url)
+	if err != nil {
+		panic(err)
+	}
+	tracer,err  := newTracer()
+	if err != nil {
+		panic(err)
+	}
+	opts := []grpc.ServerOption{
+		grpc.UnaryInterceptor(
+			otgrpc.OpenTracingServerInterceptor(tracer,otgrpc.LogPayloads()),
+		),
+	}
+	srv := grpc.NewServer(opts...)
+	cs := initCache()
+	pb.RegisterCacheServiceServer(srv, cs)
+
+	err = srv.Serve(connection)
+	if err != nil {
+		panic(err)
+	}
+}
+
+const service_name_db_query_user = "QueryDatabase"
+
+func (c *HelloService) RPCMethod(ctx context.Context, req *pb.GetReq) (*pb.GetResp, error) {
+    if parent := opentracing.SpanFromContext(ctx); parent != nil {
+        pctx := parent.Context()
+        if tracer := opentracing.GlobalTracer(); tracer != nil {
+            mysqlSpan := tracer.StartSpan(service_name_db_query_user, opentracing.ChildOf(pctx))
+            defer mysqlSpan.Finish()
+            //do some operations
+            time.Sleep(time.Millisecond * 10)
+        }
+    }
+    key := req.GetKey()
+    value := c.storage[key]
+    fmt.Println("get called with return of value:", value)
+    resp := &pb.GetResp{Value: value}
+    return resp, nil
+}
+```
+
+下一步，服务端如何实现对 Span 的 Extract 呢？
+
 
 ##  0x05    参考
 -	[OpenTracing API for Go](https://github.com/opentracing/opentracing-go)
