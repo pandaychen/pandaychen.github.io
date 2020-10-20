@@ -437,13 +437,11 @@ func main() {
 
 ####    远程命令模式
 
-
 ####    sshAgent
 
-
 ##	0x04	其他应用
-基于 golang-SSH 库还有很多有趣的应用，这里列举几个：
-[SSH Tron](https://github.com/zachlatta/sshtron) 基于此包实现了一个在线多人贪吃蛇服务
+基于 golang-SSH 库还有很多有趣的应用，这里列举几个：<br>
+[SSH Tron](https://github.com/zachlatta/sshtron)：基于此包实现了一个在线多人贪吃蛇服务
 
 
 ##	0x05	几个细节问题
