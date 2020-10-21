@@ -11,7 +11,7 @@ tags:
 ---
 
 ##  0x00    前言
-本篇文章介绍下如何在 gin 中实现限速的中间件。限速通常是限定服务的 QPS 或者并发请求量，连接数或业务支撑的关键指标。
+本篇文章介绍下如何在 gin 中实现限速的中间件。限速通常是限定服务的 QPS 或者限制并发请求量、连接数或业务支撑的关键指标。
 
 ##  0x01    Channel 方式实现
 这里有个使用 channel 实现的 [gin-limiter](https://github.com/aviddiviner/gin-limit) 中间件，通过 `sem := make(chan struct{}, n)` 的操作来实现并发控制，核心逻辑如下：
@@ -71,7 +71,32 @@ func MaxAllowed(max int, timeoutMs int) gin.HandlerFunc {
 ```
 
 ##	0x04	令牌 / 漏桶方式实现
+前面介绍了使用 channel 方式的实现，这里介绍下使用 [令牌桶的方式](https://github.com/juju/ratelimit) 实现中间件。此外中间件的生效范围可以灵活指定：<br>
+-	需要对全站限流，可以注册为全局的中间件
+-	需要某一组路由（Group）需要限流，那么就只需将该限流中间件注册到对应的路由组即可
+-	需要对某个指定的 cgi 需要限流，那么将中间件初始化为一个 `map[string]*ratelimit.Bucket` 的 key（以 `cgipath` 为 key），限速的时候先根据 `cgipath` 获取到限速策略，然后再执行 `bucket.TakeAvailable()` 方法即可
+
+下面简单给出全局限速的实现代码：
+```golang
+func MaxAllowed(fillInterval time.Duration, cap int64) func(c *gin.Context) {
+	// 初始化全局 / 局部的 bucket 策略
+	bucket := ratelimit.NewBucket(fillInterval, cap)
+
+	// 返回限流逻辑
+	return func(c *gin.Context) {
+		// 如果取不到令牌就中断本次请求返回 rate limit...
+		if bucket.TakeAvailable(1) < 1 {
+			c.String(http.StatusOK, "Rate Limit,Drop")
+			c.Abort()
+			//或者直接c.AbortWithStatus(504)
+			return
+		}
+		c.Next()
+	}
+}
+```
 
 
 ##  0x05	参考
 -   [Golang 标准库限流器 time/rate 实现剖析](https://www.cyhone.com/articles/analisys-of-golang-rate/)
+-	[gin框架中使用限流中间件](https://www.liwenzhou.com/posts/Go/ratelimit/)
