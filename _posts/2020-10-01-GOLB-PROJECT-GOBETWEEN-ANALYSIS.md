@@ -555,6 +555,130 @@ func (this *Server) wrap(conn net.Conn, sniEnabled bool) {
 下面一篇文章，再分析下 gobetween 代理实现的部分代码细节。下一小节我们看下 `server.scheduler` 的结构及实现。
 
 ##	0x07	Server 代理模块的 Scheduler 结构及实现
+上一节说到 `Server` 中重要的 [成员 `Scheduler`](https://github.com/yyyar/gobetween/blob/master/src/server/scheduler/scheduler.go)，这个结构是实现整个负载均衡调度的核心，它包含了如下组件：
+-	负载均衡选择器 `core.Balancer`
+-	后端服务发现组件 `discovery.Discovery`
+-	健康检查组件 `healthcheck.Healthcheck`
+-	Metrics 收集组件 `stats.Handler`
+
+```golang
+type Scheduler struct {
+	/* Balancer impl */
+	Balancer core.Balancer
+	/* Discovery impl */
+	Discovery *discovery.Discovery
+	/* Healthcheck impl */
+	Healthcheck *healthcheck.Healthcheck
+	/* ----- backends ------*/
+	/* Current cached backends map */
+	backends map[core.Target]*core.Backend
+	/* Stats */
+	StatsHandler *stats.Handler
+	/* ----- channels ----- */
+	/* Backend operation channel */
+	ops chan Op
+	/* Stop channel */
+	stop chan bool
+	/* Elect backend channel */
+	elect chan ElectRequest
+}
+```
+
+####	Scheduler 的核心方法
+[`Scheduler.Start()`](https://github.com/yyyar/gobetween/blob/master/src/server/scheduler/scheduler.go#L93) 是 `Scheduler` 的核心启动方法，
+```golang
+func (this *Scheduler) Start() {
+
+	log := logging.For("scheduler")
+
+	log.Info("Starting scheduler", this.StatsHandler.Name)
+
+	this.ops = make(chan Op)
+	this.elect = make(chan ElectRequest)
+	this.stop = make(chan bool)
+	this.backends = make(map[core.Target]*core.Backend)
+
+	this.Discovery.Start()
+	this.Healthcheck.Start()
+
+	// backends stats pusher ticker
+	backendsPushTicker := time.NewTicker(2 * time.Second)
+
+	/**
+	 * Goroutine updates and manages backends
+	 */
+	go func() {
+		for {
+			select {
+
+			/* ----- discovery ----- */
+
+			// handle newly discovered backends
+			case backends := <-this.Discovery.Discover():
+				this.HandleBackendsUpdate(backends)
+				this.Healthcheck.In <- this.Targets()
+				this.StatsHandler.BackendsCounter.In <- this.Targets()
+
+			/* ------ healthcheck ----- */
+
+			// handle backend healthcheck result
+			case checkResult := <-this.Healthcheck.Out:
+				this.HandleBackendLiveChange(checkResult.Target, checkResult.Status == healthcheck.Healthy)
+
+			/* ----- stats ----- */
+
+			// push current backends to stats handler
+			case <-backendsPushTicker.C:
+				this.StatsHandler.Backends <- this.Backends()
+
+			// handle new bandwidth stats of a backend
+			case bs := <-this.StatsHandler.BackendsCounter.Out:
+				this.HandleBackendStatsChange(bs.Target, &bs)
+
+			/* ----- operations ----- */
+
+			// handle backend operation
+			case op := <-this.ops:
+				this.HandleOp(op)
+
+			// elect backend
+			case electReq := <-this.elect:
+				this.HandleBackendElect(electReq)
+
+			/* ----- stop ----- */
+
+			// handle scheduler stop
+			case <-this.stop:
+				log.Info("Stopping scheduler", this.StatsHandler.Name)
+				backendsPushTicker.Stop()
+				this.Discovery.Stop()
+				this.Healthcheck.Stop()
+				metrics.RemoveServer(fmt.Sprintf("%s", this.StatsHandler.Name), this.backends)
+				return
+			}
+		}
+	}()
+}
+```
+
+####	后端服务发现组件 Discovery
+[Discovery](https://github.com/yyyar/gobetween/blob/master/src/discovery/discovery.go) 主要用于与服务注册中心通信，拿到服务名字对应的实时在线后端列表：
+
+Discovery 也是一个通用结构，不同的注册中心通过 `map[string]func(config.DiscoveryConfig) interface{}` 来存储，其中 value 对应的是相应服务发现方法的初始化。以 consul 为例：
+```golang
+func init() {
+	registry["consul"] = NewConsulDiscovery
+}
+```
+
+
+
+####	负载均衡选择组件 Balancer
+
+####	健康检查组件 Healthcheck
+
+####	Metrics 组件 Handler
+
 
 
 
