@@ -388,6 +388,8 @@ func (wp *workerPool) workerFunc(ch *workerChan) {
 ##  0x06    总结
 fasthttp 协程池是非常优秀的 golang GMP 模型的应用，在实际项目中极具借鉴意义。特别是在高并发的单一循环 Job 处理的场景中。另一个协程池开源项目 [ants](https://github.com/panjf2000/ants) 也是基于 fasthttp 来实现的。
 
+![fasthttp](https://b1.sbimg.org/file/chevereto-jia/2020/10/23/GlAdo.jpg)
+
 ##  0x07    参考
 -   [fasthttp-best-practices](https://github.com/valyala/fasthttp#fasthttp-best-practices)
 -   [fasthttp 剖析](https://www.jianshu.com/p/a0e766f8dcb0)
