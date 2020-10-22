@@ -229,7 +229,7 @@ type Service interface {
 	Disable(Server) error
 }
 ```
-6、[`Backend`(https://github.com/yyyar/gobetween/blob/master/src/core/backend.go)：定义了后端节点及统计信息的通用结构
+6、[`Backend`](https://github.com/yyyar/gobetween/blob/master/src/core/backend.go)：定义了后端节点及统计信息的通用结构
 ```golang
 /**
  * Backend means upstream server
@@ -503,7 +503,7 @@ func (this *Server) Listen() (err error) {
 
 	sniEnabled := this.cfg.Sni != nil
 
-	// 在子 goroutine 中接收，不优雅
+	// 在子 goroutine 中接受连接，不优雅（参考 fasthttp）
 	go func() {
 		for {
 			conn, err := this.listener.Accept()
@@ -664,21 +664,426 @@ func (this *Scheduler) Start() {
 ####	后端服务发现组件 Discovery
 [Discovery](https://github.com/yyyar/gobetween/blob/master/src/discovery/discovery.go) 主要用于与服务注册中心通信，拿到服务名字对应的实时在线后端列表：
 
-Discovery 也是一个通用结构，不同的注册中心通过 `map[string]func(config.DiscoveryConfig) interface{}` 来存储，其中 value 对应的是相应服务发现方法的初始化。以 consul 为例：
+`Discovery` 组件中，不同的注册中心通过 `map[string]func(config.DiscoveryConfig) interface{}` 来存储，其中 value 对应的是相应服务发现方法的初始化。以 consul 为例：
 ```golang
 func init() {
 	registry["consul"] = NewConsulDiscovery
 }
 ```
+`Discovery` 结构如下，`fetch FetchFunc` 成员，在初始化时，会被赋值为 consul 的实现 [`consulFetch`](https://github.com/yyyar/gobetween/blob/master/src/discovery/consul.go#L44)，其他成员的含义见注释：
+```golang
+type Discovery struct {
+	/**
+	 * Cached backends
+	 */
+	backends *[]core.Backend	// 缓存从 consul-API 获取到的后端节点
+	/**
+	 * Function to fetch / discovery backends
+	 */
+	fetch FetchFunc				//consul-API 拉取后端节点的方法
+	/**
+	 * Options for fetch
+	 */
+	opts DiscoveryOpts			// 服务发现的配置选项
+	/**
+	 * Discovery configuration
+	 */
+	cfg config.DiscoveryConfig
+	/**
+	 * Channel where to push newly discovered backends
+	 */
+	out chan ([]core.Backend)	// 用于和 scheduler 模块通信的 channel，用于传送最新的 backends（后端节点）
+	/**
+	 * Channel for stopping discovery
+	 */
+	stop chan bool
+}
+```
 
+[`discovery.consulFetch` 方法](https://github.com/yyyar/gobetween/blob/master/src/discovery/consul.go#L44)，通过 consul 的 Client，通过调用 `client.Health().Service()` 方法获取后端节点列表，并存在 `backends *[]core.Backend` 中：
+```golang
+func consulFetch(cfg config.DiscoveryConfig) (*[]core.Backend, error) {
+	......
+	scheme := "http"
+	transport := &http.Transport{
+		DisableKeepAlives: true,
+	}
 
+	// Enable tls if needed
+	if cfg.ConsulTlsEnabled {
+		tlsConfig := &consul.TLSConfig{
+			Address:  cfg.ConsulHost,
+			CertFile: cfg.ConsulTlsCertPath,
+			KeyFile:  cfg.ConsulTlsKeyPath,
+			CAFile:   cfg.ConsulTlsCacertPath,
+		}
+		tlsClientConfig, err := consul.SetupTLSConfig(tlsConfig)
+		if err != nil {
+			return nil, err
+		}
+		transport.TLSClientConfig = tlsClientConfig
+		scheme = "https"
+	}
 
+	// Parse http timeout
+	timeout := utils.ParseDurationOrDefault(cfg.Timeout, consulTimeout)
+
+	// Create consul client
+	client, _ := consul.NewClient(&consul.Config{
+		Token:      cfg.ConsulAclToken,
+		Scheme:     scheme,
+		Address:    cfg.ConsulHost,
+		Datacenter: cfg.ConsulDatacenter,
+		HttpAuth: &consul.HttpBasicAuth{
+			Username: cfg.ConsulAuthUsername,
+			Password: cfg.ConsulAuthPassword,
+		},
+		HttpClient: &http.Client{Timeout: timeout, Transport: transport},
+	})
+
+	// Query service
+	service, _, err := client.Health().Service(cfg.ConsulServiceName, cfg.ConsulServiceTag, cfg.ConsulServicePassingOnly, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Gather backends
+	backends := []core.Backend{}
+	for _, entry := range service {
+		s := entry.Service
+		sni := ""
+
+		for _, tag := range s.Tags {
+			split := strings.SplitN(tag, "=", 2)
+
+			if len(split) != 2 {
+				continue
+			}
+
+			if split[0] != "sni" {
+				continue
+			}
+			sni = split[1]
+		}
+
+		var host string
+		if s.Address != "" {
+			host = s.Address
+		} else {
+			host = entry.Node.Address
+		}
+
+		backends = append(backends, core.Backend{
+			Target: core.Target{
+				Host: host,
+				Port: fmt.Sprintf("%v", s.Port),
+			},
+			Priority: 1,
+			Weight:   1,
+			Stats: core.BackendStats{
+				Live: true,
+			},
+			Sni: sni,
+		})
+	}
+
+	return &backends, nil
+}
+```
 ####	负载均衡选择组件 Balancer
+gobetween 的负载均衡算法也是 `map[string]reflect.Type` 方式存储的，通过 `name` 初始化注册，这里我们简单分析下 [`RoundrobinBalancer` 的实现](https://github.com/yyyar/gobetween/blob/master/src/balance/roundrobin.go)：
+```golang
+var typeRegistry = make(map[string]reflect.Type)
+
+func init() {
+	typeRegistry["roundrobin"] = reflect.TypeOf(RoundrobinBalancer{})
+}
+
+func New(sniConf *config.Sni, balance string) core.Balancer {
+	balancer := reflect.New(typeRegistry[balance]).Elem().Addr().Interface().(core.Balancer)
+
+	if sniConf == nil {
+		return balancer
+	}
+
+	return &middleware.SniBalancer{
+		SniConf:  sniConf,
+		Delegate: balancer,
+	}
+}
+```
+
+实现 `Balancer` 的核心是实现 `Elect` 方法，该方法在 [`Scheduler.HandleBackendElect()` 方法](https://github.com/yyyar/gobetween/blob/master/src/server/scheduler/scheduler.go#L270) 中被调用，达到根据负载均衡算法选择后端的目的：
+```golang
+/**
+ * Roundrobin balancer
+ */
+type RoundrobinBalancer struct {
+
+	/* Current backend position */
+	current int
+}
+
+/**
+ * Elect backend using roundrobin strategy
+ */
+func (b *RoundrobinBalancer) Elect(context core.Context, backends []*core.Backend) (*core.Backend, error) {
+
+	if len(backends) == 0 {
+		return nil, errors.New("Can't elect backend, Backends empty")
+	}
+
+	sort.SliceStable(backends, func(i, j int) bool {
+		return backends[i].Target.String() < backends[j].Target.String()
+	})
+
+	if b.current >= len(backends) {
+		b.current = 0
+	}
+
+	backend := backends[b.current]
+	b.current += 1
+
+	return backend, nil
+}
+```
 
 ####	健康检查组件 Healthcheck
+[`Healthcheck` 结构](https://github.com/yyyar/gobetween/blob/master/src/healthcheck/healthcheck.go) 如下，值得关注的是 `workers []*Worker` 这个成员实现了一个 [工作池 workerpool](https://github.com/yyyar/gobetween/blob/master/src/healthcheck/worker.go)，该组件的核心流程如下所示：
+
+![healthycheck]()
+
+```golang
+type Healthcheck struct {
+	/* Healthcheck function */
+	check CheckFunc
+	/* Healthcheck configuration */
+	cfg config.HealthcheckConfig
+	/* Input channel to accept targets */
+	In chan []core.Target		// 与 scheduler 模块通信 channel，接收待探测的后端节点
+	/* Output channel to send check results for individual target */
+	Out chan CheckResult		// 与 scheduler 模块通信 channel，将拨测结果告知 scheduler
+	/* Current check workers */
+	workers []*Worker
+	/* Channel to handle stop */
+	stop chan bool
+}
+```
+
+如官方文档描述，healthycheck 提供了 3 种健康探测的方式，在 `init()` 中进行了注册，每个 value 都是对应的方法入口，在 `Healthcheck` 的初始化方法 `healthcheck.New()` 中传递给 `Healthcheck` 结构的 `check` 成员：
+```golang
+func init() {
+	registry["ping"] = ping
+	registry["probe"] = probe
+	registry["exec"] = exec
+	registry["none"] = nil
+}
+
+func New(strategy string, cfg config.HealthcheckConfig) *Healthcheck {
+	// 根据 strategy 的名字获取对应的探测方法的指针
+	check := registry[strategy]
+	h := Healthcheck{
+		check:   check,	// 初始化
+		cfg:     cfg,
+		In:      make(chan []core.Target),
+		Out:     make(chan CheckResult),
+		workers: []*Worker{},		// 初始化为空
+		stop:    make(chan bool),
+	}
+
+	return &h
+}
+```
+
+healthycheck 的核心循环 `healthy.Start()` 逻辑中，主要完成了 `2` 件事情：
+1.	监听 `this.In` 这个 channel，从 `Scheduler` 模块获取最新的后端列表
+2.	监听 `this.stop`，触发上层的控制退出指令，清理资源和退出
+
+```golang
+func (this *Healthcheck) Start() {
+
+	go func() {
+		for {
+			select {
+
+			/* got new targets */
+			case targets := <-this.In:
+				this.UpdateWorkers(targets)
+
+			/* got stop requst */
+			case <-this.stop:
+				// Stop all workers
+				for i := range this.workers {
+					this.workers[i].Stop()
+				}
+				// And free it's memory
+				this.workers = []*Worker{}
+
+				return
+			}
+		}
+	}()
+}
+```
+
+我们再看下 `this.UpdateWorkers()` 这个方法，根据传入的后端节点 `targets`，
+```golang
+func (this *Healthcheck) UpdateWorkers(targets []core.Target) {
+	//result 为本次更新的 workerlist
+	result := []*Worker{}
+	// Keep or add needed workers
+	for _, t := range targets {
+		var keep *Worker
+		// 遍历旧的 workers 列表
+		for i := range this.workers {
+			c := this.workers[i]
+			if t.EqualTo(c.target) {
+				// 还在使用的 worker
+				keep = c
+				break
+			}
+		}
+
+		// 如果没找到针对 targets 的 worker，那么就新建一个 worker
+		if keep == nil {
+			keep = &Worker{
+				target: t,
+				stop:   make(chan bool),
+				out:    this.Out,		//this.Out 为 healthycheck 的 channel
+				cfg:    this.cfg,
+				check:  this.check,
+				LastResult: CheckResult{
+					Status: Initial,
+				},
+			}
+			// 启动 worker
+			keep.Start()
+		}
+		// 将目前在使用的 worker 加入列表
+		result = append(result, keep)
+	}
+
+	// Stop needed workers
+	// 移除不再使用的 worker
+	for i := range this.workers {
+		c := this.workers[i]
+		remove := true
+		for _, t := range targets {
+			if c.target.EqualTo(t) {
+				remove = false
+				break
+			}
+		}
+
+		if remove {
+			// 向 worker-goroutine 发送退出 channel
+			c.Stop()
+		}
+	}
+
+	// 更新 worker 列表
+	this.workers = result
+}
+
+func (this *Healthcheck) Stop() {
+	this.stop <- true
+}
+```
+
+最后，简单看下 `Worker` 的结构定义，及核心工作流程 [`Worker.Start()` 方法](https://github.com/yyyar/gobetween/blob/master/src/healthcheck/worker.go#L52)，此方法完成了如下事情：
+1.	开启一个定时器 `time.NewTicker(interval)` 定期检测，`interval` 的时间由配置指定
+2.	单独开启 goroutine 运行 `this.check` 方法，在此方法中，执行真正的健康检查逻辑，结果通过 `result chan<- CheckResult` 异步通知 worker
+3.	在 `this.process` 方法中，将检测的结果通过 `healthy.Out` 这个 channel 传递给 `Scheduler` 模块
+4.	等待上层通知本 worker 退出
+
+```golang
+type Worker struct {
+	/* Target to monitor and check */
+	target core.Target
+	/* Function that does actual check */
+	check CheckFunc
+	/* Channel to write changed check results */
+	out chan<- CheckResult
+	/* Healthcheck configuration */
+	cfg config.HealthcheckConfig
+	/* Stop channel to worker to stop */
+	stop chan bool
+	/* Last confirmed check result */
+	LastResult CheckResult
+	/* Current passes count, if LastResult.Live = true */
+	passes int
+	/* Current fails count, if LastResult.Live = false */
+	fails int
+}
+
+/**
+ * Start worker
+ */
+func (this *Worker) Start() {
+	// Special case for no healthcheck, don't actually start worker
+	if this.cfg.Kind == "none" {
+		return
+	}
+
+	interval, _ := time.ParseDuration(this.cfg.Interval)
+
+	ticker := time.NewTicker(interval)
+	c := make(chan CheckResult, 1)
+
+	go func() {
+		/* Check health before any delay*/
+		log.Debug("Initial check", this.cfg.Kind, "for", this.target)
+		go this.check(this.target, this.cfg, c)
+		for {
+			select {
+
+			/* new check interval has reached */
+			case <-ticker.C:
+				log.Debug("Next check", this.cfg.Kind, "for", this.target)
+				go this.check(this.target, this.cfg, c)
+
+			/* new check result is ready */
+			case checkResult := <-c:
+				log.Debug("Got check result", this.cfg.Kind, ":", checkResult)
+				this.process(checkResult)
+
+			/* request to stop worker */
+			case <-this.stop:
+				ticker.Stop()
+				//close(c) // TODO: Check!
+				return
+			}
+		}
+	}()
+}
+
+func (this *Worker) process(checkResult CheckResult) {
+	//......
+	if checkResult.Status == this.LastResult.Status {
+		// check status not changed
+		return
+	}
+
+	if checkResult.Status == Unhealthy {
+		this.passes = 0
+		this.fails++
+	} else if checkResult.Status == Healthy {
+		this.fails = 0
+		this.passes++
+	}
+
+	if this.passes == 0 && this.fails >= this.cfg.Fails ||
+		this.fails == 0 && this.passes >= this.cfg.Passes {
+		this.LastResult = checkResult
+
+		log.Info("Sending to scheduler:", this.LastResult)
+		// 通过 out 这个 channel（本质是 healthy 的 Out）将结果通知给 Scheduler
+		this.out <- checkResult
+	}
+}
+```
 
 ####	Metrics 组件 Handler
-
 
 
 
