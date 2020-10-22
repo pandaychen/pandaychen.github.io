@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      在 Golang-gin 框架中集成 Ratelimiter 限流中间件
+title:      在 Golang-Gin 框架中集成 Ratelimiter 限流中间件
 subtitle:   Gin 实践：如何实现限流中间件
 date:       2020-10-10
 header-img: img/super-mario.jpg
@@ -34,7 +34,9 @@ func MaxAllowed(n int) gin.HandlerFunc {
 ##  0x03    优化：对限速的部分超时
 我们来对上面的代码做一些优化：
 1.	使用 `select` 优化 token 获取，增加超时的 case 分支，当超时后仍然拿不到 token，就对原始请求返回 `504` 超时错误
-2.	考虑了业务 panic 的 recover，考虑了多个中间件执行时能正确回收 channel
+2.	考虑到业务 Panic 场景下的 recover 机制
+3.	考虑到多个中间件执行时能正确回收 channel
+
 ```golang
 func MaxAllowed(max int, timeoutMs int) gin.HandlerFunc {
 	// 初始化 sem
@@ -88,7 +90,7 @@ func MaxAllowed(fillInterval time.Duration, cap int64) func(c *gin.Context) {
 		if bucket.TakeAvailable(1) < 1 {
 			c.String(http.StatusOK, "Rate Limit,Drop")
 			c.Abort()
-			//或者直接c.AbortWithStatus(504)
+			// 或者直接 c.AbortWithStatus(504)
 			return
 		}
 		c.Next()
@@ -96,7 +98,6 @@ func MaxAllowed(fillInterval time.Duration, cap int64) func(c *gin.Context) {
 }
 ```
 
-
 ##  0x05	参考
 -   [Golang 标准库限流器 time/rate 实现剖析](https://www.cyhone.com/articles/analisys-of-golang-rate/)
--	[gin框架中使用限流中间件](https://www.liwenzhou.com/posts/Go/ratelimit/)
+-	[gin 框架中使用限流中间件](https://www.liwenzhou.com/posts/Go/ratelimit/)
