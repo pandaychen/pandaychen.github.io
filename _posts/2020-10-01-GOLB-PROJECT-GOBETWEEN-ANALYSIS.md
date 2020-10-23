@@ -851,7 +851,7 @@ func (b *RoundrobinBalancer) Elect(context core.Context, backends []*core.Backen
 ####	健康检查组件 Healthcheck
 [`Healthcheck` 结构](https://github.com/yyyar/gobetween/blob/master/src/healthcheck/healthcheck.go) 如下，值得关注的是 `workers []*Worker` 这个成员实现了一个 [工作池 workerpool](https://github.com/yyyar/gobetween/blob/master/src/healthcheck/worker.go)，该组件的核心流程如下所示：
 
-![healthycheck]()
+![healthycheck](https://b1.sbimg.org/file/chevereto-jia/2020/10/22/GlQXw.png)
 
 ```golang
 type Healthcheck struct {
