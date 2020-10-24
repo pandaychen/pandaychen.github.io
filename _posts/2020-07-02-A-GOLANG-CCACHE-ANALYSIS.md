@@ -17,7 +17,7 @@ tags:
 3.  支持多级 Cache，如 LayeredCache 和 SecondaryCache
 4.  采用分段锁及其他一些优化策略来降低锁冲突（Competition）
 
-在项目，用此库来缓存那些不经常改动且有大量读请求的场景。
+在项目，用此库来缓存那些不经常改动且有大量读请求的数据场景。
 
 ##  0x01  CCache 的使用
 
