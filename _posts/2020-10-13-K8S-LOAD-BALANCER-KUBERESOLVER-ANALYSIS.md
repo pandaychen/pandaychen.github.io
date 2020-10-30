@@ -199,7 +199,7 @@ cc, err := grpc.Dial("kubernetes:///service.namespace:portname", opts...)
 grpc.DialContext(ctx,  "kubernetes:///service:grpc", grpc.WithBalancerName("round_robin"), grpc.WithInsecure())
 ```
 
-kuberesolver 支持如下形式的寻址方式，在 [`parseResolverTarget` 方法](https://github.com/sercand/kuberesolver/blob/master/builder.go#L76) 中实现寻址的解析：
+kuberesolver 支持如下形式的寻址方式，在 [`parseResolverTarget` 方法](https://github.com/sercand/kuberesolver/blob/master/builder.go#L76) 中实现 <font color="#dd0000"> 服务发现寻址 </font> 的解析：
 ```golang
 kubernetes:///service-name:8080
 kubernetes:///service-name:portname
@@ -216,7 +216,7 @@ kubernetes://service-name.namespace:8080/
 2.	实现 `Watcher`（一般作为 `Resolver` 的子协程单独创建）：接收 Kubernetes 的 `API` 的改变通知并调用 gRPC 的接口通知 gRPC 内部
 
 kuberesolver 的整体项目架构如下所示：
-![kuberesolver整体架构](https://wx1.sbimg.cn/2020/09/24/GzRmG.png)
+![kuberesolver 整体架构](https://wx1.sbimg.cn/2020/09/24/GzRmG.png)
 
 下面按照架构图的模块对源码进一步分析。
 
