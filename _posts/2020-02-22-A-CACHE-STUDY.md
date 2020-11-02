@@ -21,31 +21,31 @@ Cache 使用第一法则是：任何 Cache 都需要有自动过期（失效）�
 Cache 根据使用可分为远程 Cache （Redis/Memcache）和本地 Cache 两种。
 
 ####    过期策略
-通常 Cache 的过期淘汰策略有如下几种（以 Redis 和 GCache 为例）：
+通常 Cache 的过期淘汰策略有如下几种（以 Redis 和 [GCache](https://github.com/bluele/gcache) 为例）：
 -	Simple：普通缓存策略，随机淘汰
--	LRU：Least Recently Used，优先淘汰最近最少使用的内容，是一种最近最少使用策略。无论是否过期，根据元素最后一次被使用的时间戳，清除最远使用时间戳的元素释放空间。策略算法主要比较元素最近一次被 get 使用时间。在热点数据场景下较适用，优先保证热点数据的有效性。
--	LFU：Least Frequently Used，优先淘汰访问次数最少的内容，是一种最近最少使用策略。无论是否过期，根据元素的被使用次数判断，清除使用次数较少的元素释放空间。策略算法主要比较元素的 hitCount（命中次数）。在保证高频数据有效性场景下，可选择这类策略。
--	ARC：Adaptive Replacement Cache，ARC 介于 LRU 和 LFU 之间，借助 LRU 和 LFU 基本思想实现，以获得可用缓存的最佳使用。
+-	LRU：Least Recently Used，优先淘汰最近最少使用的内容，是一种最近最少使用策略。无论是否过期，根据元素最后一次被使用的时间戳，清除最远使用时间戳的元素释放空间。策略算法主要比较元素最近一次被 get 使用时间。在热点数据场景下较适用，优先保证热点数据的有效性
+-	LFU：Least Frequently Used，优先淘汰访问次数最少的内容，是一种最近最少使用策略。无论是否过期，根据元素的被使用次数判断，清除使用次数较少的元素释放空间。策略算法主要比较元素的 hitCount（命中次数）。在保证高频数据有效性场景下，可选择这类策略
+-	ARC：Adaptive Replacement Cache，ARC 介于 LRU 和 LFU 之间，借助 LRU 和 LFU 基本思想实现，以获得可用缓存的最佳使用
 -	TTL：Time To Live，定时删除
 
 ##  0x02    Cache 惊群效应
-高并发场景下缓存主要存在以下问题：缓存击穿、缓存穿透及缓存雪崩三种。
+高并发场景下缓存主要存在以下问题：缓存击穿、缓存穿透及缓存雪崩三种，统称惊群效应。在高并发的情况下，大量并发请求同时查询缓存 Cache 中同一个 key 时，此时 key 正好失效，这样会导致同一时间请求都会去查询数据库，会造成数据库 DB 请求量过大（存在 DB 压垮的风险），从本质上讲，就是大量请求使 Cache 系统不堪重负。
 
-####	缓存击穿
-在高并发的情况下，大量并发请求同时查询缓存 Cache 中同一个 key 时，此时 key 正好失效，这样会导致同一时间请求都会去查询数据库，会造成数据库 DB 请求量过大（存在 DB 压垮的风险）
+-	缓存雪崩：缓存在同一时刻全部失效，造成瞬时 DB 请求量大、压力骤增，引起雪崩。缓存雪崩通常因为缓存服务器宕机、缓存的 key 设置了相同的过期时间等引起
 
-惊群效应问题有时被称为缓存击穿，穿透或者雪崩效果。从本质上讲，就像是使系统不堪重负的大量请求。
+-	缓存击穿：一个存在的 key，在缓存过期的一刻，同时有大量的请求，这些请求都会击穿到 DB ，造成瞬时 DB 请求量大、压力骤增
 
-缓存雪崩：缓存在同一时刻全部失效，造成瞬时 DB 请求量大、压力骤增，引起雪崩。缓存雪崩通常因为缓存服务器宕机、缓存的 key 设置了相同的过期时间等引起。
-
-缓存击穿：一个存在的 key，在缓存过期的一刻，同时有大量的请求，这些请求都会击穿到 DB ，造成瞬时 DB 请求量大、压力骤增。
-
-缓存穿透：查询一个不存在的数据，因为不存在则不会写到缓存中，所以每次都会去请求 DB，如果瞬间流量过大，穿透到 DB，导致宕机。
-
-
+-	缓存穿透：查询一个不存在的数据，因为不存在则不会写到缓存中，所以每次都会去请求 DB，如果瞬间流量过大，穿透到 DB，导致宕机
 
 ##  0x03  健壮的 Cache 机制
 针对缓存的脆弱性，需要一些针对缓存的保护机制，常用的有 Singleflight，熔断保护，限流等
+
+####	常规的保护策略
+在项目中，一般常规的应对策略有如下几种：
+1、使用 Cache 集群，保证缓存服务的高可用（公司内一般使用托管集群，比如 Redis，可选主从 + Sentinel 或者 Redis Cluster 方式）
+2、分级多层缓存，比如对于热点数据，使用本地缓存代替一部分 Redis 缓存的功能
+3、合理的熔断及限流保护机制，比如 Hystrix 熔断，Google 的自适应熔断策略等，是避免缓存雪崩非常有效的策略
+4、合理的使用 Singleflight 机制
 
 ####    Singleflight 机制
 最初看到此方案是在 [groupcache 的实现](https://github.com/golang/groupcache/tree/master/singleflight) 中，它的使用场景是，在多个并发请求触发的回调操作里，只有第一个回调方法被执行，其余请求（当然需要落在第一个回调方法的时间窗口内）阻塞等待第一个被执行的那个回调操作完成后，直接取其结果，以此保证同一时刻只有一个回调方法在执行，以达到防止缓存击穿。Singleflight 常用于下面的场景：
@@ -58,7 +58,7 @@ if (/* 缓存失效 */) {
     data, err = g.Do(cacheKey, fn)
 }
 ```
-2、防止突增的接口请求对后端服务造成瞬时高负载<br>
+2、防止突增的接口请求对后端服务造成瞬时高负载 <br>
 ```golang
 fn = func() (interface{}, error) {
     // 发送请求到后端服务，并获取结果
@@ -76,7 +76,7 @@ func main() {
                 log.Printf("request %v start to get and set cache...", requestID)
                 value, _, _ := singleSetCache.Do(cacheKey, func() (ret interface{}, err error) { //do 的入参 key，可以直接使用缓存的 key，这样同一个缓存，只有一个协程会去读 DB
                         log.Printf("request %v is setting cache...", requestID)
-                        time.Sleep(3 * time.Second)
+                        time.Sleep(3 * time.Second)	// 注意：这里使用 sleep 来构建 < 并发运行时间窗口 >
                         log.Printf("request %v set cache success!", requestID)
                         return "VALUE", nil
                 })
