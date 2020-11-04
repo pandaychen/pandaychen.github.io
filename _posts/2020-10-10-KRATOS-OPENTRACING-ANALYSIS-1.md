@@ -31,7 +31,7 @@ tags:
 
 此外，还有很重要的概念：SpanContext，常用来表示跨进程传递 Span 的场景（比如：RPC/HTTP 调用的客户端到服务端），通常在 HTTP-Header 中以 Key-Value 形式传递
 
-##	0x01	Tracing的通用封装及方法
+##	0x01	Tracing 的通用封装及方法
 
 ####	sample
 [sample](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/sample.go) 给出了一个采样率的实现：
@@ -88,6 +88,7 @@ type propagator interface {
 举例来说，HTTP 协议的 `Carrier` 和 `propagator` 实现如下，从代码看极易理解：
 1.	`httpCarrier` 主要通过 `http` 包进行 Header 的读写操作
 2.	`httpPropagator` 在执行 HTTP 调用时，将 HTTP 的 Header 抽象为 `httpCarrier`，而后就可以调用 `httpCarrier` 的 `Set` 或者 `Get` 方法了
+
 ```golang
 func (h httpCarrier) Set(key, val string) {
 	http.Header(h).Set(key, val)
@@ -144,9 +145,6 @@ func (grpcPropagator) Extract(carrier interface{}) (Carrier, error) {
 	return grpcCarrier(md), nil
 }
 ```
-
-
-
 
 ##  0x03    Trace 实现总览 && 数据结构
 Kratos Tracing 的实现 [目录在此](https://github.com/go-kratos/kratos/tree/master/pkg/net/trace)，主要完成了如下工作：
@@ -238,7 +236,7 @@ func TagString(key string, val string) Tag {
 ```
 
 ####  SpanContext 结构
-在介绍 Span 之前，先引入 `SpanContext` 的 [概念](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/context.go#L20)，SpanContext 保存了分布式追踪的上下文信息，包括 Trace id，Span id 以及其它需要传递到下游服务的内容。一个 OpenTracing 的实现需要将 SpanContext 通过某种序列化协议 (Wire Protocol) 在进程边界上进行传递，以将不同进程中的 Span 关联到同一个 Trace 上。对于 HTTP 请求来说，SpanContext 一般是采用 HTTP header 进行传递的。
+在介绍 Span 之前，先引入 `SpanContext` 的 [概念](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/context.go#L20)，SpanContext 保存了分布式追踪的上下文信息，包括 Trace id，Span id 以及其它需要传递到下游服务的内容。<font color="#dd0000"> 一个 OpenTracing 的实现需要将 SpanContext 通过某种序列化协议 (Wire Protocol) 在进程边界上进行传递，以将不同进程中的 Span 关联到同一个 Trace 上。</font > 对于 HTTP 请求来说，SpanContext 一般是采用 HTTP header 进行传递的。
 
 // 此外，一般和 `spanContext` 关联的 Kratos 的 `spanContext`
 
@@ -285,7 +283,7 @@ func (c spanContext) String() string {
 ####  Span 结构
 这里再回顾下 Span：一个具有名称和时间长度的操作，例如一个 REST 调用或者数据库操作等。Span 是分布式追踪的最小跟踪单位，一个 Trace 由多段 Span 组成。追踪信息包含时间戳、 事件、 方法名（Family+Title） 、 注释（TAG/Comment）<br>
 
-客户端和服务器上的时间戳来自不同的主机， 我们必须考虑到时间偏差，RPC 客户端发送一个请求之后， 服务器端才能接收到， 对于响应也是一样的（服务器先响应， 然后客户端才能接收到这个响应） 。这样一来，服务器端的 RPC 就有一个时间戳的一个上限和下限
+// 客户端和服务器上的时间戳来自不同的主机， 我们必须考虑到时间偏差，RPC 客户端发送一个请求之后， 服务器端才能接收到， 对于响应也是一样的（服务器先响应， 然后客户端才能接收到这个响应） 。这样一来，服务器端的 RPC 就有一个时间戳的一个上限和下限
 
 先看下 [Span 结构定义](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/span.go#L18)：
 ```golang
@@ -304,10 +302,12 @@ type Span struct {
 
 从 `Span` 结构体定义看，`Span` 是属于某个 `dapper` 的，在微服务中，就是一个完整的（子）调用过程，有调用开始时间 `SetTitle` 和耗时 `duration`，有标记自己唯一属性的上下文结构 `spanContext` 以及 KV 标记 `tags`。<br>
 
-`Span` 实现的几个核心方法如下：
-1、`Span.Fork()`
+`Span` 实现的几个核心方法如下：<br>
+1、`Span.Fork()` 方法
+
 ```golang
 func (s *Span) Fork(serviceName, operationName string) Trace {
+	// 是否超过最大 child 数目
 	if s.childs > _maxChilds {
 		// if child span more than max childs set return noopspan
 		return noopspan{}
@@ -318,8 +318,59 @@ func (s *Span) Fork(serviceName, operationName string) Trace {
 }
 ```
 
-未完待续
+2、`Span.Finish()` 方法<br>
+```golang
+func (s *Span) Finish(perr *error) {
+	s.duration = time.Since(s.startTime)
+	if perr != nil && *perr != nil {
+		err := *perr
+		s.SetTag(TagBool(TagError, true))
+		s.SetLog(Log(LogMessage, err.Error()))
+		if err, ok := err.(stackTracer); ok {
+			s.SetLog(Log(LogStack, fmt.Sprintf("%+v", err.StackTrace())))
+		}
+	}
+	s.dapper.report(s)
+}
+```
 
+3、`Span.String()` 方法：返回 `spanContext` 的序列化字符串<br>
+```golang
+func (s *Span) String() string {
+	return s.context.String()
+}
+```
+
+4、`Span.SetTag()`方法：<br>
+```golang
+func (s *Span) SetTag(tags ...Tag) Trace {
+	if !s.context.isSampled() && !s.context.isDebug() {
+		return s
+	}
+	if len(s.tags) < _maxTags {
+		s.tags = append(s.tags, tags...)
+	}
+	if len(s.tags) == _maxTags {
+		s.tags = append(s.tags, Tag{Key: "trace.error", Value: "too many tags"})
+	}
+	return s
+}
+```
+
+5、`Span.setLog()`方法：<br>
+```golang
+func (s *Span) setLog(logs ...LogField) Trace {
+	protoLog := &protogen.Log{
+		Timestamp: time.Now().UnixNano(),
+		Fields:    make([]*protogen.Field, len(logs)),
+	}
+	for i := range logs {
+		protoLog.Fields[i] = &protogen.Field{Key: logs[i].Key, Value: []byte(logs[i].Value)}
+	}
+	s.logs = append(s.logs, protoLog)
+	return s
+}
+```
 
 ##  0x04  Tracer 接口及抽象
 Kratos 的 Tracer 接口定义在 [这里](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/tracer.go#L56)，`Tracer` 和 `Trace`，此外，对外部提供了 [`trace.SetGlobalTracer()` 方法](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/tracer.go#L13)，用于设置自定义的 tracer 对象，如 Kratos 提供了 `zipkin` 的接入。
