@@ -244,7 +244,7 @@ func (c *Client) invokeHook(ctx context.Context, call hrpc.Call, customName stri
 ```
 
 整体执行的流程如下图所示：
-![invokehook]()
+![invokehook](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kratos-hbase-hook.png)
 -	Part1：遍历 c.hooks 数组，按顺序执行中间件 `fn(ctx, call, customName)`
 -	Part2：执行业务逻辑
 -	Part3：遍历 `finishHooks`，执行中间件的返回方法 `fn(error)`
