@@ -1,7 +1,7 @@
 ---
 layout:     post
-title:      在 Golang-Gin 框架中集成 Ratelimiter 限流中间件
-subtitle:   Gin 实践：如何实现限流中间件
+title:      Gin 开发实践：如何实现限流中间件
+subtitle:   在 Golang-Gin 框架中集成 Ratelimiter 限流中间件
 date:       2020-10-10
 header-img: img/super-mario.jpg
 author:     pandaychen
