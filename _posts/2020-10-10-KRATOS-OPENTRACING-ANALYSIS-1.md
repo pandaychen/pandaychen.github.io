@@ -19,52 +19,143 @@ tags:
 
 
 ##  0x01    Opentracing 回顾
-当代的互联网的服务，通常都是用复杂的、大规模分布式集群来实现的。互联网应用构建在不同的软件模块集上，这些软件模块，有可能是由不同的团队开发、可能使用不同的编程语言来实现、有可能布在了几千台服务器，横跨多个不同的数据中心。因此，就需要一些可以帮助理解系统行为、用于分析性能问题的工具。
+简单回顾下 OpenTracing 的数据模型：
+一条 Trace（调用链）可认为是一个由多个 Span 组成的有向无环图（DAG 图），Span 与 Span 的关系被命名为 References，常用基于时间轴的时序图来展现 Trace 的调用路径。
 
-Logging，Metrics 和 Tracing
-Logging，Metrics 和 Tracing 有各自专注的部分。
+一般 Span 代表一次独立的调用过程，Span 包含以下的状态:
+-	An operation name，操作名称
+-	A start timestamp，起始时间
+-	A finish timestamp，结束时间
+-	Span Tag，一组键值对构成的 Span 标签集合。键值对中，键必须为 string，值可以是字符串，布尔，或者数字类型
+-	Span Log，一组 span 的日志集合。每次 log 操作包含一个键值对，以及一个时间戳
 
-Logging - 用于记录离散的事件。例如，应用程序的调试信息或错误信息。它是我们诊断问题的依据。
-Metrics - 用于记录可聚合的数据。例如，队列的当前深度可被定义为一个度量值，在元素入队或出队时被更新；HTTP 请求个数可被定义为一个计数器，新请求到来时进行累加。
-Tracing - 用于记录请求范围内的信息。例如，一次远程方法调用的执行过程和耗时。它是我们排查系统性能问题的利器。
-这三者也有相互重叠的部分，如下图所示。
+此外，还有很重要的概念：SpanContext，常用来表示跨进程传递 Span 的场景（比如：RPC/HTTP 调用的客户端到服务端），通常在 HTTP-Header 中以 Key-Value 形式传递
 
-OpenTracing 数据模型
-OpenTracing 中的 Trace（调用链）通过归属于此调用链的 Span 来隐性的定义。
-特别说明，一条 Trace（调用链）可以被认为是一个由多个 Span 组成的有向无环图（DAG 图），Span 与 Span 的关系被命名为 References。
+##	0x01	Tracing的通用封装及方法
 
-例如：下面的示例 Trace 就是由 8 个 Span 组成：
+####	sample
+[sample](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/sample.go) 给出了一个采样率的实现：
+```golang
+// sampler decides whether a new trace should be sampled or not.
+type sampler interface {
+	IsSampled(traceID uint64, operationName string) (bool, float32)
+	Close() error
+}
+
+type probabilitySampling struct {
+	probability float32		// 初始化传入，采样率
+	slot        [slotLength]int64
+}
+```
+
+核心函数为 `sample.IsSampled()`：
+```golang
+func (p *probabilitySampling) IsSampled(traceID uint64, operationName string) (bool, float32) {
+	for _, ignored := range ignoreds {
+		if operationName == ignored {
+			return false, 0
+		}
+	}
+	now := time.Now().Unix()
+	idx := oneAtTimeHash(operationName) % slotLength
+	old := atomic.LoadInt64(&p.slot[idx])
+	if old != now {
+		atomic.SwapInt64(&p.slot[idx], now)
+		return true, 1
+	}
+	return rand.Float32() < float32(p.probability), float32(p.probability)
+}
+```
+
+####	Tracing 的格式
+Kratos 中提供了两种 [Trace 数据格式化](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/propagation.go) 的类型，分别为 `HTTPFormat` 和 `GRPCFormat` 两种。被设计为两个接口：`Carrier` 和 `propagator`，前者作为读写的封装，后者为跨进程 Span 传递的封装
+```golang
+// Carrier propagator must convert generic interface{} to something this
+// implement Carrier interface, Trace can use Carrier to represents itself.
+type Carrier interface {
+	Set(key, val string)
+	Get(key string) string
+}
+
+// propagator is responsible for injecting and extracting `Trace` instances
+// from a format-specific "carrier"
+type propagator interface {
+	Inject(carrier interface{}) (Carrier, error)
+	Extract(carrier interface{}) (Carrier, error)
+}
+```
+
+举例来说，HTTP 协议的 `Carrier` 和 `propagator` 实现如下，从代码看极易理解：
+1.	`httpCarrier` 主要通过 `http` 包进行 Header 的读写操作
+2.	`httpPropagator` 在执行 HTTP 调用时，将 HTTP 的 Header 抽象为 `httpCarrier`，而后就可以调用 `httpCarrier` 的 `Set` 或者 `Get` 方法了
+```golang
+func (h httpCarrier) Set(key, val string) {
+	http.Header(h).Set(key, val)
+}
+
+func (h httpCarrier) Get(key string) string {
+	return http.Header(h).Get(key)
+}
+
+func (httpPropagator) Inject(carrier interface{}) (Carrier, error) {
+	header, ok := carrier.(http.Header)
+	if !ok {
+		return nil, ErrInvalidCarrier
+	}
+	if header == nil {
+		return nil, ErrInvalidTrace
+	}
+	return httpCarrier(header), nil
+}
+
+func (httpPropagator) Extract(carrier interface{}) (Carrier, error) {
+	header, ok := carrier.(http.Header)
+	if !ok {
+		return nil, ErrInvalidCarrier
+	}
+	if header == nil {
+		return nil, ErrTraceNotFound
+	}
+	return httpCarrier(header), nil
+}
+```
+
+而 gRPC 的 `Carrier` 和 `propagator` 是通过 `grpc.metadata` 实现的，大同小异，这里不再详述：
+```golang
+func (grpcPropagator) Inject(carrier interface{}) (Carrier, error) {
+	md, ok := carrier.(metadata.MD)
+	if !ok {
+		return nil, ErrInvalidCarrier
+	}
+	if md == nil {
+		return nil, ErrInvalidTrace
+	}
+	return grpcCarrier(md), nil
+}
+
+func (grpcPropagator) Extract(carrier interface{}) (Carrier, error) {
+	md, ok := carrier.(metadata.MD)
+	if !ok {
+		return nil, ErrInvalidCarrier
+	}
+	if md == nil {
+		return nil, ErrTraceNotFound
+	}
+	return grpcCarrier(md), nil
+}
+```
 
 
-有些时候，使用下面这种，基于时间轴的时序图可以更好的展现 Trace（调用链）：
 
 
-每个 Span 包含以下的状态:
-
-An operation name，操作名称
-A start timestamp，起始时间
-A finish timestamp，结束时间
-Span Tag，一组键值对构成的 Span 标签集合。键值对中，键必须为 string，值可以是字符串，布尔，或者数字类型。
-Span Log，一组 span 的日志集合。
-每次 log 操作包含一个键值对，以及一个时间戳。
-键值对中，键必须为 string，值可以是任意类型。
-但是需要注意，不是所有的支持 OpenTracing 的 Tracer，都需要支持所有的值类型。
-
-SpanContext，Span 上下文对象 (下面会详细说明)
-References(Span 间关系)，相关的零个或者多个 Span（Span 间通过 SpanContext 建立这种关系）
-每一个 SpanContext 包含以下状态：
-
-任何一个 OpenTracing 的实现，都需要将当前调用链的状态（例如：trace 和 span 的 id），依赖一个独特的 Span 去跨进程边界传输
-Baggage Items，Trace 的随行数据，是一个键值对集合，它存在于 trace 中，也需要跨进程边界传输
-更多关于 OpenTracing 数据模型的知识，请参考 OpenTracing 语义标准。
-
-
-##  0x02    Trace 实现总览 && 数据结构
+##  0x03    Trace 实现总览 && 数据结构
 Kratos Tracing 的实现 [目录在此](https://github.com/go-kratos/kratos/tree/master/pkg/net/trace)，主要完成了如下工作：
 1.  实现 Trace 的接口规范
 2.  提供 Trace 对 Tracer 接口的实现，供业务及 Kratos 其他模块接入使用
-3.  本身不提供整套 Trace 数据存储，通过 `Repoter` 接口第三方 Tracing 系统（`Zipkin`、`Jaeger` 等等），前提是实现它们的上报协议
+3.  本身不提供整套 Trace 数据存储，通过 `Repoter` 接口第三方 Tracing 系统（`Zipkin`、`Jaeger` 等等），前提是实现各自的上报协议
 
+整体流程如下所示：
+![kratos-tracing-reporter](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kratos-reporter.png)
 
 几个要点 && 问题：
 1.  Trace 生成的数据何时存储？
@@ -76,14 +167,14 @@ Kratos Tracing 的实现 [目录在此](https://github.com/go-kratos/kratos/tree
 -	[config.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/dapper.go)：定义了初始化 Tracing 的方法及 [配置结构 `Config`](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/config.go#L26)，`Config` 中包含了 Tracing 数据落地的地址
 -	[context.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/context.go)：`opentracing.SpanContext` 的实例化实现
 -	[tag.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/tag.go)：包含全局 Tag 的常量字符串定义及 Tag 结构定义，Tag 生成和转化接口
--	[span.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/span.go)：
+-	[span.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/span.go)：Span 的实现
 -	[tracer.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/tracer.go)：
 -	[noop.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/noop.go)：此包实现了空的 `trace.Tracer` 和 `trace.Trace` 结构，当用户使用默认的 trace 时（不传入 `reporter`），就会使用此全局变量为 `GlobalTracer`
--	[sample.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/sample.go)
--	[dapper.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/dapper.go)
--	[report.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/report.go)
--	[propagation.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/propagation.go)
--	[marshal.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/marshal.go)
+-	[sample.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/sample.go)：
+-	[dapper.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/dapper.go)：
+-	[report.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/report.go)：
+-	[propagation.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/propagation.go)：
+-	[marshal.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/marshal.go)：
 
 ####  概念
 - `Tag`：标签，本质是 KV 字符串
@@ -93,7 +184,9 @@ Kratos Tracing 的实现 [目录在此](https://github.com/go-kratos/kratos/tree
 
 ![Tracing-basic](https://b1.sbimg.org/file/chevereto-jia/2020/10/14/GE9nY.png)
 
-从上图可以看出，一个跟踪树结构是由多个 `Span` 构成的，每个 `Span` 代表了一次方法的运行周期；
+从上图可以看出，一个跟踪树结构是由多个 `Span` 构成的，每个 `Span` 代表了一次方法的运行周期
+
+![kratos-tracing-struct]()
 
 ####  Tag 定义
 `Tag` 及 `LogField` 结构，表示最基础的 kv 结构，实现 [在此](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/tag.go)，包含了系统使用到的 `Tag` 的定义及结构体：
@@ -146,6 +239,8 @@ func TagString(key string, val string) Tag {
 
 ####  SpanContext 结构
 在介绍 Span 之前，先引入 `SpanContext` 的 [概念](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/context.go#L20)，SpanContext 保存了分布式追踪的上下文信息，包括 Trace id，Span id 以及其它需要传递到下游服务的内容。一个 OpenTracing 的实现需要将 SpanContext 通过某种序列化协议 (Wire Protocol) 在进程边界上进行传递，以将不同进程中的 Span 关联到同一个 Trace 上。对于 HTTP 请求来说，SpanContext 一般是采用 HTTP header 进行传递的。
+
+// 此外，一般和 `spanContext` 关联的 Kratos 的 `spanContext`
 
 这里 `spanContext` 也可以直观理解为上面 Tracing Tree 的一个 Tree-Node：SpanContext implements opentracing.SpanContext
 
@@ -226,7 +321,7 @@ func (s *Span) Fork(serviceName, operationName string) Trace {
 未完待续
 
 
-##  0x03  Tracer 接口及抽象
+##  0x04  Tracer 接口及抽象
 Kratos 的 Tracer 接口定义在 [这里](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/tracer.go#L56)，`Tracer` 和 `Trace`，此外，对外部提供了 [`trace.SetGlobalTracer()` 方法](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/tracer.go#L13)，用于设置自定义的 tracer 对象，如 Kratos 提供了 `zipkin` 的接入。
 
 在 [dapper.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/dapper.go) 中，完整的实现了 `Trace` 这个接口。
@@ -288,7 +383,7 @@ type Trace interface {
 看到这里，产生了一个疑问：<font color="#dd0000">`Tracer` 和 `Trace` 这两个接口的使用场景分别为如何？</font>
 
 
-##	0x04	Dapper 实现
+##	0x05	Dapper 实现
 `Dapper` 是 Kratos 提供的 `trace.Tracer` 接口的实例化实现，是一个全局结构。先看看它的 [定义](https://github.com/go-kratos/kratos/blob/master/pkg/net/trace/dapper.go#L38)：
 ```golang
 type dapper struct {
@@ -303,7 +398,7 @@ type dapper struct {
 }
 ```
 
-通过 `NewTracer` 方法创建一个 `Dapper`，注意这里需要传入 `reporter`（Kratos 提供了基于 `Zipkin` 的 `reporter` 实现），初始化`Dapper`的方法如下：
+通过 `NewTracer` 方法创建一个 `Dapper`，注意这里需要传入 `reporter`（Kratos 提供了基于 `Zipkin` 的 `reporter` 实现），初始化 `Dapper` 的方法如下：
 ```golang
 // NewTracer new a tracer.
 func NewTracer(serviceName string, report reporter, disableSample bool) Tracer {
@@ -314,7 +409,7 @@ func NewTracer(serviceName string, report reporter, disableSample bool) Tracer {
 	tags := extendTag()
 	stdlog := log.New(os.Stderr, "trace", log.LstdFlags)
 	return &dapper{
-		serviceName:   serviceName,		//服务名（dapper）
+		serviceName:   serviceName,		// 服务名（dapper）
 		disableSample: disableSample,
 		propagators: map[interface{}]propagator{
 			HTTPFormat: httpPropagator{},
@@ -323,12 +418,11 @@ func NewTracer(serviceName string, report reporter, disableSample bool) Tracer {
 		reporter: report,
 		sampler:  sampler,
 		tags:     tags,
-		pool:     &sync.Pool{New: func() interface{} { return new(Span) }},	//初始化sync.Pool，复用Span
+		pool:     &sync.Pool{New: func() interface{} { return new(Span) }},	// 初始化 sync.Pool，复用 Span
 		stdlog:   stdlog,
 	}
 }
 ```
-
 
 ####	由 Dapper 创建 Span
 ```golang
