@@ -16,8 +16,8 @@ tags:
 ##  0x01 负载均衡 && 服务发现
 
 #### 基础
-&emsp;&emsp; **负载均衡**，顾名思义，是通过某种手段将流量 / 请求分配到不通的服务器上去，保证后台的每个服务收到的请求都尽可能保持平衡 <br>
-&emsp;&emsp; **服务发现**，就是指客户端按照某种约定的方式主动去（注册中心）寻找服务，然后再连接相应的服务 <br>
+&emsp;&emsp; <font color="#dd0000"> 负载均衡 </font>，顾名思义，是通过某种手段将流量 / 请求分配到不通的服务器上去，保证后台的每个服务收到的请求都尽可能保持平衡 <br>
+&emsp;&emsp; <font color="#dd0000"> 服务发现 </font>，就是指客户端按照某种约定的方式主动去（注册中心）寻找服务，然后再连接相应的服务 <br>
 &emsp;&emsp; 关于负载均衡的构建与实现，可以看下这几篇文章：
 -   [gRPC 服务发现 & 负载均衡](https://segmentfault.com/a/1190000008672912)
 -   [gRPC Load Balancing](https://gRPC.io/blog/loadbalancing/)
@@ -56,11 +56,11 @@ tags:
 1.	构建注册中心，这里注册中心一般要求具备分布式一致性（满足 CAP 定理的 AP 或 CP）的高可用的组件集群，如 Zookeeper、Consul、Etcd 等
 2.	构建 gRPC 服务端的注册逻辑，服务启动后定时向注册中心注册自身的关键信息（一般开启新的 groutine 来完成），至少包含 IP 和端口，其他可选信息，如自身的负载信息（CPU 和 Memory）、当前实时连接数等，这些辅助信息有助于帮助系统更好的执行 LB 算法
 3.	gRPC 客户端向注册中心发出服务解析请求，注册中心将请求中关联的所有服务的信息返回给 gRPC 客户端，客户端与所有在线的服务建立起 HTTP2 长连接
-4.	gRPC 客户端发起 RPC 调用，根据 LB 均衡器中实现的负载均衡策略（gRPC 中默认提供的算法是 RoundRobin），选择其中一 HTTP2 长连接进行通信，即 LB 策略决定哪个子通道-即哪个 gRPC 服务器将接收请求
+4.	gRPC 客户端发起 RPC 调用，根据 LB 均衡器中实现的负载均衡策略（gRPC 中默认提供的算法是 RoundRobin），选择其中一 HTTP2 长连接进行通信，即 LB 策略决定哪个子通道 - 即哪个 gRPC 服务器将接收请求
 
 ##	0x02 gRPC 负载均衡的运行机制
 gRPC 提供了负载均衡实现的用户侧接口，我们可以非常方便的定制化业务的负载均衡策略，为了理解 gRPC 的负载均衡的实现机制，后续博客中我会分析下 `gRPC` 实现负载均衡的代码。
-![image](https://wx1.sbimg.cn/2020/04/29/grpc-lb-basic1.png)
+![grpc-lb-basic](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grpc-lb-basic1.png)
 1.  Resolver
 	-	解析器，用于从注册中心实时获取当前服务端的列表，同步发送给 Balancer
 2.  Balancer
