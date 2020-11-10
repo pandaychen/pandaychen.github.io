@@ -53,7 +53,7 @@ go-grpc-middleware 的 [拦截器链](https://github.com/grpc-ecosystem/go-grpc-
 
 需要开发者实现 `Limiter` 接口，此接口中包含了唯一的方法 `Limit() bool`，也很好理解，返回 `true` 表示需要被拦截（限流生效），反之请求被 Pass。可以结合常见的限流方案使用。
 
-PS：这里可以根据限流返回的结果做一些 [额外的事情](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/ratelimiter/ratelimiter.go#L48)，参考 Kratos 项目的 [BBR 限流方案](https://github.com/go-kratos/kratos/blob/master/docs/ratelimit.md)，是一款自适应限流拦截器的实现。参见[Kratos 源码分析：限流器 Limiter](https://pandaychen.github.io/2020/07/12/KRATOS-LIMITER/)一文分析。
+PS：这里可以根据限流返回的结果做一些 [额外的事情](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/ratelimiter/ratelimiter.go#L48)，参考 Kratos 项目的 [BBR 限流方案](https://github.com/go-kratos/kratos/blob/master/docs/ratelimit.md)，是一款自适应限流拦截器的实现。参见 [Kratos 源码分析：限流器 Limiter](https://pandaychen.github.io/2020/07/12/KRATOS-LIMITER/) 一文分析。
 
 ```golang
 // Limiter defines the interface to perform request rate limiting.
