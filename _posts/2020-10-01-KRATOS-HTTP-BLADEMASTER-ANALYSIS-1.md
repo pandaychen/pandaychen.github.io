@@ -49,7 +49,7 @@ tags:
 
 ##	0x03	blademaster 架构简介
 一般 http 的主要处理流程如下：
-![img](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/kratos/kratos-bm-0.png)
+![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kratos/kratos-bm-0.png)
 
 blademaster 的主要流程也是如此：
 ![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kratos/kratos-bm-1.png)
