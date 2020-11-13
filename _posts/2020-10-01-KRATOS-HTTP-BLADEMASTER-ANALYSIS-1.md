@@ -8,7 +8,6 @@ author:     pandaychen
 catalog:    true
 tags:
 	- Kratos
-	- Gin
 ---
 
 
