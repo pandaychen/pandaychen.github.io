@@ -7,7 +7,8 @@ header-img: img/super-mario.jpg
 author:     pandaychen
 catalog:    true
 tags:
-    - Kratos
+	- Kratos
+	- Gin
 ---
 
 
@@ -162,7 +163,53 @@ type Context struct {
 ##	0x07	Bm 框架的核心结构
 
 ####	总控：Engine
-<待分析>
+`Engine` 的本质是对内置的 HTTP 服务器的参数封装，是全局唯一的结构：
+```golang
+// Engine is the framework's instance, it contains the muxer, middleware and configuration settings.
+// Create an instance of Engine, by using New() or Default()
+type Engine struct {
+	RouterGroup			// 提供路由管理的对外接口，engine 包裹了 RouterGroup，可以调用 RouterGroup 的所有方法（路由管理的方法）
+
+	lock sync.RWMutex
+	conf *ServerConfig
+
+	address string
+
+	trees     methodTrees		// 包含 GET/POST/DELETE 等 9 棵树的 slice
+	server    atomic.Value                      // store *http.Server
+	metastore map[string]map[string]interface{} // metastore is the path as key and the metadata of this path as value, it export via /metadata
+
+	pcLock        sync.RWMutex
+	methodConfigs map[string]*MethodConfig
+
+	injections []injection
+
+	// If enabled, the url.RawPath will be used to find parameters.
+	UseRawPath bool
+
+	// If true, the path value will be unescaped.
+	// If UseRawPath is false (by default), the UnescapePathValues effectively is true,
+	// as url.Path gonna be used, which is already unescaped.
+	UnescapePathValues bool
+
+	// If enabled, the router checks if another method is allowed for the
+	// current route, if the current request can not be routed.
+	// If this is the case, the request is answered with 'Method Not Allowed'
+	// and HTTP status code 405.
+	// If no other Method is allowed, the request is delegated to the NotFound
+	// handler.
+	HandleMethodNotAllowed bool
+
+	allNoRoute  []HandlerFunc
+	allNoMethod []HandlerFunc
+	noRoute     []HandlerFunc
+	noMethod    []HandlerFunc
+
+	pool sync.Pool		// 复用 Context 池
+}
+```
+
+![gin-engine-struct]()
 
 ####	HTTP 上下文：Context
 [`Context` 结构](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/context.go#L35) 定义如下，从结构不难看出，`Context` 主要完成了如下工作：
@@ -199,28 +246,69 @@ type Context struct {
 }
 ```
 
-####	RouterGroup
-<待分析>
-[RouterGroup](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/routergroup.go#L28) 是对路由树的包装，所有的路由规则最终都是由它（对外提供的接口）来进行管理。
+####	路由管理：RouterGroup
+[RouterGroup](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/routergroup.go#L28) 是对路由树的包装，所有的路由规则最终都是由它（对外提供的接口）来进行管理：
 ```golang
 // RouterGroup is used internally to configure router, a RouterGroup is associated with a prefix
 // and an array of handlers (middleware).
 type RouterGroup struct {
-	Handlers   []HandlerFunc
+	Handlers   []HandlerFunc	// 中间件数组
 	basePath   string
-	engine     *Engine
+	engine     *Engine			//Engine 指针，互相调用
 	root       bool
 	baseConfig *MethodConfig
 }
 ```
 
-####	路由树：methodTree
-<待分析>
+####	路由树方法：IRouter
+[IRouters](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/routergroup.go#L14) 提供了一系列的路由方法，这些方法最终都是通过调用 `Engine.addRoute` 方法将请求的 `Handler` 注册到路由树 RouterTree 中，`IRouter` 封装了 `IRouters`，并提供了额外的 `Group` 即路由分组功能：
 ```golang
+// IRouter http router framework interface.
+type IRouter interface {
+	IRoutes		//IRouter 封装了 IRoutes
+	Group(string, ...HandlerFunc) *RouterGroup	// 额外的分组功能
+}
+
+// IRoutes http router interface.
+type IRoutes interface {
+	UseFunc(...HandlerFunc) IRoutes
+	Use(...Handler) IRoutes
+
+	Handle(string, string, ...HandlerFunc) IRoutes
+	HEAD(string, ...HandlerFunc) IRoutes
+	GET(string, ...HandlerFunc) IRoutes
+	POST(string, ...HandlerFunc) IRoutes
+	PUT(string, ...HandlerFunc) IRoutes
+	DELETE(string, ...HandlerFunc) IRoutes
+}
+```
+
+####	路由树：methodTree
+`Engine.trees` 成员存储了所有路由规则，每一个 HTTP Method 都对应唯一的 `methodTree`，树的节点按照 URL 中的 `/` 符号进行层级划分，URL 支持 `:name` 形式的名称匹配，还支持 `*subpath` 形式的 Path 通配符。此外，每个树节点 `node` 都有一个成员 `HandlersChain`，它的作用是挂接若干中间件及请求处理函数，以此构成一个请求处理链。当一个 HTTP 请求到来时，先找到对应的 `methodTree`，然后在此树查找 URL 对应的 `node`，最后，拿到对应的 `node.HandlersChain`，根据 `node.HandlersChain` 中的顺序执行，即完成了对 HTTP 的处理及响应
+```golang
+type Engine struct {
+  ...
+  trees methodTrees
+  ...
+}
+
+type methodTrees []methodTree
+
 type methodTree struct {
 	method string
-	root   *node
+	root   *node  // 树根 root
 }
+
+// 树的节点
+type node struct {
+  path string // 当前节点的 path
+  ...
+  handlers HandlersChain // 请求处理链
+  ...
+}
+
+type HandlerFunc func(*Context)
+type HandlersChain []HandlerFunc
 ```
 
 ##  0x08    Metrics 指标
