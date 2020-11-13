@@ -49,7 +49,7 @@ tags:
 
 ##	0x03	blademaster 架构简介
 一般 http 的主要处理流程如下：
-![img](https://wx1.sbimg.cn/2020/08/17/3sFae.png)
+![img](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/kratos/kratos-bm-0.png)
 
 blademaster 的主要流程也是如此：
 ![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kratos/kratos-bm-1.png)
@@ -283,7 +283,8 @@ type IRoutes interface {
 ```
 
 ####	路由树：methodTree
-`Engine.trees` 成员存储了所有路由规则，每一个 HTTP Method 都对应唯一的 `methodTree`，树的节点按照 URL 中的 `/` 符号进行层级划分，URL 支持 `:name` 形式的名称匹配，还支持 `*subpath` 形式的 Path 通配符。此外，每个树节点 `node` 都有一个成员 `HandlersChain`，它的作用是挂接若干中间件及请求处理函数，以此构成一个请求处理链。当一个 HTTP 请求到来时，先找到对应的 `methodTree`，然后在此树查找 URL 对应的 `node`，最后，拿到对应的 `node.HandlersChain`，根据 `node.HandlersChain` 中的顺序执行，即完成了对 HTTP 的处理及响应
+`Engine.trees` 成员存储了所有路由规则，每一个 HTTP Method 都对应唯一的 `methodTree`，树的节点按照 URL 中的 `/` 符号进行层级划分，URL 支持 `:name` 形式的名称匹配，还支持 `*subpath` 形式的 Path 通配符。此外，每个树节点 `node` 都有一个成员 `HandlersChain`，它的作用是挂接若干中间件及请求处理函数，以此构成一个请求处理链。
+当一个 HTTP 请求到来时，先找到对应的 `methodTree`，然后在此树查找 URL 对应的 `node`，最后，拿到对应的 `node.HandlersChain`，根据 `node.HandlersChain` 中的顺序执行，即完成了对 HTTP 的处理及响应
 ```golang
 type Engine struct {
   ...
