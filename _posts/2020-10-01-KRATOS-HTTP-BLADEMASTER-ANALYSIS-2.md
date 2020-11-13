@@ -2,7 +2,7 @@
 layout:     post
 title:      Kratos 源码分析：CGI 框架 BM （二）
 subtitle:   分析 blademaster 中的拦截器实现及设计
-date:       2020-10-01
+date:       2020-10-02
 header-img: img/super-mario.jpg
 author:     pandaychen
 catalog:    true
@@ -11,7 +11,7 @@ tags:
 ---
 
 ##  0x00    前言
-熟悉 gRPC 的开发者对拦截器 interceptor（中间件）不会陌生，`gin` 框架也提供了这种能力。看下面的 helloworld 例子：
+熟悉 gRPC 的开发者对拦截器 interceptor（中间件）不会陌生，`gin` 框架也提供了这种能力，下面代码默认启用了 `Logger()` 和 `Recovery()` 两个中间件。
 ```golang
 func main() {
     r := gin.Default()
@@ -25,15 +25,74 @@ func main() {
     }
 }
 ```
-此程序默认启用了 `2` 个中间件, 分别是 `Logger()` 和 `Recovery()`
 
-##	0x
+中间件的最大好处是 <font color="#dd0000"> 剥离非业务逻辑 </font>，通过中间件（链）的方式将一些基础组件的功能整合起来，是一种非常实用的手段。基于 `net.http` 包实现的话，中间件构造需要通过包装 `http.Handler`，再返回一个新的 `http.Handler`。
 
 ##  0x01    拦截器的执行顺序
+关于拦截器的执行顺序，先看下面 [例子](https://chai2010.gitbooks.io/advanced-go-programming-book/content/ch5-web/ch5-03-middleware.html)：
+```golang
+func hello(wr http.ResponseWriter, r *http.Request) {
+	wr.Write([]byte("hello"))
+}
 
+func timeMiddleware(next http.Handler) http.Handler {
+	// 返回 http.HandlerFunc() 包装后的方法
+	return http.HandlerFunc(func(wr http.ResponseWriter, r *http.Request) {
+		timeStart := time.Now()
 
+		// next handler
+		next.ServeHTTP(wr, r)
 
-##  0x02    bm 核心结构 Context
+		timeElapsed := time.Since(timeStart)
+		fmt.Println("timeMiddleware:", timeElapsed)
+	})
+}
+
+func logMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(wr http.ResponseWriter, r *http.Request) {
+		fmt.Println("logMiddleware:before logger")
+		// next handler
+		next.ServeHTTP(wr, r)
+
+		fmt.Println("logMiddleware:after logger")
+	})
+}
+
+func main() {
+	//customizedHandler = logger(timeout(ratelimit(helloHandler)))
+	http.Handle("/", logMiddleware(timeMiddleware(http.HandlerFunc(hello))))
+	http.ListenAndServe(":8080", nil)
+}
+```
+
+输出为：
+```javascript
+logMiddleware:before logger
+timeMiddleware: 7.628µs
+logMiddleware:after logger
+```
+
+如何理解这里的中间件包装逻辑呢？注意 `timeMiddleware` 的定义代码：
+```golang
+func(wr http.ResponseWriter, r *http.Request) {
+	timeStart := time.Now()
+
+	// next handler
+	next.ServeHTTP(wr, r)
+
+	timeElapsed := time.Since(timeStart)
+	logger.Println(timeElapsed)
+}
+```
+
+在 `net.http` 包中，只要 handler 函数签名是 `func (ResponseWriter, *Request)`，那么此 handler 和 `http.HandlerFunc()` 就有了一致的函数签名，可以将该 handler 函数进行类型转换并转为 `http.HandlerFunc`。而 `http.HandlerFunc` 实现了 `http.Handler` 这个接口。在 `net.http` 库需要调用你的 handler 函数来处理 http 请求时，会调用 `HandlerFunc()` 的 `ServeHTTP()` 函数。
+
+对于上面的例子，调用链如下图所示：
+![http-middleware](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ch6-03-middleware_flow.png)
+
+小结下，中间件要做的事情就是通过一个或多个函数对 handler 进行包装，返回一个包括了各个中间件逻辑的函数链（chains）。拦截器链在进行请求处理的时候就是不断地进行函数压栈再出栈（类似于递归的执行流）
+
+##  0x02   Context：存储中间件
 `bm.Context` 是 `bm` 框架的核心结构，从其封装的成员来看，是一个 HTTP 请求从开始到响应结束时包含的所有属性（如 KV 存储、中间件数组等）。以下是 bm 框架 中 [`Context` 对象结构](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/context.go)：
 ```golang
 // Context is the most important part. It allows us to pass variables between
@@ -549,3 +608,4 @@ func Example() {
 ##  0x06    参考
 -   [明白了，原来 Go web 框架中的中间件都是这样实现的](https://colobu.com/2019/08/21/decorator-pattern-pipeline-pattern-and-go-web-middlewares/)
 -   [blademaster 的项目代码](https://github.com/go-kratos/kratos/tree/master/pkg/net/http/blademaster)
+-	[Go 语言高级编程 - 5.3 中间件](https://chai2010.gitbooks.io/advanced-go-programming-book/content/ch5-web/ch5-03-middleware.html)
