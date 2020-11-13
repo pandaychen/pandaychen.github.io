@@ -207,7 +207,7 @@ type Context struct {
 
 ##  0x05    Bm 框架的指标 Metrics
 blademaster 默认提供了如下几个维度的 metrics[监控采集数据](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/metrics.go)：
--   `_metricServerReqDur `：`NewHistogramVec` 类型，含义是服务端处理请求的延迟范围（区间）：`http server requests duration(ms)`，统计维度为 `path/caller/method`，单位为 `ms`
+-   `_metricServerReqDur`：`NewHistogramVec` 类型，含义是服务端处理请求的延迟范围（区间）：`http server requests duration(ms)`，统计维度为 `path/caller/method`，单位为 `ms`
 -	`_metricServerReqCodeTotal`：
 
 ####	Metrics 的一个细节

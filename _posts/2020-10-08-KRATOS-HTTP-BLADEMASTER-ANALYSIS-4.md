@@ -19,6 +19,18 @@ tags:
 在 `bm.Engine` 成员中，`trees` 是一个数组，针对框架支持的每一种方法，都会创建一个节点。例如 GET、POST 是 trees 的两个元素。
 在 Gin 框架中，路由规则被分成了最多 9 棵前缀树，每一个 HTTP Method 对应一棵「前缀树」，树的节点按照 URL 中的 / 符号进行层级划分，URL 支持 :name 形式的名称匹配，还支持 *subpath 形式的路径通配符 。
 
+####    路由冲突
+因为httprouter中使用的是显式匹配，所以在设计路由的时候需要规避一些会导致路由冲突的情况，例如：
+conflict:
+GET /user/info/:name
+GET /user/:id
+
+no conflict:
+GET /user/info/:name
+POST /user/:id
+
+简单来讲的话，如果两个路由拥有一致的http方法(指 GET/POST/PUT/DELETE)和请求路径前缀，且在某个位置出现了A路由是wildcard（指:id这种形式）参数，B路由则是普通字符串，那么就会发生路由冲突。路由冲突会在初始化阶段直接panic：
+
 每个节点都会挂接若干请求处理函数构成一个请求处理链 HandlersChain。当一个请求到来时，在这棵树上找到请求 URL 对应的节点，拿到对应的请求处理链来执行就完成了请求的处理。
 
 ```golang
