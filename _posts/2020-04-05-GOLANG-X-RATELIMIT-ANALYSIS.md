@@ -18,11 +18,11 @@ tags:
 从上一篇文章 [JuJu-Ratelimit 限速算法实现分析](https://pandaychen.github.io/2020/04/02/JUJU-RATELIMIT-ANALYSIS/) 的总结，令牌桶的实现本质就是利用了 <font color="#dd0000">Token 数可以和时间跨度相互转化</font> 的原理。需要有如下关键信息：
 
 -	生产 Token 令牌的速率：一秒钟可以产生多少 Token（生产一个 Token 需要多长时间单位），记为 $$p$$（`1s`）
--	Token 令牌桶的大小 $$Bucket_{size}$$
+-	Token 令牌桶的大小 $Bucket_{size}$
 
 基于上面这两个基础信息，容易得到：
-1. 生成 $$N$$ 个新的 Token 一共需要的时间单位：$$\frac{N}{p}*1s$$
-2. 给定一段时长 $$Duration$$，这段时间一共可以生成多少个 Token，$$\frac{Duration}{1s}*p$$
+1. 生成 $N$ 个新的 Token 一共需要的时间单位：$\frac{N}{p}*1s$
+2. 给定一段时长 $$Duration$$，这段时间一共可以生成多少个 Token，$\frac{Duration}{1s}*p$
 
 
 ##  0x02  参考
