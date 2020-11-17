@@ -15,9 +15,23 @@ tags:
 ##  0x00    前言
 这篇文章来分析下标准库 [time/rate](https://github.com/golang/time/blob/master/rate/rate.go) 的使用及实现细节，此库同样基于令牌桶（Token Bucket）实现了限流。
 
+##	0x01	time/rate 的使用
 
-##	0x01	rate/limiter 的使用
+####	创建限流器
+使用 `NewLimiter(r Limit, b int)` 创建限速器，令牌桶容量为 `b`。初始化状态下桶是满的，即桶里装有 `b` 个令牌，以后再以每秒往里面填充 `r` 个令牌。有两种特例：
+1.	允许声明容量为 0 的限速器，此时将以拒绝所有事件操作
+2.	就是 `r == Inf` 时，此时 b 参数将被忽略（`const Inf = Limit(math.MaxFloat64)`），即令牌桶无限大
 
+####	限流判定
+time/rate 库提供了三类方法（其中 `AllowN`、`ReserveN` 和 `WaitN` 允许消费 n 个令牌）：
+-	`Wait/WaitN`：当没有可用或足够的 Token 时，将阻塞等待 Token 或者超时取消（推荐实际程序中使用这个方法）
+-	`Allow/AllowN`：当没有可用或足够的 Token 时，返回 `false`
+-	`Reserve/ReserveN` 当没有可用或足够的 Token 时，返回 `Reservation` 对象，和要等待多久才能获得足够的 Token（给用户的控制权是最多的）
+
+注意 `Wait` 方法中的阻塞等待，因为令牌桶的实现是基于时间戳的（等的越久 Token 越多），`Wait` 会返回阻塞等待的时间跨度，在此之后就可以拿到足够的令牌，配和 `context.Context` 使用效果极好。
+
+####	使用例子
+以上使用例子 [见此]()
 
 ##	0x02	令牌桶的本质
 从上一篇文章 [JuJu-Ratelimit 限速算法实现分析](https://pandaychen.github.io/2020/04/02/JUJU-RATELIMIT-ANALYSIS/) 的总结，令牌桶的实现本质就是利用了 <font color="#dd0000">Token 数可以和时间跨度相互转化 </font> 的原理。需要有如下关键信息：
@@ -246,7 +260,7 @@ func (lim *Limiter) AllowN(now time.Time, n int) bool {
 
 ####	Reserve 系列
 
-##	0x06	Reservation结构
+##	0x06	Reservation 结构
 ```golang
 // A Reservation holds information about events that are permitted by a Limiter to happen after a delay.
 // A Reservation may be canceled, which may enable the Limiter to permit additional events.
