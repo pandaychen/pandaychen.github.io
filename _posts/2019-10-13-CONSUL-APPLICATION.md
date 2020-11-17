@@ -12,11 +12,9 @@ tags:
 ---
 
 ##  0x00    前言
-
-业余时间利用 gRPC`+`Consul 实现的服务发现一个项目 [grpclb2consul](https://github.com/pandaychen/grpclb2consul/)。这篇文章，总结下我在开发和 Consul 使用过程中的一些经验 <br>
+业余时间利用 gRPC 与 Consul 实现的服务发现项目 [grpclb2consul](https://github.com/pandaychen/grpclb2consul/)。这篇文章，总结下我在开发和 Consul 使用过程中的一些经验 <br>
 
 ##  0x01    Consul 介绍
-
 目前我使用到的 Consul 功能，服务发现与注册（含健康检查）/ 分布式 KeyValue 存储 / 配置中心 / DNS / 分布式锁, 总而言之，只有理解了 Consul 的设计思路，才能熟练的应用它。（Consul 应用思路和 Etcd 真的很不一样）<br>
 
 Consul 和 Etcd 的功能是有重叠的（有很多文章都有对二者进行比较），不过 Etcd 仅仅是一个 CP 的 KV 存储，而 Consul 更像是一个微服务开发的完整套件。Consul 的官网介绍：<br>
