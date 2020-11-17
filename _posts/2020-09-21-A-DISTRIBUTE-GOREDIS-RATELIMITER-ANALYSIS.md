@@ -2,7 +2,7 @@
 layout:     post
 title:      分布式限流：基于 Redis 实现
 subtitle:   基于 Redis 实现的分布式限流方案总结
-date:       2020-11-21
+date:       2020-09-21
 author:     pandaychen
 catalog:    true
 tags:
@@ -93,7 +93,7 @@ local time = redis.call('time')
 -- time[1] 返回的为秒，time[2] 为 ms
 local now_micros = tonumber(time[1]) * 1000000 + tonumber(time[2])
 
--- 查询获取令牌是否超时（传入参数，单位为 ms）
+-- 查询获取令牌是否超时（传入参数，单位为 微秒）
 if (ARGV[2] ~= nil) then
     -- 获取令牌的超时时间
     local timeout_micros = tonumber(ARGV[2])
@@ -106,33 +106,47 @@ end
 -- 当前存储的令牌数
 local stored_permits = tonumber(redis.call('hget', key, 'stored_permits') or 0)
 -- 添加令牌的时间间隔（1000000ms 为 1s）
+-- 计算生产 1 个令牌需要多少微秒
 local stable_interval_micros = 1000000 / permits_per_second
 
 -- 补充令牌
 if (now_micros> next_free_ticket_micros) then
     local new_permits = (now_micros - next_free_ticket_micros) / stable_interval_micros
     stored_permits = math.min(max_permits, stored_permits + new_permits)
+    -- 补充后，更新下次可以获取令牌的时间
     next_free_ticket_micros = now_micros
 end
 
 -- 消耗令牌
 local moment_available = next_free_ticket_micros
+--  两种情况：required_permits<=stored_permits 或者 required_permits>stored_permits
 local stored_permits_to_spend = math.min(required_permits, stored_permits)
 local fresh_permits = required_permits - stored_permits_to_spend;
+-- 如果 fresh_permits>0，说明令牌桶的剩余数目不够了，需要等待一段时间
 local wait_micros = fresh_permits * stable_interval_micros
 
 --  Redis 提供了 redis.replicate_commands() 函数来实现这一功能，把发生数据变更的命令以事务的方式做持久化和主从复制，从而允许在 Lua 脚本内进行随机写入
 redis.replicate_commands()
+--  存储剩余的令牌数：桶中剩余的数目 - 本次申请的数目
 redis.call('hset', key, 'stored_permits', stored_permits - stored_permits_to_spend)
 redis.call('hset', key, 'next_free_ticket_micros', next_free_ticket_micros + wait_micros)
 redis.call('expire', key, 10)
 
 -- 返回需要等待的时间长度
+-- 返回为 0（moment_available==now_micros）表示桶中剩余的令牌足够，不需要等待
 return moment_available - now_micros
 ```
 
 简单分析上上述代码，传入参数为：
-- key：限流 key
+- `key`：限流 key
+- `max_permits`：最大存储的令牌数
+- `permits_per_second`：每秒钟产生的令牌数
+- `required_permits`：请求的令牌数
+- `timeout_micros`：获取令牌的超时时间（非必须）
+
+整个代码的运行流程如下：
+![redis-token-bucket-dataflow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/limiter/redis-token-bucket-dataflow.png)
+
 
 ##  0x0 Go-Redis 提供的分布式限流库
 go-redis 官方提供了一个分布式限频库：[Rate limiting for go-redis：redis_rate](https://github.com/go-redis/redis_rate)
