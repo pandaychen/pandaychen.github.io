@@ -12,7 +12,7 @@ tags:
 ---
 
 ##  0x00	前言
-本文梳理下基于 Redis 实现的 分布式限流的策略和算法。这里主要关注 "分布式" 的场景，主要的实现算法也无非以下几种：
+本文梳理下基于 Redis 实现的 分布式限流的策略和算法。这里主要关注 <font color="#dd0000"> 分布式 </font> 的场景，主要的实现算法也无非以下几种：
 -	计数器
 -	固定窗口
 -	滑动窗口
@@ -146,6 +146,53 @@ return moment_available - now_micros
 
 整个代码的运行流程如下：
 ![redis-token-bucket-dataflow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/limiter/redis-token-bucket-dataflow.png)
+
+
+####    固定窗口
+此算法来自于 [go-redis/redis_rate:v7](https://github.com/go-redis/redis_rate/blob/v7/rate.go#L60) 版本提供的实现，使用 [示例在此](https://github.com/go-redis/redis_rate/blob/v7/README.md)，主要的限速逻辑代码见下：
+
+![redis-rate-fixed-window](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/limiter/redis-rate-window-fixed.png)
+
+在此算法中，使用 `redisPrefix:name-slot` 做固定窗口的标识 key（`allowName` 方法），其中 `slot` 为当前时间戳（秒）除以窗口时延区间值 `udur`；在 `AllowN` 方法实现中，`delay` 的计算出的值是在一个 `dur` 范围内浮动的（由 `utime` 决定）；最终使用 [`INCRBY` 指令](http://redisdoc.com/string/incrby.html) 统计窗口（即 key：`redisPrefix:name-slot`）已使用流量 `count`，并且同时设置 `redisPrefix:name-slot` 在此窗口结束后自动过期
+
+```golang
+func (l *Limiter) AllowN(
+	name string, maxn int64, dur time.Duration, n int64,
+) (count int64, delay time.Duration, allow bool) {
+	udur := int64(dur / time.Second)        // 注意，将 duration 转为整数，不可以小于 1s
+	utime := time.Now().Unix()
+	slot := utime / udur    // 这里的除法有溢出风险
+	delay = time.Duration((slot+1)*udur-utime) * time.Second
+	if l.Fallback != nil {
+		allow = l.Fallback.Allow()
+	}
+	name = allowName(name, slot)
+	count, err := l.incr(name, dur, n)
+	if err == nil {
+		allow = count <= maxn
+	}
+	return count, delay, allow
+}
+
+//allowName 使用 name+slot 作为 redis 的 key
+func allowName(name string, slot int64) string {
+	return fmt.Sprintf("%s:%s-%d", redisPrefix, name, slot)
+}
+
+//IncrBy+expire 操作合并执行
+func (l *Limiter) incr(name string, period time.Duration, n int64) (int64, error) {
+    var incr *redis.IntCmd
+    // 使用 pipeline 批量操作
+	_, err := l.redis.Pipelined(func(pipe redis.Pipeliner) error {
+		incr = pipe.IncrBy(name, n)
+		pipe.Expire(name, period+30*time.Second)
+		return nil
+	})
+
+	rate, _ := incr.Result()
+	return rate, err
+}
+```
 
 
 ##  0x0 Go-Redis 提供的分布式限流库
