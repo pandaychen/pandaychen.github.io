@@ -16,11 +16,11 @@ tags:
 ##  0x01  Jekyll 支持 Latex 的设置
 
 1.  第一步，将 `_config.yml` 中的 `markdown` 修改为
-```js
+``` js
 markdown: kramdown
 ```
 2. 第二步，在 `header` 文件中添加引用和设置代码，也就是_include/header.html 中
-```js
+``` js
   <script type="text/x-mathjax-config">
     MathJax.Hub.Config({
       tex2jax: {
@@ -33,17 +33,18 @@ markdown: kramdown
 ```
 
 ##  0x02  数学公式的例子
-1、<br>
-$E=mc^2$
+1.$E=mc^2$
 
-2、<br>
+2.
+
 $$
 \begin{aligned} \dot{x} &= \sigma(y-x) \\
 \dot{y} &= \rho x - y - xz \\
 \dot{z} &= -\beta z + xy \end{aligned}
 $$
 
-3、<br>
+3.
+
 $$
 R_{\mu \nu} - {1 \over 2}g_{\mu \nu}\,R + g_{\mu \nu} \Lambda
 = {8 \pi G \over c^4} T_{\mu \nu}
