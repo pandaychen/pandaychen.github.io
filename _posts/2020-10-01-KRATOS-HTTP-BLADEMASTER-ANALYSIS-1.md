@@ -391,3 +391,4 @@ func (engine *Engine) addRoute(method, path string, handlers ...HandlerFunc) {
 -   [blademaster 官方文档](https://github.com/go-kratos/kratos/blob/master/doc/wiki-cn/blademaster.md)
 -   [blademaster](https://github.com/go-kratos/kratos/blob/master/doc/wiki-cn/blademaster-mid.md)
 -   [go 语言框架 gin 的中文文档](https://github.com/skyhee/gin-doc-cn)
+-   [fiber : Express inspired web framework written in Go](https://github.com/gofiber/fiber)
