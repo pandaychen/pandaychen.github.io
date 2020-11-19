@@ -160,7 +160,7 @@ func main(){
 
 ####  	Docker-Container
 在 Docker-container 中，`runtime.GOMAXPROCS()` 获取的是 <font color="#dd0000"> 宿主机的 CPU 核数 </font>。`P` 值设置过大，导致生成线程过多，会增加上线文切换的负担，导致严重的上下文切换，浪费 CPU。
-所以，在 Docker-container 中, Golang 设置的 GOMAXPROCS 并不准确。
+所以，在 Docker-container 中, Golang 设置的 `GOMAXPROCS` 并不准确。
 
 ####    Kubernetes
 Kubernetes Pod 中的结果同 Docker，在 Kubernetes 集群中，如果采用如此设置，会导致 Node（宿主机）中的线程数过多。在笔者的 Kubernetes 集群中，有 3 个 Node 节点，总核数约 36 核：
@@ -170,7 +170,7 @@ CPU: 8.95/35.97 核
 ```
 
 创建的 Pod 参数中，限制 Pod 的 CPU 核数是 1（limits），采用了 `GOMAXPROCS` 设置后，发现 Pod 容器中的线程数量超过 36，集群中的线程总数也远超过预期。
-```yaml
+```bash
 resources:
 	limits:
 		cpu: "1"
@@ -192,7 +192,7 @@ func main() {
 }
 ```
 
-##  0X06	参考
+##  0x06	参考
 -	[详尽干货！从源码角度看 Golang 的调度（上）](https://www.infoq.cn/article/r6wzs7bvq2er9kuelbqb)
 -   [管理处理器的亲和性（affinity）](https://www.ibm.com/developerworks/cn/linux/l-affinity.html)
 -   [Go 调度器: M, P 和 G](https://colobu.com/2017/05/04/go-scheduler/)
