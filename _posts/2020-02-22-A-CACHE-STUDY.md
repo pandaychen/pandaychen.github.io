@@ -44,7 +44,7 @@ Cache 根据使用可分为远程 Cache （Redis/Memcache）和本地 Cache 两�
 在项目中，一般常规的应对策略有如下几种：
 
 1.	使用 Cache 集群，保证缓存服务的高可用（公司内一般使用托管集群，比如 Redis，可选主从 + Sentinel 或者 Redis Cluster 方式）
-2.	分级多层缓存，比如对于热点数据，使用<>带过期机制的本地缓存代替一部分 Redis 缓存的功能
+2.	分级多层缓存，比如对于热点数据，使用 <font color="#dd0000"> 带过期机制的本地缓存代替一部分 Redis 缓存的功能 </font>
 3.	合理的熔断及限流保护机制，比如 Hystrix 熔断，Google 的自适应熔断策略等，是避免缓存雪崩非常有效的策略
 4.	合理的使用 Singleflight 机制
 
@@ -67,7 +67,7 @@ fn = func() (interface{}, error) {
 data, err = g.Do(ApiWithParams, fn)
 ```
 
-singleflight 的使用方式如下：
+singleflight 的使用方式如下：<br>
 下面例子开启了 100 个 goroutine，只有 1 个能进入，其他 goroutine 都只能阻塞等待结果：
 ```golang
 func main() {
