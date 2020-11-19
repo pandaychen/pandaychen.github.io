@@ -8,8 +8,8 @@ header-img: img/golang-tools-fun.png
 catalog: true
 category:   false
 tags:
-	- GOMAXPROCS
-	- GOLANG
+    - GOMAXPROCS
+    - GOLANG
 ---
 
 ##  0x00    前言
