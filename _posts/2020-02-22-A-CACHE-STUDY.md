@@ -42,13 +42,14 @@ Cache 根据使用可分为远程 Cache （Redis/Memcache）和本地 Cache 两�
 
 ####	常规的保护策略
 在项目中，一般常规的应对策略有如下几种：
-1、使用 Cache 集群，保证缓存服务的高可用（公司内一般使用托管集群，比如 Redis，可选主从 + Sentinel 或者 Redis Cluster 方式）
-2、分级多层缓存，比如对于热点数据，使用本地缓存代替一部分 Redis 缓存的功能
-3、合理的熔断及限流保护机制，比如 Hystrix 熔断，Google 的自适应熔断策略等，是避免缓存雪崩非常有效的策略
-4、合理的使用 Singleflight 机制
+
+1.	使用 Cache 集群，保证缓存服务的高可用（公司内一般使用托管集群，比如 Redis，可选主从 + Sentinel 或者 Redis Cluster 方式）
+2.	分级多层缓存，比如对于热点数据，使用<>带过期机制的本地缓存代替一部分 Redis 缓存的功能
+3.	合理的熔断及限流保护机制，比如 Hystrix 熔断，Google 的自适应熔断策略等，是避免缓存雪崩非常有效的策略
+4.	合理的使用 Singleflight 机制
 
 ####    Singleflight 机制
-最初看到此方案是在 [groupcache 的实现](https://github.com/golang/groupcache/tree/master/singleflight) 中，它的使用场景是，在多个并发请求触发的回调操作里，只有第一个回调方法被执行，其余请求（当然需要落在第一个回调方法的时间窗口内）阻塞等待第一个被执行的那个回调操作完成后，直接取其结果，以此保证同一时刻只有一个回调方法在执行，以达到防止缓存击穿。Singleflight 常用于下面的场景：
+最初看到此方案是在 [groupcache 的实现](https://github.com/golang/groupcache/tree/master/singleflight) 中，它的使用场景是，在多个并发请求触发的回调操作里，只有第一个回调方法被执行，其余请求（当然需要落在第一个回调方法的时间窗口内）阻塞等待第一个被执行的那个回调操作完成后，直接取其结果，以此保证同一时刻只有一个回调方法在执行，以达到防止缓存击穿。Singleflight 常用于下面的场景：<br>
 1、缓存失效时的保护性更新 <br>
 ```golang
 if (/* 缓存失效 */) {
@@ -66,7 +67,8 @@ fn = func() (interface{}, error) {
 data, err = g.Do(ApiWithParams, fn)
 ```
 
-singleflight 的使用方式如下，下面 100 个 goroutine，只有 1 个能进入，其他 goroutine 都只能阻塞等待结果：
+singleflight 的使用方式如下：
+下面例子开启了 100 个 goroutine，只有 1 个能进入，其他 goroutine 都只能阻塞等待结果：
 ```golang
 func main() {
         var singleSetCache singleflight.Group
