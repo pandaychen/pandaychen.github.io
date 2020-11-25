@@ -19,7 +19,7 @@ tags:
 
 笔者基于此包实现过如下的 SSH 工程：
 1.  SSH 运维客户端
-2.  SSH-Proxy 代理（基于中间人会话劫持 `+` 转发控制与审计）
+2.  SSH-Proxy 代理（基于中间人会话劫持 + 转发控制与审计）
 3.  SSH honeypot
 
 ##  0x01    SSH 架构
@@ -393,9 +393,10 @@ go func() {
 以上，我们就实现了一个简单的交互式的 SSH Server。
 
 ##  0x03    构建 SSH 客户端
-SSH 客户端常见的实现有交互式和命令执行，其中命令执行又分为交互式执行和一般的 bash 执行，比如 `gdb`、`top` 等就属于交互式命令，而 `ls` 就属于一般的 bash。
+SSH 客户端常见的实现有交互式 tty-bash 和命令执行，其中命令执行又分为交互式 command 和一般的 bash 命令，比如 `gdb`、`top` 等就属于交互式命令，而 `ls` 就属于一般的 bash 执行。
 
 ####    交互模式
+此模式为最常用的场景，客户端连接上服务器并获取了 tty-bash：
 ```golang
 func main() {
         ce := func(err error, msg string) {
@@ -409,9 +410,7 @@ func main() {
                         User: "root",
                         Auth: []ssh.AuthMethod{ssh.Password("xxx")},
                 })
-        ce(err, "dial")
         session, err := client.NewSession()
-        ce(err, "new session")
         defer session.Close()
         session.Stdout = os.Stdout
         session.Stderr = os.Stderr
@@ -427,21 +426,106 @@ func main() {
         termState, _ := terminal.MakeRaw(termFD)
         defer terminal.Restore(termFD, termState)
         err = session.RequestPty("xterm-256color", h, w, modes)
-        ce(err, "request pty")
         err = session.Shell()
-        ce(err, "start shell")
         err = session.Wait()
-        ce(err, "return")
 }
 ```
 
 ####    远程命令模式
+远程命令模式分为两种：
+1、一般的命令执行，执行完即返回结果 <br>
+```golang
+func main{
+    //...session 的生成代码见上
+    session.Stdout = os.Stdout
+    session.Stderr = os.Stderr
+    err = session.Run(command)
+    if err != nil {
+        fmt.Printf("\n[ERROR]Command [%s] run error(%s)", command, err.Error())
+    } else {
+        //fmt.Println(b.String())
+        return "", nil
+    }
+    //...
+}
+```
+2、交互式指令，如 `top`、`gdb` 等等，与上面最大的不同，是需要 `tty` 的支持（需要交互式输入输出的环境）
+```golang
+func main{
+    //...session 的生成代码见上
+    fd := int(os.Stdin.Fd())
+    oldState, err := terminal.MakeRaw(fd)
+    if err != nil {
+        panic(err)
+    }
+    defer terminal.Restore(fd, oldState)
 
-####    sshAgent
+    session.Stdout = os.Stdout
+    session.Stderr = os.Stdout
+    session.Stdin = os.Stdin
+
+    termWidth, termHeight, err := terminal.GetSize(fd)
+    if err != nil {
+        return "", err
+    }
+    modes := ssh.TerminalModes{
+        ssh.ECHO:          1,
+        ssh.TTY_OP_ISPEED: 14400,
+        ssh.TTY_OP_OSPEED: 14400,
+    }
+
+    if err := session.RequestPty("xterm", termHeight, termWidth, modes); err != nil {
+        return "", err
+    }
+
+    err = session.Run(command)
+    if err != nil {
+        return "", err
+    }
+    //...
+}
+```
+
+####    sshAgent 机制
+![ssh-agent](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/ssh_agent.gif)
+
+[sshAgent](https://en.wikipedia.org/wiki/Ssh-agent) 严格的说是一个客户端认证机制，客户端通过和 `SSH_AUTH_SOCK` 这个环境变量指向的 Unix Domain Socket（本质上是 Sshd 建立的）通信，以获取其存储的私钥（实际也是保存在内存中，用户不可见），以此作为 ssh 的客户端验证方式：
+```golang
+func SSHAgent() ssh.AuthMethod {
+	if sshAgent, err := net.Dial("unix", os.Getenv("SSH_AUTH_SOCK")); err == nil {
+		return ssh.PublicKeysCallback(agent.NewClient(sshAgent).Signers)
+	}
+	return nil
+}
+
+func main(){
+    //...
+    sshConfig := &ssh.ClientConfig{
+        User: "login_name",
+        Auth: []ssh.AuthMethod{
+            SSHAgent()
+        },
+    }
+    //...
+}
+```
+
+在此之前，需要在机器上开启 `ssh-agent` 功能及通过 `ssh-add` 向其中添加私钥：
+```bash
+[root@VM_0_7_centos ~]# eval `ssh-agent -s`
+Agent pid 26303
+[root@VM_0_7_centos ~]# ssh-add ~/.ssh/id_rsa
+Identity added: /root/.ssh/id_rsa (/root/.ssh/id_rsa)
+Certificate added: /root/.ssh/id_rsa-cert.pub ()
+[root@VM_0_7_centos ~]# env|grep SSH_AUTH_SOCK
+SSH_AUTH_SOCK=/tmp/ssh-IcFeG5r3XuQA/agent.26302
+```
 
 ##	0x04	其他应用
 基于 golang-SSH 库还有很多有趣的应用，这里列举几个：<br>
-[SSH Tron](https://github.com/zachlatta/sshtron)：基于此包实现了一个在线多人贪吃蛇服务
+-   [SSH Tron](https://github.com/zachlatta/sshtron)：此包实现了一个在线多人贪吃蛇服务
+-   [Chat over SSH](https://github.com/shazow/ssh-chat)：基于 ssh 的聊天工具
+-   [Easy SSH servers in Golang](https://github.com/gliderlabs/ssh)：一个通用的 sshd 框架实现
 
 
 ##	0x05	几个细节问题
@@ -559,8 +643,11 @@ func (s *Session) Setenv(name, value string) error {
 本文介绍了使用 golang-SSH 包构造 SSHD、SSH 的一般方法，利用此包还可以完成其他一些有趣的项目。
 
 ##  0x07    参考
+-   [Writing a replacement to OpenSSH using Go (1/2)](https://scalingo.com/blog/writing-a-replacement-to-openssh-using-go-12.html)
 -   [Writing a replacement to OpenSSH using Go (2/2)](https://scalingo.com/blog/writing-a-replacement-to-openssh-using-go-22.html)
 -   [Simple SSH Harvester in Go](https://parsiya.net/blog/2017-12-29-simple-ssh-harvester-in-go/)
 -   [Go ssh 交互式执行命令](https://mritd.me/2018/11/09/go-interactive-shell/)
 -   [SSH Client connection in Golang](https://blog.ralch.com/tutorial/golang-ssh-connection/)
 -   [Writing an SSH server in Go](https://blog.gopheracademy.com/advent-2015/ssh-server-in-go/)
+-   [SSH Agent Explained](https://smallstep.com/blog/ssh-agent-explained/)
+-   [SSH Agent Forwarding 原理](https://blog.csdn.net/sdcxyz/article/details/41487897)
