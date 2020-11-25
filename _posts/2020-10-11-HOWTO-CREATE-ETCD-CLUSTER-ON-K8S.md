@@ -20,14 +20,16 @@ tags:
 4.  `Pod` 共享数据（持久化）存储
 
 ##  0x01 Kubernetes 的 StatefulSets
-[`StatefulSets`](https://kubernetes.io/zh/docs/concepts/workloads/controllers/statefulset/) 是为了有状态的应用和分布式系统设计的，核心就是稳定 </font>，`StatefulSets` 的特点如下：
-  tefulset 名称)-$(序号)`
+[`StatefulSets`](https://kubernetes.io/zh/docs/concepts/workloads/controllers/statefulset/) 是为了有状态的应用和分布式系统设计的，<font color="#dd0000"> 核心就是稳定 </font>，`StatefulSets` 的特点如下：
+1.  `Pod` 一致性：包含次序（启动、停止次序）、网络一致性。此一致性与 `Pod` 相关，与被调度到哪个 `Node` 节点无关
+2.  稳定的次序：对于 `N` 个副本的 `StatefulSet`，每个 `Pod` 都在 `[0，N)` 的范围内分配一个数字序号，且是唯一的
+3.  稳定的网络：`Pod` 的 `hostname` 模式为 `(statefulset 名称)-(序号)`
 4.  稳定（持久）的存储：通过 `VolumeClaimTemplate` 为每个 `Pod` 创建一个 `PV`。删除、减少副本，不会删除相关的卷
 
 ##  0x02  PV Vs PVC Vs StorageClass
 - `PV`：PersistentVolume，集群级别的资源，由 集群管理员 or External Provisioner 创建。`PV` 的生命周期独立于使用 `PV` 的 `Pod`，`PV` 的 `.Spec` 中保存了存储设备的详细信息
-- `PVC`：PersistentVolumeClaim，命名空间（Namespace）级别的资源，由 用户 or `StatefulSet` 控制器（根据 `VolumeClaimTemplate`） 创建。`PVC` 类似于 `Pod`，`Pod` 消耗 `Node` 资源，`PVC` 消耗 `PV` 资源。`Pod` 可以请求特定级别的资源（CPU 和内存），而 `PVC` 可以请求特定存储卷的大小及访问模式（Access Mode）；
-- `StorageClass`：StorageClass 是集群级别的资源，由集群管理员创建。：StorageClass 为管理员提供了一种动态提供存储卷的类模板，：StorageClass 中的 `.Spec` 中详细定义了存储卷 `PV` 的不同服务质量级别、备份策略等等
+- `PVC`：PersistentVolumeClaim，命名空间（Namespace）级别的资源，由 用户 or `StatefulSet` 控制器（根据 `VolumeClaimTemplate`） 创建。`PVC` 类似于 `Pod`，`Pod` 消耗 `Node` 资源，`PVC` 消耗 `PV` 资源。`Pod` 可以请求特定级别的资源（CPU 和内存），而 `PVC` 可以请求特定存储卷的大小及访问模式（Access Mode）
+- `StorageClass`：StorageClass 是集群级别的资源，由集群管理员创建。它为管理员提供了一种动态提供存储卷的类模板，其中的 `.Spec` 中详细定义了存储卷 `PV` 的不同服务质量级别、备份策略等等
 
 通俗点说，PersistentVolume 是对存储资源创建和使用的抽象，使得存储作为集群中的资源管理，存储资源提供者和提供存储容量；PersistentVolumeClaim 让用户不需要关心具体的 Volume 实现细节，是存储资源的消费者和消费容量。PersistentVolume 与 PersistentVolumeClaim 是绑定关系。
 
@@ -144,7 +146,7 @@ status:
 通过如下配置文件，在 Tencent Kubernetes 上部署了一个可用的 Etcd 集群，注意几点：
 1.  本配置文件部署为一个 `CLUSTER_SIZE=3` 的集群
 2.  数据目录的设定 `--data-dir /var/run/etcd/${IP}/default.etcd`，采用独立的 IP 在 `NFS` 上分隔
-3.  `spec.ClusterIP` 必须为 `None`，采用 Headless Service 方式部署，访问采用 DNS 方式（`${SET_NAME}-${i}.${SET_NAME}.default.svc.cluster.local`）
+3.  `spec.ClusterIP` 必须为 `None`，采用 Headless Service 方式部署，访问采用 DNS 方式（`{SET_NAME}-{i}.{SET_NAME}.default.svc.cluster.local`）
 
 TKE 上的完整的配置文件如下：
 ```yaml
@@ -235,10 +237,9 @@ spec:
         server: 172.16.0.4
 ```
 
-上面的 yaml 配置可以拆分为 `kind: Service` 和 `kind: StatefulSet` 两个部分，配置中 `${SET_NAME}` 的值必须和 `StatefulSet` 的 `.metadata.name` 一致。在集群内部可以通过 `http://${SET_NAME}-${i}.${SET_NAME}.${CLUSTER_NAMESPACE}:2379` 访问 Etcd 集群了。如果需要从外部（VPN 内网或者公网）访问集群，那么需要结合 NodePort 或 Ingress 来暴露对外端口。
+上面的 yaml 配置可以拆分为 `kind: Service` 和 `kind: StatefulSet` 两个部分，配置中 `{SET_NAME}` 的值必须和 `StatefulSet` 的 `.metadata.name` 一致。在集群内部可以通过 `http://{SET_NAME}-{i}.{SET_NAME}.{CLUSTER_NAMESPACE}:2379` 访问 Etcd 集群了。如果需要从外部（VPN 内网或者公网）访问集群，那么需要结合 NodePort 或 Ingress 来暴露对外端口。
 
 此外，[使用 Statefulset 在 Kubernetes 集群中部署 Etcd 集群](https://wilhelmguo.cn/blog/post/william/%E4%BD%BF%E7%94%A8Statefulset%E5%9C%A8Kubernetes%E9%9B%86%E7%BE%A4%E4%B8%AD%E9%83%A8%E7%BD%B2etcd%E9%9B%86%E7%BE%A4) 提供了一个基于 Ceph Block Device 的 Etcd 搭建实现。
-
 
 
 ####  扩缩容
