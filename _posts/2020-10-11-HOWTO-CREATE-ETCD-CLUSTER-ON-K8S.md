@@ -20,7 +20,7 @@ tags:
 4.  `Pod` 共享数据（持久化）存储
 
 ##  0x01 Kubernetes 的 StatefulSets
-[`StatefulSets`](https://kubernetes.io/zh/docs/concepts/workloads/controllers/statefulset/) 是为了有状态的应用和分布式系统设计的，<font color="#dd0000"> 核心就是稳定 </font>，`StatefulSets` 的特点如下：
+[`StatefulSets`](https://kubernetes.io/zh/docs/concepts/workloads/controllers/statefulset/) 是为了有状态的应用和分布式系统设计的，<font color="#dd0000"> 核心就是稳定 </font>，它的特点如下：
 1.  `Pod` 一致性：包含次序（启动、停止次序）、网络一致性。此一致性与 `Pod` 相关，与被调度到哪个 `Node` 节点无关
 2.  稳定的次序：对于 `N` 个副本的 `StatefulSet`，每个 `Pod` 都在 `[0，N)` 的范围内分配一个数字序号，且是唯一的
 3.  稳定的网络：`Pod` 的 `hostname` 模式为 `(statefulset 名称)-(序号)`
@@ -136,14 +136,13 @@ status:
 ```
 
 ##  0x04  Etcd 部署
-有两种方式，采用官方的 Operator 或者 `Statefulset` 部署
+有两种方式，采用官方的 Etcd-Operator 方式或者 `Statefulset` 部署
 
 ####  使用官方的 Etcd-Operator 部署
-[etcd-operator](https://github.com/coreos/etcd-operator)。Etcd-Operator 的部署方式对 Etcd 版本和 Kubernetes 版本都有要求, 详见官方文档。
+官方提供了 [etcd-operator](https://github.com/coreos/etcd-operator)，Etcd-Operator 的部署方式对 Etcd 版本和 Kubernetes 版本都有要求, 详见 [官方文档](https://github.com/coreos/etcd-operator/blob/master/README.md)。
 
 ####  独立部署
-相对于上一种方式，`Statefulset` 可以实现更灵活的配置，比如亲和性、PV 使用等等
-通过如下配置文件，在 Tencent Kubernetes 上部署了一个可用的 Etcd 集群，注意几点：
+相对于上一种方式，`Statefulset` 可以实现更灵活的配置，比如亲和性、`PV` 使用等等。这里我们通过如下配置文件，在 TKE 上部署一个可用的 Etcd 集群，注意几点：
 1.  本配置文件部署为一个 `CLUSTER_SIZE=3` 的集群
 2.  数据目录的设定 `--data-dir /var/run/etcd/${IP}/default.etcd`，采用独立的 IP 在 `NFS` 上分隔
 3.  `spec.ClusterIP` 必须为 `None`，采用 Headless Service 方式部署，访问采用 DNS 方式（`{SET_NAME}-{i}.{SET_NAME}.default.svc.cluster.local`）
@@ -240,7 +239,6 @@ spec:
 上面的 yaml 配置可以拆分为 `kind: Service` 和 `kind: StatefulSet` 两个部分，配置中 `{SET_NAME}` 的值必须和 `StatefulSet` 的 `.metadata.name` 一致。在集群内部可以通过 `http://{SET_NAME}-{i}.{SET_NAME}.{CLUSTER_NAMESPACE}:2379` 访问 Etcd 集群了。如果需要从外部（VPN 内网或者公网）访问集群，那么需要结合 NodePort 或 Ingress 来暴露对外端口。
 
 此外，[使用 Statefulset 在 Kubernetes 集群中部署 Etcd 集群](https://wilhelmguo.cn/blog/post/william/%E4%BD%BF%E7%94%A8Statefulset%E5%9C%A8Kubernetes%E9%9B%86%E7%BE%A4%E4%B8%AD%E9%83%A8%E7%BD%B2etcd%E9%9B%86%E7%BE%A4) 提供了一个基于 Ceph Block Device 的 Etcd 搭建实现。
-
 
 ####  扩缩容
 使用 `kubectl scale` 即可方便的实现集群扩容缩容：
