@@ -1,10 +1,10 @@
 ---
 layout:     post
-title:      Cache 设计、使用与优化
-subtitle:   如何在设计高效的缓存使用策略
+title:      Cache 使用与优化
+subtitle:   如何设计高效且合理的缓存使用策略
 date:       2020-02-22
 author:     pandaychen
-header-img:
+header-img:	img/golang-horse-fly.png
 catalog: true
 category:   false
 tags:
@@ -248,3 +248,4 @@ func (g *Group) doCall(c *call, key string, fn func() (interface{}, error)) {
 -   [如何设计并实现一个线程安全的 Map ？](https://halfrost.com/go_map_chapter_two/)
 -   [Writing a very fast cache service with millions of entries in Go](https://allegro.tech/2016/03/writing-fast-cache-service-in-go.html)
 -	[动手写分布式缓存 - GeeCache 第六天 防止缓存击穿](https://geektutu.com/post/geecache-day6.html)
+-	[缓存更新的套路](https://coolshell.cn/articles/17416.html#Write_Behind_Caching_Pattern)
