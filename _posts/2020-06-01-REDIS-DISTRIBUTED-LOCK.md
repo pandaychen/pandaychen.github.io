@@ -7,8 +7,8 @@ author:     pandaychen
 img:	img/super-mario.jpg
 catalog:    true
 tags:
-	- 分布式锁
-	- Redis
+    - 分布式锁
+    - Redis
 ---
 
 ##  0x00    前言
