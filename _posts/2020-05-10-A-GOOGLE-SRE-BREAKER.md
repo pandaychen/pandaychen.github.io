@@ -41,7 +41,7 @@ The number of requests accepted by the backend
 -	当后端出现异常情况时，$accepts$ 的数量会逐渐小于 $requests$
 -	当后端持续异常时，客户端可以继续发送请求直到 $requests=K*accepts$，一旦超过这个值，客户端就启动自适应限流机制，新产生的请求在本地会以 $p$ 概率（下面描述的 Client request rejection probability 定义）被拒绝
 -	当客户端主动丢弃请求时，$requests$ 值会一直增大，在某个时间点会超过 $K*accepts$，使概率 $p$ 计算出来的值大于 `0`，此时客户端会以此概率对请求做主动丢弃
--	当后端逐渐恢复时，$accepts$ 增加，（同时 $requests$ 值也会增加，但是由于 $K$ 的关系，$K \times accepts$ 的放大倍数更快），使得 $\frac{requests-K\timesaccepts}{requests+1}$ 变为负数，从而概率 $p==0$，客户端自适应限流结束
+-	当后端逐渐恢复时，$accepts$ 增加，（同时 $requests$ 值也会增加，但是由于 $K$ 的关系，$K \times accepts$ 的放大倍数更快），使得 $\frac{requests-K \times accepts}{requests+1}$ 变为负数，从而概率 $p==0$，客户端自适应限流结束
 
 <font color="#dd0000"> 客户端请求拒绝的概率 </font>（Client request rejection probability）基于如下公式计算（其中 $K$ 为倍率 - multiplier，常用的值为 `2`）：
 
