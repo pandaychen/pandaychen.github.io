@@ -243,6 +243,7 @@ func (m *Mutex) actOnPoolsAsync(actFn func(redis.Pool) (bool, error)) (int, erro
 ```
 
 `actOnPoolsAsync` 方法中的参数 `actFn` 有 [两类](https://github.com/go-redsync/redsync/blob/master/mutex.go#L54)：
+
 1、调用 `m.acquire` 去批量设置锁 <br>
 ```golang
 func(pool redis.Pool) (bool, error) {
