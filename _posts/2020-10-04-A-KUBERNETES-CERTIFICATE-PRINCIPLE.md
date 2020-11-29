@@ -17,7 +17,7 @@ tags:
 * 服务器单向认证：只需要服务器端提供证书，客户端通过服务器端证书验证服务的身份，但服务器并不验证客户端的身份。这种情况一般适用于对 Internet 开放的服务，例如搜索引擎网站，任何客户端都可以连接到服务器上进行访问，但客户端需要验证服务器的身份，以避免连接到伪造的恶意服务器
 * 双向 TLS 认证：除了客户端需要验证服务器的证书，服务器也要通过客户端证书验证客户端的身份。只允许特定身份的客户端访问
 
-x509 的证书签发流程如下，对理清下面 kubernetes 的证书关系非常有帮助：
+X509 的证书签发流程如下，对理清下面 kubernetes 的证书关系非常有帮助：
 ![x509-certallinone](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/basic/x509-cert-allinone.png)
 
 ##    0x01  gRPC 的双向认证
@@ -104,11 +104,42 @@ func main() {
 ```
 
 ##  0x02  Kubernetes 的 TLS 认证
-同样的，Kubernetes的TLS 认证体系也分成两类：Server Auth 和 Client Auth：
+同样的，Kubernetes 的 TLS 认证体系也分成两类：Server Auth 和 Client Auth。
 
+####  Server Auth
+从架构看，集群环境中最重要的服务方为 Etcd 和 APIServer，此外还包括 Kubelet：
+- Etcd：作为 Kubernetes 中对象的配置信息库
+- APIServer：提供所有组件的 API 访问接口
+- Kubelet：（每个 node）用于处理 Master 节点下发到本 node 的任务，管理 Pod 和 Container
+
+在证书体系中，此二者各需要一套 CA 证书（信任）关系链，某些场景下，Kubelet 也存在的一套 CA 证书链（非必要）。默认情况下，APIServer 访问 kubelet 时，不需要对 Kubelet 进行 Server Auth
+
+#### Client Auth
+客户端信任（Client Auth）包含如下几点：
+- 对于访问 APIServer 的其他 Kubernetes 组件，通过 Server Auth 确认 APIServer 是否可信。
+- 通过客户端证书是向 APIServer 证明自己亦可信
+- Kubernetes 的 Client Auth 机制有：Client Certificate/TLS bootstrapping 等，存储有 Secret、kubeConfig 及本地证书文件
+- 如果集群中部署了 extension APIServer（如 Metrics），访问 extension APIServer 也需要进行 Client Auth
+- <font color="#dd0000"> 如果存在多集群管理的平台或者通过 kubectl 访问多个 Kubernetes 集群 </font>，那么该容器平台无论通过 WebAPI 或者 kubectl 客户端访问某个 Kubernetes 集群的 APIServer，<font color="#dd0000"> 都需要将平台的 Root CA 证书附加到 APIServer 的信任 CA 证书中，否则 APIServer 会认为该平台不可信 </font>，平台将无法通过 API 访问该 Kubernetes 集群
 
 ##  0x03  Kubernetes 的模块调用
-![https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kubernetes/kubernetes-certificate-indetail.png]
+下面引入一个典型的较为完整的 Kubernetes [模块调用示意图](https://zhaohuabing.com/post/2020-05-19-k8s-certificate/)，序号标识了服务访问过程，箭头表明了调用方向，箭头所指方向为服务提供方，另一头为服务调用方：
+![kubernetes-certificate-indetail](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kubernetes/kubernetes-certificate-indetail.png)
+
+为了实现 TLS 双向认证，服务提供方需要使用一个服务端证书（server.crt），服务调用方则需要提供一个客户端证书（client.crt），并且双方都需要使用同一个 CA 证书（ca.crt）来验证对方提供的证书。证书的作用如下：
+
+1.  Etcd 集群中各个节点之间相互通信使用的证书，由于一个 Etcd 节点既为其他节点提供服务，又需要作为客户端访问其他节点（该证书同时用作服务端证书和客户端证书）
+2.  Etcd 集群向外提供服务（主要提供 APIServer 访问）使用的证书（服务端证书）
+3.  kube-apiserver 作为客户端访问 Etcd 使用的证书（客户端证书）
+4.  kube-apiserver 对外提供服务使用的证书（服务端证书）
+5.  kube-controller-manager 作为客户端访问 kube-apiserver 使用的证书（客户端证书）
+6.  kube-scheduler 作为客户端访问 kube-apiserver 使用的证书（客户端证书）
+7.  kube-proxy 作为客户端访问 kube-apiserver 使用的证书（客户端证书）
+8.  kubelet 作为客户端访问 kube-apiserver 使用的证书（客户端证书）
+9.  管理员 / 用户通过 kubectl 访问 kube-apiserver 使用的证书（客户端证书）
+10. kubelet 对外提供服务使用的证书（服务端证书）
+11. kube-apiserver 作为客户端访问 kubelet 采用的证书（客户端证书）
+12. kube-controller-manager 用于生成和验证 service-account token 的证书。该证书并不会像其他证书一样用于身份认证，而是将证书中的公钥 / 私钥对用于 service-account token 的生成和验证。<font color="#dd0000">kube-controller-manager 会用该证书的私钥来生成 service-account token（如何生成？），然后以 secret 的方式加载到 pod 中，pod 中的应用可以使用该 token 来访问 kube-apiserver，kube-apiserver 会使用该证书中的公钥来验证请求中的 token</font>
 
 ##  0x04  kubernetes 中的证书
 使用 [`kubeadm` 工具](https://github.com/kubernetes/kubeadm) 搭建集群后，证书存放目录如下：
@@ -158,22 +189,23 @@ kubernetes/
 * kube-scheduler.yaml
 
 ####  根证书（ROOT）
-kubeadm 默认生成了三套根证书（用来管理和签发其他证书）：
-- `etcd/ca.key[ca.crt]`:
-- ：kubernates 内部组件
--
+kubeadm 默认生成了 `3` 套根证书（用来管理和签发其他证书）：
+- `pki/etcd/ca.key[ca.crt]`：用于 Etcd 组件相关的内部（组 Etcd 集群）及外部访问
+- `pki/ca.key[ca.crt]`：用于 Kubernates APIServer 相关的访问
+- `pki/front-proxy-ca.key[front-proxy-ca.crt]`：用于配置 Kubernates 聚合层使用
 
+为了厘清 Kubernates 证书的关系，这 `3` 套 CA 全部使用一对证书来管理。<font color="#dd0000">只要在通信组件中正确配置用于验证对方证书的 CA 根证书，就可以使用不同的 CA 来颁发不同用途的证书</font>。
 
-####  ETCD CA 信任链 && 证书 && 秘钥对
-etcd 服务是数据中心。用于持久化存储信息。要求高可用和数据一致性。即多部署几个 master 节点
+####  Etcd CA 信任链 && 证书 && 秘钥对
+Etcd 服务是数据中心。用于持久化存储信息。要求高可用和数据一致性。即多部署几个 master 节点
 存储哪些信息：k8s 有本身的节点信息、组件信息、运行的 pod、service 都需要做持久化
 
-ETCD CA 信任链是必须的，ETCD CA 根证书路径为 `/etc/kubernetes/pki/etcd/`
-- `ca.key`、`ca.crt`：ETCD 节点之间相互进行认证的 peer 证书、私钥以及验证 peer 的 CA
+Etcd CA 信任链是必须的，Etcd CA 根证书路径为 `/etc/kubernetes/pki/etcd/`
+- `ca.key`、`ca.crt`：Etcd 节点之间相互进行认证的 peer 证书、私钥以及验证 peer 的 CA
 - `healthcheck-client.crt`、`healthcheck-client.key`：ETCD 验证访问其服务的客户端（etcdctl 工具）的 CA
-- `server.key`、`server.crt`：ETCD 对外提供服务的服务端证书及私钥
+- `server.key`、`server.crt`：Etcd 对外提供服务的服务端证书及私钥
 
-从 ETCD 的配置文件可以很直观的观察上述证书的功能，注意 ETCD 容器中，还启动了一个 `livenessProbe` 来探测 ETCD 容器的 Live 存活情况：
+从 Etcd 的配置文件可以很直观的观察上述证书的功能，注意 Etcd 容器中，还启动了一个 `livenessProbe` 来探测 Etcd 容器的 Live 存活情况：
 ```yaml
 spec:
   containers:
@@ -209,8 +241,7 @@ spec:
 ```
 
 ####  kube-apiserver 证书 && 秘钥对
-api-server 提供集群管理的 API 接口，包括认证授权、数据校验、集群状态变更、其他模块之间的数据交互和通信
-其他模块，都是通过 api-server 查询操作数据，也就是说只有 api-server 才能直接操作 etcd
+ApiServer 提供了集群管理的 API 接口，包括认证授权、数据校验、集群状态变更、与其他模块之间的数据交互和通信；Kubernetes的其他模块，也是通过 ApiServer 查询操作数据（只有 ApiServer 才能直接操作 Etcd）
 
 `kube-apiserver` 的配置如下，`apiserver` 的证书和秘钥对在此路径 `/etc/kubernetes/pki`，`apiserver` 和多个 kubernetes 模块都有交互：
 ```YAML
@@ -503,7 +534,7 @@ users:
 
 
 ####  关于 kubelet 的疑问
-现在有一个问题就是，<font color="#dd0000">kubernetes 中节点可能有上万个，那么是如何快速给节点自动生成客户端证书和秘钥 </font> 然后配置给每个 worker 节点上的 `kubelet` 呢？答案就是 [TLS BOOTSTRAPPING 机制](https://kubernetes.io/zh/docs/reference/command-line-tools-reference/kubelet-tls-bootstrapping/)，该机制大大简化了 kubelet 节点客户端证书的生成步骤（有点类似于Access Token/Json Web Token）：
+现在有一个问题就是，<font color="#dd0000">kubernetes 中节点可能有上万个，那么是如何快速给节点自动生成客户端证书和秘钥 </font> 然后配置给每个 worker 节点上的 `kubelet` 呢？答案就是 [TLS BOOTSTRAPPING 机制](https://kubernetes.io/zh/docs/reference/command-line-tools-reference/kubelet-tls-bootstrapping/)，该机制大大简化了 kubelet 节点客户端证书的生成步骤（有点类似于 Access Token/Json Web Token）：
 
 ```JAVASCRIPT
 [root@VM-4-11-centos pki]# ps -ef | grep kubelet
