@@ -96,6 +96,7 @@ dlock.Unlock(ret)
 [官方](https://redis.io/topics/distlock) 推荐的实现是 [redsync](https://github.com/go-redsync/redsync)，本小节分析下其实现。redsync 支持下面两个 redis 客户端库：
 * [Redigo](https://github.com/gomodule/redigo)
 * [Go-redis](https://github.com/go-redis/redis)
+
 兼容的方式就是采用 `interface{}` 抽象出 [Pool 的接口](https://github.com/go-redsync/redsync/blob/master/redis/redis.go)，具体方法的实现细节由每个 [不同的库实现](https://github.com/go-redsync/redsync/blob/master/redis/goredis/goredis.go)。
 
 ####	通用定义
