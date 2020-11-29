@@ -12,16 +12,18 @@ tags:
 ---
 
 ##  0x00    前言
-本文着重介绍 bm 框架的路由树构造算法。
+本文着重介绍 bm（gin） 框架的路由树构造算法。
 
-从前几篇文章已知，bm 框架也是使用了压缩的 [Trie 树](https://zh.wikipedia.org/wiki/Trie) 作为路由 Path 的存储结构，本文分析根据设置的路由请求构建路由压缩 Trie 树的代码实现 [细节](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/tree.go)。
+从前几篇文章已知，bm（gin） 框架也是使用了压缩的 [Trie 树](https://zh.wikipedia.org/wiki/Trie) 作为路由 Path 的存储结构，本文分析根据设置的路由请求构建路由压缩 Trie 树的代码实现 [细节](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/tree.go)。
 
 相较于普通的 Trie 树，压缩版本的树能显著减少树的层数，同时因为每个节点上数据存储也比通常的 Trie 树要多。
 
-##	0x01	HTTPRouter 及示例
-关于 HTTPRouter，在设计路由的时候需要规避一些会导致路由冲突的情况。一般而言，如果两个路由拥有一致的 http 方法 (指 GET/POST/PUT/DELETE 等) 和请求路径前缀，且在某个位置出现了 A 路由是 wildcard（指 `:id` 这种形式）参数，B 路由则是普通字符串，那么就会发生路由冲突。路由冲突会在初始化阶段直接 `panic`。
+![radix-tree](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/datastructure/radix_tree.png)
 
-```JavaScript
+##	0x01	HTTPRouter 及示例
+关于 HTTPRouter，在设计路由的时候需要规避一些会导致路由冲突的情况。一般而言，如果两个路由拥有一致的 HTTP 方法 (指 `GET/POST/PUT/DELETE` 等) 和请求路径前缀，且在某个位置出现了 A 路由是 wildcard（指 `:id` 这种形式）参数，B 路由则是普通字符串，那么就会发生路由冲突。路由冲突会在初始化阶段直接 `panic`。下面给出了冲突的路由示例：
+
+```javascript
 conflict:
 GET /user/info/:name
 GET /user/:id
@@ -33,7 +35,7 @@ POST /user/:id
 
 ####	压缩字典树的构造
 本小节基于下面的路由来构建一颗压缩 Trie 树：
-```golang
+```javascript
 PUT /user/installations/:installation_id/repositories/:repository_id
 
 GET /marketplace_listing/plans/
@@ -42,83 +44,85 @@ GET /search
 GET /status
 GET /support
 
-// 补充路由：
+// 附：补充路由：
 GET /marketplace_listing/plans/ohyes
 ```
 
-1、root 节点创建 <br>
-路由有 GET 和 POST 两种方法，那么每一种方法对应的都是一棵独立的压缩 Trie 树，这些树之间是独立的。某个方法首次插入的路由就会导致对应字典树的根节点（ROOT）被创建，如下：
+插入部分的代码 [主要在此](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/tree.go)：
+
+1、node 节点的结构 <br>
+Radix Tree 的节点类型为 [`*bm.node`](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/tree.go#L88)：
+```golang
+type node struct {
+	path      string
+	indices   string
+	children  []*node
+	handlers  []HandlerFunc
+	priority  uint32
+	nType     nodeType
+	maxParams uint8
+	wildChild bool
+}
+```
+
+关键的字段说明如下：
+-	`children`：保存该节点所有子节点 node 的指针
+-	`path`：当前节点对应的路径中的字符串（相对路径）
+-	`wildChild`：子节点是否为参数节点，即 wildcard node，或者说 `:id` 这种类型的节点
+-	`indices`：子节点索引，当子节点为非参数类型，即本节点的 wildChild 为 `false` 时，会将每个子节点的首字母放在该索引数组（在 golang 中为 `string`）
+-	`nType`: 当前节点类型，有四个枚举值：分别为 `static/root/param/catchAll`
+	-	`static`：非根节点的普通字符串节点
+	-	`root`：根节点
+	-	`param`：参数节点，例如 `:id`
+	-	`catchAll`：通配符节点，例如 `*anyway`
+
+2、root 节点创建（PUT） <br>
+本例子中路由有 GET 和 POST 两种方法，那么每一种方法对应的都是一棵独立的压缩 Trie 树，这些树之间是独立的。任何 HTTP 方法首次插入的路由就会导致对应字典树的根节点（Root）被创建，如下：
 ```golang
 r := httprouter.New()
 // 创建 PUT 的 root 节点
 r.PUT("/user/installations/:installation_id/repositories/:reposit", Hello)
 ```
-![bm-eg-1]()
+
+该 `PUT` 方法对应的树如下，根据 [代码构建的逻辑](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/tree.go#L254)，`PUT` 对应的根节点被创建出来，此外，根据 wildcard 的规则，该路由 `/user/installations/:installation_id/repositories/:reposit` 被构建为一棵有 `4` 个节点的树，Root 节点的 Path 信息为 `/user/installations/`：
+![bm-put-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kratos/blademaster/radix-put1.png)
+
+3、root 节点创建（GET） <br>
+插入第一条 GET 路由，当插入 `GET /marketplace_listing/plans` 时，类似前面 PUT 的过程，建立了一棵 GET 树，因为第一个路由没有 wildcard 参数，path 都被存储到 Root 节点上了。目前只有一个 Root 节点：
+![bm-get-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kratos/blademaster/radix-get1.png)
+
+对应的关键信息如下：
+```javascript
+path:	/marketplace_listing/plans
+wildChild:	false
+indices: ""
+nType:	root
+```
+
+4、插入普通节点（GET）：新路由可以直接作为原路由的子节点进行插入 <br>
+然后插入路由 `GET /marketplace_listing/plans/:id/accounts`，新的路径与之前的路径有共同的前缀（和现有树的 node 进行比较，找到共同的前缀），且可以直接在之前叶子节点后进行插入，不过由于本路径存在 wildcard，所以需要对此路由进行拆分：
+![bm-get-2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kratos/blademaster/radix-get2.png)
+
+PS：由于 `:id` 这个节点只有一个字符串的普通子节点，所以目前不需要处理 `indices`
+
+5、导致边分裂的情况（GET） <br>
+下一条插入路由为 `GET /search`，这时 <font color="#dd0000"> 会导致树的边分裂 </font>。原有树的 node 路径和新的路径在初始的 `/` 位置发生分裂，这样需要把原有的 root 节点内容下移，再将新路由 search 同样作为子节点挂在 root 节点之下。这时候因为子节点出现多个，root 节点的 indices 提供子节点索引，即 `ms` 代表子节点的首字母分别为 `m`（marketplace）和 `s`（search）：
+![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kratos/blademaster/radix-get3.png)
+
+6、继续导致边分裂的情况（GET） <br>
+继续插入录入 `GET /status` 和 `GET /support` 这两个路由。这时候会导致在 search 节点上再次发生分裂：
+![bm-get-4](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kratos/blademaster/radix-get4.png)
 
 
-图 5-3 插入路由之后的压缩字典树
+####	子节点冲突处理
+从上面插入的 case 来看，理解子节点冲突处理的规则对理解路由树算法有非常大的帮助，只要发生冲突，都会在初始化的时候 `panic`。在路由本身只有字符串的情况下，不会发生任何冲突。只有当路由中含有 wildcard（类似 `:id`）或者 catchAll 的情况下才可能冲突。子节点的冲突处理的规则分几种情况：
+1.	在插入 wildcard 节点时，父节点的 `children` 数组非空且 `wildChild` 被设置为 `false` 时。例如：（先插入）`GET /user/getAll` 和 （再插入）`GET /user/:id/getAddr`，或者 `GET /user/*aaa` 和 `GET /user/:id`
+2.	在插入 wildcard 节点时，父节点的 `children` 数组非空且 `wildChild` 被设置为 `true`，但该父节点的 wildcard 子节点要插入的 wildcard 名字（`:` 后面的字符串）不一样。例如：`GET /user/:id/info` 和 `GET /user/:name/info`
+3.	在插入 catchAll 节点时，父节点的 `children` 非空。例如：`GET /src/abc` 和 `GET /src/*filename`，或者 `GET /src/:id` 和 `GET /src/*filename`
+4.	在插入 static 节点时，父节点的 `wildChild` 字段被设置为 `true`
+5.	在插入 static 节点时，父节点的 `children` 非空，且子节点 `nType` 为 catchAll
 
-radix 的节点类型为 * httprouter.node，为了说明方便，我们留下了目前关心的几个字段：
-
-path: 当前节点对应的路径中的字符串
-
-wildChild: 子节点是否为参数节点，即 wildcard node，或者说 :id 这种类型的节点
-
-nType: 当前节点类型，有四个枚举值: 分别为 static/root/param/catchAll。
-    static                   // 非根节点的普通字符串节点
-    root                     // 根节点
-    param                    // 参数节点，例如 :id
-    catchAll                 // 通配符节点，例如 *anyway
-
-indices：子节点索引，当子节点为非参数类型，即本节点的 wildChild 为 false 时，会将每个子节点的首字母放在该索引数组。说是数组，实际上是个 string。
-当然，PUT 路由只有唯一的一条路径。接下来，我们以后续的多条 GET 路径为例，讲解子节点的插入过程。
-
-2、子节点插入
-当插入 GET /marketplace_listing/plans 时，类似前面 PUT 的过程，GET 树的结构如图 5-4：
-
-![]()
-
-图 5-4 插入第一个节点的压缩字典树
-
-因为第一个路由没有参数，path 都被存储到根节点上了。所以只有一个节点。
-
-然后插入 GET /marketplace_listing/plans/:id/accounts，新的路径与之前的路径有共同的前缀，且可以直接在之前叶子节点后进行插入，那么结果也很简单，插入后的树结构见图 5-5:
-
-get radix step 2
-
-图 5-5 插入第二个节点的压缩字典树
-
-由于: id 这个节点只有一个字符串的普通子节点，所以 indices 还依然不需要处理。
-
-上面这种情况比较简单，新的路由可以直接作为原路由的子节点进行插入。实际情况不会这么美好。
-
-3、边分裂
-接下来我们插入 GET /search，这时会导致树的边分裂，见图 5-6。
-
-get radix step 3
-
-图 5-6 插入第三个节点，导致边分裂
-
-原有路径和新的路径在初始的 / 位置发生分裂，这样需要把原有的 root 节点内容下移，再将新路由 search 同样作为子节点挂在 root 节点之下。这时候因为子节点出现多个，root 节点的 indices 提供子节点索引，这时候该字段就需要派上用场了。"ms" 代表子节点的首字母分别为 m（marketplace）和 s（search）。
-
-我们一口作气，把 GET /status 和 GET /support 也插入到树中。这时候会导致在 search 节点上再次发生分裂，最终结果见图 5-7：
-
-get radix step 4
-
-图 5-7 插入所有路由后的压缩字典树
-
-4、子节点冲突处理
-在路由本身只有字符串的情况下，不会发生任何冲突。只有当路由中含有 wildcard（类似 :id）或者 catchAll 的情况下才可能冲突。
-
-子节点的冲突处理很简单，分几种情况：
-
-在插入 wildcard 节点时，父节点的 children 数组非空且 wildChild 被设置为 false。例如：GET /user/getAll 和 GET /user/:id/getAddr，或者 GET /user/*aaa 和 GET /user/:id。
-在插入 wildcard 节点时，父节点的 children 数组非空且 wildChild 被设置为 true，但该父节点的 wildcard 子节点要插入的 wildcard 名字不一样。例如：GET /user/:id/info 和 GET /user/:name/info。
-在插入 catchAll 节点时，父节点的 children 非空。例如：GET /src/abc 和 GET /src/*filename，或者 GET /src/:id 和 GET /src/*filename。
-在插入 static 节点时，父节点的 wildChild 字段被设置为 true。
-在插入 static 节点时，父节点的 children 非空，且子节点 nType 为 catchAll。
-只要发生冲突，都会在初始化的时候 panic。例如，在插入我们臆想的路由 GET /marketplace_listing/plans/ohyes 时，出现第 4 种冲突情况：它的父节点 marketplace_listing/plans / 的 wildChild 字段为 true。
-
+例如，在上面的树中，插入路由 `GET /marketplace_listing/plans/ohyes` 时，出现第 `4` 种冲突情况：它的父节点 `marketplace_listing/plans/` 的 wildChild 字段为 `true`
 
 ##	0x02	路由结构
 在 `bm.Engine` 成员中，`trees` 是一个 Slice，不同的 HTTP 方法（`GET`/`POST`/`DELETE` 等），都会创建一个 `methodTree`，每个 `methodTree` 即为 Trie 树，即每个 HTTP Method 对应一棵 Trie 树。树的节点按照 URL 中的 / 符号进行层级划分，URL 支持 `:name` 形式的名称匹配，还支持 `*subpath` 形式的路径通配符。
