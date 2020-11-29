@@ -69,11 +69,11 @@ RedLock 算法用来解决单实例 Redis 集群的可用性问题，此算法�
 1.	需要申请分布式锁的客户端，获取当前时间（毫秒数），即获取当前机器的毫秒级的时间戳，记为 $t_{cur1}$
 2.	分布式锁的过期时间（客户端自行设置）初始值设置为 $t_{expect}$
 3.	按顺序依次向 `N` 个 Redis Master 节点 <font color="#dd0000"> 执行获取锁的操作 </font>。这个获取操作跟前面基于单 Redis 节点的获取锁的过程相同，包含随机字符串 `randomValue`（即以相同的 `lock_key` 和随机 `randomValue`），同时也包含过期时间 (比如 `PX 30000`，即锁的有效时间)。为了保证在某个 Redis 节点不可用的时候算法能够继续运行，这个获取锁的操作还有一个超时时间（整体操作超时），它要远小于锁的有效时间（几十毫秒量级，比如锁的有效时间是 `10` 秒，那么这个超时时间大概为 `5~50` 毫秒）。客户端在向某个 Redis 节点获取锁失败以后，应该立即尝试下一个 Redis 节点。这里的失败，应该包含任何类型的失败，比如该 Redis 节点不可用，或者该 Redis 节点上的锁已经被其它客户端持有（注：Redlock 原文中这里只提到了 Redis 节点不可用的情况，但也应该包含其它的失败情况）
-4.	计算整个获取锁的过程总共消耗了多长时间，计算方法是用当前时间（记为 $t_{cur2}$）减去第 `1` 步记录的时间（结果记为 $t_{delta}$）。如果客户端从大多数 Redis 节点（超过 `Quorum>=`$\frac{N}{2}+1$ 台）成功获取到了锁，并且获取锁总共消耗的时间（即 $t_{delta}$）没有超过锁的有效时间（即 $t_{expect}$），那么这时客户端才认为最终获取锁成功；否则，认为最终获取锁失败。
+4.	计算整个获取锁的过程总共消耗了多长时间，计算方法是用当前时间（记为 $t_{cur2}$）减去第 `1` 步记录的时间（结果记为 $t_{delta}$）。如果客户端从大多数 Redis 节点（即：超过 `Quorum>=`$\frac{N}{2}+1$ 台）成功获取到了锁，并且获取锁总共消耗的时间（即 $t_{delta}$）没有超过锁的有效时间（即 $t_{expect}$），那么这时客户端才认为最终获取锁成功；否则，认为最终获取锁失败。
 5.	如果最终获取锁成功了，那么这个锁的有效时间应该重新计算，它等于最初的锁的有效时间减去第 `4` 步计算出来的获取锁消耗的时间，即分布式锁的过期时间（有效时间）为： $t_{final} = t_{expect}-t_{delta}$
 6.	如果最终获取锁失败了（可能由于获取到锁的 Redis 节点个数少于 $\frac{N}{2}+1$，或者整个获取锁的过程消耗的时间超过了锁的最初有效时间），那么 <font color="#dd0000"> 客户端应该立即向所有 Redis 节点发起释放锁的操作 </font>（即前面介绍的 Redis Lua 脚本）。释放锁的操作就很简单了, 只需要一步: 客户端向所有 Redis 节点发起释放锁的操作，不管这些节点当时在获取锁的时候成功与否
 
-以上是 Redlock 算法的主要流程，还得考虑到多机的时钟不同，多台机器之间的时钟可能稍微有点偏差，但是不会有太大的偏差的情况，所以在有效性的时长上再扣除偏移量 `CLOCK_DRIFT` （可以设置为有效性时长的 `1%` 左右），这样更加安全。那么最终的时间 $t_{final}= t_{expect} – t_{delta} - CLOCK_DRIFT$。
+以上是 Redlock 算法的主要流程，还得考虑到多机的时钟不同，多台机器之间的时钟可能稍微有点偏差，但是不会有太大的偏差的情况，所以在有效性的时长上再扣除偏移量 `CLOCKDRIFT` （可以设置为有效性时长的 `1%` 左右），这样更加安全。那么最终的时间 $t_{final}= t_{expect} – t_{delta} - CLOCKDRIFT$。
 
 对于分布式锁，还有一些容灾的考虑，比如集群 `5` 台机器，突然多启动了一台 Redis 节点，那么整体变成了 `6` 台，如果这台机器可以立刻提供服务，那么有可能两个客户端都能获取到锁（每个客户端都获取了 `3` 个机器的锁），这种情况，有个很好的解决办法是新启动的机器有段时间的冷却，在一个 TTL 之后才能提供服务，也就是大部分锁已经过了有效期之后，再提供服务。
 
@@ -100,7 +100,7 @@ dlock.Unlock(ret)
 兼容的方式就是采用 `interface{}` 抽象出 [Pool 的接口](https://github.com/go-redsync/redsync/blob/master/redis/redis.go)，具体方法的实现细节由每个 [不同的库实现](https://github.com/go-redsync/redsync/blob/master/redis/goredis/goredis.go)。
 
 ####	通用定义
-如下：
+redsync 的通用结构定义如下：
 -	`Pool`：抽象连接池
 -	`Conn`：抽象每个 Redis 连接
 -	`Script`：Redis 脚本
@@ -127,6 +127,7 @@ type Script struct {
 ```
 
 ####	Pool 定义
+`Redsync` 结构的成员 `pools` 是个 `redis.Pool` 数组，每个 `redis.Pool` 都是上面的 `Pool` 实现，它代表了一个 Redis 实例的连接池：
 ```golang
 // Redsync provides a simple method for creating distributed mutexes using multiple Redis connection pools.
 type Redsync struct {
@@ -135,7 +136,7 @@ type Redsync struct {
 ```
 
 ####	Mutex 实现
-Mutex 是分布式锁的定义，
+`Mutex` 是分布式锁的定义，代表了一个分布式锁，其成员多为 redlock 算法所需要的条件：
 ```GOLANG
 // A Mutex is a distributed mutual exclusion lock.
 type Mutex struct {
@@ -157,7 +158,7 @@ type Mutex struct {
 ```
 
 ####	获取锁
-Lock 方法实现了 Redlock 算法的加锁接口，根据上面的算法描述实现，代码逻辑并不难懂。
+Lock 方法实现了 Redlock 算法的加锁接口（Redlock 算法的核心实现），根据上面的算法描述实现，代码逻辑并不难懂。
 ```golang
 // Lock locks m. In case it returns an error on failure, you may retry to acquire the lock by calling this method again.
 func (m *Mutex) LockContext(ctx context.Context) error {
@@ -170,6 +171,8 @@ func (m *Mutex) LockContext(ctx context.Context) error {
 	// tries 为尝试次数
 	for i := 0; i < m.tries; i++ {
 		if i != 0 {
+			// 注意：
+			// 失败重试： 当客户端无法获取锁得时候会设置一个随机值重试，这个随机值的重试时间应当和当次申请锁的时间错开，减少脑裂的可能。
 			time.Sleep(m.delayFunc(i))
 		}
 
@@ -204,7 +207,9 @@ func (m *Mutex) LockContext(ctx context.Context) error {
 }
 ```
 
-注意上面的 `for i := 0; i < m.tries; i++` 重试逻辑，
+注意上面的 `time.Sleep(m.delayFunc(i))` 的失败重试逻辑，当客户端无法获取锁得时候会设置一个随机值重试，这个随机值的重试时间应当和当次申请锁的时间错开，减少脑裂的可能。此外，一个客户端在所有 Redis 实例中申请的时间越短，发生脑裂的时间窗口越小，所以要用非阻塞的方式，这里 `actOnPoolsAsync` 同时向多个 redis 实例异步发送 Set 请求（实际上是异步发送请求，阻塞获取每个请求的结果），接下来看下 `actOnPoolsAsync` 方法的实现。
+
+####	actOnPoolsAsync 方法
 
 `actOnPoolsAsync` 方法封装了向 `m.pools`（保存了所有的 Redis 实例的连接池）发送命令并获取结果的方法：
 ```golang
@@ -300,18 +305,18 @@ func (m *Mutex) UnlockContext(ctx context.Context) (bool, error) {
 ```
 
 ##	0x05 Mutex 初始化
-外部接口都在 [此](https://github.com/go-redsync/redsync/blob/master/redsync.go)
+外部接口都在 [此](https://github.com/go-redsync/redsync/blob/master/redsync.go)，`NewMutex` 为初始化方法，关注下其中的参数的初始化值：
 ```golang
 // NewMutex returns a new distributed mutex with given name.
 func (r *Redsync) NewMutex(name string, options ...Option) *Mutex {
 	m := &Mutex{
 		name:         name,
-		expiry:       8 * time.Second,
-		tries:        32,
-		delayFunc:    func(tries int) time.Duration { return 500 * time.Millisecond },
+		expiry:       8 * time.Second,	// 锁的过期（有效）时间
+		tries:        32,				// 最大重试次数
+		delayFunc:    func(tries int) time.Duration { return 500 * time.Millisecond },	// 每次失败后，重试 500ms
 		genValueFunc: genValue,
-		factor:       0.01,
-		quorum:       len(r.pools)/2 + 1,
+		factor:       0.01,				//CLOCKDRIFT 的比率
+		quorum:       len(r.pools)/2 + 1,		//quorum 数目
 		pools:        r.pools,
 	}
 	for _, o := range options {
@@ -322,7 +327,6 @@ func (r *Redsync) NewMutex(name string, options ...Option) *Mutex {
 ```
 
 ##	0x06	Redsync 的使用
-
 ```golang
 func main() {
 	// Create a pool with go-redis (or redigo) which is the pool redisync will
@@ -357,9 +361,8 @@ func main() {
 }
 ```
 
-
 ##  0x07	总结
-本文简单介绍单机 redis 分布式锁的缺点以及多机 redis 分布式锁的实现方式。
+本文简单介绍单机 Redis 分布式锁的缺点以及多机 Redis 分布式锁算法 Redlock 算法的实现。
 
 ##  0x08	参考
 -   [Distributed locks with Redis](https://redis.io/topics/distlock)
