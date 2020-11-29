@@ -102,3 +102,4 @@ the list of kubernetes groups derived from user roles.
 -   [Teleport Kubernetes Access Guide](https://gravitational.com/teleport/docs/kubernetes-ssh/)
 -   [Teleport Kubernetes: how it works](https://gravitational.com/teleport/how-it-works/)
 -   [pomerium - Overview](https://www.pomerium.io/docs/#)
+-   [pomerium - kubernetes](https://www.pomerium.com/docs/quick-start/kubernetes.html)
