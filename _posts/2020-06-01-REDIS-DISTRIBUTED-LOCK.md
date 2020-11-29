@@ -96,7 +96,6 @@ dlock.Unlock(ret)
 [官方](https://redis.io/topics/distlock) 推荐的实现是 [redsync](https://github.com/go-redsync/redsync)，本小节分析下其实现。redsync 支持下面两个 redis 客户端库：
 * [Redigo](https://github.com/gomodule/redigo)
 * [Go-redis](https://github.com/go-redis/redis)
-
 兼容的方式就是采用 `interface{}` 抽象出 [Pool 的接口](https://github.com/go-redsync/redsync/blob/master/redis/redis.go)，具体方法的实现细节由每个 [不同的库实现](https://github.com/go-redsync/redsync/blob/master/redis/goredis/goredis.go)。
 
 ####	通用定义
@@ -104,6 +103,7 @@ redsync 的通用结构定义如下：
 -	`Pool`：抽象连接池
 -	`Conn`：抽象每个 Redis 连接
 -	`Script`：Redis 脚本
+
 ```golang
 // A Pool maintains a pool of Redis connections.
 type Pool interface {
@@ -210,7 +210,6 @@ func (m *Mutex) LockContext(ctx context.Context) error {
 注意上面的 `time.Sleep(m.delayFunc(i))` 的失败重试逻辑，当客户端无法获取锁得时候会设置一个随机值重试，这个随机值的重试时间应当和当次申请锁的时间错开，减少脑裂的可能。此外，一个客户端在所有 Redis 实例中申请的时间越短，发生脑裂的时间窗口越小，所以要用非阻塞的方式，这里 `actOnPoolsAsync` 同时向多个 redis 实例异步发送 Set 请求（实际上是异步发送请求，阻塞获取每个请求的结果），接下来看下 `actOnPoolsAsync` 方法的实现。
 
 ####	actOnPoolsAsync 方法
-
 `actOnPoolsAsync` 方法封装了向 `m.pools`（保存了所有的 Redis 实例的连接池）发送命令并获取结果的方法：
 ```golang
 func (m *Mutex) actOnPoolsAsync(actFn func(redis.Pool) (bool, error)) (int, error) {
@@ -327,6 +326,7 @@ func (r *Redsync) NewMutex(name string, options ...Option) *Mutex {
 ```
 
 ##	0x06	Redsync 的使用
+Redsync 的使用基本上和前述一致，注意每个 `Pool` 的连接池中连接的数目：
 ```golang
 func main() {
 	// Create a pool with go-redis (or redigo) which is the pool redisync will
@@ -362,10 +362,14 @@ func main() {
 ```
 
 ##  0x07	总结
-本文简单介绍单机 Redis 分布式锁的缺点以及多机 Redis 分布式锁算法 Redlock 算法的实现。
+本文简单介绍单机 Redis 分布式锁的缺点以及多机 Redis 分布式锁算法 Redlock 算法的实现。在项目如何选择 [合适的分布式锁算法呢](https://books.studygolang.com/advanced-go-programming-book/)？
+1.	业务还在单机就可以搞定的量级时，那么按照需求使用任意的单机锁方案就可以
+2.	如果发展到了分布式服务阶段，但业务规模不大，比如 `qps < 1000`，使用哪种锁方案都差不多。如果公司内已有可以使用的 Zookeeper/Etcd/Redis 集群，那么就尽量在不引入新的技术栈的情况下满足业务需求
+3.	业务发展到一定量级的话，就需要从多方面来考虑了。首先是你的锁是否在任何恶劣的条件下都不允许数据丢失，如果不允许，那么就不要使用 Redis 的 setnx 的简单锁；如果要使用 Redlock 算法，那么要考虑 Redis 的集群方案的安全问题，即是否可以直接把对应的 Redis 的实例的 `ip/port` 暴露给开发人员。如果不可以，那也没法用
+4.	对锁数据的可靠性要求极高的话，那只能使用 Etcd 或者 Zookeeper 这种通过一致性协议保证数据可靠性的锁方案。但可靠的背面往往都是较低的吞吐量和较高的延迟。需要根据业务的量级对其进行压力测试，以确保分布式锁所使用的 Etcd/Zookeeper 集群可以承受得住实际的业务请求压力。需要注意的是，Etcd 和 Zookeeper 集群是没有办法通过增加节点来提高其性能的。要对其进行横向扩展，只能增加搭建多个集群来支持更多的请求。这会进一步提高对运维和监控的要求。此外，多个集群可能需要引入 Proxy，没有 Proxy 那就需要业务去根据某个业务 id 来做 sharding。如果业务已经上线的情况下做扩展，还要考虑数据的动态迁移。这些都不是容易的事情。在选择具体的方案时，还是需要多加思考，对风险早做预估。
 
 ##  0x08	参考
 -   [Distributed locks with Redis](https://redis.io/topics/distlock)
 -   [Distributed mutual exclusion lock using Redis for Go](https://github.com/go-redsync/redsync)
 -   [How to do distributed locking](http://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html)
--	[6.1 分布式锁](https://books.studygolang.com/advanced-go-programming-book/ch6-cloud/ch6-01-lock.html)
+-	[Go 语言高级编程：6.1 分布式锁](https://books.studygolang.com/advanced-go-programming-book/ch6-cloud/ch6-01-lock.html)
