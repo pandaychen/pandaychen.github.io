@@ -8,9 +8,9 @@ header-img: img/super-mario.jpg
 catalog: true
 category:   false
 tags:
-	- 反向代理
-  - 网关
-  - Oxy
+    - 反向代理
+    - 网关
+    - Oxy
 ---
 
 ##  0x00    前言
