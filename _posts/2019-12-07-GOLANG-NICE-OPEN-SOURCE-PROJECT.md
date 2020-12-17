@@ -8,6 +8,7 @@ catalog:    true
 header-img: img/panda-md-pic7.jpg
 tags:
     - Golang
+    - OpenSource
 ---
 
 
@@ -26,6 +27,8 @@ tags:
 
 -   [gores](https://github.com/wang502/gores)，用 Go 语言编写的基于 Redis 的消息队列系统。核心使用 Redis 的 List 组件来模拟队列
 
+##	分布式
+-	[raft](https://github.com/hashicorp/raft)：Hashcrop 的 raft 库实现，值得分析，后续分析下该库的实现，用以进一步全面掌握 raft 分布式协议
 
 ##	认证、安全
 -	[JWT-Go](https://github.com/dgrijalva/jwt-go)

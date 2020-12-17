@@ -27,7 +27,7 @@ User`<--->`Browser`<--->`WebSocket`<--->`SSH`<--->`(TTY)RemoteServer
 
 ##  0x02    实现
 作为一个 SSH 远程登陆系统，认证是及其重要的一环，我们将上面的数据流扩展下，加入必要的身份及票据认证，如下图<br>
-![webconsoleWithAuth](https://wx2.sbimg.cn/2020/09/29/GYLLa.png)
+![webconsoleWithAuth](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/webconsole-jiagou.png)
 
 ####  组件
 
