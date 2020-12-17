@@ -7,7 +7,7 @@ author:     pandaychen
 catalog:    true
 header-img: img/panda-md-pic7.jpg
 tags:
-	- Golang
+    - Golang
     - 定时器
     - Timer
     - Ticker
