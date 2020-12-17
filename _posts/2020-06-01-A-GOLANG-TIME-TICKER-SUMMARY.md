@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      基于 Golang 实现的定时器分析与实现（未完成）
-subtitle:   Timer and Ticker: events in the future
+subtitle:   Timer and Ticker： events in the future
 date:       2020-06-01
 author:     pandaychen
 catalog:    true
@@ -9,8 +9,8 @@ header-img: img/panda-md-pic7.jpg
 tags:
     - Golang
     - 定时器
+    - Timer
 ---
-
 
 ##  0x00    前言
 
@@ -31,6 +31,5 @@ tags:
 ##  0x05    其他
 
 ##  0x06    参考
--   [Go-Zero 如何应对海量定时 / 延迟任务](https://my.oschina.net/u/4628563/blog/4667586)
+-   [Go-Zero 如何应对海量定时延迟任务](https://my.oschina.net/u/4628563/blog/4667586)
 -   [论 golang Timer Reset 方法使用的正确姿势](https://tonybai.com/2016/12/21/how-to-use-timer-reset-in-golang-correctly/)
-
