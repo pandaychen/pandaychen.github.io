@@ -86,7 +86,7 @@ config := &ssh.ServerConfig{
 ####    SSHD 开发的完整流程
 我们以 [sshd.go](https://gist.github.com/jpillora/b480fde82bff51a06238) 为例，简单看下如何构建一个 SSHD 服务端。<br>
 一般来说，SSHD 的开发流程如下图所示：
-![img](https://wx2.sbimg.cn/2020/08/19/3aCl7.png)
+![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/sshd-dev-flow.png)
 
 1、SSH-Server 配置认证回调及其他配置
 注意配置中的 `NoClientAuth: true`，即任何客户端都可以连，一般不建议开启。此外，回调方法 `func` 中的 [`ConnMetadata`](https://godoc.org/golang.org/x/crypto/ssh#ConnMetadata) 结构保存了 ssh 连接的相关属性信息，可以用于会话追踪及 Debug 等。<br>
@@ -316,7 +316,7 @@ if err != nil {
 PS：这里如果直接将 `bash` 的输入和输出直接对接 `terminal`，这是错误的操作， 因为 `bash` 没有运行在 `tty` 中，这里需要一个模拟 `tty` 来运行 `bash`。<br>
 
 `tty` 和 `bash` 的关系如下图所示，这样就方便理解了。
-![img](https://wx2.sbimg.cn/2020/08/20/3Nm3N.jpg)
+![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/tty-bash.png)
 
 最后需要将 `bash` 的管道（输入和输出）和 `Connection` 的管道对接，即完成了 SSHD 的 `tty` 实现逻辑。
 ```golang
