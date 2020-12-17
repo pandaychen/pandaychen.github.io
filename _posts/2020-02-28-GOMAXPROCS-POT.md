@@ -9,7 +9,7 @@ catalog: true
 category:   false
 tags:
     - GOMAXPROCS
-    - GOLANG
+    - Golang
 ---
 
 ##  0x00    前言
