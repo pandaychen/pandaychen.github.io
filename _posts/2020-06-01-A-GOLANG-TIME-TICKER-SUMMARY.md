@@ -10,7 +10,6 @@ tags:
     - Golang
     - 定时器
     - Timer
-    - Ticker
 ---
 
 
