@@ -32,12 +32,16 @@ tags:
 ![epoll_min_heap](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/linux/epoll_min_heap.jpg)
 
 ##  0x04    GOIM 的最小堆定时器
-Goim 是一个 Tcp 长连接模型，实现了 [最小堆 Timer](https://github.com/Terry-Mao/goim/tree/master/pkg/time) 的定时器结构，用来解决海量连接高性能心跳处理的问题。对外提供了三个方法：
+Goim 是一个 Tcp 长连接模型，实现了 [最小堆 Timer](https://github.com/Terry-Mao/goim/tree/master/pkg/time) 的定时器结构，用来解决海量连接高性能心跳处理的问题。
+
+为什么不用内置 Golang 的 `Timer` 而选择自己造，作者给出了他的 [观点](https://github.com/Terry-Mao/goim/issues/231)，即原生的 `Timer` 存在全局大锁争用，在密集连接发送时候，容易出现 futex 争用，所以通过自己实现 timer，然后减少对系统层面的 timer 调用。貌似新版本 Golang 已经 Fix？
+
+此 Timer 对外提供了三个方法：
 
 Timer 对外提供 `Add`、`Del` 及 `Set` 三个方法用于添加，删除、修改 `TimerData`：
-1.  [Add 方法](https://github.com/Terry-Mao/goim/blob/master/pkg/time/timer.go#L102)：
-2.  [Del 方法](https://github.com/Terry-Mao/goim/blob/master/pkg/time/timer.go#L114)：
-3.  [Set 方法](https://github.com/Terry-Mao/goim/blob/master/pkg/time/timer.go#L168)：
+1.  [Add 方法](https://github.com/Terry-Mao/goim/blob/master/pkg/time/timer.go#L102)：添加定时器节点
+2.  [Del 方法](https://github.com/Terry-Mao/goim/blob/master/pkg/time/timer.go#L114)：删除定时器节点
+3.  [Set 方法](https://github.com/Terry-Mao/goim/blob/master/pkg/time/timer.go#L168)：更新定时器节点
 
 ####    基础结构
 1.  `Timer` 是管理定时器的结构，管理一组定时器。注意其成员 `timers []*TimerData` 是一个 slice，其中每个元素都是一个 `TimerData` 的指针
