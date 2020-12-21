@@ -17,6 +17,13 @@ tags:
 一个具备远程登陆的功能的 Web-Console，其数据流向大概如下：<br>
 User`<--->`Browser`<--->`WebSocket`<--->`SSH`<--->`(TTY)RemoteServer
 
+```
++---------+     http     +--------+    ssh    +-----------+
+| browser | <==========> | webssh | <=======> | ssh server|
++---------+   websocket  +--------+    ssh    +-----------+
+```
+
+
 ####    数据流
 中间的 Proxy 代理层，负责将 websocket 流转换为 SSH 流（核心是输入和输出的转发）：
 
