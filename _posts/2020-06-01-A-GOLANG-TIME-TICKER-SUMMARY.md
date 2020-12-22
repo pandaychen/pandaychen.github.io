@@ -19,7 +19,8 @@ tags:
 
 ####    实现方案
 
-##  0x01    Golang 原生库的使用
+##  0x01    Golang 中的定时器
+
 
 ##  0x02    原生库的实现
 
@@ -292,6 +293,17 @@ func (t *Timer) put(td *TimerData) {
 ```
 
 ##  0x04    Timewheel 实现
+在海量并发场景下（百、千万级），基于时间轮（Timewheel）的 Timer 相较于最小堆实现的 Timer，性能更优：
+
+| 实现算法 | 创建复杂度 | 删除复杂度 |
+|------|------------|----------|
+| 最小堆   |   O(log n)     | O(log n)|
+| 时间轮    | O(1)        | O(1)       |
+
+常见的时间轮实现有两种：
+
+-	简单时间轮（Simple Timing Wheel）
+-	层级时间轮（Hierarchical Timing Wheels）：比如 Kafka 的 [实现](https://www.confluent.io/blog/apache-kafka-purgatory-hierarchical-timing-wheels/) 及 Linux 内核中多级时间轮定时器
 
 ##  0x05    其他
 
@@ -299,3 +311,6 @@ func (t *Timer) put(td *TimerData) {
 -   [Go-Zero 如何应对海量定时延迟任务](https://my.oschina.net/u/4628563/blog/4667586)
 -   [论 golang Timer Reset 方法使用的正确姿势](https://tonybai.com/2016/12/21/how-to-use-timer-reset-in-golang-correctly/)
 -   [定时任务高效触发](https://coolshell.me/articles/cron-job-trigger-high-efficiency.html)
+-	[Go 高级编程：6.3 延时任务系统](https://chai2010.cn/advanced-go-programming-book/ch6-cloud/ch6-03-delay-job.html)
+-	[层级时间轮的 Golang 实现](http://russellluo.com/2018/10/golang-implementation-of-hierarchical-timing-wheels.htmlS)
+-	[Apache Kafka, Purgatory, and Hierarchical Timing Wheels](https://www.confluent.io/blog/apache-kafka-purgatory-hierarchical-timing-wheels/)
