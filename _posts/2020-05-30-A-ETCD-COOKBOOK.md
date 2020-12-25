@@ -77,8 +77,8 @@ type KeyValue struct {
 
 从 `Key-Value` 的结构看，其关联了 `CreateRevision`、`ModRevision` 及 `Version`，而 `Revision` 是在每次客户端请求服务端的 `ResponseHeader` 中返回的。
 
-答案如下：
->       the Revision is the current revision of etcd. It is incremented every time the v3 backed is modified (e.g., Put, Delete, Txn). ModRevision is the etcd revision of the last update to a key. Version is the number of times the key has been modified since it was created. Get(..., WithRev(rev)) will perform a Get as if the etcd store is still at revision rev.
+答案如下：<br>
+> the Revision is the current revision of etcd. It is incremented every time the v3 backed is modified (e.g., Put, Delete, Txn). ModRevision is the etcd revision of the last update to a key. Version is the number of times the key has been modified since it was created. Get(..., WithRev(rev)) will perform a Get as if the etcd store is still at revision rev.
 
 验证一下上面的结论：
 ```javascript
@@ -137,7 +137,8 @@ key1 -> value1, create revsion=47, head revision=53
 {"header":{"cluster_id":14841639068965178418,"member_id":10276657743932975437,"revision":54,"raft_term":2}}
 ```
 
-总结下：
+总结下：<br>
+
 | 字段 | 关联范围 | 说明 |
 |------|------------|----------|
 | Revision   |  全局     | Revision 表示改动序号（ID），每次 KV 的变化，Leader 节点都会修改 Revision 值，因此，这个值在 Cluster（集群）内是全局唯一的，而且是递增的 |
