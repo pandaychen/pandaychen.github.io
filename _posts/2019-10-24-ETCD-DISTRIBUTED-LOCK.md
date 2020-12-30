@@ -237,9 +237,9 @@ func (m *Mutex) Lock(ctx context.Context) error {
 }
 ```
 
-再看看 `waitDeletes` 函数的行为, `waitDeletes` <font color="#dd0000"> 模拟了一种公平的先来后到的排队逻辑，循环等待所有当前比当前 Key 的 Revision 小的 Key 被删除后，锁释放后才返回 </font>，注意上面的关键字：循环等待
+再看看 `waitDeletes` 函数的行为, `waitDeletes` <font color="#dd0000"> 模拟了一种公平的先来后到的排队逻辑，循环等待所有当前比当前 Key 的 </font> `Revision` <font color="#dd0000"> 值小的 Key 被删除后，锁释放后才返回 </font>，注意上面的关键字：循环等待。此处正是利用了 `Revision` 是单调递增的特性来实现。
 ```golang
-//注意waitDeletes的调用方式：hdr, werr := waitDeletes(ctx, client, m.pfx, m.myRev-1)
+// 注意 waitDeletes 的调用方式：hdr, werr := waitDeletes(ctx, client, m.pfx, m.myRev-1)
 func waitDeletes(ctx context.Context, client *v3.Client, pfx string, maxCreateRev int64) (*pb.ResponseHeader, error) {
    // 注意 WithLastCreate 和 WithMaxCreateRev 这两个特性
    getOpts := append(v3.WithLastCreate(), v3.WithMaxCreateRev(maxCreateRev))
@@ -288,7 +288,7 @@ func waitDelete(ctx context.Context, client *v3.Client, key string, rev int64) e
 ```
 
 使用 Etcd 获取分布式锁的架构图如下：
-![etcd-d-lock]()
+![etcd-d-lock](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/etcd/etcd_lock.png)
 
 ##	0x05	总结下 Etcd 分布式锁的步骤
 分析完 `concurrency` 包的核心逻辑，这里总结下基于 Etcd 构造（公平式长期）分布式锁的一般流程如下：
