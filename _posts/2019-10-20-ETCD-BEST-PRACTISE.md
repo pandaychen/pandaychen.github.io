@@ -11,9 +11,8 @@ tags:
 
 ##	0x00    Etcd 最佳实践
 
-此篇文章是本人在学习和使用 Etcd 中，遇到的问题和一些使用心得的总结，避免重复踩坑。：）<br>
-（PS：当然了，大部分的情况，都是使用者的问题，想熟练的掌握 Etcd，哪能不踩几个雷）<br>
-最近阅读的一篇文章[三年之久的 etcd 3 数据不一致 bug 分析](http://dockerone.com/article/10077)，非常好，推荐看下。
+此篇文章是本人在学习和使用 Etcd 中，遇到的问题和一些使用心得的总结，避免重复踩坑。<br>
+最近阅读的一篇文章 [三年之久的 etcd 3 数据不一致 bug 分析](http://dockerone.com/article/10077)，非常好，推荐看下。
 
 ##  0x01    介绍
 
@@ -33,7 +32,7 @@ Etcd 是一个基于 Raft 协议实现的高可用的 KV 存储系统，具备�
 -   可用性（Availability）
 -   分区容忍性（Partition Tolerance）
 
-CAP 定理指的是，这三个要素中最多只能同时实现两点，不可能三者兼顾。因此在进行分布式架构设计时，必须做出取舍。而对于分布式数据系统，分区容忍性是基本要求，否则就失去了价值。因此设计分布式数据系统，就是在一致性和可用性之间取一个平衡。而对于大多数 web 应用，其实并不需要强一致性，因此牺牲一致性而换取高可用性，是目前多数分布式数据库产品的方向。
+CAP 定理指的是，这三个要素中最多只能同时实现两点，不可能三者兼顾。因此在进行分布式架构设计时，必须做出取舍。而对于分布式数据系统，分区容忍性是基本要求，否则就失去了价值。因此设计分布式数据系统，就是在一致性和可用性之间取一个平衡。而对于大多数 Web 应用，其实并不需要强一致性，因此牺牲一致性而换取高可用性，是目前多数分布式数据库产品的方向。
 
 当然，牺牲一致性，并不是完全不管数据的一致性，否则数据是混乱的，那么系统可用性再高分布式再好也没有了价值。牺牲一致性，只是不再要求关系型数据库中的强一致性，而是只要系统能达到最终一致性即可，考虑到客户体验，这个最终一致的时间窗口，要尽可能的对用户透明，也就是需要保障 "用户感知到的一致性"。通常是通过数据的多份异步复制来实现系统的高可用和数据的最终一致性的，"用户感知到的一致性" 的时间窗口则取决于数据复制到一致状态的时间。
 
@@ -58,7 +57,6 @@ Network Partition 是必然的，网络非常可能出现问题（断线、超�
 从客户端角度，多进程并发访问时，更新过的数据在不同进程如何获取的不同策略，决定了不同的一致性。对于关系型数据库，要求更新过的数据能被后续的访问都能看到，这是强一致性。如果能容忍后续的部分或者全部访问不到，则是弱一致性。如果经过一段时间后要求能访问到更新后的数据，则是最终一致性。
 
 ####    经典的 CAP 图
-
 ![image](https://s2.ax1x.com/2019/11/08/MZr0WF.png)
 
 ##  0x03    Etcd 原理
@@ -71,16 +69,16 @@ Etcd 官方提供了一个动态演示集群原理的项目 <br>
 
 ####    物理节点监控
 物理节点的监控 + 进程监控 <br>
-对于 N 个物理节点的 Etcd 集群，挂掉 (N-1)/2 台，剩余节点组成的集群可以正常工作。
+对于 `N` 个物理节点的 Etcd 集群，挂掉 $\frac{N-1}{2}$ 台，剩余节点组成的集群可以正常工作。
 
-####    各个物理节点的NTP同步
-Etcd 中，存在租约的概念，租约过期后，Key 就会被删除。假设我们三台机器组成了 Etcd 集群，那么如果其中某台机器的 NTP 误差较大的话，是存在风险的，可能会导致设置的 Lease 时间和预期不符。所以必要的 NTP 同步是需要的
+####    各个物理节点的 NTP 同步
+Etcd 中，存在租约的概念，租约过期后，Key 就会被删除。假设我们三台机器组成了 Etcd 集群，那么如果其中某台机器的 `NTP` 误差较大的话，是存在风险的，可能会导致设置的 Lease 时间和预期不符。所以必要的 `NTP` 同步是需要的
 
 ##  0x05    客户端
 
 ####    版本差异
 1.	Etcd 有 V2 和 V3 版本，数据是不互通的，所以勿用 V3 的 API 去操作 V2 版本 API 写入的数据，反之亦然
-2.	在 V2 版本中，每一个 key 都进行一次 Etcd 的 set 操作，这个操作是加锁的，所以，在读写的情况下会耗时很多在锁上面。V3 版本中，是先聚合，再每 128 个操作进行一次事务性执行。V3 较 V2 性能提升明显。
+2.	在 V2 版本中，每一个 key 都进行一次 Etcd 的 `Set` 操作，这个操作是加锁的，所以，在读写的情况下会耗时很多在锁上面。V3 版本中，是先聚合，再每 128 个操作进行一次事务性执行。V3 较 V2 性能提升明显。
 
 ####    更安全的客户端
 在很多环境中我们启动 Etcd 都是通过配置 TLS 方式进行的（比如 Kubernetes）, 所以在连接 Etcd 的时候需要使用 TLS 方式连接：
@@ -106,7 +104,7 @@ defer client.Close()
 ```
 
 当然也可以使用 User+Password 的方式来创建，看这里的 [clientv3.Client 结构](https://godoc.org/github.com/coreos/etcd/clientv3#Client)
-```go
+```golang
 type Client struct {
     Cluster
     KV
@@ -114,7 +112,6 @@ type Client struct {
     Watcher
     Auth
     Maintenance
-
     // Username is a user name for authentication.
     Username string
     // Password is a password for authentication.
@@ -124,7 +121,7 @@ type Client struct {
 ```
 
 此外，由于 EtcdV3 的客户端是 gRPC 实现的，所以也提供了 gRPC 拦截器的初始化：
-```go
+```golang
 cli, err := clientv3.New(clientv3.Config{
     Endpoints: endpoints,
     DialOptions: []grpc.DialOption{
@@ -137,15 +134,15 @@ cli, err := clientv3.New(clientv3.Config{
 ##  0x06    MVCC
 MVCC(Multiversion concurrency control 多版本并发控制)，Etcd 在内存中维护了一个 BTREE(B 树) 纯内存索引，它是有序的。(回想起 MYSQL 的索引也是 BTREE 实现的，极大的提升查找效率)<br>
 在这个 BTREE 中，整个 KV 存储大概就是这样：
-```go
+```golang
 type treeIndex struct {
     sync.RWMutex
     tree *btree.BTree
 }
 ```
-当存储大量的 Key-Value 时，因为用户的 value 一般比较大，全部放在内存 btree 里内存耗费过大，所以 Etcd 将用户 value 保存在磁盘中。
+当存储大量的 Key-Value 时，因为用户的 Value 一般比较大，全部放在内存 BTREE 里内存耗费过大，所以 Etcd 将用户 Value 保存在磁盘中。
 
-Etcd 在事件模型（watch 机制）上与 ZooKeeper 完全不同，每次数据变化都会通知，并且通知里携带有变化后的数据内容，其基础就是自带 MVCC 的 bboltdb 存储引擎。
+Etcd 在事件模型（Watch 机制）上与 ZooKeeper 完全不同，每次数据变化都会通知，并且通知里携带有变化后的数据内容，其基础就是自带 MVCC 的 Bboltdb 存储引擎。
 
 ####	MVCC 要点
 
@@ -155,17 +152,17 @@ Etcd 在事件模型（watch 机制）上与 ZooKeeper 完全不同，每次数�
 4.	每个 Revision 由（main ID，sub ID）唯一标识
 
 ####    关于 Version/Revision/ModRevison 的概念与区别
-从 MVCC 引出 Version/Revision/ModRevison 这三个重要概念：<br>
+从 MVCC 引出 `Version`/`Revision`/`ModRevison` 这三个重要概念：<br>
 
--	Revision 表示改动序号（ID），每次 KV 的变化，leader 节点都会修改 Revision 值，因此，这个值在 cluster 内是全局唯一的，而且是递增的。
+-	`Revision` 表示改动序号（ID），每次 KV 的变化，leader 节点都会修改 `Revision` 值，因此，这个值在 cluster 内是全局唯一的，而且是递增的。
 
--	ModRevison 记录了某个 key 最近修改时的 Revision，即它是与 key 关联的。
--   Version 表示 KV 的版本号，初始值为 1，每次修改 KV 对应的 version 都会加 1，也就是说它是作用在 KV 之内的。
+-	`ModRevison` 记录了某个 key 最近修改时的 Revision，即它是与 key 关联的。
+-   `Version` 表示 KV 的版本号，初始值为 1，每次修改 KV 对应的 `Version` 都会加 1，也就是说它是作用在 KV 之内的。
 
--	使用参数 --write-out 可以格式化（json/fields ...）输出详细的信息，包括 Revision、ModRevison、Version，此外，还包括 LeaseID
+使用参数 `--write-out` 可以格式化（json/fields ...）输出详细的信息，包括 `Revision`、`ModRevison`、`Version`，此外，还包括 `LeaseID`
 
 如：
-``` bash
+```javascript
 Etcdctl get /a/b --prefix --write-out=fields    #
 
 "Key" : "/a/b/key1-Iag4se1uz1"
