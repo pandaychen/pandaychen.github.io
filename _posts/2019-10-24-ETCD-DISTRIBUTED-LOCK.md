@@ -24,7 +24,7 @@ tags:
 ##  0x01	分布式锁的两种形态
 通常，分布式锁有如下两种形态：
 -  短期锁：即用即申请，用完即释放，一般用于资源控制粒度比较细的系统，这种场景会频繁的调用 Etcd 服务
--  长期锁：这种锁是先到先得，得到即长期占有，更多是用在主备系统的切换场景，如果占有锁的服务不发生异常，则不会主动与 Etcd 交互
+-  长期锁：这种锁是先到先得，得到即长期占有，更多是用在主备系统的切换场景，如果占有锁的服务不发生异常，则不会主动与 Etcd 交互，对于笔者的数据同步服务是一种长期锁
 
 这里多提一句，无论是短期还是长期占有的锁，在锁竞争上最好都遵从公平的策略，即先注册（排队）的进程（实例）先获取锁。
 
@@ -120,7 +120,7 @@ type Mutex struct {
 }
 ```
 
-初始化 `Mutex`，可以看到在 `NewMutex` 方法中，并非直接拿传进来的 `pfx` 作为 prefix 的，而且在后面加了个 `/`，在 Etcd 开发项目中，定义或查找 prefix 或 suffix 时都建议加上分隔符 `/`，这是个好习惯，也可以避免出现问题。
+初始化 `Mutex`，可以看到在 `NewMutex` 方法中，并非直接拿传进来的 `pfx` 作为 Prefix 的，而且在后面加了个 `/`，在 Etcd 开发项目中，定义或查找 Prefix 或 Suffix 时都建议加上分隔符 `/`，这是个好习惯，也可以避免出现问题。
 ```golang
 func NewMutex(s *Session, pfx string) *Mutex {
    //Etcd 这里默认将 / path 的 key 结构转换为一个目录结构 /path/
@@ -200,7 +200,7 @@ func WithPrefix() OpOption {
 }
 ```
 
-看到上面的代码，`WithPrefix/WithSort`，所以 `getOwner` 的具体执行效果是会把虽有以 `lockkey` 开头的 Key-Value 都拿到，且按照 `CreateRevision` 升序排列，并取第一个值，这个意思就很明白了，就是要拿到当前以 `lockkey` 为 prefix 的且 `CreatereVision` 最小的那个 Key，就是目前已经拿到锁的 Key;
+看到上面的代码，`WithPrefix/WithSort`，所以 `getOwner` 的具体执行效果是会把虽有以 `lockkey` 开头的 Key-Value 都拿到，且按照 `CreateRevision` 升序排列，并取第一个值，这个意思就很明白了，就是要拿到当前以 `lockkey` 为 Prefix 的且 `CreatereVision` 最小的那个 Key，就是目前已经拿到锁的 Key;
 
 `TryLock/Lock` 上层调用：
 ```golang
@@ -287,7 +287,7 @@ func waitDelete(ctx context.Context, client *v3.Client, key string, rev int64) e
 }
 ```
 
-使用 Etcd 获取分布式锁的架构图如下：
+使用 Etcd 实现分布式锁的架构图如下：
 ![etcd-d-lock](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/etcd/etcd_lock.png)
 
 ##	0x05	总结下 Etcd 分布式锁的步骤
