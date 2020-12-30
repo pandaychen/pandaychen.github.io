@@ -237,26 +237,32 @@ func (m *Mutex) Lock(ctx context.Context) error {
 }
 ```
 
-再看看 `waitDeletes` 函数的行为, `waitDeletes` 模拟了一种公平的先来后到的排队逻辑，等待所有当前比当前 Key 的 `Revision` 小的 Key 被删除后，锁释放后才返回
+再看看 `waitDeletes` 函数的行为, `waitDeletes` <font color="#dd0000"> 模拟了一种公平的先来后到的排队逻辑，循环等待所有当前比当前 Key 的 Revision 小的 Key 被删除后，锁释放后才返回 </font>，注意上面的关键字：循环等待
 ```golang
+//注意waitDeletes的调用方式：hdr, werr := waitDeletes(ctx, client, m.pfx, m.myRev-1)
 func waitDeletes(ctx context.Context, client *v3.Client, pfx string, maxCreateRev int64) (*pb.ResponseHeader, error) {
    // 注意 WithLastCreate 和 WithMaxCreateRev 这两个特性
    getOpts := append(v3.WithLastCreate(), v3.WithMaxCreateRev(maxCreateRev))
    for {
+      // 循环
       resp, err := client.Get(ctx, pfx, getOpts...)
       if err != nil {
          return nil, err
       }
       if len(resp.Kvs) == 0 {
+         // 表示在 maxCreateRev 前面已经没有比本进程优先级更高的客户端了，本客户端可以获得锁
          return resp.Header, nil
       }
       lastKey := string(resp.Kvs[0].Key)
+      // 阻塞，waitDelete 等待 lastKey+resp.Header.Revision 被成功删除
+      //resp.Header.Revision 是当前最小的
       if err = waitDelete(ctx, client, lastKey, resp.Header.Revision); err != nil {
          return nil, err
       }
    }
 }
 
+//
 func waitDelete(ctx context.Context, client *v3.Client, key string, rev int64) error {
    cctx, cancel := context.WithCancel(ctx)
    defer cancel()
@@ -281,6 +287,9 @@ func waitDelete(ctx context.Context, client *v3.Client, key string, rev int64) e
 }
 ```
 
+使用 Etcd 获取分布式锁的架构图如下：
+![etcd-d-lock]()
+
 ##	0x05	总结下 Etcd 分布式锁的步骤
 分析完 `concurrency` 包的核心逻辑，这里总结下基于 Etcd 构造（公平式长期）分布式锁的一般流程如下：
 
@@ -292,7 +301,7 @@ func waitDelete(ctx context.Context, client *v3.Client, key string, rev int64) e
 
 4.	执行业务逻辑，操作共享资源
 
-5.	释放分布式锁，现网的程序逻辑需要实现在正常和异常条件下的释放锁的策略，如捕获 SIGTERM 后执行 Unlock，或者异常退出时，有完善的监控和及时删除 Etcd 中的 Key 的异步机制，避免出现死锁现象
+5.	释放分布式锁，现网的程序逻辑需要实现在正常和异常条件下的释放锁的策略，如捕获 `SIGTERM` 后执行 `Unlock`，或者异常退出时，有完善的监控和及时删除 Etcd 中的 Key 的异步机制，避免出现死锁现象
 
 6.	当客户端持有锁期间，其它客户端只能等待，为了避免等待期间租约失效，客户端需创建一个定时任务进行续约续期。如果持有锁期间客户端崩溃，心跳停止，Key 将因租约到期而被删除，从而锁释放，避免死锁
 
