@@ -526,6 +526,7 @@ SSH_AUTH_SOCK=/tmp/ssh-IcFeG5r3XuQA/agent.26302
 -   [SSH Tron](https://github.com/zachlatta/sshtron)：此包实现了一个在线多人贪吃蛇服务
 -   [Chat over SSH](https://github.com/shazow/ssh-chat)：基于 ssh 的聊天工具
 -   [Easy SSH servers in Golang](https://github.com/gliderlabs/ssh)：一个通用的 sshd 框架实现
+-   [Awesome SSH - Curated list of awesome lists](https://project-awesome.org/moul/awesome-ssh)：Awesome SSH Lists
 
 
 ##	0x05	几个细节问题
