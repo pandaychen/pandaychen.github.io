@@ -47,12 +47,23 @@ Raft 的优点如下：
 节点的状态切换状态机如下图所示。
 ![raft-state](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/raft/raft3.jpg)
 
+1.  Start 起始状态，各个节点刚启动的时候自动进入 `Follower` 状态
+2.  Times out, starts election：`Follower` 在启动之后，将开启一个选举超时定时器，当这个定时器到期时，`Follower` 将切换到 `Candidate` 状态发起选举（每个 `Follower` 都投自己一票，成为 `Candidate`）
+3.  Times out, new election：进入 `Candidate` 状态之后就开始选举，但是如果在下一次选举超时之前，还没有选出一个新的 `Leader`，那么还会保持在 `Candidate` 状态重新开始一次新选举
+4.  Receives votes from majority of servers：当 `Candidate` 状态的节点，收到了超过半数的节点的选票，那么其将切换状态成为新的 `Leader`，同时向其他节点广播，其他节点成为 `Follower`
+4.  Discovers current leader or new term：处于 `Candidate` 状态的节点，如果收到了来自 `Leader` 的消息，或者更高任期号（Term）的消息，表示集群中已经有 `Leader` 了，将切换回到 `Follower` 状态
+5.  Discovers server with higher term：`Leader` 状态下如果收到来自更高任期号的消息，将切换到 `Follower` 状态。这种情况大多数发生在有网络分区的状态下（网络分区又恢复）
 
+Raft 节点间通过 RPC 请求来互相通信，主要有以下两类 RPC 请求：
+1.  Request-Vote RPC：用于 `Candidate` 状态的节点进行选举用途
+2.  Append-Entries RPC：由 `Leader` 节点向其他节点复制日志数据以及同步心跳数据
+
+####    任期 Term
 
 ####    选举定时器
 在 Raft 中有两个 Timeout 定时器控制着选主 Election 的进行：
 1.  选举超时时间（Election Timeout）：意思是 `Follower` 要等待成为 `Candidate` 的时间（要成为 `Candidate` 后才可以投票选举），通常 Election Timeout 定时器为 `150ms~300ms`，这个时间结束之后 `Follower` 变成 `Candidate` 开始选举过程。首先是自己对自己投票（`+1`），然后向其他节点请求投票（选票），如果接收节点在收到投票请求时还没有参与过投票，那么它会响应本次请求，并把票投给这个请求投票的 `Candidate`，然后重置自身的 Election Timeout 定时器，一旦一个 `Candidate` 拥有所有节点中的大多数投票，则此节点变成一个 `Leader`
-2.  心跳超时时间（Heartbeat Timeout）：当一个节点从 `Candidate` 变为 `Leader` 时，此节点开始向其他 `Follower` 发送 Append Entries，这些消息发送的频率是通过 Heartbeat Timeout 配置，`Follower` 会响应每条的 Append Entry，整个选举会一直进行直到 `Follower` 停止接受 heartbeat 并且变成 `Candidate` 开始下一轮选举（即假设此时 `Leader` 故障或者丢失了，`Follower` 检测到心跳超时后，等待自身竞选超时后发起选举）
+2.  心跳超时时间（Heartbeat Timeout）：当一个节点从 `Candidate` 变为 `Leader` 时，此节点开始向其他 `Follower` 发送 Append Entries，这些消息发送的频率是通过 Heartbeat Timeout 配置，`Follower` 会响应每条的 Append Entry，整个选举会一直进行直到 `Follower` 停止接受 heartbeat 并且变成 `Candidate` 开始下一轮选举（即假设此时 `Leader` 故障或者丢失了，`Follower` 检测到心跳超时（在此期间没有收到 `Leader` 发送的 Append Entry）后，再等待自身选举超时后发起新一轮选举）
 
 ##  0x02    Leader Election
 

@@ -16,11 +16,11 @@ tags:
 ##  0x01  Jekyll 支持 Latex 的设置
 
 1.  第一步，将 `_config.yml` 中的 `markdown` 修改为
-``` js
+```javascript
 markdown: kramdown
 ```
 2. 第二步，在 `header` 文件中添加引用和设置代码，也就是_include/header.html 中
-``` js
+```javascript
   <script type="text/x-mathjax-config">
     MathJax.Hub.Config({
       tex2jax: {
