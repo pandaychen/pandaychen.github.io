@@ -16,6 +16,7 @@ tags:
 
 ##  PUSH 长连接
 -   [connsvr](https://github.com/simplejia/connsvr)：golang 实现的长连接服务，适合群推，比如推消息，推比赛比分等，功能丰富
+-   [goim](https://github.com/Terry-Mao/goim)：GOIM is a IM and push notification server cluster.（http://goim.io）
 
 ##  负载均衡
 -   [GOLB](https://github.com/onestraw/golb)：Yet another load balancer
