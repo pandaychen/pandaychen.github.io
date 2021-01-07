@@ -14,26 +14,35 @@ tags:
 ---
 
 ##  0x00    前言
-前一篇文章，介绍过 [Nginx 的负载均衡算法](https://pandaychen.github.io/2019/12/15/NGINX-SMOOTH-WEIGHT-ROUNDROBIN-ANALYSIS/)。<br>
-`upstream` 机制使得 Nginx 通常用于反向代理服务器，Nginx 接收来自下游客户端的 Http 请求，并处理该请求，同时根据该请求向上游服务器发送 Tcp 请求报文，上游服务器会根据该请求返回相应地响应报文，Nginx 根据上游服务器的响应报文，决定是否向下游客户端转发响应报文。另外 `upstream` 机制提供了负载均衡的功能，可以将请求负载均衡到集群服务器的某个服务器上面。
+前一篇文章，介绍过 [Nginx 的负载均衡算法](https://pandaychen.github.io/2019/12/15/NGINX-SMOOTH-WEIGHT-ROUNDROBIN-ANALYSIS/)。`upstream` 机制使得 Nginx 通常用于反向代理服务器，Nginx 接收来自下游客户端的 Http 请求，并处理该请求，同时根据该请求向上游服务器发送 Tcp 请求报文，上游服务器会根据该请求返回相应地响应报文，Nginx 根据上游服务器的响应报文，决定是否向下游客户端转发响应报文。另外 `upstream` 机制提供了负载均衡的功能，可以将请求负载均衡到集群服务器的某个服务器上面。
 
 同时，上一篇文章介绍了采用 Confd+Nginx 的 [方案](https://pandaychen.github.io/2021/01/01/A-GOLANG-CONFD-ANALYSIS/)，不过，在高并发的场景下，使用 `nginx -s reload` 方式可能会带来性能上的损耗，不够优雅。本篇介绍下 Weibo 开源的 Nginx Module：Upsync，基于 Nginx 容器动态流量管理方案。该方案结合了 Nginx 的健康检查模块，以及动态 `reload` 机制，可以近乎无损的服务的升级上线与扩容。
 
-Upsync 是 Nginx 和 Etcd、Consul 等服务发现组件非常好的结合实践。
+Upsync 是 Nginx 和 Etcd、Consul 等服务发现组件非常好的结合实践。Upsync-Module 提供了动态的负载均衡，它可以从 Consul/Etcd 同步 `upstreams`，而且支持动态修改后端服务器属性（如 `weight`，`max_fails`，`down` 等参数），无须重新加载 Nginx，从而实现平滑伸缩。
+
+关于在高并发下 `reload` 带来的影响可以参见 [Upsync：微博开源基于 Nginx 容器动态流量管理方案](https://mp.weixin.qq.com/s?__biz=MzAwMDU1MTE1OQ==&mid=404151075&idx=1&sn=5f3b8c007981a2d048766f808f8c8c98&scene=2&srcid=0223XScbJrOv7noogVX6T60Q&from=timeline&isappinstalled=0#wechat_redirect)
+
+> 在流量比较重的情况下，发起 reload 会对性能造成影响。reload 的同时会引发新的 work 进程的创建，在一段时间内新旧 work 进程会同时存在，并且旧的 work 进程会频繁的遍历 connection 链表，查看是否请求已经处理结束，若结束便退出进程；另 reload 也会造成 Nginx 与 client 和 backend 的长链接关闭，新的 work 进程需要创建新的链接。在 reload 时 Nginx 的请求处理能力会下降。
+
 
 ##  0x01    架构 && 流程
 -   [nginx-upsync-module](https://github.com/weibocom/nginx-upsync-module)：支持 Http 的配置
 -   [nginx-stream-upsync-module](https://github.com/xiaokai-wang/nginx-stream-upsync-module)：支持 Stream（四层）的代理配置
 
-![nginx-upsync - 原理图]()
+![nginx-upsync - 原理图](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/nginx/upsync-architecture.png)
+
+本小节简单介绍下 Upsync 的实现原理。
+
+####    基于动态路由的方案设计
+
 
 ##  0x02    UpSync 配置及使用
 
 ####    配置指令说明
+
 | 指令 | 位置 | 功能 | 语法示例 | 默认值 |
 |------|------------|----------|----------|----------|
-| upsync  |  upstream     | 从 Consul/Etcd 获取 `upstream` 服务列表 | upsync $consul.api.com:$port/v1/kv/upstreams/$upstream_name [upsync_type=consul] [upsync_interval=seconds/minutes] [upsync_timeout=seconds/minutes] [strong_dependency=off/on];|upsync_interval=5s upsync_timeout=6m strong_dependency=off|
-
+| upsync  |upstream| 从 Consul/Etcd 获取 `upstream` 服务列表 | upsync $consul.api.com:$port/v1/kv/upstreams/$upstream_name [upsync_type=consul] [upsync_interval=seconds/minutes] [upsync_timeout=seconds/minutes] [strong_dependency=off/on];|upsync_interval=5s upsync_timeout=6m strong_dependency=off|
 
 ####    配置示例
 先来看一个 Upsync 配置示例：
@@ -92,7 +101,7 @@ server 127.0.0.1:8081 weight=1 max_fails=2 fail_timeout=10s;
 ```
 
 通过 ETCD V2 版本接口进行数据操作：
-```JavaScript
+```bash
 #增加 upstream 节点，默认属性为：weight=1 max_fails=2 fail_timeout=10 down=0 backup=0;
 curl -X PUT http://127.0.0.1:2379/v2/keys/upstreams/pool/127.0.0.1:8082
 #删除数据
@@ -114,7 +123,10 @@ Upstream name: bar; Backend server count: 1
 ```
 
 ##  0x03    核心代码分析
-整个模块的核心逻辑在 [ngx_http_upsync_module.c](https://github.com/weibocom/nginx-upsync-module/blob/master/src/ngx_http_upsync_module.c)：
+整个模块的核心逻辑在 [ngx_http_upsync_module.c](https://github.com/weibocom/nginx-upsync-module/blob/master/src/ngx_http_upsync_module.c)，需要对 Nginx 的 Module 开发有些了解。
+
+模块的基本流程如下：
+![upsync-flowchart1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/nginx/upsync-flowchart1.png)
 
 `ngx_http_client_send` 函数，调用 GET 请求访问 Consul 或者 Etcd 集群并获取结果：
 ```c

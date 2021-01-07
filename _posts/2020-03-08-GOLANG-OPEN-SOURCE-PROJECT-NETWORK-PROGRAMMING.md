@@ -22,5 +22,8 @@ tags:
 -   [GOLB](https://github.com/onestraw/golb)：Yet another load balancer
 
 
+##  Nginx Modules
+-   [Nginx正向代理](https://github.com/chobits/ngx_http_proxy_connect_module)
+
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
