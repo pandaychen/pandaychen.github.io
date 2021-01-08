@@ -34,7 +34,32 @@ Upsync 是 Nginx 和 Etcd、Consul 等服务发现组件非常好的结合实践
 本小节简单介绍下 Upsync 的实现原理。
 
 ####    基于动态路由的方案设计
+在 Nginx 的设计中，每一个 `upstream` 维护了一张静态路由表（注意：静态），存储了 `backend` 的 `ip`、`port` 以及其他的 `metadata`。每次请求到达后，会依据路由 `location` 配置检索路由表，然后依据具体的调度（负载均衡）算法选择一个 `backend` 转发请求。<font color="#dd0000"> 但这张路由表是静态的，如果变更后，则必须 reload<font>，解决 `reload` 的关键就是将静态路由表调整为动态的，即每次更新 `backend` 后，动态更新 / 创建一张新的路由表，从而无需 `reaload` 即可生效。本文介绍的 Nginx 扩展模块 [nginx-upsync-module](https://github.com/weibocom/nginx-upsync-module) 即可完成此功能（动态更新维护路由表）。
 
+nginx-upsync-module 采用 PULL 方案来完成获取最新 `backend` 列表的功能，实现细节如下：
+1.  提供外部接口，将路由表中所有的后端节点 `backend` 信息及相关属性（如权重、参数等）存储到 Consul/Etcd，Nginx 本地初始化一份本地 `backend` 配置
+2.  所有的 Nginx 通过调用 Consul/Etcd 的 API 接口拉取 `backend` 列表，并和本地保存的列表比较，有变更则更新路由表，实现动态更新路由的功能
+    -   每个 Work 进程定时的去 Consul/Etcd 拉取相应 upstream 的配置，若 Consul 发现对应 upstream 的值没有变化，便会 hang 住这个请求 `5` 分钟。在 `5` 分钟内对此 upstream 的任何操作，都会立刻返回给 Nginx 对相应路由进行更新
+    -   当 `upstream` 变更后，除了更新 Nginx 的缓存路由信息，还会把本次 `upstream` 的后端 `backend` 列表 dump 到本地，保持本地 server 信息与远端的一致性，[代码见此](https://github.com/weibocom/nginx-upsync-module/blob/master/src/ngx_http_upsync_module.c#L723)
+    -   除了注册 / 注销后端的 `backend` 到 Consul，会更新到 Nginx 的 upstream 路由信息外，对后端 `backend` 属性的修改也会同步到 Nginx 的 upstream 路由，Upsync 模块支持修改的属性有  `weight`、`max_fails`、`fail_timeout` 和 `down`
+
+属性说明如下：
+
+| `backend` 属性 | 说明 |
+|------|------------|
+|weight	| 服务器权重，默认为 1。修改权重可以动态的调整后端的流量 |
+|max_fails|	最大尝试失败次数，默认为 1，将其设置为 0 可以关闭检查 |
+|fail_timeout | 失效时间，默认为 10 秒。在这个时间内产生了 max_fails 所设置大小的失败尝试连接请求后这个服务器可能不可用 |
+|down | 标记服务器处于离线状态。1：离线；0：在线，若想要临时移除 server，可以把 server 的 down 属性置为 1。若要恢复流量，可重新把 down 置为 0|
+
+
+####    模块的 HA 设计
+Upsync 模块在高可用性 HA 上也有一定考虑，不强依赖 Consul/Etcd（更新除外）：
+![upsync-ha](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/nginx/upsync-ha-flowchart.jpg)
+
+-   即使中途 Consul/Etcd 集群不可用，也不会影响 Nginx 的服务，Nginx 会沿用最后一次更新的服务列表继续提供服务
+-   若 Consul/Etcd 集群重新提供服务，这个时候 Nginx 会继续去 Consul/Etcd 探测，且 Consul/Etcd 的后端 `backend` 列表发生了变化，也会及时的更新到 Nginx
+-   Worker 进程每次更新都会把后端列表 dump 到本地，目的是降低对 Consul/Etcd 的依赖性，即使在 Consul/Etcd 不可用时，也可以 Reload Nginx 继续生效
 
 ##  0x02    UpSync 配置及使用
 
@@ -42,7 +67,7 @@ Upsync 是 Nginx 和 Etcd、Consul 等服务发现组件非常好的结合实践
 
 | 指令 | 位置 | 功能 | 语法示例 | 默认值 |
 |------|------------|----------|----------|----------|
-| upsync  |upstream| 从 Consul/Etcd 获取 `upstream` 服务列表 | upsync $consul.api.com:$port/v1/kv/upstreams/$upstream_name [upsync_type=consul] [upsync_interval=seconds/minutes] [upsync_timeout=seconds/minutes] [strong_dependency=off/on];|upsync_interval=5s upsync_timeout=6m strong_dependency=off|
+| upsync  |upstream| 从 Consul/Etcd 获取 `upstream` 服务列表 | upsync consul.api.com:port/v1/kv/upstreams/$upstream_name [upsync_type=consul] [upsync_interval=seconds/minutes] [upsync_timeout=seconds/minutes] [strong_dependency=off/on];|upsync_interval=5s upsync_timeout=6m strong_dependency=off|
 
 ####    配置示例
 先来看一个 Upsync 配置示例：
@@ -128,6 +153,22 @@ Upstream name: bar; Backend server count: 1
 模块的基本流程如下：
 ![upsync-flowchart1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/nginx/upsync-flowchart1.png)
 
+
+####    Etcd 的实现
+Etcd 的更新流程 [在此](https://github.com/weibocom/nginx-upsync-module/blob/master/src/ngx_http_upsync_module.c#L363)，分为下面几个步骤：
+```c
+static ngx_upsync_conf_t  ngx_upsync_types[] = {
+    //...
+ {ngx_string("etcd"),
+      NGX_HTTP_UPSYNC_ETCD,
+      ngx_http_upsync_send_handler,
+      ngx_http_upsync_recv_handler,
+      ngx_http_upsync_etcd_parse_init,
+      ngx_http_upsync_etcd_parse_json,
+      ngx_http_upsync_clean_event },
+}
+```
+
 `ngx_http_client_send` 函数，调用 GET 请求访问 Consul 或者 Etcd 集群并获取结果：
 ```c
 static ngx_int_t
@@ -167,7 +208,12 @@ ngx_http_client_send(ngx_http_conf_client *client,
 }
 ```
 
+##  其他细节
+1、使用 `ngx_add_timer` 添加定时器（单位：ms）<br>
+Nginx 在 event 模块里实现了精确到毫秒级别的定时器机制，使用红黑树结构管理所有定时器对象
+
 ##  参考
 -   [Nginx 开发从入门到精通：upstream 模块](http://tengine.taobao.org/book/chapter_5.html)
--   [Nginx 中 upstream 机制的实现](https://www.kancloud.cn/digest/understandingnginx/202606)
+-   [理解 Nginx 源码：Nginx 中 upstream 机制的实现](https://www.kancloud.cn/digest/understandingnginx/202606)
 -   [Upsync：微博开源基于 Nginx 容器动态流量管理方案](https://mp.weixin.qq.com/s?__biz=MzAwMDU1MTE1OQ==&mid=404151075&idx=1&sn=5f3b8c007981a2d048766f808f8c8c98&scene=2&srcid=0223XScbJrOv7noogVX6T60Q&from=timeline&isappinstalled=0#wechat_redirect)
+-   [Nginx 中 upstream 机制的负载均衡](https://www.kancloud.cn/digest/understandingnginx/202607)
