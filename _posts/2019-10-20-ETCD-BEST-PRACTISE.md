@@ -243,6 +243,81 @@ Etcd 的 lease 可以用来做心跳，监控模块存活状态。Lease 的存�
 
 Etcd 提供了 watcher，来监控集群 kv 的变化。这个在开发 gRPC 服务发现的 ClientConn 实时更新接口时，必不可少。但是 Watch 返回的 WatchChan 有可能在运行过程中失败而关闭，此时 WatchResponse.Canceled 会被置为 true，WatchResponse.Err() 也会返回具体的错误信息。所以在 range WatchChan 的时候，每一次循环都要检查 WatchResponse.Canceled，在关闭的时候重新发起 Watch 或报错。
 
+##  0x0A    Etcd WatchPrefix 的最佳方式
+最近读了一些开源实现，发现对 Etcd WatchPrefix 的一些细节上的考虑，一个考虑完备的实现如下：
+
+####    封装 watcher 结构
+```golang
+
+// Watch A watch only tells the latest revision
+type Watch struct {
+	revision  int64
+	cancel    context.CancelFunc    // 控制 watcher 退出
+	eventChan chan *clientv3.Event  // 返回给上层的数据 channel
+	eventChanSize int
+	lock      *sync.RWMutex
+	logger    *zap.Logger
+
+	incipientKVs []*mvccpb.KeyValue
+}
+```
+
+####    WatchPrefix 的实现
+```golang
+func (client *Client) WatchPrefix(ctx context.Context, prefix string) (*Watch, error) {
+	// 初始化请求 WithPrefix
+	resp, err := client.Get(ctx, prefix, clientv3.WithPrefix())
+	if err != nil {
+		return nil, err
+	}
+
+	// 返回
+
+	var w = &Watch{
+		eventChanSize:64,
+		revision:     resp.Header.Revision,
+		eventChan:    make(chan *clientv3.Event, 64),
+		incipientKVs: resp.Kvs,
+	}
+
+	xgo.Go(func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		w.cancel = cancel
+		rch := client.Client.Watch(ctx, prefix, clientv3.WithPrefix(), clientv3.WithCreatedNotify(), clientv3.WithRev(w.revision))
+		for {
+			for n := range rch {
+				if n.CompactRevision > w.revision {
+					w.revision = n.CompactRevision
+				}
+				if n.Header.GetRevision()> w.revision {
+					w.revision = n.Header.GetRevision()
+				}
+				if err := n.Err(); err != nil {
+					xlog.Error(ecode.MsgWatchRequestErr, xlog.FieldErrKind(ecode.ErrKindRegisterErr), xlog.FieldErr(err), xlog.FieldAddr(prefix))
+					continue
+				}
+				for _, ev := range n.Events {
+					select {
+					case w.eventChan <- ev:
+					default:
+						xlog.Error("watch etcd with prefix", xlog.Any("err", "block event chan, drop event message"))
+					}
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			w.cancel = cancel
+			if w.revision > 0 {
+				rch = client.Watch(ctx, prefix, clientv3.WithPrefix(), clientv3.WithCreatedNotify(), clientv3.WithRev(w.revision))
+			} else {
+				rch = client.Watch(ctx, prefix, clientv3.WithPrefix(), clientv3.WithCreatedNotify())
+			}
+		}
+	})
+
+	return w, nil
+}
+```
+
 
 ##  0x0A    参考文档
 -   [Godoc - package clientv3](https://godoc.org/github.com/Etcd-io/Etcd/clientv3)
