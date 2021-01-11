@@ -20,10 +20,10 @@ tags:
 Consul 和 Etcd 的功能是有重叠的（有很多文章都有对二者进行比较），不过 Etcd 仅仅是一个 CP 的 KV 存储，而 Consul 更像是一个微服务开发的完整套件。Consul 的官网介绍：<br>
 
 -   服务发现 <br>
-Consul 的客户端可用提供一个服务，比如 api 或者 mysql，另外一些客户端可用使用 Consul 去发现一个指定服务的提供者。通过 DNS 或者 HTTP 应用程序可用很容易的找到他所依赖的服务
+Consul 的客户端可用提供一个服务，比如 API 或者 Mysql，另外一些客户端可用使用 Consul 去发现一个指定服务的提供者。通过 DNS 或者 HTTP 应用程序可用很容易的找到他所依赖的服务
 
 -   健康检查 <br>
-Consul 客户端可用提供任意数量的健康检查, 指定一个服务 (比如: Webserver 是否返回了 200 OK 状态码) 或者使用本地节点 (比如: 内存使用是否大于 90%). 这个信息可由 operator 用来监视集群的健康. 被服务发现组件用来避免将流量发送到不健康的主机.
+Consul 客户端可用提供任意数量的健康检查, 指定一个服务 (比如: Webserver 是否返回了 `200 OK` 状态码) 或者使用本地节点 (比如: 内存使用是否大于 `90%`). 这个信息可由 operator 用来监视集群的健康. 被服务发现组件用来避免将流量发送到不健康的主机.
 
 -   Key/Value 存储 <br>
 应用程序可用根据自己的需要使用 Consul 的层级的 Key/Value 存储. 比如动态配置, 功能标记, 协调, 领袖选举等等, 简单的 HTTP API 让他更易于使用.
@@ -67,14 +67,14 @@ Consul 支持开箱即用的多数据中心. 这意味着用户不需要担心�
 
 在 Consul 集群中，Server 节点是一定需要的，Client 节点可以不需要；
 
-同一集群内的 Server 节点（图中每个 DataCenter 都具由 3 个 Server 节点）有一个 Leader 和多个 Follower，Leader 节点会将数据同步到 Follower，Server 的数量推荐是 3 个或者 5 个，在 Leader 挂掉的时候会启动选举机制产生一个新的 Leader。Server 间的选举遵循 [RAFT 算法](https://github.com/hashicorp/raft)
+同一集群内的 Server 节点（图中每个 DataCenter 都具由 `3` 个 Server 节点）有一个 Leader 和多个 Follower，Leader 节点会将数据同步到 Follower，Server 的数量推荐是 `3` 个或者 `5` 个，在 Leader 挂掉的时候会启动选举机制产生一个新的 Leader。Server 间的选举遵循 [RAFT 算法](https://github.com/hashicorp/raft)
 
-集群内的 Consul 节点通过 gossip 协议维护成员关系（这里指的是 Client 和 Server 之间的通信），也就是说某个节点了解集群内现在还有哪些节点，这些节点是 Client 还是 Server。单个数据中心的 gossip 协议同时使用 TCP 和 UDP 通信，并且都使用 8301 端口。
+集群内的 Consul 节点通过 gossip 协议维护成员关系（这里指的是 Client 和 Server 之间的通信），也就是说某个节点了解集群内现在还有哪些节点，这些节点是 Client 还是 Server。单个数据中心的 gossip 协议同时使用 TCP 和 UDP 通信，并且都使用 `8301` 端口。
 
-跨数据中心的 gossip 协议也同时使用 TCP 和 UDP 通信，端口使用 8302。
+跨数据中心的 gossip 协议也同时使用 TCP 和 UDP 通信，端口使用 `8302`。
 
 ###	数据读写的流程
-集群内数据的读写请求既可以直接发到 Server，也可以通过 Client 使用 RPC 转发到 Server，请求最终会到达 Leader 节点，在允许数据轻微陈旧的情况下，读请求也可以在普通的 Server 节点完成，集群内数据的读写和复制都是通过 TCP 的 8300 端口完成。（和 ETCD 类似的流程）
+集群内数据的读写请求既可以直接发到 Server，也可以通过 Client 使用 RPC 转发到 Server，请求最终会到达 Leader 节点，在允许数据轻微陈旧的情况下，读请求也可以在普通的 Server 节点完成，集群内数据的读写和复制都是通过 TCP 的 `8300` 端口完成（和 ETCD 类似的流程）
 
 ##	0x04    Consul 服务发现原理
 下面这张图基本描述了服务发现的完整流程，一个可以在现网中集群部署的方式（简单）：<br>
@@ -91,7 +91,7 @@ Consul 支持开箱即用的多数据中心. 这意味着用户不需要担心�
 
 ## 0x05 Consul-Docker 部署
 
-Consul 的 docker 镜像基于 alpine 构建的，进入容器的时候需要指定 / bin/sh
+Consul 的 docker 镜像基于 `alpine` 构建的，进入容器的时候需要指定 `/bin/sh`
 
 首先拉取镜像：
 ```bash
@@ -118,14 +118,14 @@ docker run -d --name=consul_3 -e CONSUL_BIND_INTERFACE=eth0 consul agent --serve
 docker run -d --name=consul_4 -e CONSUL_BIND_INTERFACE=eth0 consul agent --server=false --client=0.0.0.0 --join 172.17.0.2
 ```
 
-集群搭建完成后，我们在容器中执行 consul members，查看集群的组成信息，我们的集群中，启动 4 个 Consul Agent，3 个 Server（会选举出一个 leader），1 个 Client。
+集群搭建完成后，我们在容器中执行 consul members，查看集群的组成信息，我们的集群中，启动 `4` 个 Consul Agent，`3` 个 Server（会选举出一个 Leader），`1` 个 Client。
 ![image](https://s2.ax1x.com/2019/10/17/KEO5VA.png)
 
-这些 Consul 节点在 Docker 的容器内是互通的，他们通过桥接的模式通信。但是如果主机要访问容器内的网络，需要做端口映射。在启动第一个容器时，将 Consul 的 8500 端口映射到了主机的 8900 端口，这样就可以方便的通过主机的浏览器查看集群信息。
+这些 Consul 节点在 Docker 的容器内是互通的，他们通过桥接的模式通信。但是如果主机要访问容器内的网络，需要做端口映射。在启动第一个容器时，将 Consul 的 `8500` 端口映射到了主机的 `8900` 端口，这样就可以方便的通过主机的浏览器查看集群信息。
 
 
-##  0x06    Consul 的 WEB-UI
-根据上一步的暴露的 UI 端口 8900，打开主页，能看到我们的集群中节点信息，共计 4 个节点。
+##  0x06    Consul 的 WEBUI
+根据上一步的暴露的 UI 端口 `8900`，打开主页，能看到我们的集群中节点信息，共计 `4` 个节点。
 ![image](https://s2.ax1x.com/2019/10/17/KEjXAs.png)
 
 
@@ -134,14 +134,14 @@ docker run -d --name=consul_4 -e CONSUL_BIND_INTERFACE=eth0 consul agent --serve
 ### 服务注册
 Consul 通用的注册方式，JSON 配置文件，需要在配置文件中指定两个重要信息，一是服务的 IP 和端口，二是健康检查的方法，尤其要注意健康检查，这个在 Consul 实现服务注册时特别重要，一旦健康检查服务失败，服务会被标记为下线。这个地方需要注意，我在另外一篇文章中详细说。<br>
 
-在测试服务端 [server.go](https://github.com/pandaychen/grpclb2consul/blob/master/example/server.go) 中，设置 gRPC 健康检查方式为 TTL，Consul-Agent 地址设置为 http://172.17.0.2:8500，运行 gRPC-Server：
+在测试服务端 [server.go](https://github.com/pandaychen/grpclb2consul/blob/master/example/server.go) 中，设置 gRPC 健康检查方式为 TTL，Consul-Agent 地址设置为 `http://172.17.0.2:8500`，运行 gRPC-Server：
 ![image](https://s2.ax1x.com/2019/10/18/KVCUvq.png)
 
 查看 WEB，健康检查通过，服务启动成功：
 ![image](https://s2.ax1x.com/2019/10/18/KVCDVU.png)
 
 ### 服务发现
-在测试客户端 [client.go](https://github.com/pandaychen/grpclb2consul/blob/master/example/client.go) 中，设置 Consul-Agent 地址为 http://172.17.0.3:8500，注意这里和 Server 设置的不一样（当然也可以一样），运行 gRPC-Client:
+在测试客户端 [client.go](https://github.com/pandaychen/grpclb2consul/blob/master/example/client.go) 中，设置 Consul-Agent 地址为 `http://172.17.0.3:8500`，注意这里和 Server 设置的不一样（当然也可以一样），运行 gRPC-Client:
 ![image](https://s2.ax1x.com/2019/10/18/KVCfr6.png)
 
 ##  0x08    后记
