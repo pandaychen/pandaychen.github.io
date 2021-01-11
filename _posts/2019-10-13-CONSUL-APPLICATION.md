@@ -60,8 +60,8 @@ Consul 支持开箱即用的多数据中心. 这意味着用户不需要担心�
 ![image](https://s2.ax1x.com/2019/10/17/KEfbg1.png)
 
 
-###	集群架构与节点类型
-首先 Consul 支持多数据中心，在上图中有两个数据中心（DataCenter1 个 DataCenter2），他们通过 Internet 互联，同时请注意为了提高通信效率，只有 Server 节点才加入跨数据中心的通信。
+####	集群架构与节点类型
+首先 Consul 支持多数据中心，在上图中有两个数据中心（DataCenter1 和 DataCenter2），通过 Internet 互联，同时请注意为了提高通信效率，只有 Server 节点才加入跨数据中心的通信。
 
 在单个数据中心中，Consul 分为 Client 和 Server 两种节点（所有的节点也被称为 Agent），Server 节点保存数据，Client 负责健康检查（healthy check）及转发数据请求到 Server；
 
@@ -73,15 +73,13 @@ Consul 支持开箱即用的多数据中心. 这意味着用户不需要担心�
 
 跨数据中心的 gossip 协议也同时使用 TCP 和 UDP 通信，端口使用 `8302`。
 
-###	数据读写的流程
+####	数据读写的流程
 集群内数据的读写请求既可以直接发到 Server，也可以通过 Client 使用 RPC 转发到 Server，请求最终会到达 Leader 节点，在允许数据轻微陈旧的情况下，读请求也可以在普通的 Server 节点完成，集群内数据的读写和复制都是通过 TCP 的 `8300` 端口完成（和 ETCD 类似的流程）
 
 ##	0x04    Consul 服务发现原理
 下面这张图基本描述了服务发现的完整流程，一个可以在现网中集群部署的方式（简单）：<br>
 
 ![image](https://s2.ax1x.com/2019/10/17/KEqC8O.png)
-
-
 
 首先需要有一个正常的 Consul 集群，有 Server，有 Leader。这里在服务器 Server1、Server2、Server3 上分别部署了 Consul Server，假设他们选举了 Server2 上的 Consul Server 节点为 Leader。这些服务器上最好只部署 Consul 程序，以尽量维护 Consul Server 的稳定。
 
@@ -90,8 +88,7 @@ Consul 支持开箱即用的多数据中心. 这意味着用户不需要担心�
 最后在服务器 Server6 中 Program D 需要访问 Service B，这时候 Program D 首先访问本机 Consul Client 提供的 HTTP API，本机 Client 会将请求转发到 Consul Server，Consul Server 查询到 Service B 当前的信息返回，最终 Program D 拿到了 Service B 的所有部署的 IP 和端口，然后就可以选择 Service B 的其中一个部署并向其发起请求了。如果服务发现采用的是 DNS 方式，则 Program D 中直接使用 Service B 的服务发现域名，域名解析请求首先到达本机 DNS 代理，然后转发到本机 Consul Client，本机 Client 会将请求转发到 Consul Server，Consul Server 查询到 Service B 当前的信息返回，最终 Program D 拿到了 Service B 的某个部署的 IP 和端口。
 
 ## 0x05 Consul-Docker 部署
-
-Consul 的 docker 镜像基于 `alpine` 构建的，进入容器的时候需要指定 `/bin/sh`
+Consul 的 Docker 镜像基于 `alpine` 构建的，进入容器的时候需要指定 `/bin/sh`
 
 首先拉取镜像：
 ```bash
@@ -131,7 +128,7 @@ docker run -d --name=consul_4 -e CONSUL_BIND_INTERFACE=eth0 consul agent --serve
 
 ##  0x07    Consul 服务发现测试
 
-### 服务注册
+####    服务注册
 Consul 通用的注册方式，JSON 配置文件，需要在配置文件中指定 <font color="#dd0000"> 两个重要信息，一是服务的 IP 和端口，二是健康检查的方法，尤其要注意健康检查，这个在 Consul 实现服务注册时特别重要，一旦健康检查服务失败，服务会被标记为下线 </font>。这个地方需要注意，我在另外一篇文章中详细说。<br>
 
 在测试服务端 [server.go](https://github.com/pandaychen/grpclb2consul/blob/master/example/server.go) 中，设置 gRPC 健康检查方式为 TTL，Consul-Agent 地址设置为 `http://172.17.0.2:8500`，运行 gRPC-Server：
@@ -140,12 +137,15 @@ Consul 通用的注册方式，JSON 配置文件，需要在配置文件中指�
 查看 WEB，健康检查通过，服务启动成功：
 ![image](https://s2.ax1x.com/2019/10/18/KVCDVU.png)
 
-### 服务发现
+####    服务发现
 在测试客户端 [client.go](https://github.com/pandaychen/grpclb2consul/blob/master/example/client.go) 中，设置 Consul-Agent 地址为 `http://172.17.0.3:8500`，注意这里和 Server 设置的不一样（当然也可以一样），运行 gRPC-Client：
 ![image](https://s2.ax1x.com/2019/10/18/KVCfr6.png)
 
 ##  0x08    后记
 至此，一个 gRPC+Consul 的可用框架就搭建完成了。后面我还会写一篇文章，介绍 Consul 服务注册的详细方法、Consul 与 Etcd 的比较。<br>
+
+##  0x09    参考
+-   [使用Consul做服务发现的若干姿势](https://blog.didispace.com/consul-service-discovery-exp/)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
 
