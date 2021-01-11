@@ -118,7 +118,7 @@ docker run -d --name=consul_3 -e CONSUL_BIND_INTERFACE=eth0 consul agent --serve
 docker run -d --name=consul_4 -e CONSUL_BIND_INTERFACE=eth0 consul agent --server=false --client=0.0.0.0 --join 172.17.0.2
 ```
 
-集群搭建完成后，我们在容器中执行 consul members，查看集群的组成信息，我们的集群中，启动 `4` 个 Consul Agent，`3` 个 Server（会选举出一个 Leader），`1` 个 Client。
+集群搭建完成后，我们在容器中执行 `consul members`，查看集群的组成信息，我们的集群中，启动 `4` 个 Consul Agent，`3` 个 Server（会选举出一个 Leader），`1` 个 Client。
 ![image](https://s2.ax1x.com/2019/10/17/KEO5VA.png)
 
 这些 Consul 节点在 Docker 的容器内是互通的，他们通过桥接的模式通信。但是如果主机要访问容器内的网络，需要做端口映射。在启动第一个容器时，将 Consul 的 `8500` 端口映射到了主机的 `8900` 端口，这样就可以方便的通过主机的浏览器查看集群信息。
@@ -132,7 +132,7 @@ docker run -d --name=consul_4 -e CONSUL_BIND_INTERFACE=eth0 consul agent --serve
 ##  0x07    Consul 服务发现测试
 
 ### 服务注册
-Consul 通用的注册方式，JSON 配置文件，需要在配置文件中指定两个重要信息，一是服务的 IP 和端口，二是健康检查的方法，尤其要注意健康检查，这个在 Consul 实现服务注册时特别重要，一旦健康检查服务失败，服务会被标记为下线。这个地方需要注意，我在另外一篇文章中详细说。<br>
+Consul 通用的注册方式，JSON 配置文件，需要在配置文件中指定 <font color="#dd0000"> 两个重要信息，一是服务的 IP 和端口，二是健康检查的方法，尤其要注意健康检查，这个在 Consul 实现服务注册时特别重要，一旦健康检查服务失败，服务会被标记为下线 </font>。这个地方需要注意，我在另外一篇文章中详细说。<br>
 
 在测试服务端 [server.go](https://github.com/pandaychen/grpclb2consul/blob/master/example/server.go) 中，设置 gRPC 健康检查方式为 TTL，Consul-Agent 地址设置为 `http://172.17.0.2:8500`，运行 gRPC-Server：
 ![image](https://s2.ax1x.com/2019/10/18/KVCUvq.png)
@@ -141,7 +141,7 @@ Consul 通用的注册方式，JSON 配置文件，需要在配置文件中指�
 ![image](https://s2.ax1x.com/2019/10/18/KVCDVU.png)
 
 ### 服务发现
-在测试客户端 [client.go](https://github.com/pandaychen/grpclb2consul/blob/master/example/client.go) 中，设置 Consul-Agent 地址为 `http://172.17.0.3:8500`，注意这里和 Server 设置的不一样（当然也可以一样），运行 gRPC-Client:
+在测试客户端 [client.go](https://github.com/pandaychen/grpclb2consul/blob/master/example/client.go) 中，设置 Consul-Agent 地址为 `http://172.17.0.3:8500`，注意这里和 Server 设置的不一样（当然也可以一样），运行 gRPC-Client：
 ![image](https://s2.ax1x.com/2019/10/18/KVCfr6.png)
 
 ##  0x08    后记
