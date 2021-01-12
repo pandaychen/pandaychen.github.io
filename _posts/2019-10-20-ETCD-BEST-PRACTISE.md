@@ -14,6 +14,8 @@ tags:
 此篇文章是本人在学习和使用 Etcd 中，遇到的问题和一些使用心得的总结，避免重复踩坑。<br>
 最近阅读的一篇文章 [三年之久的 etcd 3 数据不一致 bug 分析](http://dockerone.com/article/10077)，非常好，推荐看下。
 
+此外，笔者将常用的 EtcdV3 接口进行了封装： 在此 [etcd_tools](https://github.com/pandaychen/etcd_tools)
+
 ##  0x01    介绍
 
 Etcd 是一个基于 Raft 协议实现的高可用的 KV 存储系统，具备如下几个优点：
@@ -153,9 +155,7 @@ Etcd 在事件模型（Watch 机制）上与 ZooKeeper 完全不同，每次数�
 
 ####    关于 Version/Revision/ModRevison 的概念与区别
 从 MVCC 引出 `Version`/`Revision`/`ModRevison` 这三个重要概念：<br>
-
 -	`Revision` 表示改动序号（ID），每次 KV 的变化，leader 节点都会修改 `Revision` 值，因此，这个值在 cluster 内是全局唯一的，而且是递增的。
-
 -	`ModRevison` 记录了某个 key 最近修改时的 Revision，即它是与 key 关联的。
 -   `Version` 表示 KV 的版本号，初始值为 1，每次修改 KV 对应的 `Version` 都会加 1，也就是说它是作用在 KV 之内的。
 
@@ -283,6 +283,8 @@ func (client *Client) WatchPrefix(ctx context.Context, prefix string) (*Watch, e
 	xgo.Go(func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		w.cancel = cancel
+
+		// 注意，client.Watch 是一个子协程
 		rch := client.Client.Watch(ctx, prefix, clientv3.WithPrefix(), clientv3.WithCreatedNotify(), clientv3.WithRev(w.revision))
 		for {
 			for n := range rch {
