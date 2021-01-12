@@ -83,7 +83,7 @@ Consul 支持开箱即用的多数据中心. 这意味着用户不需要担心�
 
 首先需要有一个正常的 Consul 集群，有 Server，有 Leader。这里在服务器 Server1、Server2、Server3 上分别部署了 Consul Server，假设他们选举了 Server2 上的 Consul Server 节点为 Leader。这些服务器上最好只部署 Consul 程序，以尽量维护 Consul Server 的稳定。
 
-然后在服务器 Server4 和 Server5 上通过 Consul Client 分别注册 Service A、B、C，这里每个 Service 分别部署在了两个服务器上，这样可以避免 Service 的单点问题。服务注册到 Consul 可以通过 HTTP API（8500 端口）的方式，也可以通过 Consul 配置文件的方式。Consul Client 可以认为是无状态的，它将注册信息通过 RPC 转发到 Consul Server，服务信息保存在 Server 的各个节点中，并且通过 Raft 实现了强一致性。
+然后在服务器 Server4 和 Server5 上通过 Consul Client 分别注册 Service A、B、C，这里每个 Service 分别部署在了两个服务器上，这样可以避免 Service 的单点问题。服务注册到 Consul 可以通过 HTTP API（`8500` 端口）的方式，也可以通过 Consul 配置文件的方式。Consul Client 可以认为是无状态的，它将注册信息通过 RPC 转发到 Consul Server，服务信息保存在 Server 的各个节点中，并且通过 Raft 实现了强一致性。
 
 最后在服务器 Server6 中 Program D 需要访问 Service B，这时候 Program D 首先访问本机 Consul Client 提供的 HTTP API，本机 Client 会将请求转发到 Consul Server，Consul Server 查询到 Service B 当前的信息返回，最终 Program D 拿到了 Service B 的所有部署的 IP 和端口，然后就可以选择 Service B 的其中一个部署并向其发起请求了。如果服务发现采用的是 DNS 方式，则 Program D 中直接使用 Service B 的服务发现域名，域名解析请求首先到达本机 DNS 代理，然后转发到本机 Consul Client，本机 Client 会将请求转发到 Consul Server，Consul Server 查询到 Service B 当前的信息返回，最终 Program D 拿到了 Service B 的某个部署的 IP 和端口。
 
