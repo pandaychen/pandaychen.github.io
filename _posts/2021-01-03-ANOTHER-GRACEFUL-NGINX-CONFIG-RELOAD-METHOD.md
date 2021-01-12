@@ -39,6 +39,8 @@ Upsync 是 Nginx 和 Etcd、Consul 等服务发现组件非常好的结合实践
 nginx-upsync-module 采用 PULL 方案来完成获取最新 `backend` 列表的功能，实现细节如下：
 1.  提供外部接口，将路由表中所有的后端节点 `backend` 信息及相关属性（如权重、参数等）存储到 Consul/Etcd，Nginx 本地初始化一份本地 `backend` 配置
 2.  所有的 Nginx 通过调用 Consul/Etcd 的 API 接口拉取 `backend` 列表，并和本地保存的列表比较，有变更则更新路由表，实现动态更新路由的功能
+    -   Nginx 启动时，master 进程首先会解析本地的配置文件，解析完成功，接着进行一系列的初始化，之后便会开始 Worker 进程的初始化
+    -   Worker 初始化时会去 Consul 拉取配置，进行 Worker 进程 upstream 路由信息的更新，若拉取成功，便直接更新，若拉取失败，便会打开配置的 dump 后端列表的文件，提取之前 dump 下来的 server 信息，进行 upstream 路由的更新，之后便开始正常的提供服务
     -   每个 Work 进程定时的去 Consul/Etcd 拉取相应 upstream 的配置，若 Consul 发现对应 upstream 的值没有变化，便会 hang 住这个请求 `5` 分钟。在 `5` 分钟内对此 upstream 的任何操作，都会立刻返回给 Nginx 对相应路由进行更新
     -   当 `upstream` 变更后，除了更新 Nginx 的缓存路由信息，还会把本次 `upstream` 的后端 `backend` 列表 dump 到本地，保持本地 server 信息与远端的一致性，[代码见此](https://github.com/weibocom/nginx-upsync-module/blob/master/src/ngx_http_upsync_module.c#L723)
     -   除了注册 / 注销后端的 `backend` 到 Consul，会更新到 Nginx 的 upstream 路由信息外，对后端 `backend` 属性的修改也会同步到 Nginx 的 upstream 路由，Upsync 模块支持修改的属性有  `weight`、`max_fails`、`fail_timeout` 和 `down`
