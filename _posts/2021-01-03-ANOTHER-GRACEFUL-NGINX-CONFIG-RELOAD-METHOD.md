@@ -34,7 +34,7 @@ Upsync 是 Nginx 和 Etcd、Consul 等服务发现组件非常好的结合实践
 本小节简单介绍下 Upsync 的实现原理。
 
 ####    基于动态路由的方案设计
-在 Nginx 的设计中，每一个 `upstream` 维护了一张静态路由表（注意：静态），存储了 `backend` 的 `ip`、`port` 以及其他的 `metadata`。每次请求到达后，会依据路由 `location` 配置检索路由表，然后依据具体的调度（负载均衡）算法选择一个 `backend` 转发请求。<font color="#dd0000"> 但这张路由表是静态的，如果变更后，则必须 reload<font>，解决 `reload` 的关键就是将静态路由表调整为动态的，即每次更新 `backend` 后，动态更新 / 创建一张新的路由表，从而无需 `reaload` 即可生效。本文介绍的 Nginx 扩展模块 [nginx-upsync-module](https://github.com/weibocom/nginx-upsync-module) 即可完成此功能（动态更新维护路由表）。
+在 Nginx 的设计中，每一个 `upstream` 维护了一张静态路由表（注意：静态），存储了 `backend` 的 `ip`、`port` 以及其他的 `metadata`。每次请求到达后，会依据路由 `location` 配置检索路由表，然后依据具体的调度（负载均衡）算法选择一个 `backend` 转发请求。<font color="#dd0000"> 但这张路由表是静态的，如果变更后，则必须 reload </font>，解决 `reload` 的关键就是将静态路由表调整为动态的，即每次更新 `backend` 后，动态更新或创建一张新的路由表，从而无需 `reaload` 即可生效。本文介绍的 Nginx 扩展模块 [nginx-upsync-module](https://github.com/weibocom/nginx-upsync-module) 即可完成此功能（动态更新维护路由表）。
 
 nginx-upsync-module 采用 PULL 方案来完成获取最新 `backend` 列表的功能，实现细节如下：
 1.  提供外部接口，将路由表中所有的后端节点 `backend` 信息及相关属性（如权重、参数等）存储到 Consul/Etcd，Nginx 本地初始化一份本地 `backend` 配置
@@ -47,7 +47,7 @@ nginx-upsync-module 采用 PULL 方案来完成获取最新 `backend` 列表的�
 
 属性说明如下：
 
-| `backend` 属性 | 说明 |
+| backend 属性 | 说明 |
 |------|------------|
 |weight	| 服务器权重，默认为 1。修改权重可以动态的调整后端的流量 |
 |max_fails|	最大尝试失败次数，默认为 1，将其设置为 0 可以关闭检查 |
@@ -213,6 +213,9 @@ ngx_http_client_send(ngx_http_conf_client *client,
 ##  其他细节
 1、使用 `ngx_add_timer` 添加定时器（单位：ms）<br>
 Nginx 在 event 模块里实现了精确到毫秒级别的定时器机制，使用红黑树结构管理所有定时器对象
+
+2、在此实践中使用域名方式连接 Consul 时可能会有坑，见 [网易杭研 Nginx 自动扩缩容实践](https://sq.163yun.com/blog/article/375808724630351872)，本文不做深入探讨。规避方式是采用 ip:port 方式连接。<br>
+
 
 ##  参考
 -   [Nginx 开发从入门到精通：upstream 模块](http://tengine.taobao.org/book/chapter_5.html)
