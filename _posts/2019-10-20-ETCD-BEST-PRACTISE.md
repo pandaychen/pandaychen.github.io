@@ -10,14 +10,12 @@ tags:
 ---
 
 ##	0x00    Etcd 最佳实践
-
 此篇文章是本人在学习和使用 Etcd 中，遇到的问题和一些使用心得的总结，避免重复踩坑。<br>
 最近阅读的一篇文章 [三年之久的 etcd 3 数据不一致 bug 分析](http://dockerone.com/article/10077)，非常好，推荐看下。
 
 此外，笔者将常用的 EtcdV3 接口进行了封装： 在此 [etcd_tools](https://github.com/pandaychen/etcd_tools)
 
 ##  0x01    介绍
-
 Etcd 是一个基于 Raft 协议实现的高可用的 KV 存储系统，具备如下几个优点：
 
 -   简单：Golang 实现，可直接二进制部署
@@ -53,7 +51,6 @@ Network Partition 是必然的，网络非常可能出现问题（断线、超�
 当然，在上面的例子中，A 可以先允许写入，等 B 的网络恢复以后再同步至 B（根据 CAP 原理这样不能保证强一致性了，但是可以考虑实现最终一致性）
 
 ####    最终一致性（Eventually Consistent）
-
 对于一致性，可以分为从客户端和服务端两个不同的视角。从客户端来看，一致性主要指的是多并发访问时更新过的数据如何获取的问题。从服务端来看，则是更新如何复制分布到整个系统，以保证数据最终一致。一致性是因为有并发读写才有的问题，因此在理解一致性的问题时，一定要注意结合考虑并发读写的场景。
 
 从客户端角度，多进程并发访问时，更新过的数据在不同进程如何获取的不同策略，决定了不同的一致性。对于关系型数据库，要求更新过的数据能被后续的访问都能看到，这是强一致性。如果能容忍后续的部分或者全部访问不到，则是弱一致性。如果经过一段时间后要求能访问到更新后的数据，则是最终一致性。
@@ -80,7 +77,7 @@ Etcd 中，存在租约的概念，租约过期后，Key 就会被删除。假�
 
 ####    版本差异
 1.	Etcd 有 V2 和 V3 版本，数据是不互通的，所以勿用 V3 的 API 去操作 V2 版本 API 写入的数据，反之亦然
-2.	在 V2 版本中，每一个 key 都进行一次 Etcd 的 `Set` 操作，这个操作是加锁的，所以，在读写的情况下会耗时很多在锁上面。V3 版本中，是先聚合，再每 128 个操作进行一次事务性执行。V3 较 V2 性能提升明显。
+2.	在 V2 版本中，每一个 key 都进行一次 Etcd 的 `Set` 操作，这个操作是加锁的，所以，在读写的情况下会耗时很多在锁上面。V3 版本中，是先聚合，再每 `128` 个操作进行一次事务性执行。V3 较 V2 性能提升明显。
 
 ####    更安全的客户端
 在很多环境中我们启动 Etcd 都是通过配置 TLS 方式进行的（比如 Kubernetes）, 所以在连接 Etcd 的时候需要使用 TLS 方式连接：
@@ -134,7 +131,7 @@ cli, err := clientv3.New(clientv3.Config{
 ```
 
 ##  0x06    MVCC
-MVCC(Multiversion concurrency control 多版本并发控制)，Etcd 在内存中维护了一个 BTREE(B 树) 纯内存索引，它是有序的。(回想起 MYSQL 的索引也是 BTREE 实现的，极大的提升查找效率)<br>
+MVCC（Multiversion concurrency control 多版本并发控制），Etcd 在内存中维护了一个 BTREE（B 树） 纯内存索引，它是有序的。（回想起 MYSQL 的索引也是 BTREE 实现的，极大的提升查找效率）<br>
 在这个 BTREE 中，整个 KV 存储大概就是这样：
 ```golang
 type treeIndex struct {
@@ -147,10 +144,9 @@ type treeIndex struct {
 Etcd 在事件模型（Watch 机制）上与 ZooKeeper 完全不同，每次数据变化都会通知，并且通知里携带有变化后的数据内容，其基础就是自带 MVCC 的 Bboltdb 存储引擎。
 
 ####	MVCC 要点
-
-1.	每个 tx 事务有唯一事务 ID，在 Etcd 中叫做 main ID，全局递增不重复
-2.	一个 tx 可以包含多个修改操作（put 和 delete），每一个操作叫做一个 revision（修订），共享同一个 main ID
-3.	一个 tx 内连续的多个修改操作会被从 0 递增编号，这个编号叫做 sub ID
+1.	每个 `tx` 事务有唯一事务 ID，在 Etcd 中叫做 main ID，全局递增不重复
+2.	一个 `tx` 可以包含多个修改操作（put 和 delete），每一个操作叫做一个 revision（修订），共享同一个 main ID
+3.	一个 `tx` 内连续的多个修改操作会被从 0 递增编号，这个编号叫做 sub ID
 4.	每个 Revision 由（main ID，sub ID）唯一标识
 
 ####    关于 Version/Revision/ModRevison 的概念与区别
@@ -159,7 +155,7 @@ Etcd 在事件模型（Watch 机制）上与 ZooKeeper 完全不同，每次数�
 -	`ModRevison` 记录了某个 key 最近修改时的 Revision，即它是与 key 关联的。
 -   `Version` 表示 KV 的版本号，初始值为 1，每次修改 KV 对应的 `Version` 都会加 1，也就是说它是作用在 KV 之内的。
 
-使用参数 `--write-out` 可以格式化（json/fields ...）输出详细的信息，包括 `Revision`、`ModRevison`、`Version`，此外，还包括 `LeaseID`
+使用参数 `--write-out` 可以格式化（`json/fields` ...）输出详细的信息，包括 `Revision`、`ModRevison`、`Version`，此外，还包括 `LeaseID`
 
 如：
 ```javascript
@@ -186,23 +182,16 @@ Etcdctl get /a/b --prefix --write-out=fields    #
 ##  0x07    数据压缩
 
 ####    定期压缩（compac）、碎片整理（defrag）
-
 对于 Etcd 这种多版本的 kv 存储系统而言，每一次成功修改数据的原子操作，都会被记录到新的版本中，每一个历史版本的数据都会被完整保存下来。由于 Etcd 本身是磁盘存储，随着数据量的增大，不可避免的会出现两个问题：一是数据体积增大、二是磁盘碎片增多；随着修改次数的增多，存储的数据量会越来越大，这对 Etcd 集群的性能和稳定性都会带来很大的影响。<br>
 
 因此，在大量使用的 Etcd 的实际生产场景中，需要考虑优化 Etcd 集群的配置，定期做 compact 和 defrag，且对每个节点的 defrag 时间需要错开，不能同时进行。Etcd 提供了如下参数来帮助我们实现自动压缩和碎片整理：
 
 ```bash
-1. --auto-compaction-retention
+--auto-compaction-retention	#
+--max-request-bytes		#
+--quota-backend-bytes	#
 ```
-
-```bash
-2.--max-request-bytes
-```
-
-```bash
-3.--quota-backend-bytes
-```
-此参数 Etcd-db 数据大小，默认是 2G, 当数据达到 2G 的时候就不允许写入，必须对历史数据进行压缩才能继续写入。在启动的时候就应该提前确定大小，官方推荐是 8G
+此参数 Etcd-db 数据大小，默认是 `2G`, 当数据达到 `2G` 的时候就不允许写入，必须对历史数据进行压缩才能继续写入。在启动的时候就应该提前确定大小，官方推荐是 `8G`
 
 ##  0x08    租约机制
 
@@ -214,14 +203,14 @@ EtcdV3 中提供了自动续期的函数 [Lease.KeepAlive](https://github.com/Et
 
 
 解决的方法，我这里提供两点思路：
-1.  使用定时器 timer 代替 Lease 的 Keepalive 功能，定时 PUT-KEY-with-Lease，续期时间建议设置为 LeaseTTL 的 1/3
+1.  使用定时器 timer 代替 Lease 的 Keepalive 功能，定时 PUT-KEY-with-Lease，续期时间建议设置为 LeaseTTL 的 `1/3`
 2.  监听 Lease 的 channel，如果发现 channel 被动关闭了，重新申请 Lease 然后再执行 KeepAlive 方法进行续期（当然了，也要先判断 Key 是不是丢失了）
 
 总结一下：<br>
 Etcd 的 lease 可以用来做心跳，监控模块存活状态。Lease 的存活时间决定了发现服务异常的及时性，太长会较晚才能发现服务异常，较短容易受网络波动的影响。另外一种解决的思路是结合心跳和探测。把 Lease 设置为一个较小的值，在发现心跳消失的时候，做网络探测，确实不通了，再判定为不可用。需要注意的是，上报心跳的进程要对 lease not found 这种情况做处理，重新生成一个 lease 进行上报。
 
 以下上 GODOC 中对 KeepAlive 方法的说明：
-```bash
+```golang
    // KeepAlive attempts to keep the given lease alive forever. If the keepalive responses posted
     // to the channel are not consumed promptly the channel may become full. When full, the lease
     // client will continue sending keep alive requests to the Etcd server, but will drop responses
@@ -240,8 +229,7 @@ Etcd 的 lease 可以用来做心跳，监控模块存活状态。Lease 的存�
 ```
 
 ##  0x09    Watcher（监听器）
-
-Etcd 提供了 watcher，来监控集群 kv 的变化。这个在开发 gRPC 服务发现的 ClientConn 实时更新接口时，必不可少。但是 Watch 返回的 WatchChan 有可能在运行过程中失败而关闭，此时 WatchResponse.Canceled 会被置为 true，WatchResponse.Err() 也会返回具体的错误信息。所以在 range WatchChan 的时候，每一次循环都要检查 WatchResponse.Canceled，在关闭的时候重新发起 Watch 或报错。
+Etcd 提供了 watcher，来监控集群 kv 的变化。这个在开发 gRPC 服务发现的 `ClientConn` 实时更新接口时，必不可少。但是 Watch 返回的 `WatchChan` 有可能在运行过程中失败而关闭，此时 `WatchResponse.Canceled` 会被置为 `true`，`WatchResponse.Err()` 也会返回具体的错误信息。所以在 range WatchChan 的时候，每一次循环都要检查 `WatchResponse.Canceled`，在关闭的时候重新发起 Watch 或报错。
 
 ##  0x0A    Etcd WatchPrefix 的最佳方式
 最近读了一些开源实现，发现对 Etcd WatchPrefix 的一些细节上的考虑，一个考虑完备的实现如下：
