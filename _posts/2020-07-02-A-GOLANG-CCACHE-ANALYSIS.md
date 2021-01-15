@@ -20,7 +20,7 @@ tags:
 在项目，用此库来缓存那些不经常改动且有大量读请求的数据场景。
 
 ##  0x01  CCache 的使用
-
+使用方法见 [文档](https://github.com/karlseguin/ccache/blob/master/readme.md)，需要注意的一点是，当使用 `Get()` 方法获取值时，需要使用 `Expired()` 方法来判断设置的 key 是否到期，到期后需要调用 `cache.Delete()` 方法进行删除。
 
 ##  0x02  CCache 的优化
 
@@ -62,6 +62,93 @@ func (c *Cache) bucket(key string) *bucket {
 	h := fnv.New32a()
 	h.Write([]byte(key))
 	return c.buckets[h.Sum32()&c.bucketMask]
+}
+```
+
+##	0x03	LRU 的实现
+
+####	实现原理
+
+
+####	代码
+[gc 方法](https://github.com/karlseguin/ccache/blob/master/cache.go#L293) 实现了 LRU 删除的逻辑，就是自双链表 `c.list` 的尾部遍历，按照配置 `itemsToPrune` 的个数为上限，进行删除（为空时退出）：
+```golang
+func (c *Cache) gc() int {
+	dropped := 0
+	element := c.list.Back()
+	for i := 0; i < c.itemsToPrune; i++ {
+		if element == nil {
+			return dropped
+		}
+		// 取 prev
+		prev := element.Prev()
+		item := element.Value.(*Item)
+		if c.tracking == false || atomic.LoadInt32(&item.refCount) == 0 {
+			// 删除 bucket 中的 key
+			c.bucket(item.key).delete(item.key)
+			c.size -= item.size
+			// 从 list 中 remove
+			c.list.Remove(element)
+			if c.onDelete != nil {
+				c.onDelete(item)
+			}
+			dropped += 1
+			item.promotions = -2
+		}
+		// 继续遍历
+		element = prev
+	}
+	return dropped
+}
+```
+
+[worker 方法](https://github.com/karlseguin/ccache/blob/master/cache.go#L216)，
+```golang
+func (c *Cache) worker() {
+	defer close(c.control)
+	dropped := 0
+	for {
+		select {
+		case item, ok := <-c.promotables:
+			if ok == false {
+				goto drain
+			}
+			if c.doPromote(item) && c.size > c.maxSize {
+				dropped += c.gc()
+			}
+		case item := <-c.deletables:
+			c.doDelete(item)
+		case control := <-c.control:
+			switch msg := control.(type) {
+			case getDropped:
+				msg.res <- dropped
+				dropped = 0
+			case setMaxSize:
+				c.maxSize = msg.size
+				if c.size > c.maxSize {
+					dropped += c.gc()
+				}
+			case clear:
+				for _, bucket := range c.buckets {
+					bucket.clear()
+				}
+				c.size = 0
+				c.list = list.New()
+				msg.done <- struct{}{}
+			}
+		}
+	}
+
+drain:
+	for {
+		select {
+		case item := <-c.deletables:
+			c.doDelete(item)
+		default:
+			close(c.deletables)
+			return
+		}
+	}
 }
 ```
 
