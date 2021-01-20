@@ -244,6 +244,8 @@ func (p *watchProcessor) Process() {
    - `sync`[方法](https://github.com/kelseyhightower/confd/blob/master/resource/template/resource.go#L238)：应用新的配置（当改变时），视是否配置 `ReloadCmd` 调用相应命令重启服务
 4. 继续下一次循环
 
+实现如下：
+
 ```golang
 // 监听每个模板文件
 func (p *watchProcessor) monitorPrefix(t *TemplateResource) {
@@ -271,7 +273,7 @@ func (p *watchProcessor) monitorPrefix(t *TemplateResource) {
 
 #### Confd 的客户端实现：EtcdV3 的客户端
 
-在 Confd 的 EtcdV3 客户端的实现中，重要的结构体是 `Client` 和 `Watch`，注意 `Client` 结构的 `watches` 成员，其存储了所有需要监听改变的 `key`，对应于配置文件中的 `key` 数组（ps：线上项目中建议开启 Etcd 客户端的 TLS + 认证机制）
+在 Confd 的 EtcdV3 [客户端的实现](https://github.com/kelseyhightower/confd/blob/master/backends/etcdv3/client.go) 中，重要的结构体是 `Client` 和 `Watch`，注意 `Client` 结构的 `watches` 成员，其存储了所有需要监听改变的 `key`，对应于配置文件中的 `key` 数组（ps：线上项目中建议开启 Etcd 客户端的 TLS + 认证机制）
 
 ```golang
 // Client is a wrapper around the etcd client
@@ -283,7 +285,7 @@ type Client struct {
 }
 ```
 
-而 `Watch` 结构则记录，当前关联的 `key` 在 Etcd 中存储最新的 `revision` 值，由于 Etcd 本身是个 MVCC 存储，所以我们保存了 `revision`：
+而 `Watch` 结构则记录，当前关联的 `key` 在 Etcd 中存储最新的 `revision` 值，由于 Etcd 本身是个 MVCC 存储，所以我们保存了 `revision`（这里的 `revision` 是最新的 revision）：
 
 ```golang
 // A watch only tells the latest revision
@@ -341,9 +343,11 @@ func (c *Client) WatchPrefix(prefix string, keys []string, waitIndex uint64, sto
 	notify := make(chan int64)
 	// Wait for all watches
 	for _, v := range watches {
+		// 异步，调用 WaitNext 方法监控 w.revision 是否发生改变
 		go v.WaitNext(ctx, int64(waitIndex), notify)
 	}
 	select{
+		// 当有修改时，正常情况下 notify 会接收到新的 revision
 	case nextRevision := <- notify:
 		return uint64(nextRevision), err
 	case <-ctx.Done():
@@ -353,14 +357,17 @@ func (c *Client) WatchPrefix(prefix string, keys []string, waitIndex uint64, sto
 }
 ```
 
+`WatchPrefix` 调用 `createWatch` 来监听器 `Watch`，此方法也是 Etcd-Watcher 的核心实现逻辑：
+
 ```golang
 func createWatch(client *clientv3.Client, prefix string) (*Watch, error) {
 	w := &Watch{0, make(chan struct{}), sync.RWMutex{}}
 	go func() {
 		rch := client.Watch(context.Background(), prefix, clientv3.WithPrefix(),
-							clientv3.WithCreatedNotify())
+		clientv3.WithCreatedNotify())
 		log.Debug("Watch created on %s", prefix)
 		for {
+			// 默认情况下，会阻塞在 rch 这个 channel 上面
 			for wresp := range rch {
 				if wresp.CompactRevision > w.revision {
 					// respect CompactRevision
@@ -375,12 +382,15 @@ func createWatch(client *clientv3.Client, prefix string) (*Watch, error) {
 					log.Error("Watch error: %s", err.Error())
 				}
 			}
+			// 当 rch 被外部调用关闭时
 			log.Warning("Watch to'%s'stopped at revision %d", prefix, w.revision)
 			// Disconnected or cancelled
 			// Wait for a moment to avoid reconnecting
 			// too quickly
 			time.Sleep(time.Duration(1) * time.Second)
 			// Start from next revision so we are not missing anything
+
+			// 根据 w.revision 的值重新开始新一轮 watch
 			if w.revision > 0 {
 				// 从 revision+1 开始，其他 key 的改变也会导致 revision 增加，但是这里加了 WithPrefix 保证我们始终拿到 prefix 关联的 key
 				rch = client.Watch(context.Background(), prefix, clientv3.WithPrefix(),
@@ -389,7 +399,7 @@ func createWatch(client *clientv3.Client, prefix string) (*Watch, error) {
 				// Start from the latest revision
 				//
 				rch = client.Watch(context.Background(), prefix, clientv3.WithPrefix(),
-									clientv3.WithCreatedNotify())
+				clientv3.WithCreatedNotify())
 			}
 		}
 	}()
@@ -397,7 +407,46 @@ func createWatch(client *clientv3.Client, prefix string) (*Watch, error) {
 }
 ```
 
-#### GetValues
+`Client.WatchPrefix` 方法中调用了 `WaitNext` 方法，该方法是循环检测 `w.revision` 的值，当 `w.revision > lastRevision` 时，将 `w.revision` 的值通过 channel `notify` 通知给上层。否则，阻塞 `select...case` 上，等待 `update`[方法](https://github.com/kelseyhightower/confd/blob/master/backends/etcdv3/client.go#L51) 中唤醒。这里个人感觉需要阻塞的原因是因为避免多次对读写锁 `w.rwl` 加解锁？
+
+```golang
+// Update revision
+func (w *Watch) update(newRevision int64){
+	w.rwl.Lock()
+	defer w.rwl.Unlock()
+	w.revision = newRevision
+	// 向 w.cond 发送信号
+	close(w.cond)
+	// 重新创建 w.cond
+	w.cond = make(chan struct{})
+}
+
+// Wait until revision is greater than lastRevision
+func (w *Watch) WaitNext(ctx context.Context, lastRevision int64, notify chan<-int64) {
+	for {
+		w.rwl.RLock()
+		if w.revision > lastRevision {
+			w.rwl.RUnlock()
+			break
+		}
+		cond := w.cond
+		w.rwl.RUnlock()
+		select{
+			// 一轮循环之后阻塞在此，等待 update 的逻辑中 close(w.cond) 唤醒
+		case <-cond:
+		case <-ctx.Done():
+			return
+		}
+	}
+	// We accept larger revision, so do not need to use RLock
+	select{
+	case notify<-w.revision:
+	case <-ctx.Done():
+	}
+}
+```
+
+#### GetValues 方法
 
 ```golang
 // GetValues queries etcd for keys prefixed by prefix.
@@ -417,9 +466,9 @@ func (c *Client) GetValues(keys []string) (map[string]string, error) {
 
 		for _, k := range ops {
 			txnOps = append(txnOps, clientv3.OpGet(k,
-											   clientv3.WithPrefix(),
-											   clientv3.WithSort(clientv3.SortByKey, clientv3.SortDescend),
-											   clientv3.WithRev(first_rev)))
+			clientv3.WithPrefix(),
+			clientv3.WithSort(clientv3.SortByKey, clientv3.SortDescend),
+			clientv3.WithRev(first_rev)))
 		}
 
 		result, err := c.client.Txn(ctx).Then(txnOps...).Commit()
@@ -464,6 +513,10 @@ func (c *Client) GetValues(keys []string) (map[string]string, error) {
 }
 ```
 
-## 参考
+## 0x04 基于 Redis 的实现
+
+## 0x05 总结
+
+## 0x06 参考
 
 - [Quick Start Guide](https://github.com/kelseyhightower/confd/blob/master/docs/quick-start-guide.md)
