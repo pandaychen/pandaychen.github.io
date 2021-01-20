@@ -1,19 +1,21 @@
 ---
-layout:     post
-title:      Confd 使用 && 源码分析
-subtitle:   Confd 源码分析：强大的动态配置更新（基于 etcdv3/redis 存储）
-date:       2021-01-01
-author:     pandaychen
+layout: post
+title: Confd 使用 && 源码分析
+subtitle: Confd 源码分析：强大的动态配置更新（基于 etcdv3/redis 存储）
+date: 2021-01-01
+author: pandaychen
 header-img: img/super-mario.jpg
 catalog: true
-category:   false
+category: false
 tags:
-    - Confd
-    - Golang
+  - Confd
+  - Golang
 ---
 
-##  0x00    前言
+## 0x00 前言
+
 现网有类似下面的 Nginx 配置，如何对 `upstream` 指向的后端服务节点做动态的上下线切换（即时剔除无效节点）？一个可行的解决方案就是使用 Confd+Etcd。
+
 ```javascript
 upstream backend_cluster {
     server 172.19.161.1:9081;
@@ -38,7 +40,8 @@ server {
 最近准备给 Nginx 代理的配置文件提供动态更新 reload 的功能，采用 Etcd+Confd 实现，本文简单分析下 [Confd](https://github.com/kelseyhightower/confd) 的实现。<br>
 Confd 是一个轻量级的配置管理工具，可以通过查询后端存储系统来实现第三方应用的（动态）配置管理，如 Nginx、HAproxy、Docker 配置等。Confd 能够查询和监听后端系统的数据变更，结合配置模版引擎动态更新本地配置文件，保持和后端系统的数据一致，并且能够执行命令或者脚本实现系统的 reload 或者 restart 等操作。
 
-##	0x01	COnfd 的运行原理
+## 0x01 COnfd 的运行原理
+
 一般配置中心的运行模式如下，这种方式需要在服务端代码中加入定期 PULL or Watch 配置文件发生改变，改变需要重新加载本进程配置，侵入性较强：
 ![config-center]()
 
@@ -46,8 +49,10 @@ Confd 是一个轻量级的配置管理工具，可以通过查询后端存储�
 
 ![confd]()
 
-##  0x02    Confd 的使用
+## 0x02 Confd 的使用
+
 1、配置文件 `confd.toml`，主要记录了使用的存储后端、`confdir` 等，参数 `watch` 表示实时监听 etcdV3 的变化，如有变化则更新 Confd 管理的配置（推荐使用）<br>
+
 ```toml
 backend = "etcdv3"
 confdir = "/etc/confd"
@@ -60,29 +65,76 @@ scheme = "http"
 watch = true
 ```
 
-####    confdir 的目录配置
+#### confdir 的目录配置
+
 包含配置与模板两个目录：
--   `./conf.d/`：Confd 的配置文件，包含配置的生成逻辑
--   `./templates`：配置模板 Template，即基于不同应用组件的配置，遵循 Golang text templates 的模板文件，详见 [文档](https://github.com/kelseyhightower/confd/blob/master/docs/templates.md)
+
+- `./conf.d/`：Confd 的配置文件，包含配置的生成逻辑
+- `./templates`：配置模板 Template，即基于不同应用组件的配置，遵循 Golang text templates 的模板文件，详见 [文档](https://github.com/kelseyhightower/confd/blob/master/docs/templates.md)
 
 例如：
 
-####    同步生成 Nginx 配置
+#### 同步生成 Nginx 配置
 
+在实际线上应用中，可以考虑使用 [supervisord](http://supervisord.org/)+ Confd 的部署方式。
 
-##  0x02    Confd 分析
+## 0x03 Confd 逻辑分析
+
 Confd 的整体应用架构如下：
 ![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/etcd/confd-architecture.png)
 
 从部署来看，Confd 需要完成如下几件事情：
-1.	一个客户端动态 PULL 或者 Watch 远端配置中心的改变，及时将数据拉取到本地
-2.	本地文件和上一步获取的文件内容比较
-3.	更新本地文件及后续的自定义操作
-4.	对模板语法的处理
 
+1. 一个客户端动态 PULL 或者 Watch 远端配置中心的改变，及时将数据拉取到本地
+2. 本地文件和上一步获取的文件内容比较
+3. 更新本地文件及后续的自定义操作
+4. 对模板语法的处理
 
-####    main 逻辑
-启动部分的 [代码 (https://github.com/kelseyhightower/confd/blob/master/confd.go#L16) 完成了几件事情：
+#### 配置模板结构
+
+[TemplateResource](https://github.com/kelseyhightower/confd/blob/master/resource/template/resource.go) 结构如下，此结构代表了解析后的每个模板文件：
+
+```golang
+type Config struct {
+	ConfDir       string `toml:"confdir"`
+	ConfigDir     string
+	KeepStageFile bool
+	Noop          bool   `toml:"noop"`
+	Prefix        string `toml:"prefix"`
+	StoreClient   backends.StoreClient
+	SyncOnly      bool `toml:"sync-only"`
+	TemplateDir   string
+	PGPPrivateKey []byte
+}
+
+// TemplateResource is the representation of a parsed template resource.
+type TemplateResource struct {
+	CheckCmd      string `toml:"check_cmd"`
+	Dest          string
+	FileMode      os.FileMode
+	Gid           int
+	Keys          []string
+	Mode          string
+	Prefix        string
+	ReloadCmd     string `toml:"reload_cmd"`
+	Src           string
+	StageFile     *os.File
+	Uid           int
+	funcMap       map[string]interface{}
+	lastIndex     uint64
+	keepStageFile bool
+	noop          bool
+	store         memkv.Store
+	storeClient   backends.StoreClient
+	syncOnly      bool
+	PGPPrivateKey []byte
+}
+```
+
+#### main 逻辑
+
+启动部分的 [代码](https://github.com/kelseyhightower/confd/blob/master/confd.go#L16) 完成了几件事情：
+
 1.  初始化配置文件的存储后端的 Client
 2.  初始化配置模板
 
@@ -104,7 +156,11 @@ func main(){
 }
 ```
 
-接着就是标准的启动停止（处理信号）：
+接着就是标准的启动停止（处理信号），针对远程配置的监控，分为两种方式：
+
+1. `template.WatchProcessor`：以 watch 方式监控
+2. `template.IntervalProcessor`：定时轮询
+
 ```golang
 func main(){
     //...
@@ -122,6 +178,7 @@ func main(){
 		processor = template.IntervalProcessor(config.TemplateConfig, stopChan, doneChan, errChan, config.Interval)
 	}
 
+	// 单独启动 process
 	go processor.Process()
 
 	signalChan := make(chan os.Signal, 1)
@@ -140,14 +197,16 @@ func main(){
 }
 ```
 
-####	WatchProcessor
-我们看下 `WatchProcessor` 的实现：
+#### WatchProcessor
+
+我们先分析下 `WatchProcessor` 的实现，其中 [getTemplateResources 方法](https://github.com/kelseyhightower/confd/blob/master/resource/template/processor.go#L111) 是获取 Confd 模板目录下的所有模板文件，`watchProcessor.Process` 方法针对每个模板文件都建立一个单独的 Watcher：
+
 ```golang
 type watchProcessor struct {
 	config   Config
-	stopChan chan bool
-	doneChan chan bool
-	errChan  chan error
+	stopChan chan bool		// 用于控制
+	doneChan chan bool		// 用于控制
+	errChan  chan error		// 错误上报
 	wg       sync.WaitGroup	// 用于并发控制
 }
 
@@ -158,7 +217,7 @@ func WatchProcessor(config Config, stopChan, doneChan chan bool, errChan chan er
 
 func (p *watchProcessor) Process() {
 	defer close(p.doneChan)
-	// 从模板配置中获取模板文件
+	// 从模板配置中获取模板文件（ts 为 TemplateResource 结构数组）
 	ts, err := getTemplateResources(p.config)
 	if err != nil {
 		log.Fatal(err.Error())
@@ -174,7 +233,17 @@ func (p *watchProcessor) Process() {
 }
 ```
 
-`monitorPrefix` 方法用于监听每个模板文件的改变，注意下面这个 `t.lastIndex` 的意义。先看下 EtcdV3 的 [实现](https://github.com/kelseyhightower/confd/blob/master/backends/etcdv3/client.go#L225)
+`monitorPrefix` 方法用于监听每个模板文件的改变（当监听到远程配置中心发生改变时，从远程拉取一次配置并更新本地），注意下面这个 `t.lastIndex` 的意义。先看下 EtcdV3 的 [实现](https://github.com/kelseyhightower/confd/blob/master/backends/etcdv3/client.go#L225)，该方法是一个 `forever-loop`：
+
+1. 使用 `t.storeClient.WatchPrefix`<font color="#dd0000"> 阻塞监听 Etcd 的指定 Key 值的改变 </font>，当发生改变时，返回 Etcd 中最新（发生修改的）数据的 Last seen revision
+2. 保存本次的 `index` 值 `t.lastIndex`
+3. 调用 `t.process()`[方法](https://github.com/kelseyhightower/confd/blob/master/resource/template/resource.go#L349) 更新本地配置，`t.process()` 方法的步骤为：
+   - `setFileMode`[方法](https://github.com/kelseyhightower/confd/blob/master/resource/template/resource.go#L366)：设定文件掩码
+   - `setVars`[方法](https://github.com/kelseyhightower/confd/blob/master/resource/template/resource.go#L175)：先从 Etcd 拉取对应 Key 的数据，然后按照格式以 key-value 方式保存在本地 [内存中](https://github.com/kelseyhightower/confd/blob/master/vendor/github.com/kelseyhightower/memkv/store.go)
+   - `createStageFile`[方法](https://github.com/kelseyhightower/confd/blob/master/resource/template/resource.go#L198)：将上一步拉取的配置按照 template 模板保存为临时文件
+   - `sync`[方法](https://github.com/kelseyhightower/confd/blob/master/resource/template/resource.go#L238)：应用新的配置（当改变时），视是否配置 `ReloadCmd` 调用相应命令重启服务
+4. 继续下一次循环
+
 ```golang
 // 监听每个模板文件
 func (p *watchProcessor) monitorPrefix(t *TemplateResource) {
@@ -198,10 +267,12 @@ func (p *watchProcessor) monitorPrefix(t *TemplateResource) {
 }
 ```
 
-####	Confd 的客户端封装
+#### Confd 的客户端封装
 
-####	Confd 的客户端实现：EtcdV3 的客户端
+#### Confd 的客户端实现：EtcdV3 的客户端
+
 在 Confd 的 EtcdV3 客户端的实现中，重要的结构体是 `Client` 和 `Watch`，注意 `Client` 结构的 `watches` 成员，其存储了所有需要监听改变的 `key`，对应于配置文件中的 `key` 数组（ps：线上项目中建议开启 Etcd 客户端的 TLS + 认证机制）
+
 ```golang
 // Client is a wrapper around the etcd client
 type Client struct {
@@ -213,6 +284,7 @@ type Client struct {
 ```
 
 而 `Watch` 结构则记录，当前关联的 `key` 在 Etcd 中存储最新的 `revision` 值，由于 Etcd 本身是个 MVCC 存储，所以我们保存了 `revision`：
+
 ```golang
 // A watch only tells the latest revision
 type Watch struct {
@@ -225,7 +297,10 @@ type Watch struct {
 }
 ```
 
-####	WatchPrefix 方法
+#### WatchPrefix 方法
+
+分析下在上一小节 `watchProcessor.monitorPrefix` 中调用的 `WatchPrefix` 方法：
+
 ```golang
 func (c *Client) WatchPrefix(prefix string, keys []string, waitIndex uint64, stopChan chan bool) (uint64, error) {
 	var err error
@@ -322,7 +397,7 @@ func createWatch(client *clientv3.Client, prefix string) (*Watch, error) {
 }
 ```
 
-####	GetValues
+#### GetValues
 
 ```golang
 // GetValues queries etcd for keys prefixed by prefix.
@@ -389,7 +464,6 @@ func (c *Client) GetValues(keys []string) (map[string]string, error) {
 }
 ```
 
+## 参考
 
-
-##  参考
--   [Quick Start Guide](https://github.com/kelseyhightower/confd/blob/master/docs/quick-start-guide.md)
+- [Quick Start Guide](https://github.com/kelseyhightower/confd/blob/master/docs/quick-start-guide.md)
