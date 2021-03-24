@@ -34,7 +34,7 @@ Kubernetes 提供的 Watch 功能是建立在对 Etcd 的 Watch 之上的，当 
 -	`List` 机制：提供查询当前最新状态的接口，以 `HTTP` 短连接方式提供
 -	`Watch`（监听）机制：所有的组件通过 `Watch` 机制建立 `HTTP` 长链接，随时获悉自己感兴趣的资源的变化事件，实现对应的功能后还是调用 APIServer 来写入组件的 `Spec`，比如客户端 （Kubelet/Scheduler/Controller-manager） 通过 List-Watch 机制监听 APIServer 中资源 (Pods/ReplicaSet/Service 等等) 的 Create//Update/Delete 事件，并针对事件类型调用相应的事件处理函数。
 
-![img](https://wx1.sbimg.cn/2020/09/19/G3yRo.jpg)
+![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2020/K8S-architecture.jpg)
 
 以 Pods 为例，List API 一般为 `GET /api/v1/pods`， Watch API 一般为 `GET /api/v1/watch/pods`，并且会带上 `watch=true`，表示采用 HTTP 长连接持续监听 Pods 相关事件，每当有事件来临，返回一个 WatchEvent。
 
@@ -55,7 +55,7 @@ Transfer-Encoding: chunked
 {"type":"MODIFIED", "object":{"kind":"Pod","apiVersion":"v1",...}}
 ```
 
-![http_transfer_encoding](https://wx2.sbimg.cn/2020/09/24/GzAxK.png)
+![http_transfer_encoding](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2020/K8S-httptransfer.png)
 
 下面给出两个实际的查询例子：
 
@@ -216,7 +216,7 @@ kubernetes://service-name.namespace:8080/
 2.	实现 `Watcher`（一般作为 `Resolver` 的子协程单独创建）：接收 Kubernetes 的 `API` 的改变通知并调用 gRPC 的接口通知 gRPC 内部
 
 kuberesolver 的整体项目架构如下所示：
-![kuberesolver 整体架构](https://wx1.sbimg.cn/2020/09/24/GzRmG.png)
+![kuberesolver 整体架构](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2020/K8S-kuberesolver.png)
 
 下面按照架构图的模块对源码进一步分析。
 
