@@ -47,7 +47,7 @@ OAuth2 是一个授权协议，有四种 Flow 流。
 ![normal-oauth2-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/auth/sso/normal-oauth2-flow.png)
 
 以 github 的 oauth 认证举例，其流程如下：
-![github-oauth2](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/auth/sso/sso-devel-githuboauth.png)
+![github-oauth2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/auth/sso/sso-devel-githuboauth.png)
 
 1、客户端（如 Web 浏览器），开始请求服务端 MyService<br>
 2、服务端校验 cookies，若校验失败，则重定向跳转到 IDP 认证服务 GithubApp<br>
@@ -64,7 +64,7 @@ OAuth2 是一个授权协议，有四种 Flow 流。
 ## 0x03 SAML2
 
 SAML2 的基本通信流如下（SAML 也有较多的变种，这里仅列举一种典型的）：
-![normal-saml-flow](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/auth/sso/normal-saml2-flow.png)
+![normal-saml-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/auth/sso/normal-saml2-flow.png)
 
 以 IDP Okta 的 SAML2 APP 服务验证流程为例：
 ![okta-saml2]()
@@ -81,7 +81,14 @@ OIDC（OpenID Connect）等于 （Identity, Authentication） + OAuth 2.0。OIDC
 
 ## 0x07 其他一些话题
 
-1. 能否混用 OAuth 及 SAML？
+1、能否混用 OAuth 及 SAML？<br>
+2、如何设置多个 OAuth 的 CallBack Url<br>
+
+#### SSH SSO
+
+基于 SSH 的 SSO 实现，有两个思路：
+
+1. 从上面对 Auth 协议的分析，如果我们在 SSH 登录前能先获取到 access-token，然后拿着此 token 调用 IDP 接口获取到用户的真实身份即可。
 
 ## 0x08 参考
 
@@ -94,5 +101,6 @@ OIDC（OpenID Connect）等于 （Identity, Authentication） + OAuth 2.0。OIDC
 - [OAuth 2.0](https://oauth.net/2/)
 - [Choosing an SSO Strategy: SAML vs OAuth2](https://www.mutuallyhuman.com/blog/choosing-an-sso-strategy-saml-vs-oauth2/)
 - [OAuth & OpenID & SAML 工作流程梳理对比](https://www.jianshu.com/p/6e25a892db89)
+- [Github oauth multiple authorization callback URL](https://stackoverflow.com/questions/35942009/github-oauth-multiple-authorization-callback-url)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
