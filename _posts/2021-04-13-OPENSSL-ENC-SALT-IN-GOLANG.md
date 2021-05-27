@@ -1,6 +1,6 @@
 ---
 layout: post
-title: 在 Golang 中实现 Openssl 的 AES-CBC-256 算法（With Salt）-- 未完成
+title: 在 Golang 中实现 Openssl 的 AES-CBC-256 算法（With Salt）
 subtitle:
 date: 2021-04-15
 author: pandaychen
