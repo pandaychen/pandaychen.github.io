@@ -100,7 +100,7 @@ xxd enc1.salted.bin
 
 实现代码示例 [在此](https://github.com/pandaychen/goes-wrapper/blob/master/pycrypto/aes_cbc_salt.go)，主要是下面几个部分：
 
-#### 如何通过 salt 和 SecretPassword
+#### 如何通过 salt 和 SecretPassword 生成 key/iv
 
 ```golang
 type Creds [CBC_CRED_LEN]byte
