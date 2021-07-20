@@ -135,7 +135,7 @@ status:
   phase: Bound
 ```
 
-##  0x04  Etcd 部署
+##  0x03  Etcd 部署
 有两种方式，采用官方的 Etcd-Operator 方式或者 `Statefulset` 部署
 
 ####  使用官方的 Etcd-Operator 部署
@@ -246,7 +246,7 @@ spec:
 kubectl scale --replicas=5 statefulset etcd
 ```
 
-##  0x05  参考
+##  0x04  参考
 - [Create statefulset etcd cluster on kubernetes.](https://github.com/wilhelmguo/etcd-statefulset)
 - [一文读懂 K8s 持久化存储流程](https://developer.aliyun.com/article/754434)
 - [Introducing the etcd Operator: Simplify etcd cluster configuration and management](https://coreos.com/blog/introducing-the-etcd-operator.html)

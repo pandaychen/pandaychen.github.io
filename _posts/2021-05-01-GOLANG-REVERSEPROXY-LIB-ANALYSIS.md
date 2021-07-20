@@ -14,7 +14,13 @@ tags:
 
 ## 0x00 前言
 
-[ReverseProxy](https://golang.org/pkg/net/http/httputil/#ReverseProxy) 是官方提供的一个反向代理实现，可直接拿来用，在网关或代理类服务实现非常方便，这篇文章简单分析下其实现。
+在工作项目中，使用 `gin` 与 `httputil.ReverseProxy` 完成认证网关及反向代理的功能，反向代理的流程为：
+1、 通过 `gin` 实现的 https 网关 接收浏览器 Web 发起的请求 <br>
+2、 网关通过 `httputil.ReverseProxy` 发起一个带 API 签名的 HTTP 请求给后台 CGI 服务，实现代理功能 <br>
+3、 网关接收到后台 CGI 的服务响应信息 <br>
+4、 网关将响应回复给客户端浏览器 <br>
+
+本文分析下 `httputil.ReverseProxy` 的实现细节。[httputil.ReverseProxy](https://golang.org/pkg/net/http/httputil/#ReverseProxy) 是官方提供的一个反向代理实现，可直接拿来用，在网关或代理类服务实现非常方便，这篇文章简单分析下其实现。
 <br>
 ReverseProxy 具有如下特点：
 
@@ -30,7 +36,7 @@ ReverseProxy 具有如下特点：
 
 #### ReverseProxy 结构
 
-`ReverseProxy` 包含两个重要的属性 `Director` 和 `ModifyResponse`。此 2 属性都是函数类型，在接收到客户端请求时，`ServeHTTP` 函数首先调用 `Director` 函数对接受到的请求体进行修改，例如修改请求的目标地址、请求头等；然后使用修改后的请求体发起新的请求，接收到响应后，调用 `ModifyResponse` 函数对响应进行修改，最后将修改后的响应体拷贝并响应给客户端，这样就实现了反向代理的整个流程。
+`ReverseProxy` 包含两个重要的属性 `Director` 和 `ModifyResponse`，这两个属性都是函数类型。当接收到客户端请求时，`ServeHTTP` 函数首先调用 `Director` 函数对接受到的请求体进行修改，例如修改请求的目标地址、请求头等；然后使用修改后的请求体发起新的请求，接收到响应后，调用 `ModifyResponse` 函数对响应进行修改，最后将修改后的响应体拷贝并响应给客户端，这样就实现了反向代理的整个流程。
 
 ```golang
 // 处理进来的请求，并发送转发至后端 server 实现反向代理，并将响应请求回传给客户端
@@ -137,7 +143,7 @@ func singleJoiningSlash(a, b string) string {
 
 ## 0x02 ServeHTTP 方法
 
-基于先前的经验，实例化的 reverseproxy 对象必须实现 `ServeHTTP` 方法才能使用 `Handler` 方式调用，本小节具体分析下 (ServeHTTP)[https://golang.org/src/net/http/httputil/reverseproxy.go?s=6664:6739#L202] 方法：
+基于先前的经验，实例化的 reverseproxy 对象必须实现 `ServeHTTP` 方法才能使用 `Handler` 方式调用，本小节具体分析下 [ServeHTTP](https://golang.org/src/net/http/httputil/reverseproxy.go?s=6664:6739#L202) 方法：
 
 ```golang
 // 实现了 ServeHTTP 接口
@@ -436,7 +442,223 @@ func (p *ReverseProxy) handleUpgradeResponse(rw http.ResponseWriter, req *http.R
 }
 ```
 
-## 0x03 ReverseProxy 的 <坑>
+## 0x03 ReverseProxy 之坑
+
+当然，在测试过程中也遇到了几个问题，排查下来都和 `httputil.ReverseProxy` 有关。遇到的问题主要有如下两个：
+
+- `http.ErrAbortHandler` 类似的 `Panic` 异常
+- `Context canceled` 的错误
+
+问题的场景是有些 `js` 文件或者页面加载时间较长，超时或者（未加载完全时）用户点击了其中某个按钮的场景出现概率极高，从抓包分析看是在未加载完时，点击了其中的一个按钮，浏览器会取消这些未完成的请求去载入新页面，此时（浏览器）客户端会主动断开连接，从而导致了 `httputil.ReverseProxy` 在处理上的一些异常。
+
+#### PANIC 异常（http.ErrAbortHandler）
+
+从上面的源码来看，整个 `ServeHttp` 的实现中只有一处代码抛出了异常，即当客户端请求主动取消发生在 <代理获取到响应信息后将 response 复制给网关的 `rw http.ResponseWriter` 对象> 阶段时，就会出现 `http.ErrAbortHandler` 的 `Panic` 异常。相关源码如下：
+
+```golang
+//copyResponse 的实现
+func (p *ReverseProxy) copyResponse(dst io.Writer, src io.Reader, flushInterval time.Duration) error {
+	if flushInterval != 0 {
+		if wf, ok := dst.(writeFlusher); ok {
+			mlw := &maxLatencyWriter{
+				dst:     wf,
+				latency: flushInterval,
+			}
+			defer mlw.stop()
+
+			// set up initial timer so headers get flushed even if body writes are delayed
+			mlw.flushPending = true
+			mlw.t = time.AfterFunc(flushInterval, mlw.delayedFlush)
+
+			dst = mlw
+		}
+	}
+
+	var buf []byte
+	if p.BufferPool != nil {
+		buf = p.BufferPool.Get()
+		defer p.BufferPool.Put(buf)
+	}
+	// 复制 response 到 dst，即
+	_, err := p.copyBuffer(dst, src, buf)
+	return err
+}
+
+
+// shouldPanicOnCopyError reports whether the reverse proxy should
+// panic with http.ErrAbortHandler. This is the right thing to do by
+// default, but Go 1.10 and earlier did not, so existing unit tests
+// weren't expecting panics. Only panic in our own tests, or when
+// running under the HTTP server.
+//shouldPanicOnCopyError 实现
+func shouldPanicOnCopyError(req *http.Request) bool {
+	if inOurTests {
+		// Our tests know to handle this panic.
+		return true
+	}
+	// 服务器模式，返回 true，适用于本文出现的场景
+	if req.Context().Value(http.ServerContextKey) != nil {
+		// We seem to be running under an HTTP server, so
+		// it'll recover the panic.
+		return true
+	}
+	// Otherwise act like Go 1.10 and earlier to not break
+	// existing tests.
+	return false
+}
+
+// copyBuffer returns any write errors or non-EOF read errors, and the amount
+// of bytes written.
+//dst 为 gin 网关侧的数据写入接口，src 为后端 CGI 服务的 HTTP 响应
+func (p *ReverseProxy) copyBuffer(dst io.Writer, src io.Reader, buf []byte) (int64, error) {
+	if len(buf) == 0 {
+		buf = make([]byte, 32*1024)
+	}
+	var written int64
+	for {
+		// 分块读，节省内存，bf 长度默认为 32k，一般需要读取多次才能把数据读完
+		nr, rerr := src.Read(buf)
+		if rerr != nil && rerr != io.EOF && rerr != context.Canceled {
+			p.logf("httputil: ReverseProxy read error during body copy: %v", rerr)
+		}
+		if nr > 0 {
+			// 将读取的数据写入网关侧的 http.ResponseWriter
+			nw, werr := dst.Write(buf[:nr])
+			if nw > 0 {
+				written += int64(nw)
+			}
+			 // 写入过程中出现问题
+			if werr != nil {
+				return written, werr
+			}
+			if nr != nw {
+				return written, io.ErrShortWrite
+			}
+		}
+		// 读取过程中出现问题
+		if rerr != nil {
+			if rerr == io.EOF {
+				rerr = nil
+			}
+			return written, rerr
+		}
+	}
+}
+
+func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	//......
+	// 周期性刷新内容到（给客户端的） Response 中，周期性刷新是指刷新频率（时间间隔）
+	// 在 flushInterval(req, res) 方法中，控制时间间隔是通过读取 ReverseProxy 结构体中 FlushInterval 字段（可由开发者定义）
+	err = p.copyResponse(rw, res.Body, p.flushInterval(res))
+	if err != nil {
+		defer res.Body.Close()
+		// Since we're streaming the response, if we run into an error all we can do
+		// is abort the request. Issue 23643: ReverseProxy should use ErrAbortHandler
+		// on read error while copying body.
+		// 是否应该抛出 panic
+		if !shouldPanicOnCopyError(req) {
+			p.logf("suppressing panic for copyResponse error in test; copy error: %v", err)
+			return
+		}
+		panic(http.ErrAbortHandler)
+	}
+	//.....
+}
+```
+
+从上面分析可知，该 `Panic` 异常，应该是客户端主动断开连接导致，当连接断开时，然后 `httputil.ReverseProxy` 正处于拿到响应信息后，将响应信息复制给网关的 `rw http.ResponseWriter` 对象过程中（可能数据较大，未复制完成），出现了问题导致。而且由于 `shouldPanicOnCopyError` 返回为 `true`，导致了最终 `ServeHTTP` 方法执行了 `panic(http.ErrAbortHandler)`。
+
+#### Context canceled 错误
+
+同样的，引用 `ServeHttp` 的代码：
+
+```golang
+// 实现了 ServeHTTP 接口
+//rw：响应（客户端）的数据
+//req：来自客户端的请求
+func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	//......
+	/*
+	 从原始请求 req 中取出上下文信息，通过类型断言 rw.(http.CloseNotifier)，来判断连接 (请求) 是否终止。
+如果终止了则直接放弃本次请求，即调用 cancel()，取消此上下文，当然对应的资源也就释放了。
+其中 http.CloseNotifier 是一个接口，只有一个方法 CloseNotify() <-chan bool，作用是检测连接是否断开
+	*/
+	ctx := req.Context()
+	if cn, ok := rw.(http.CloseNotifier); ok {
+		// 客户端连接终止
+		var cancel context.CancelFunc
+		// 注意 ctx 是 req 的 Context()，这里使用 WithCancel 强行在 req 的 context 中加入取消通知功能
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		notifyChan := cn.CloseNotify()
+		// 启动 goroutine 来监听 notifyChan 的取消事件，若触发则调用 cancel() 取消所有的子 context
+		go func() {
+			select {
+			// 监听取消事件，收到请求取消通知，则调 context 的取消函数
+			case <-notifyChan:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	}
+
+	// 拷贝原始请求 req 的上下文信息，并赋值给对外请求的 request（outreq）
+	// 从 req.Clone 的实现来看：https://golang.org/src/net/http/request.go?s=13662:13715#L371
+	//outreq 的 ctx 就是 ctx
+	outreq := req.Clone(ctx)
+	//......
+
+	// 执行真正的代理功能：向后端发送请求数据，transport.RoundTrip() 的作用就是执行一个 HTTP 事务，根据请求返回响应
+	// 注意：发起 HTTP 调用，当响应还未完成时，调用 cancel() 则会取消调用，并返回 Context cancel 的错误!!!
+	res, err := transport.RoundTrip(outreq)
+	if err != nil {
+		p.getErrorHandler()(rw, outreq, err)
+		return
+	}
+
+	//......
+}
+
+// Clone returns a deep copy of r with its context changed to ctx.
+// The provided ctx must be non-nil.
+//
+// For an outgoing client request, the context controls the entire
+// lifetime of a request and its response: obtaining a connection,
+// sending the request, and reading the response headers and body.
+func (r *Request) Clone(ctx context.Context) *Request {
+	if ctx == nil {
+		panic("nil context")
+	}
+	r2 := new(Request)
+	*r2 = *r
+	r2.ctx = ctx	//ctx 赋值
+	r2.URL = cloneURL(r.URL)
+	if r.Header != nil {
+		r2.Header = r.Header.Clone()
+	}
+	if r.Trailer != nil {
+		r2.Trailer = r.Trailer.Clone()
+	}
+	if s := r.TransferEncoding; s != nil {
+		s2 := make([]string, len(s))
+		copy(s2, s)
+		r2.TransferEncoding = s2
+	}
+	r2.Form = cloneURLValues(r.Form)
+	r2.PostForm = cloneURLValues(r.PostForm)
+	r2.MultipartForm = cloneMultipartForm(r.MultipartForm)
+	return r2
+}
+```
+
+从代码实现不难看出，`Context cancel` 产生的原因主要就是 `httputil.ReverseProxy` 监听了前置 `gin` 的请求对象，即 `req *http.Request` （其中包含的 `Context` 对象）的取消通知，当客户端主动取消连接时，`gin` 会发送通知，`httputil.ReverseProxy` 收到后就会调用 `cancel()` 方法。
+此时若刚好处于 <代理发起 HTTP 调用，响应还未完成> 过程时，`http.transport.RoundTrip` 就会抛出 `Context Canceled` 的错误，同时中断该连接。
+
+#### 问题解决
+
+解决的方法也很简单，修改原始代码，把抛出异常的部分去掉（或者在上层忽略掉这种错误）。看起来，使用 `io.Copy` 实现代理功能时，当客户端主动断开连接时，需要格外小心处理这种错误。
+
+## 0x04 总结
 
 ## 0x04 参考
 
