@@ -14,7 +14,7 @@ tags:
 
 ## 0x00 前言
 
-在工作项目中，使用 `gin` 与 `httputil.ReverseProxy` 完成认证网关及反向代理的功能，反向代理的流程为：
+在工作项目中，曾使用 `gin` 与 `httputil.ReverseProxy` 实现了认证网关和反向代理的功能，该认证网关的主要流程为：
 1、 通过 `gin` 实现的 https 网关 接收浏览器 Web 发起的请求 <br>
 2、 网关通过 `httputil.ReverseProxy` 发起一个带 API 签名的 HTTP 请求给后台 CGI 服务，实现代理功能 <br>
 3、 网关接收到后台 CGI 的服务响应信息 <br>
@@ -22,7 +22,8 @@ tags:
 
 本文分析下 `httputil.ReverseProxy` 的实现细节。[httputil.ReverseProxy](https://golang.org/pkg/net/http/httputil/#ReverseProxy) 是官方提供的一个反向代理实现，可直接拿来用，在网关或代理类服务实现非常方便，这篇文章简单分析下其实现。
 <br>
-ReverseProxy 具有如下特点：
+
+`httputil.ReverseProxy` 具有如下特点：
 
 - 自定义修改响应包体
 - 连接池
@@ -34,7 +35,7 @@ ReverseProxy 具有如下特点：
 
 ## 0x01 核心结构与方法
 
-#### ReverseProxy 结构
+#### httputil.ReverseProxy 结构
 
 `ReverseProxy` 包含两个重要的属性 `Director` 和 `ModifyResponse`，这两个属性都是函数类型。当接收到客户端请求时，`ServeHTTP` 函数首先调用 `Director` 函数对接受到的请求体进行修改，例如修改请求的目标地址、请求头等；然后使用修改后的请求体发起新的请求，接收到响应后，调用 `ModifyResponse` 函数对响应进行修改，最后将修改后的响应体拷贝并响应给客户端，这样就实现了反向代理的整个流程。
 
@@ -97,7 +98,7 @@ type ReverseProxy struct {
 
 #### NewSingleHostReverseProxy 方法
 
-`NewSingleHostReverseProxy` 方法返回一个新的 `ReverseProxy`，将 `URLs` 请求路由到传入参数 `target` 的指定的 `Scheme`, `Host` 以及 `Base path`，也是默认的 `director` 配置，在 NewSingleHostReverseProxy 中源码已经对传入的 URLs 进行解析并且完成了 Director 的修改
+`NewSingleHostReverseProxy` 方法返回一个新的 `ReverseProxy`，将 `URLs` 请求路由到传入参数 `target` 的指定的 `Scheme`, `Host` 以及 `Base path`，也是默认的 `director` 配置，在 NewSingleHostReverseProxy 中源码已经对传入的 `URLs` 进行解析并且完成了 `Director` 的修改
 
 ```golang
 // NewSingleHostReverseProxy returns a new ReverseProxy that routes
@@ -143,7 +144,7 @@ func singleJoiningSlash(a, b string) string {
 
 ## 0x02 ServeHTTP 方法
 
-基于先前的经验，实例化的 reverseproxy 对象必须实现 `ServeHTTP` 方法才能使用 `Handler` 方式调用，本小节具体分析下 [ServeHTTP](https://golang.org/src/net/http/httputil/reverseproxy.go?s=6664:6739#L202) 方法：
+基于先前的经验，实例化的 `httputil.Reverseproxy` 对象必须实现 `ServeHTTP` 方法才能使用 `Handler` 方式调用，本小节具体分析下 [ServeHTTP](https://golang.org/src/net/http/httputil/reverseproxy.go?s=6664:6739#L202) 方法：
 
 ```golang
 // 实现了 ServeHTTP 接口
