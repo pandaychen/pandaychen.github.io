@@ -1,7 +1,7 @@
 ---
 layout: post
-title: Circuit Breaker 的一种实现：gobreaker
-subtitle: 分析 Sony 的 gobreaker 熔断器实现
+title: 开源熔断组件分析（一）：gobreaker
+subtitle: 分析 Sony 的 gobreaker 熔断器实现（Circuit Breaker 的一种实现）
 date: 2021-04-03
 header-img: img/super-mario.jpg
 author: pandaychen
@@ -13,11 +13,11 @@ tags:
 
 ## 0x00 前言
 
-[gobreaker](https://github.com/sony/gobreaker) 实现了 [Circuit Breaker pattern](<https://docs.microsoft.com/en-us/previous-versions/msp-n-p/dn589784(v=pandp.10)?redirectedfrom=MSDN>) 模式。本篇文章简单分析下其实现。
+[gobreaker](https://github.com/sony/gobreaker) 实现了 [Circuit Breaker pattern](<https://docs.microsoft.com/en-us/previous-versions/msp-n-p/dn589784(v=pandp.10)?redirectedfrom=MSDN>) 模式的熔断机制。本篇文章简单分析下其实现。
 
-#### Circuit Breaker
+#### Circuit Breaker 回顾
 
-回顾下 Circuit Breaker 的状态机模型：即 3 种状态，4 种状态（变化）迁移，如下图：
+回顾下 Circuit Breaker 的状态机模型：即 `3` 种状态，`4` 种状态（变化）迁移，如下图：
 
 ![circuit-breaker](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/breaker/circuit-breaker.png)
 
@@ -111,4 +111,5 @@ func (c *Counts) clear() {
 ## 参考
 
 - [gobreaker.go 实现](https://github.com/sony/gobreaker/blob/master/gobreaker.go)
+- [gobreaker 简单注释](https://github.com/pandaychen/gobreaker)
 - [sre_breaker.go](https://github.com/go-kratos/kratos/blob/master/pkg/net/netutil/breaker/sre_breaker.go)
