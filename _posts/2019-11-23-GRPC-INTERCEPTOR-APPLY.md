@@ -19,6 +19,10 @@ gRPC 提供了拦截器（Interceptor）机制，可以完成这个功能。<br>
 
 在实际项目开发中，可以将许多共性的功能放在拦截器的逻辑中实现，此外利用 `defer` 关键字还能够方便的实现 RPC 拦截器计时的功能。
 
+注意：新版本的 gRPC 已经提供了内置的链式 Interceptor 实现，即 `WithChainUnaryInterceptor` 和 `WithChainStreamInterceptor`
+-	[WithChainStreamInterceptor](https://pkg.go.dev/google.golang.org/grpc#WithChainStreamInterceptor)
+-	[WithChainUnaryInterceptor](https://pkg.go.dev/google.golang.org/grpc#WithChainUnaryInterceptor)
+
 ##  0x01    Interceptor 分析
 gRPC 中使用 `UnaryInterceptor` 来实现 Unary RPC 一元拦截器，使用 `StreamInterceptor` 来实现 Stream RPC 流式的拦截器，而且既可以在客户端进行拦截，也可以对服务器端进行拦截。
 
