@@ -49,77 +49,105 @@ metadata:
 创建 `StatefulSet`，并把数据挂载到宿主机上。注意，我们使用 `initContainers` 来完成前置工作，如目录创建等；
 
 ```yaml
-apiVersion: apps/v1
+apiVersion: apps/v1beta2
 kind: StatefulSet
 metadata:
+  creationTimestamp: "2021-06-27T10:03:08Z"
+  generation: 1
   name: redis
+  namespace: xxxx
 spec:
+  podManagementPolicy: OrderedReady
   replicas: 1
-  serviceName: redis
+  revisionHistoryLimit: 10
   selector:
     matchLabels:
       name: redis
+  serviceName: redis
   template:
     metadata:
+      creationTimestamp: null
       labels:
         name: redis
     spec:
-      initContainers:
-        - name: init-redis
-          image: busybox
-          command:
-            [
-              "sh",
-              "-c",
-              "mkdir -p /data/middleware-data/redis/log/;mkdir -p /data/middleware-data/redis/conf/;mkdir -p /data/middleware-data/redis/data/",
-            ]
-          volumeMounts:
-            - name: data
-              mountPath: /data/middleware-data/redis/
       containers:
-        - name: redis
-          image: redis:5.0.6
-          imagePullPolicy: IfNotPresent
-          command:
+        - command:
             - sh
             - -c
-            - "exec redis-server /data/middleware-data/redis/conf/redis.conf"
+            - exec redis-server /data/middleware-data/redis/conf/redis.conf
+          image: redis:5.0.6
+          imagePullPolicy: IfNotPresent
+          name: redis
           ports:
             - containerPort: 6379
               name: redis
               protocol: TCP
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
           volumeMounts:
-            - name: redis-config
-              mountPath: /data/middleware-data/redis/conf/
-            - name: data
-              mountPath: /data/middleware-data/redis/
+            - mountPath: /data/middleware-data/redis/conf/
+              name: redis-config
+            - mountPath: /data/middleware-data/redis/
+              name: data
+      dnsPolicy: ClusterFirst
+      initContainers:
+        - command:
+            - sh
+            - -c
+            - mkdir -p /data/middleware-data/redis/log/;mkdir -p /data/middleware-data/redis/conf/;mkdir -p /data/middleware-data/redis/data/
+          image: busybox
+          imagePullPolicy: Always
+          name: init-redis
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          volumeMounts:
+            - mountPath: /data/middleware-data/redis/
+              name: data
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
       volumes:
-        - name: redis-config
-          configMap:
+        - configMap:
+            defaultMode: 420
             name: redis-conf
-        - name: data
-          hostPath:
+          name: redis-config
+        - hostPath:
             path: /data/middleware-data/redis/
+            type: ""
+          name: data
+  updateStrategy:
+    rollingUpdate:
+      partition: 0
+    type: RollingUpdate
 ```
 
 #### 创建 Service
 
 ```yaml
-kind: Service
 apiVersion: v1
+kind: Service
 metadata:
+  creationTimestamp: "2021-06-27T10:03:44Z"
   labels:
     name: redis
   name: redis
+  namespace: xxxx
 spec:
-  type: NodePort
+  clusterIP: 172.16.255.66
+  externalTrafficPolicy: Cluster
   ports:
     - name: redis
-      port: 6379
-      targetPort: 6379
       nodePort: 30020
+      port: 6379
+      protocol: TCP
+      targetPort: 6379
   selector:
     name: redis
+  sessionAffinity: None
+  type: NodePort
 ```
 
 ## 0x02 Redis 集群搭建
