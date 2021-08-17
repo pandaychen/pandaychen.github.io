@@ -14,7 +14,7 @@ tags:
 
 ## 0x00 前言
 
-在工作项目中，曾使用 `gin` 与 `httputil.ReverseProxy` 实现了认证网关和反向代理的功能，该认证网关的主要流程为：
+在工作项目中，曾使用 `gin` 与 `httputil.ReverseProxy` 实现了认证网关和反向代理的功能，该认证网关的主要流程为：<br>
 1、 通过 `gin` 实现的 https 网关 接收浏览器 Web 发起的请求 <br>
 2、 网关通过 `httputil.ReverseProxy` 发起一个带 API 签名的 HTTP 请求给后台 CGI 服务，实现代理功能 <br>
 3、 网关接收到后台 CGI 的服务响应信息 <br>
