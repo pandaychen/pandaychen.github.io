@@ -18,6 +18,7 @@ tags:
 -   以配置文件的形式固化，存放于服务器文件或者 Database 中
 -   以代码的方式存在于 `git` 私有仓库上，并严格控制此库的访问权限
 -   以 KMS（Key Management Service，云服务居多）方式托管在公有云服务上
+
 <br>
 我们需要实现的通用密码仓库需要满足如下特性：
 -   密文存储（兼顾复杂性）
@@ -25,7 +26,7 @@ tags:
 -   权限控制
 
 
-本文要介绍 [Vault](https://learn.hashicorp.com/vault) 这款开源的 Secret 管理工具（口令、token、私钥及证书等等），是管理代码中口令、秘钥（防止明文泄漏）极佳的应用实践。此外，KMS（Key Management Service，云服务居多）也是较好的 Secret 管理实践。源码 [在此](https://github.com/hashicorp/vault)
+本文要介绍 [Vault](https://learn.hashicorp.com/vault) 这款开源的 Secret 管理工具（口令、token、私钥及证书等等），是管理代码中口令、秘钥（防止明文泄漏）极佳的应用实践。此外，KMS（Key Management Service，云服务居多）也是较好的 Secret 管理实践。vault 项目源码 [在此](https://github.com/hashicorp/vault)
 
 针对此类产品，需要着重关注以下几点：
 1.  Secret 的存储方式，支持的存储后端
@@ -71,9 +72,9 @@ Vault 支持多种存储后端：具体 [在此](https://github.com/hashicorp/va
 disable_mlock  = true
 ui=true
 storage "mysql" {
-    address = "9.134.120.245:3306"
+    address = "127.0.0.1:3306"
     username = "root"
-    password = "a@A12345"
+    password = "xxxxxx"
     database = "vault"
     table = "vault"
 }
