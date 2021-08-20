@@ -50,9 +50,34 @@ Vault 的使用场景一般为：
 vault 的架构如下：
 ![vault-architecture](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/vault/vault-%E6%9E%B6%E6%9E%84%E5%9B%BE.png)
 
-####    一些关于 Vault 的名词
-1、Token<br>
+从架构图可以看出，Vault 分为 Storage Backend、安全屏障（Barrier） 和 HTTP API `3` 个部分，Storage Backend 和 Vault 之间的所有数据流动都需要经过 barrier，barrier 确保只有加密数据会被写入 Storage Backend，加密数据在经过 barrier 被读出的过程中被验证与解密。
+
+##  0x02 Vault 的主要运行流程
+
+###    Step1：数据存储及加密解密
+了解几个名词：<br>
+1、Storage Backend（后端存储）: Vault 自身不存储数据，需要为其配置 Storage Backend。注意！！Storage Backend 是不受信任的，只用于存储加密数据 <br>
+
+2、Initialaztion: Vault 在首次启动时需要初始化，这一步生成一个加密密钥（Encryption key）用于加密数据，加密完成的数据才能被保存到 Storage Backend<br>
+
+3、Unseal（解封）: Vault 启动后，因为不知道加密密钥（Encryption Key），它会进入封印（Sealed）状态，在被解封 ()」前无法进行任何操作。加密密钥被 Master key 保护，必须提供 Master key 才能完成 Unseal 操作 < br>
+
+Master key 和 Encryption Key 的关系如下图所示：
+![vault-shamir-storage.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/vault/vault-shamir-storage.png)
+
+###    Step2：认证 && 权限管理
+在 Unseal 完成后，Vault 才可以处理客户端请求，客户端首次连接 vault 时，需要先完成身份认证。客户端的身份认证方式有：
+-   适合用户：用户名 / 密码、LDAP
+-   适合应用：Public/Private keys、Tokens 或者 Jwt 等
+
 [Token](https://learn.hashicorp.com/tutorials/vault/tokens)
+
+###    Step3：Secret Engine（重要）
+Secret Engine 是 Vault 系统保存、生成或者加密数据的组件。常用的有如下几种：
+-   `kv`：键值存储。可看作一个加密的 Redis，只是单纯地存储 / 读取一些静态的配置 / 数据
+-   `Transit Secrets Engine`：提供加密即服务的功能，只负责加密和解密，不负责存储。主要应用场景是帮 app 加解密数据，但是数据仍旧存储在 MySQL 等数据库中
+-   证书管理：最常见的场景是将根证书（root）存入 Vault，业务证书通过此 Engine 签发
+
 
 
 ####    Shamir 密钥分享算法（shamir secret sharing）
@@ -241,3 +266,4 @@ Code: 403. Errors:
 -   [密钥分享 Secret Sharing 介绍](https://zhuanlan.zhihu.com/p/44999983)
 -   [小马哥 Devops](https://my.oschina.net/u/3952901?tab=newest&catalogId=7038751)
 -   [vault-architecture](https://www.vaultproject.io/docs/internals/architecture)
+-   [Auto-unseal using Transit Secrets Engine](https://learn.hashicorp.com/tutorials/vault/autounseal-transit)
