@@ -38,6 +38,7 @@ tags:
 7.  系统对外接口的 QPS 及并发性能
 
 ##  0x01    Vault 基本原理
+本小节参考官方 [文档](https://www.vaultproject.io/docs/internals/architecture)。<br>
 vault 的基础应用场景如下：
 ![vault-basic](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/vault/vault-basic.png)
 
@@ -51,6 +52,16 @@ vault 的架构如下：
 ![vault-architecture](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/vault/vault-%E6%9E%B6%E6%9E%84%E5%9B%BE.png)
 
 从架构图可以看出，Vault 分为 Storage Backend、安全屏障（Barrier） 和 HTTP API `3` 个部分，Storage Backend 和 Vault 之间的所有数据流动都需要经过 barrier，barrier 确保只有加密数据会被写入 Storage Backend，加密数据在经过 barrier 被读出的过程中被验证与解密。
+
+其他主要组件的功能如下：
+-   `HTTP(s) API`:
+-   `Storage backend`：
+-   `Token Store`：
+-   `Auth Method`：
+-   `Core`：负责处理审核代理（Audit brok）的请求及响应日志，将请求发送到所有已配置的审核设备（audit devices）
+-   `Policy store`：负责管理和存储 ACL Policies，由 `Core` 进行 ACL Policy 的检查
+
+![vault-storage](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/vault/vault_storage.png)
 
 ##  0x02 Vault 的主要运行流程
 
@@ -66,22 +77,26 @@ Master key 和 Encryption Key 的关系如下图所示：
 ![vault-shamir-storage.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/vault/vault-shamir-storage.png)
 
 ###    Step2：认证 && 权限管理
-在 Unseal 完成后，Vault 才可以处理客户端请求，客户端首次连接 vault 时，需要先完成身份认证。客户端的身份认证方式有：
--   适合用户：用户名 / 密码、LDAP
--   适合应用：Public/Private keys、Tokens 或者 Jwt 等
+在 Unseal（解封） 操作完成后，Vault 才可以处理客户端请求，客户端首次连接 Vault 时，需要先完成身份认证。客户端的身份认证方式有：
+-   适合用户：用户名 / 密码、LDAP 认证等，同时用户需要被授予合适的权限用来访问 Vault
+-   适合应用：Public/Private keys、Tokens 或者 Jwt Token 等
+
+此一般流程如下：<br>
+客户端发起身份验证请求，该请求流经 `Core` 模块并进入 `Auth methods`，`Auth methods` 确定请求是否有效并返回关联策略（Policies）的列表。在通过 `Auth methods` 完成了身份认证，并且检查的关联策略也符合授权之后，`Token Store` 将会生成并管理一个新的 Token， 这个 Token 会被返回给客户端，用于进行后续请求。需要注意的是，此 token 也都存在一个 Lease 租期（有效期），同时 Token 关联了相关的策略 Policies，这些策略将被用于验证请求的权限。<br>
+
+请求经过验证后，将被路由到 `Secret engine` 模块。如果 `Secret engine` 返回了一个 Secret（由 Vault 自动生成的 Secret）， `Core` 会将其注册到 `Expiration manager`，并给它附加一个 `lease ID`。`lease ID` 被客户端用于更新（Renew）或吊销（Revoke）它得到的 Secret。如果客户端允许租约（Lease）到期，`Expiration manager` 将自动吊销这个 Secret
 
 [Token](https://learn.hashicorp.com/tutorials/vault/tokens)
 
 ###    Step3：Secret Engine（重要）
-Secret Engine 是 Vault 系统保存、生成或者加密数据的组件。常用的有如下几种：
+`Secret Engine` 是 Vault 系统保存、生成或者加密数据的组件。`Secret Engine` 类似一个虚拟文件系统，所有的 `read`/`write`/`delete`/`list` 操作等都在它下面进行的，然后 `Secret Engine` 可以自己决定如何来响应请求。从代码设计角度而言，`Secret Engine` 一种抽象，它对上层（调用方）提供统一的接口，如物理文件系统、数据库等等，都可以统一使用增删改查这些操作接口。<br>
+常用的 Engine 有如下几种：
 -   `kv`：键值存储。可看作一个加密的 Redis，只是单纯地存储 / 读取一些静态的配置 / 数据
 -   `Transit Secrets Engine`：提供加密即服务的功能，只负责加密和解密，不负责存储。主要应用场景是帮 app 加解密数据，但是数据仍旧存储在 MySQL 等数据库中
 -   证书管理：最常见的场景是将根证书（root）存入 Vault，业务证书通过此 Engine 签发
 
-
-
 ####    Shamir 密钥分享算法（shamir secret sharing）
-Vault 中给出了 Shamir 算法的 [实现](https://github.com/hashicorp/vault/blob/master/shamir/shamir.go)，该密钥分享算法的基本思想是分发者通过秘密多项式，将秘密 secret 分解为 `n` 个秘密持有者，其中任意至少于 `k` 个秘密均能恢复密文，即某一个秘密通常不能由单个持有者保存，必须将秘密分由多人保管并且只有当多人同时在场时秘密才能得以恢复。
+Vault 中给出了 Shamir 算法的 [实现](https://github.com/hashicorp/vault/blob/master/shamir/shamir.go)，该密钥分享算法的基本思想是分发者通过秘密多项式，将秘密 Secret 分解为 `n` 个秘密持有者，其中任意至少于 `k` 个秘密均能恢复密文，即某一个秘密通常不能由单个持有者保存，必须将秘密分由多人保管并且只有当多人同时在场时秘密才能得以恢复。
 
 ![vault-key-share](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/vault/vault-shamir-key-algorithm.png)
 
@@ -258,12 +273,50 @@ Code: 403. Errors:
         * permission denied
 ```
 
+7、查看和关闭 Secret engine<br>
+```bash
+[root@VM_120_245_centos ~/vault]# vault secrets list
+Path          Type         Accessor              Description
+----          ----         --------              -----------
+cubbyhole/    cubbyhole    cubbyhole_e86bac2b    per-token private secret storage
+identity/     identity     identity_19b16864     identity store
+kv/           kv           kv_988a3c7e           n/a
+secret/       kv           kv_a1c65202           n/a
+sys/          system       system_8d02021f       system endpoints used for control, policy and debugging
 
+[root@VM_120_245_centos ~/vault]# vault secrets disable secret/ #关闭 secret/
+Success! Disabled the secrets engine (if it existed) at: secret/
+
+
+[root@VM_120_245_centos ~/vault]# vault secrets list
+Path          Type         Accessor              Description
+----          ----         --------              -----------
+cubbyhole/    cubbyhole    cubbyhole_e86bac2b    per-token private secret storage
+identity/     identity     identity_19b16864     identity store
+kv/           kv           kv_988a3c7e           n/a
+sys/          system       system_8d02021f       system endpoints used for control, policy and debugging
+```
+
+##  部署及 HA 架构
+官方推荐的部署架构见下文：
+-   [Vault Reference Architecture](https://learn.hashicorp.com/tutorials/vault/reference-architecture)
+-   [Vault with Integrated Storage Reference Architecture](https://learn.hashicorp.com/tutorials/vault/raft-reference-architecture?in=vault/day-one-raft)
+
+官方推荐还是以 Consul 集群方式部署：
+![vault-consul-ha](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/vault/vault-consul-ha.jpeg)
+
+##  性能优化
+[官方文档](https://learn.hashicorp.com/tutorials/vault/performance-tuning)
 
 ##  参考
+-   [Vault 组件](https://www.vaultproject.io/docs/glossary)
 -   [vault - Documentation](https://www.vaultproject.io/docs)
 -   [Secret sharing](https://en.wikipedia.org/wiki/Secret_sharing)
 -   [密钥分享 Secret Sharing 介绍](https://zhuanlan.zhihu.com/p/44999983)
 -   [小马哥 Devops](https://my.oschina.net/u/3952901?tab=newest&catalogId=7038751)
 -   [vault-architecture](https://www.vaultproject.io/docs/internals/architecture)
 -   [Auto-unseal using Transit Secrets Engine](https://learn.hashicorp.com/tutorials/vault/autounseal-transit)
+-   [architecture](https://www.vaultproject.io/docs/internals/architecture)
+-   [Vault High Availability with Consul](https://learn.hashicorp.com/tutorials/vault/ha-with-consul)
+-   [hashicorp-engineering 文章连载](https://medium.com/hashicorp-engineering)
+-   [Secret Management Architectures: Finding the balance between security and complexity](https://medium.com/slalom-build/secret-management-architectures-finding-the-balance-between-security-and-complexity-d857ceaa2300)
