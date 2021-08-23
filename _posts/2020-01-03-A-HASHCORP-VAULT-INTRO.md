@@ -64,6 +64,9 @@ vault 的架构如下：
 - `Core`：负责处理审核代理（Audit brok）的请求及响应日志，将请求发送到所有已配置的审核设备（Audit devices）
 - `Policy store`：负责管理和存储 ACL Policies，由 `Core` 进行 ACL Policy 的检查
 
+####  Vault 的数据流
+![vault-all-dataflow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/vault/vault-all-dataflow.jpg)
+
 ## 0x02 Vault 的主要运行流程
 
 ### Step1：数据存储及加密解密
@@ -122,6 +125,8 @@ vault/             kv           kv_e26a68a4           n/a
 
 此外，同一个 `Secret Engine` 可以被加载到不同的路径下（一个 `Secret Engine` 类的多个实例），每个路径下的数据都是彼此独立的。
 
+![vault-secret-engine-path](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/vault/vault-secret-engine-path.png)
+
 ## 0x03 Vault Details
 
 本小节介绍 Vault 实现上的一些细节。
@@ -134,7 +139,7 @@ Vault 中给出了 Shamir 算法的 [实现](https://github.com/hashicorp/vault/
 
 #### Vault 认证方法
 
-Vault 支持 [如下](https://www.vaultproject.io/docs/auth) 的身份认证机制
+Vault 支持 [如下](https://www.vaultproject.io/docs/auth) 的身份认证机制：<br>
 1、Token 方式 <br>
 Token 是 Vault 内置的验证方法，启动时即被加载，且不能禁用。例如，服务器初始化时会输出 `Root Token`，使用 `Root Token` 登录的用户具有系统最高的访问权限。在 Vault 中，Token 是可继承的树型结构，此 <继承> 包括两方面的含义：
 
@@ -456,7 +461,7 @@ sys/          system       system_8d02021f       system endpoints used for contr
 - [Vault with Integrated Storage Reference Architecture](https://learn.hashicorp.com/tutorials/vault/raft-reference-architecture?in=vault/day-one-raft)
 
 实战中我们以 Consul 集群方式部署：
-![vault-consul-ha](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/vault/vault-consul-ha.jpeg)
+![vault-consul-ha](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/vault/vault-consul-ha.jpeg)
 
 ## 0x06 Vault 性能优化
 
