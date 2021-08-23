@@ -14,7 +14,7 @@ tags:
 
 
 ##  0x00    前言
-我们在工作中是如何管理大量的 Secret 信息的（比如笔者的项目中会涉及到对 OpenSSH 的秘钥及口令存储、以及对此的定时轮转及外部调用）？
+我们在工作中是如何管理大量的 Secret 信息的？（比如笔者的项目中会涉及到对 OpenSSH 的秘钥及口令存储、以及对此的定时轮转及外部调用）
 -   以配置文件的形式固化，存放于服务器文件或者 Database 中
 -   以代码的方式存在于 `git` 私有仓库上，并严格控制此库的访问权限
 -   以 KMS（Key Management Service，云服务居多）方式托管在公有云服务上
@@ -43,35 +43,34 @@ vault 的基础应用场景如下：
 ![vault-basic](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/vault/vault-basic.png)
 
 Vault 的使用场景一般为：
-1.  系统用户（如运维同事）通过 `HTTP-Vault-API`、Vault 命令行工具等将 secret data 写入 Vault
+1.  系统用户（如运维同事）通过 `HTTP-Vault-API`、Vault 命令行工具等将 Secret data 写入 Vault
 2.  Vault 再将加密的数据存储到后端
-3.  外部用户（如开发人员，各类脚本或者应用程序）通过 `HTTP-Vault-API`、Vault 命令行工具等方式来获取到仅仅与自己账号相关联的 secret data，这里就涉及到 Valut 的权限细粒度管理
+3.  外部用户（如开发人员，各类脚本或者应用程序）通过 `HTTP-Vault-API`、Vault 命令行工具等方式来获取到仅仅与自己账号相关联的 Secret data，这里就涉及到 Valut 的权限细粒度管理
 
 
 vault 的架构如下：
 ![vault-architecture](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/vault/vault-%E6%9E%B6%E6%9E%84%E5%9B%BE.png)
 
-从架构图可以看出，Vault 分为 Storage Backend、安全屏障（Barrier） 和 HTTP API `3` 个部分，Storage Backend 和 Vault 之间的所有数据流动都需要经过 barrier，barrier 确保只有加密数据会被写入 Storage Backend，加密数据在经过 barrier 被读出的过程中被验证与解密。
+从架构图可以看出，Vault 分为 Storage Backend、安全屏障（Barrier） 和 HTTP API 三个部分，Storage Backend 和 Vault 之间的所有数据流动都需要经过 Barrier，Barrier 确保只有加密数据会被写入 Storage Backend，加密数据在经过 Barrier 被读出的过程中被验证与解密。
 
 其他主要组件的功能如下：
 -   `HTTP(s) API`:
 -   `Storage backend`：
 -   `Token Store`：
 -   `Auth Method`：
--   `Core`：负责处理审核代理（Audit brok）的请求及响应日志，将请求发送到所有已配置的审核设备（audit devices）
+-   `Core`：负责处理审核代理（Audit brok）的请求及响应日志，将请求发送到所有已配置的审核设备（Audit devices）
 -   `Policy store`：负责管理和存储 ACL Policies，由 `Core` 进行 ACL Policy 的检查
 
-![vault-storage](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/vault/vault_storage.png)
 
 ##  0x02 Vault 的主要运行流程
 
 ###    Step1：数据存储及加密解密
 了解几个名词：<br>
-1、Storage Backend（后端存储）: Vault 自身不存储数据，需要为其配置 Storage Backend。注意！！Storage Backend 是不受信任的，只用于存储加密数据 <br>
+1、Storage Backend（后端存储）: Vault 自身不存储数据，需要为其配置 Storage Backend。<font color="#dd0000"> 注意！！Storage Backend 是不受信任的，只用于存储加密数据 </font> <br>
 
-2、Initialaztion: Vault 在首次启动时需要初始化，这一步生成一个加密密钥（Encryption key）用于加密数据，加密完成的数据才能被保存到 Storage Backend<br>
+2、Initialaztion: Vault 在首次启动时需要初始化，这一步生成一个加密密钥（Encryption key）用于加密数据，加密完成的数据才能被保存到 Storage Backend <br>
 
-3、Unseal（解封）: Vault 启动后，因为不知道加密密钥（Encryption Key），它会进入封印（Sealed）状态，在被解封 ()」前无法进行任何操作。加密密钥被 Master key 保护，必须提供 Master key 才能完成 Unseal 操作 < br>
+3、Unseal（解封）: Vault 启动后，因为不知道加密密钥（Encryption Key），它会进入封印（Sealed）状态，在被解封前无法进行任何操作。Encryption Key 被 Master key 保护，必须提供 Master key 才能完成 Unseal 操作 <br>
 
 Master key 和 Encryption Key 的关系如下图所示：
 ![vault-shamir-storage.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/vault/vault-shamir-storage.png)
@@ -82,9 +81,9 @@ Master key 和 Encryption Key 的关系如下图所示：
 -   适合应用：Public/Private keys、Tokens 或者 Jwt Token 等
 
 此一般流程如下：<br>
-客户端发起身份验证请求，该请求流经 `Core` 模块并进入 `Auth methods`，`Auth methods` 确定请求是否有效并返回关联策略（Policies）的列表。在通过 `Auth methods` 完成了身份认证，并且检查的关联策略也符合授权之后，`Token Store` 将会生成并管理一个新的 Token， 这个 Token 会被返回给客户端，用于进行后续请求。需要注意的是，此 token 也都存在一个 Lease 租期（有效期），同时 Token 关联了相关的策略 Policies，这些策略将被用于验证请求的权限。<br>
+1.  客户端发起身份验证请求，该请求流经 `Core` 模块并进入 `Auth methods`，`Auth methods` 确定请求是否有效并返回关联策略（Policies）的列表。在通过 `Auth methods` 完成了身份认证，并且检查的关联策略也符合授权之后，`Token Store` 将会生成并管理一个新的 Token， 这个 Token 会被返回给客户端，用于进行后续请求。需要注意的是，此 token 也都存在一个 Lease 租期（有效期），同时 Token 关联了相关的策略 Policies，这些策略将被用于验证请求的权限。<br>
 
-请求经过验证后，将被路由到 `Secret engine` 模块。如果 `Secret engine` 返回了一个 Secret（由 Vault 自动生成的 Secret）， `Core` 会将其注册到 `Expiration manager`，并给它附加一个 `lease ID`。`lease ID` 被客户端用于更新（Renew）或吊销（Revoke）它得到的 Secret。如果客户端允许租约（Lease）到期，`Expiration manager` 将自动吊销这个 Secret
+2.  请求经过验证后，将被路由到 `Secret engine` 模块。如果 `Secret engine` 返回了一个 Secret（由 Vault 自动生成的 Secret）， `Core` 会将其注册到 `Expiration manager`，并给它附加一个 `lease ID`。`lease ID` 被客户端用于更新（Renew）或吊销（Revoke）它得到的 Secret。如果客户端允许租约（Lease）到期，`Expiration manager` 将自动吊销这个 Secret
 
 [Token](https://learn.hashicorp.com/tutorials/vault/tokens)
 
@@ -95,6 +94,9 @@ Master key 和 Encryption Key 的关系如下图所示：
 -   `Transit Secrets Engine`：提供加密即服务的功能，只负责加密和解密，不负责存储。主要应用场景是帮 app 加解密数据，但是数据仍旧存储在 MySQL 等数据库中
 -   证书管理：最常见的场景是将根证书（root）存入 Vault，业务证书通过此 Engine 签发
 
+##  0x03    Vault Details
+本小节介绍 Vault 实现上的一些细节。
+
 ####    Shamir 密钥分享算法（shamir secret sharing）
 Vault 中给出了 Shamir 算法的 [实现](https://github.com/hashicorp/vault/blob/master/shamir/shamir.go)，该密钥分享算法的基本思想是分发者通过秘密多项式，将秘密 Secret 分解为 `n` 个秘密持有者，其中任意至少于 `k` 个秘密均能恢复密文，即某一个秘密通常不能由单个持有者保存，必须将秘密分由多人保管并且只有当多人同时在场时秘密才能得以恢复。
 
@@ -103,10 +105,12 @@ Vault 中给出了 Shamir 算法的 [实现](https://github.com/hashicorp/vault/
 ####    存储
 Vault 支持多种存储后端：具体 [在此](https://github.com/hashicorp/vault/tree/master/plugins/database)，生产架构的后端存储使用 `HA` 方式进行部署，比如 consul/etcd/mysql 集群等。
 
+![vault-storage](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/vault/vault_storage.png)
+
 -   [mysql](https://github.com/hashicorp/vault/blob/master/plugins/database/mysql/mysql.go)
 
-##  基本功能使用
-1、配置 Mysql 作为存储后端，启动 vault<br>
+##  0x04    Vault 基本功能使用
+1、配置 Mysql 作为存储后端，启动 Vault<br>
 ```bash
 [root@VM_120_245_centos ~/vault]# cat vault.hcl
 disable_mlock  = true
@@ -297,7 +301,7 @@ kv/           kv           kv_988a3c7e           n/a
 sys/          system       system_8d02021f       system endpoints used for control, policy and debugging
 ```
 
-##  部署及 HA 架构
+##  0x05    Vault 部署及 HA 架构
 官方推荐的部署架构见下文：
 -   [Vault Reference Architecture](https://learn.hashicorp.com/tutorials/vault/reference-architecture)
 -   [Vault with Integrated Storage Reference Architecture](https://learn.hashicorp.com/tutorials/vault/raft-reference-architecture?in=vault/day-one-raft)
@@ -305,10 +309,23 @@ sys/          system       system_8d02021f       system endpoints used for contr
 官方推荐还是以 Consul 集群方式部署：
 ![vault-consul-ha](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/vault/vault-consul-ha.jpeg)
 
-##  性能优化
+##  0x06    Vault 性能优化
 [官方文档](https://learn.hashicorp.com/tutorials/vault/performance-tuning)
 
-##  参考
+##  0x07    Vault 其他注意事项
+1.  当前 Vault 服务重启后，需要再次解封，否则无法使用（也可以设置 [自动解封](https://learn.hashicorp.com/collections/vault/auto-unseal)）
+```bash
+[root@VM_120_245_centos /tmp/]# vault read kv/hello
+Error reading kv/hello: Error making API request.
+
+URL: GET http://127.0.0.1:8200/v1/kv/hello
+Code: 503. Errors:
+
+* Vault is sealed
+```
+
+
+##  0x08    参考
 -   [Vault 组件](https://www.vaultproject.io/docs/glossary)
 -   [vault - Documentation](https://www.vaultproject.io/docs)
 -   [Secret sharing](https://en.wikipedia.org/wiki/Secret_sharing)
