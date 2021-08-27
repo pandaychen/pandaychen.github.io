@@ -14,20 +14,30 @@ tags:
 
 ##  0x00    前言
 密钥管理系统（Key Management Service，KMS）是一款安全管理类服务，可以让您轻松创建和管理密钥，保护密钥的保密性、完整性和可用性，满足用户多应用多业务的密钥管理需求，符合监管和合规要求。
-
 ##  0x01    KMS 的对称加解密
 
+####  敏感数据加密
+此场景保护小型敏感数据（小于 4KB），如密钥、证书、配置文件等，直接使用 CMK 加密敏感数据信息，CMK 通过经过第三方认证的硬件密码模块（HSM）加密保护，从而保障敏感数据的安全性。对用户而言，只需要关注 `Encrypt`/`Decrypt` 接口即可
+
+![IMG](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kms/small_data_kms.png)
+
 ####    信封加密
-信封加密（Envelope Encryption）是类似数字信封技术的一种加密手段。这种技术将加密数据的数据密钥封入信封中存储 / 传递和使用，不再使用主密钥直接加解密数据。
+信封加密（Envelope Encryption）是类似数字信封技术的一种加密手段。这种技术将加密数据的数据密钥封入信封中存储 / 传递和使用，不再使用主密钥直接加解密数据。是一种应对海量数据的高性能加解密方案。对于较大的文件或者对性能敏感的数据加密，可以调用类似 API 接口，如 [GenerateDataKey 接口](https://cloud.tencent.com/document/product/573/34419) 生成数据加密密钥 `DEK`，只需要传输数据加密密钥 `DEK` 到 KMS 服务端（必须通过 `CMK` 进行加解密），所有的业务数据都是采用高效的本地对称加密处理，对业务的访问体验影响很小。对用户而言，需要关注通过 `GenerateDataKey` 创建 `DEK`，通过 `Decrypt` 解密 `DEK`。
+
+在对数据加密性能要求较高，数据加密量大的场景下，可通过本地内存中生成 `DEK` 来对本地数据进行加解密，保证了业务加密性能的要求，同时也由 KMS 确保了数据密钥的随机性和安全性。
+
+上面两种方式基本一样，差别在于 `DEK` 的生成方式，是调用云 API 生成，还是在本地内存中生成。
+
+![IMG](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kms/normal_data_kms.png)
 
 信封加密的加密流程如下：<br>
 1、首先，通过 KMS 创建一个客户主密钥，也就是 CMK<br>
-2、CMK（Custom Master Key） 生成后，使用 CMK 生成数据密钥，用户能够得到一个明文数据密钥和一个密文的数据密钥 <br>
+2、`CMK`（Custom Master Key） 生成后，使用 CMK 生成数据密钥，用户能够得到一个明文数据密钥和一个密文的数据密钥 <br>
 3、然后使用明文数据密钥加密明文数据，生成密文 <br>
 4、将密文和密文数据密钥一同存储到持久化存储设备或服务中 <br>
 5、完成加密后，将明文数据，以及明文数据密钥删除 <br>
 
-当完成上述加密操作后，只保留密文密钥和密文文件，这样即使密文密钥和密文文件被窃取，也无法解密获得用户的明文文件
+当完成上述加密操作后，只保留密文密钥和密文文件，这样即使密文密钥和密文文件被窃取，也无法解密获得用户的明文文件。`CMK` 是授权用户在云密钥管理服务中创建的主密钥（不能够取出，只能使用其加 / 解密获取结果），`CMK` 主要用于加密保护数据密钥，产生信封，也可直接用于加密少量的数据
 
 ![kms-Envelope-en.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kms/kms_Envelope_en.png)
 
@@ -58,7 +68,24 @@ tags:
 -   使用 AES 明文密钥解密密文数据
 
 
-##  0x02    参考
+##  0x02  KMS 密钥分级体系
+KMS 密钥管理采用分级管理体系， 如下图所示：
+
+![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kms/kms_mkey_duo_level.png)
+
+1、HSM Key<br>
+即上图中的根密钥，由加密机初始化生成的 `HSMKey`，无法导出，只能在加密机内部使用，用于加密保护 `DomainKey`
+
+2、DomainKey<br>
+`DomainKey` 即区域密钥，由加密机创建并存储于加密机内，无法导出，只能在加密机使用，用于加密保护 CMK。每个 region 会有多个不同 `DomainKey` 进行轮换加密
+
+3、CMK（Customer Muster Key）<br>
+即用户主密钥，`CMK` 对用户来说属于用户的根密钥。 `CMK` 无法导出明文，只能在加密机内部实现加解密。CMK 用于进行数据加解密和 `DEK` 的派生
+
+4、DEK（Data Encrypt Key）<br>
+即数据密钥，数据密钥由 `CMK` 加密保护，KMS 不做存储，由应用方 / 用户使用管理
+
+##  0x03    参考
 -   [AWS Key Management Service](https://docs.aws.amazon.com/zh_cn/kms/latest/developerguide/concepts.html)
 -   [腾讯云 KMS](https://cloud.tencent.com/document/product/573/8790)
 -   [阿里云 KMS](https://help.aliyun.com/document_detail/42339.html)

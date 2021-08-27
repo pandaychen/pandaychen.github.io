@@ -19,6 +19,7 @@ tags:
 - 以配置文件的形式固化，存放于服务器文件或者 Database 中
 - 以代码的方式存在于 `git` 私有仓库上，并严格控制此库的访问权限
 - 以 KMS（Key Management Service，云服务居多）方式托管在公有云服务上
+- 来自云上的挑战：[Unlocking the Cloud Operating Model](https://www.hashicorp.com/cloud-operating-model)
 
 <br>
 我们需要实现的通用密码仓库需要满足如下特性：
@@ -453,6 +454,24 @@ kv/           kv           kv_988a3c7e           n/a
 sys/          system       system_8d02021f       system endpoints used for control, policy and debugging
 ```
 
+8、开启V2的Secret Engine
+```bash
+[root@VM_120_245_centos ~]# vault secrets enable -path=secretv2 -version=2 kv
+Success! Enabled the kv secrets engine at: secretv2/
+[root@VM_120_245_centos ~]# vault secrets list
+Path               Type         Accessor              Description
+----               ----         --------              -----------
+bifrost_vault/     kv           kv_962069cd           n/a
+cubbyhole/         cubbyhole    cubbyhole_e86bac2b    per-token private secret storage
+identity/          identity     identity_19b16864     identity store
+kv/                kv           kv_988a3c7e           n/a
+secret/            kv           kv_4a27cb62           n/a
+secret_bifrost/    kv           kv_0b5b6ac3           n/a
+secretv2/          kv           kv_6e9e3b5b           n/a
+sys/               system       system_8d02021f       system endpoints used for control, policy and debugging
+vault/             kv           kv_e26a68a4           n/a
+```
+
 ## 0x05 Vault 部署及 HA 架构
 
 官方推荐的部署架构见下文：
@@ -487,6 +506,7 @@ Code: 503. Errors:
 
 ## 0x09 参考
 
+- [Unlocking the Cloud Operating Model](https://www.hashicorp.com/cloud-operating-model)
 - [Vault 组件](https://www.vaultproject.io/docs/glossary)
 - [vault - Documentation](https://www.vaultproject.io/docs)
 - [Secret sharing](https://en.wikipedia.org/wiki/Secret_sharing)
