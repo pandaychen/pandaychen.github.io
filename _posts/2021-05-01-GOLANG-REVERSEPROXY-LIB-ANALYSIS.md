@@ -37,7 +37,7 @@ tags:
 
 #### httputil.ReverseProxy 结构
 
-`ReverseProxy` 包含两个重要的属性 `Director` 和 `ModifyResponse`，这两个属性都是函数类型。当接收到客户端请求时，`ServeHTTP` 函数首先调用 `Director` 函数对接受到的请求体进行修改，例如修改请求的目标地址、请求头等；然后使用修改后的请求体发起新的请求，接收到响应后，调用 `ModifyResponse` 函数对响应进行修改，最后将修改后的响应体拷贝并响应给客户端，这样就实现了反向代理的整个流程。
+`ReverseProxy` 包含两个重要的属性： `Director` 和 `ModifyResponse`，这两个属性都是函数类型。当接收到客户端请求时，`ServeHTTP` 函数首先调用 `Director` 函数对接受到的请求体进行修改，例如修改请求的目标地址、请求头等；然后使用修改后的请求体发起新的请求，接收到响应后，调用 `ModifyResponse` 函数对响应进行修改，最后将修改后的响应体拷贝并响应给客户端，这样就实现了反向代理的整个流程。
 
 ```golang
 // 处理进来的请求，并发送转发至后端 server 实现反向代理，并将响应请求回传给客户端
@@ -98,7 +98,7 @@ type ReverseProxy struct {
 
 #### NewSingleHostReverseProxy 方法
 
-`NewSingleHostReverseProxy` 方法返回一个新的 `ReverseProxy`，将 `URLs` 请求路由到传入参数 `target` 的指定的 `Scheme`, `Host` 以及 `Base path`，也是默认的 `director` 配置，在 NewSingleHostReverseProxy 中源码已经对传入的 `URLs` 进行解析并且完成了 `Director` 的修改
+`NewSingleHostReverseProxy` 方法返回一个新的 `ReverseProxy`，将 `URLs` 请求路由到传入参数 `target` 的指定的 `Scheme`, `Host` 以及 `Base path`，也是默认的 `director` 配置，在 `NewSingleHostReverseProxy` 中源码已经对传入的 `URLs` 进行解析并且完成了 `Director` 的修改
 
 ```golang
 // NewSingleHostReverseProxy returns a new ReverseProxy that routes
@@ -141,6 +141,13 @@ func singleJoiningSlash(a, b string) string {
 	return a + b  // 否则直接拼接到一块
 }
 ```
+
+`NewSingleHostReverseProxy` 的意义是告知开发者在实现反向代理功能时，至少需要修改如下 `req` 字段：
+-	`req.URL.Scheme`
+-	`req.URL.Host`
+-	`req.URL.Path`
+-	`req.URL.RawQuery`
+
 
 ## 0x02 ServeHTTP 方法
 
