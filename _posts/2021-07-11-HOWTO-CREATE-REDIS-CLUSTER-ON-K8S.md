@@ -13,7 +13,7 @@ tags:
 
 ## 0x00 前言
 
-本篇文章总结下，项目背景是需要在 Kubernetes 集群中部署 Redis 单机 / 集群，也是需要利用 `Statefulsets` 来生成。
+本篇文章总结下，项目背景是需要在 Kubernetes 集群中部署 Redis 单机 / 集群，需要利用 `Statefulsets` 与 `NFS` 来生成。
 
 ## 0x01 单机 Redis 搭建
 
@@ -151,5 +151,15 @@ spec:
 ```
 
 ## 0x02 Redis 集群搭建
+
+####  第一步：创建 NFS 存储
+####  创建 PV
+####  创建 PVC
+
+使用 NFS 配置 StatefulSet 的动态持久化存储
+
+####  创建 Configmap
+####  创建 Headless Service
+####  创建 Redis StatefulSet
 
 ## 0x03 参考
