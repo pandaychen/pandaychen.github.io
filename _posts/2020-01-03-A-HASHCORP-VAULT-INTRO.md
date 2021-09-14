@@ -158,8 +158,7 @@ path "secret/data/mysql/webapp" {
   capabilities = ["read"]
 }
 #2、加载 policy
-[root@VM_120_245_centos /vault]# vault policy write readonly  readonly
-
+[root@VM_120_245_centos /vault]# vault policy write readonly readonly<br>
 Success! Uploaded policy: readonly
 #3、创建带 TTL 的 token
 [root@VM_120_245_centos /vault]# vault write auth/approle/role/readonly token_policies="readonly" token_ttl=1h token_max_ttl=4h
