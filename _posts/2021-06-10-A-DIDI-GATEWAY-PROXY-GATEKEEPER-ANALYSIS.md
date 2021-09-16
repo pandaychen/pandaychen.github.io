@@ -48,7 +48,26 @@ tags:
 2. 每个 `GateKeeper` 实例，针对每个服务模块，单独进行服务探测
 3. 在线服务管理时，配置数据先保存到 `GateKeeper` 配置 `DB` 中，然后再通过调用配置更新接口（ `/reload` ），更新所有实例机器配置
 
-## 0x02
+## 0x01 使用
+
+浏览器访问如下 URL：
+
+```bash
+http://127.0.0.1:8081/gatekeeper/test_http/cgi1?app_id=test_app&sign=62fda0f2212eaffd90dbf04136768c5f
+```
+
+返回
+
+```javascript
+Hello World1
+```
+
+## 0x02 核心流程分析
+
+gatekeeper 对请求的主要处理如下图所示：
+![flow1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/gateway/gatekeeper/gatekeeper-flow1.png)
+
+#### 初始化 & 启动
 
 ## 0x03 参考
 
