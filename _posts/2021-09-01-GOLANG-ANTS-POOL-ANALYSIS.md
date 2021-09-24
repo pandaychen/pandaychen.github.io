@@ -18,12 +18,13 @@ tags:
 ## 0x01 ants 协程池使用
 
 ants 提供了两种执行模式：
-1、`ants.NewPool(pool_size)`<br>
-通过这种方式创建的 Pool，需要调用 `pool.Submit(task)` 提交任务，任务是一个无参数无返回值的函数，适合不关注结果的并发任务场景
-2、`ants.NewPoolWithFunc(pool_size, func(interface{}))`<br>
-这种方式创建的 Pool 需要指定任务处理函数，需调用 `p.Invoke(arg)` 提交任务，`arg` 是传递给 `func(interface{})` 的参数，此 Pool 适合关注结果的并发任务执行场景
 
-## 0x02 ants 分析
+1、`ants.NewPool(pool_size)`<br>
+通过这种方式创建的 Pool，需要调用 `pool.Submit(task)` 提交任务，任务是一个无参数无返回值的函数，适合不关注结果的并发任务场景 < br>
+2、`ants.NewPoolWithFunc(pool_size, func(interface{}))`<br>
+这种方式创建的 Pool 需要指定任务处理函数，需调用 `p.Invoke(arg)` 提交任务，`arg` 是传递给 `func(interface{})` 的参数，此 Pool 适合关注结果的并发任务执行场景 < br>
+
+## 0x02 整体分析
 
 ants 的运行流程图如下，比较直观，我们按照如下几个核心模块进行分析：
 
@@ -31,7 +32,7 @@ ants 的运行流程图如下，比较直观，我们按照如下几个核心模
 - Worker：ants 中为每个任务都是由 worker 对象来处理的，每个 worker 对象会对应创建一个 goroutine 来处理任务，一个 worker 对应于一个 goroutine
 - Task：用户指定的运行方法，即单个任务
 
-![img]()
+![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/groutine-pool/ants1.png)
 
 ## 0x03 Pool 分析
 
@@ -112,6 +113,7 @@ func NewPool(size int, options ...Option) (*Pool, error) {
 		size = -1
 	}
 
+	// 设置回收协程定时器触发时间
 	if expiry := opts.ExpiryDuration; expiry < 0 {
 		return nil, ErrInvalidPoolExpiry
 	} else if expiry == 0 {
@@ -155,12 +157,19 @@ func NewPool(size int, options ...Option) (*Pool, error) {
 
 此外，在创建 Pool 时，根据 `options.PreAlloc` 设置，分两种方式（上面代码）：
 
-- 预先分配
-- 运行时创建
+- 预先分配，size 需要指定，使用 Queue 结构进行创建
+- 运行时创建，初始化 size 为 `0`，使用 Stack 结构进行创建
 
-调用创建 Pool 的方法时，创建 Pool 的类型又会分为 Stack 及 Queue 两种结构，见下文的分析。
+原因见下文分析。
 
-#### 销毁 Pool
+#### 定期回收超时的 goWorker
+
+在 `NewPool` 方法中会启动一个 goroutine 定期清理过期的 `goWorker`。具体流程如下：
+
+- 在每个清理周期，调用 `p.workers.retrieveExpiry` 方法，取出过期的 `goWorker`（goroutine）
+  - 向每个 `goWorker` 的 `task` channel 发送一个 `nil`，通知 goWorker 退出（因为 `goWorker` 启动的 goroutine 阻塞在 channel `task` 上，其接收值为 `nil` 的任务后会 `return` 退出）
+  - `goWorker` goroutine 正常退出
+- 若所有 `goWorker` 都被清理，可能这时还有 goroutine 阻塞在 `pool.retrieveWorker` 方法中的 `p.cond.Wait()` 上，所以这里需要调用 `p.cond.Broadcast()` 唤醒这些 goroutine，执行后续的逻辑（创建新的 goWorker 等等）
 
 ```golang
 func (p *Pool) purgePeriodically() {
@@ -169,6 +178,7 @@ func (p *Pool) purgePeriodically() {
 
   for range heartbeat.C {
     if p.IsClosed() {
+		// 如果 Pool 被主动关闭，直接退出 goroutine
       break
     }
 
@@ -182,6 +192,7 @@ func (p *Pool) purgePeriodically() {
     }
 
     if p.Running() == 0 {
+		// 唤醒阻塞在 p.cond.Wait() 上的 goroutine
       p.cond.Broadcast()
     }
   }
@@ -192,7 +203,7 @@ func (p *Pool) purgePeriodically() {
 
 #### 向 Pool 中提交 Task
 
-Pool 提供了 `Submit` 方法，提供外部发起任务调度的接口：
+Pool 提供了 `Submit` 方法，提供外部发起任务调度的接口，此方法调用 `pool.retrieveWorker` 方法获取一个空闲的 `goWorker`（如果能成功获取），然后将任务 `task` 发送到 `goWorker` 的 channel `w.task`：
 
 ```golang
 func (p *Pool) Submit(task func()) error {
@@ -277,6 +288,98 @@ func (p *Pool) retrieveWorker() (w *goWorker) {
 }
 ```
 
+#### 动态修改 Pool 容量
+
+ants 提供了 `Tune` 方法用以动态调整非 `PreAlloc` 模式下的容量，通过 `atomic` 原子写入 `pool.capacity` 即可。
+
+- 下次执行 `pool.revertWorker` 方法时就会以新的容量 `pool.capacity` 判断是否能放回
+- 下次执行 `pool.retrieveWorker` 方法时会以新容量判断是否能创建新 goWorker
+
+```golang
+func (p *Pool) Tune(size int) {
+  if capacity := p.Cap(); capacity == -1 || size <= 0 || size == capacity || p.options.PreAlloc {
+    return
+  }
+  atomic.StoreInt32(&p.capacity, int32(size))
+}
+```
+
+为何 `PreAlloc` 模式下无法动态调整？
+
+#### 销毁 / Restart Pool
+
+`pool.Release` 用来关闭协程池，注意方法中的 `p.cond.Broadcast()`，此为了唤醒有任务阻塞在 `p.cond.Wait()` 上。
+
+```golang
+func (p *Pool) Release() {
+	// 设置 pool 的关闭状态
+	atomic.StoreInt32(&p.state, CLOSED)
+	p.lock.Lock()
+
+	// 关闭 workerArray 中的每个 goroutine
+	p.workers.reset()
+	p.lock.Unlock()
+	// 注意！为了防止有 goroutine 阻塞在 p.cond.Wait() 上，执行一次 p.cond.Broadcast() 唤醒这些阻塞的任务！
+	p.cond.Broadcast()
+}
+
+// workerStack.reset
+func (wq *workerStack) reset() {
+	for i := 0; i <wq.len(); i++ {
+		// 对每个 worker，发送 nil 到 task 通道从而结束 goroutine
+		wq.items[i].task <- nil
+		wq.items[i] = nil
+  	}
+	//free wq.items，好习惯
+  	wq.items = wq.items[:0]
+}
+```
+
+注意到在关闭过程中，只是清理了 `p.workers` 以及更新了相关字段，并未对 `pool` 的管理结构做回收，所以可以很方便的实现 restart：
+
+```golang
+func (p *Pool) Reboot() {
+	// 打开 pool 的状态
+	if atomic.CompareAndSwapInt32(&p.state, CLOSED, OPENED) {
+		// 由于 p.purgePeriodically() 在 p.Release() 之后检测到池关闭就直接退出了，需要重新开启 purgePeriodically 方法
+		go p.purgePeriodically()
+	}
+}
+```
+
+#### 将 goWorker 放回 Pool
+
+`revertWorker` 方法用于将任务处理完成的 goWorker 放回 Pool，该方法返回 `true` 表示 goWorker 成功放回 Pool，返回 `false` 表示放回失败，此 goroutine 会退出。注意这里设置了 goWorker 的 `recycleTime` 字段，用于在 `p.workers.retrieveExpiry` 方法中判断 goroutine 是否过期。
+
+```golang
+func (p *Pool) revertWorker(worker *goWorker) bool {
+  if capacity := p.Cap(); (capacity> 0 && p.Running() > capacity) || p.IsClosed() {
+	  // 不满足放回条件，返回 false
+    return false
+  }
+  worker.recycleTime = time.Now()	// 重置空闲计时器，用于判定过期
+  p.lock.Lock()
+
+  if p.IsClosed() {
+	  // 如果 Pool 被关闭，那么退出
+    p.lock.Unlock()
+    return false
+  }
+
+	// 调用 workerArray 的 insert 方法，放回 pool
+  err := p.workers.insert(worker)
+  if err != nil {
+    p.lock.Unlock()
+    return false
+  }
+
+	// 放回成功，通过 p.cond.Signal() 唤醒一个可能阻塞的 goroutine
+  p.cond.Signal()
+  p.lock.Unlock()
+  return true
+}
+```
+
 ## 0x04 Worker 实现
 
 ants 中为每个任务都是由 worker 对象来处理的，每个 worker 对象会对应创建一个 goroutine 来处理任务，Worker 对应的结构是 [goWorker](https://github.com/panjf2000/ants/blob/master/worker.go#L33)，其中 `recycleTime` 标识了空闲开始时间，该字段只在非 `PreAlloc` 模式（运行时创建模式）下才起效
@@ -305,14 +408,18 @@ PS：这里其实可以修改为 goroutine 一直不停的监听在 `w.task` 上
 // run starts a goroutine to repeat the process
 // that performs the function calls.
 func (w *goWorker) run() {
+	// 任务 + 1
 	w.pool.incRunning()
 	go func() {
 		// 异常处理！
 		defer func() {
+			// 任务执行失败，goroutine 结束，运行数量减 1
 			w.pool.decRunning()
+			//goWorker 对象可以重复利用，利用 sync.Pool 回收，将 goWorker 对象放回 sync.Pool 池中
 			w.pool.workerCache.Put(w)
 			if p := recover(); p != nil {
 				if ph := w.pool.options.PanicHandler; ph != nil {
+					// 自定义 panic_handler
 					ph(p)
 				} else {
 					w.pool.options.Logger.Printf("worker exits from a panic: %v\n", p)
@@ -322,22 +429,44 @@ func (w *goWorker) run() {
 				}
 			}
 			// Call Signal() here in case there are goroutines waiting for available workers.
+			// 这里有意思，调用 w.pool.cond.Signal() 通知现在有空闲的 goWorker 了
+			// 因为我们实际运行的 goWorker 数量由于 panic 少了一个，而池中可能有其他任务在等待处理
 			w.pool.cond.Signal()
 		}()
 
+		//CORE!
 		for f := range w.task {
 			//for loop here......
 			if f == nil {
+				// 外部主动通知本协程关闭
 				return
 			}
 			f()
+
+			// 调用池的 revertWorker() 方法放回 Pool，返回 false，goroutine 退出；返回 true，说明此 goroutine 被正确的放回了 pool，阻塞在 range 上，等待下一次 task 被塞入任务！
 			if ok := w.pool.revertWorker(w); !ok {
+				// 如果放回操作失败，则会调用 return，这会让 goroutine 运行结束，防止 goroutine 泄漏
 				return
 			}
 		}
 	}()
 }
 ```
+
+从上面 Worker 运行的代码可知，每个由 Pool 创建的 goroutine 都会经过如下运行处理的逻辑：
+
+1. 为了保证 goroutine 运行的稳定性，调用 `defer` 进行异常处理（捕获任务执行过程中抛出的 panic），在异常处理中勿忘记更新 pool 的状态
+   - 更新 pool 状态
+   - 回收 `goWorker` 以复用
+   - 在 `defer` 逻辑中，发送 `w.pool.cond.Signal` 通知现在有空闲的 goWorker 了（因为实际运行的 goWorker 数量由于 `panic` 少了一个，而池中可能有其他任务在等待处理）
+2. 工作 goroutine 会一直阻塞在 `for f := range w.task` 上，等到 `w.task` 这个 channel 有事件发生：
+   - 有任务被成功的 recv，然后进行任务处理逻辑
+   - 接收到 `nil`，表示有外界需要主动关闭此 goroutine 的行为，那么 goroutine 就退出
+3. 正常运行的 goroutine 会向 Pool 申请放回，表示 <font color="#dd0000"> 自己已经处理完当前任务，可以等待下一次调度 </font>
+4. 若返回 Pool 失败，则本 goroutine 退出
+5. 放回成功的 goroutine，继续阻塞在 `range` 上，等待下一次任务调度（或者因为超时被回收了）
+
+每个 goWorker 只会启动一次 goroutine，正常情况下，此 goroutine 一直在运行（后续重复利用这个 goroutine），goroutine 每次只执行一个任务就会被放回池中。这也是协程池高性能的关键所在。同时这里要考虑到，放回操作失败时需要确保 goroutine 正常退出（避免 goroutine 泄漏）。
 
 ## 0x05 workerArray 实现
 
@@ -485,6 +614,8 @@ type Options struct {
 ```
 
 ## 0x07 一些细节
+
+#### PreAlloc 对数据结构选型的影响
 
 #### slice 指针的回收
 
