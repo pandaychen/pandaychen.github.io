@@ -20,9 +20,9 @@ tags:
 ants 提供了两种执行模式：
 
 1、`ants.NewPool(pool_size)`<br>
-通过这种方式创建的 Pool，需要调用 `pool.Submit(task)` 提交任务，任务是一个无参数无返回值的函数，适合不关注结果的并发任务场景 < br>
+通过这种方式创建的 Pool，需要调用 `pool.Submit(task)` 提交任务，任务是一个无参数无返回值的函数，适合不关注结果的并发任务场景 <br>
 2、`ants.NewPoolWithFunc(pool_size, func(interface{}))`<br>
-这种方式创建的 Pool 需要指定任务处理函数，需调用 `p.Invoke(arg)` 提交任务，`arg` 是传递给 `func(interface{})` 的参数，此 Pool 适合关注结果的并发任务执行场景 < br>
+这种方式创建的 Pool 需要指定任务处理函数，需调用 `p.Invoke(arg)` 提交任务，`arg` 是传递给 `func(interface{})` 的参数，此 Pool 适合关注结果的并发任务执行场景 <br>
 
 ## 0x02 整体分析
 
@@ -258,27 +258,35 @@ func (p *Pool) retrieveWorker() (w *goWorker) {
                         p.lock.Unlock()
                         return
                 }
-				// 未超过最大阻塞队列长度限制
+				// 未超过最大阻塞队列长度限制，阻塞等待数量 +1，调用 p.cond.Wait() 阻塞等待（此操作会被 p.cond.Signal()/p.cond.Broadcast() 这两个方法唤醒）
                 p.blockingNum++
 				// 调用 p.cond.Wait() 等待
 				// 注意！这里会阻塞，通过 p.cond.Signal() 方法会唤醒这里的逻辑
                 p.cond.Wait()
-				// 阻塞的任务数减 1
+				// 异步：被唤醒后， 阻塞的任务数减 1
                 p.blockingNum--
                 var nw int
                 if nw = p.Running(); nw == 0 {
+					// 判断当前 goWorker 的数量（goroutine 数量）是否等于 0，若为 0，很有可能 Pool 刚刚执行了 Release() ，及 Pool 被主动关闭了
                         p.lock.Unlock()
                         if !p.IsClosed() {
+							//Pool 未被关闭，说明可以创建新的 goWorker，调用 spawnWorker() 创建一个新的 goWorker 并执行其 run() 方法
                                 spawnWorker()
                         }
+						// 如果 Pool 被关闭了，p.IsClosed 为 true，那么直接返回
                         return
                 }
+
+				// 如果当前 goWorker 数量不为 0，则调用 p.workers.detach() 方法尝试取出一个空闲的 goWorker
                 if w = p.workers.detach(); w == nil {
+					// 若取出失败（有可能发生），因为可能同时有多个 goroutine 在等待，唤醒的时候只有部分 goroutine 能获取到 goWorkerr
                         if nw < capacity {
+							// 从 Pool 中取出失败，检查容量是否还有额度，直接创建新的 goWorke
                                 p.lock.Unlock()
                                 spawnWorker()
                                 return
                         }
+						// 如果没有取到 goWorker，那么就返回到 p.cond.Wait() 继续阻塞等待好了
                         goto RETRY
                 }
 
@@ -615,6 +623,103 @@ type Options struct {
 
 ## 0x07 一些细节
 
+#### pool.retrieveWorker 方法的 Lock 问题
+
+[retrieveWorker](https://github.com/panjf2000/ants/blob/master/pool.go#L220) 方法关于 lock 的代码如下：
+
+```golang
+// retrieveWorker returns an available worker to run the tasks.
+func (p *Pool) retrieveWorker() (w *goWorker) {
+	//...
+	p.lock.Lock()
+
+	w = p.workers.detach()
+	if w != nil { // first try to fetch the worker from the queue
+		p.lock.Unlock()
+	} else if capacity := p.Cap(); capacity == -1 || capacity> p.Running() {
+		// if the worker queue is empty and we don't run out of the pool capacity,
+		// then just spawn a new worker goroutine.
+		p.lock.Unlock()
+		spawnWorker()
+	} else { // otherwise, we'll have to keep them blocked and wait for at least one worker to be put back into pool.
+		if p.options.Nonblocking {
+			p.lock.Unlock()
+			return
+		}
+	retry:
+		if p.options.MaxBlockingTasks != 0 && p.blockingNum >= p.options.MaxBlockingTasks {
+			p.lock.Unlock()
+			return
+		}
+		p.blockingNum++
+		p.cond.Wait() // block and wait for an available worker
+		p.blockingNum--
+		var nw int
+		if nw = p.Running(); nw == 0 { // awakened by the scavenger
+			p.lock.Unlock()
+			if !p.IsClosed() {
+				spawnWorker()
+			}
+			return
+		}
+		if w = p.workers.detach(); w == nil {
+			if nw < capacity {
+				p.lock.Unlock()
+				spawnWorker()
+				return
+			}
+			goto retry
+		}
+
+		p.lock.Unlock()
+	}
+	return
+}
+```
+
+注意 `p.lock.Lock()` 这里加的锁，会在 `p.cond.Wait()` 方法中被释放。这样，goroutine 不会阻塞在 `p.lock.Lock()` 上。在 `NewPool` 方法中初始化 `sync.Cond` 对象的代码中，是传了 `p.lock` 进去的：
+
+```golang
+p.cond = sync.NewCond(p.lock)
+```
+
+通过分析 `p.cond.Wait()` 内部实现的机制可知，此方法会将当前 goroutine 挂起，然后解开它持有的锁（此锁必须由初始化传入），即会调用 `p.lock.Unlock()` 解锁。这也是为何上述代码中多个 goroutine 可以通过 `p.lock.Lock()` 加锁逻辑继续执行的的原因。
+
+下一个问题，为何在 `p.cond.Wait()` 之后还需要对 `p.lock` 做解锁操作呢？按道理这里是无锁了，此原因是因为异步由其他 goroutine 调用 `p.cond.Signal()` 或 `p.cond.Broadcast()` 方法唤醒了阻塞在 `p.cond.Wait()` 的 goroutine 时，内部会重新对 `p.lock` 执行加锁操作（即调用 `p.lock.Lock()`）。即说明 `p.cond.Wait()` 之后的逻辑还是在有锁的状态下执行的。
+
+从 `sync.Cond` 的实现方法不难理清上述的逻辑：
+
+```golang
+func (c *Cond) Wait() {
+	c.checker.check()
+	t := runtime_notifyListAdd(&c.notify)
+	// 先解锁
+	c.L.Unlock()
+	// 等待唤醒
+	runtime_notifyListWait(&c.notify, t)
+	// 加锁
+	c.L.Lock()
+}
+
+// Signal wakes one goroutine waiting on c, if there is any.
+//
+// It is allowed but not required for the caller to hold c.L
+// during the call.
+func (c *Cond) Signal() {
+	c.checker.check()
+	runtime_notifyListNotifyOne(&c.notify)
+}
+
+// Broadcast wakes all goroutines waiting on c.
+//
+// It is allowed but not required for the caller to hold c.L
+// during the call.
+func (c *Cond) Broadcast() {
+	c.checker.check()
+	runtime_notifyListNotifyAll(&c.notify)
+}
+```
+
 #### PreAlloc 对数据结构选型的影响
 
 #### slice 指针的回收
@@ -639,3 +744,5 @@ func (wq *workerStack) detach() *goWorker {
 ## 0x08 参考
 
 - [Go 每日一库之 ants](https://darjun.github.io/2021/06/03/godailylib/ants/)
+- [Go 语言高性能编程 - sync.Cond](https://geektutu.com/post/hpg-sync-cond.html)
+- [sync.Cond 的 Signal 方法](https://cs.opensource.google/go/go/+/go1.17.1:src/sync/cond.go;l=64)
