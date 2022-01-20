@@ -24,7 +24,7 @@ tags:
 2.  只执行一次的任务
 
 试想一下，我们的系统应该是下面这样的，满足如下特性：
-[distribute-crontab](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/dcrontab/dcron1.png)
+![distribute-crontab](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/dcrontab/dcron1.png)
 
 - 存储：定时任务必须落地在满足 AP 或 CP 的分布式系统中，典型的系统如 Redis（AP）、Etcd（CP）
 - 工作节点的可用性：系统在定时器触发的那一刻需要至少选出一个工作节点（worknode）来执行任务
@@ -36,7 +36,7 @@ tags:
 ## 0x03 源码分析
 
 [dcron](https://github.com/libi/dcron)正是采用 redis 实现的一个分布式定时任务库。其整体架构如下：
-[dcron 架构图](https://raw.githubusercontent.com/libi/dcron/master/dcron.png)
+![dcron 架构图](https://raw.githubusercontent.com/libi/dcron/master/dcron.png)
 
 dcron 的背景和我们遇到的场景[基本类似](https://libisky.com/post/Dcron-基于redis与一致性哈希算法的分布式定时任务库)，主要解决单机场景下的定时任务问题。
 
