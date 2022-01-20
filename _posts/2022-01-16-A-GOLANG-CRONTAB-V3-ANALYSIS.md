@@ -42,7 +42,7 @@ dcron 的背景和我们遇到的场景[基本类似](https://libisky.com/post/D
 
 #### 核心数据流
 
-![dcron-core-data-flow](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/2022/dcrontab/dcron-core-flow.png)
+![dcron-core-data-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/dcrontab/dcron-core-flow.png)
 
 #### 一致性 hash 的使用
 
