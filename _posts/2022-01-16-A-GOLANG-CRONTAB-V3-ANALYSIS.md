@@ -40,6 +40,10 @@ tags:
 
 dcron 的背景和我们遇到的场景[基本类似](https://libisky.com/post/Dcron-基于redis与一致性哈希算法的分布式定时任务库)，主要解决单机场景下的定时任务问题。
 
+#### 核心数据流
+
+![dcron-core-data-flow](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/2022/dcrontab/dcron-core-flow.png)
+
 #### 一致性 hash 的使用
 
 ## 0x04 可改进的思路
