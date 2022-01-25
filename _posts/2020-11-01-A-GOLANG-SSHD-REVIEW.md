@@ -165,6 +165,29 @@ type ServerConn struct {
 }
 ```
 
+7、Session<br>
+A Session represents a connection to a remote command or shell.
+```golang
+type Session struct {
+	// Stdin specifies the remote process's standard input.
+	// If Stdin is nil, the remote process reads from an empty
+	// bytes.Buffer.
+	Stdin io.Reader
+
+	// Stdout and Stderr specify the remote process's standard
+	// output and error.
+	//
+	// If either is nil, Run connects the corresponding file
+	// descriptor to an instance of ioutil.Discard. There is a
+	// fixed amount of buffering that is shared for the two streams.
+	// If either blocks it may eventually cause the remote
+	// command to block.
+	Stdout io.Writer
+	Stderr io.Writer
+	// contains filtered or unexported fields
+}
+```
+
 ## 0x02 认证、配置相关
 
 1、Signer<br>

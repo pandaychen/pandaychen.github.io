@@ -163,13 +163,13 @@ enable.auto.commit = false
 
 此场景下，业务开发需要在消费到消息业务逻辑处理整个流程完成后进行手动提交。如果在流程未处理结束时发生重启，则之前消费到未提交的消息会重新消费到。在 `sarama-kafka` 库中，有如下的配置选项：
 
-````golang
+```golang
 sarama.offset.initial =  OffsetNewest // 可选 OffsetOldest、OffsetNewest
 offsets.retention.minutes = 1440s
 ```
 
--   OffsetOldest：代表消费者可以访问到的 topic 里的最早的消息，大于 commit 的位置，但是小于 HW。同时也受到 broker 上消息保留时间的影响和位移保留时间的影响（不能保证一定能消费到 topic 起始位置的消息）
--   OffsetNewest：代表访问 commit 位置的下一条消息
+- OffsetOldest：代表消费者可以访问到的 topic 里的最早的消息，大于 commit 的位置，但是小于 HW。同时也受到 broker 上消息保留时间的影响和位移保留时间的影响（不能保证一定能消费到 topic 起始位置的消息）
+- OffsetNewest：代表访问 commit 位置的下一条消息
 
 如果发生 consumer 重启且 `enable.auto.commit` 没有设置为 `false`, 则之前的消息会发生丢失，再也消费不到了。在业务环境不稳定或非持久化 consumer 实例的场景下，应特别注意。
 
@@ -180,7 +180,7 @@ offsets.retention.minutes = 1440s
 ```bash
 enable.auto.commit = true
 auto.commit.interval.ms = 1s    #假设是 1s 提交一次
-````
+```
 
 上述配置的 consumer 收到消息就返回正确给 broker, 但是如果业务逻辑没有走完中断了，实际上这个消息没有消费成功。这种场景适用于可靠性要求不高的业务。其中 auto.commit.interval.ms 代表了自动提交的间隔。比如设置为 1s 提交 1 次，那么在 1s 内的故障重启，会从当前消费 offset 进行重新消费时，1s 内未提交但是已经消费的 msg, 会被重新消费到。
 
@@ -209,9 +209,9 @@ auto.commit.interval.ms = 1s    #假设是 1s 提交一次
 
 在现网中，如何避免消费客户端频繁出现 Rebalance 的方法，总结起来有如下几种：
 
-## 0x07 Producer 最佳实践
+## 0x07 Producer 实践心得
 
-## 0x08 Consumer 最佳实践
+## 0x08 Consumer 实践心得
 
 ## 消费者 VS 消费者组？
 
@@ -220,7 +220,41 @@ auto.commit.interval.ms = 1s    #假设是 1s 提交一次
 - 消费者组（consumer group），多个消费者实例组成一个整体消费消息
 - 独立消费者（standalone consumer），单独执行消费（某个指定 topic 的 partition）操作
 
-基于笔者实战的总结，二者更有优劣，需要灵活选择：
+基于笔者实战的总结，二者更有优劣，需要灵活选择。
+
+#### 消费者组（consumer group）
+
+前文说过，Consumer Group 是 Kafka 提供的可扩展且具有容错性的消费者机制。组内可以有多个消费者或消费者实例（Consumer Instance），它们共享一个公共的 ID，这个 ID 被称为 Group ID。组内的所有消费者协调在一起来消费订阅主题（Subscribed Topics）的所有 partition。每个 partition 只能由同一个消费者组内的一个 Consumer 实例来消费，如下图单个消费者（组），消费`4`个 partition：
+
+![consumer-group-0](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka/consumer-group-0.png)
+
+当有新增的 consumer 时（新增 partition），通过 Rebalance 机制，某个时刻的消费情况可能变成下面这样：
+![consumer-group-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka/consumer-group-1.png)
+
+然而让人诟病的就是 Rebalance 机制。**在 Rebalance 过程中，所有 Consumer 实例都会停止消费，等待 Rebalance 完成**，对于一个高并发的场景中，这是很致命的。所以该机制即是 consumer group 的优点，也是其缺点。在现网项目中，可以通过调参来预防不必要的 Rebalance 发生，常用的调优参数有如下几个：
+
+- `session.timeout.ms`
+- `groupRebalanceTimeout`
+- `max.poll.interval.ms`
+
+关于这几个参数的含义，请见[文章]()
+
+#### 独立消费者（standalone consumer）
+
+Standalone consumer，即独立消费者模式，消费者可以指定 topic 的分区进行消费，（即对某个 topic，每个消息源启动一个生产者，分别发往不同的分区，consumer 指定消费相关的 partition 即可），如下图`4`个多机消费者，每个消费者均指定了其中的 `1` 个 partition：
+
+![standalone-consumer](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka/standalone-consumer1.png)
+
+Standalone consumer 的限制：
+
+1. 此方式下，Kafka 集群并不会维护每个 consumer 的消费偏移量，需要每个 consumer 各自维护监听分区的消费偏移量
+2. 此方式建议勿与 consumer group 模式混合使用
+3. 新增 partition 时，需要手动增加一个新的 Standalone consumer ，否则新建的 partition 不会被消费到，如下图
+4. 相较于 consumer group 模式的 Rebalance 机制，group 模式下在组内某个 consumer 异常时可将其监听的分区通过 Rebalance 重分配给其它正常的 consumer，使得这些 partition 不会停止被监听消费；但是 standalone consumer 由于是手动进行监听指定分区，因此某个 Standalone consumer 发生异常时，并不会将其监听的 partition 进行重分配，这就会造成某些 partition 消息堆积。因此，在该 standalone consumer 模式下，**独立消费者需要开发者实现高可用机制**，比如笔者的项目中对 standalone consumer 做了如下监控：
+   - 内置心跳上报，每个分区的 standalone consumer 都上报各自心跳，超时告警
+   - 部署在 tke 平台中，以 deployment 方式部署，加上健康检查
+
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka/standalone-consumer2.png)
 
 ## 0x09 sarama 库的消费者用法
 
