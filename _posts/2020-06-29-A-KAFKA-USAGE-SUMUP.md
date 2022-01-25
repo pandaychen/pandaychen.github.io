@@ -1,59 +1,81 @@
 ---
-layout:     post
-title:      关于 Kafka 应用开发知识点的整理
-subtitle:   在项目中使用 Python 的 kafka 进行开发
-date:       2020-06-29
-author:     pandaychen
+layout: post
+title: 关于 Kafka 应用开发知识点的整理
+subtitle: 在项目中使用 Python 的 kafka 进行开发
+date: 2020-06-29
+author: pandaychen
 header-img:
 catalog: true
-category:   false
+category: false
 tags:
-    - Kafka
-    - Python
+  - Kafka
+  - Python
 ---
 
+## 0x00 前言
 
-##  0x00    前言
 项目中使用 Kafka 作为消息队列，本篇文章就个人使用 Kafka 的一些经验做一些总结。大概从下面几个方面：
 
-1.      Kafka 的基础知识总结
-2.      Kakfa 的生产者分区选择
-3.      Kafka 的消费者组机制
-4.      Kafka 的 offset 机制？
-5.      Kafka 的消费延迟问题如何监控和优化？
-6.      关于 Kafka 应用的场景
+1.  Kafka 的基础知识总结
+2.  Kakfa 的生产者分区选择
+3.  Kafka 的消费者组机制
+4.  Kafka 的 offset 机制？
+5.  Kafka 的消费延迟问题如何监控和优化？
+6.  关于 Kafka 应用的场景
 
-##     0x01     Kafka 的基本概念
+## 0x01 Kafka 的基本概念
+
 Kafka 的基础知识可以参见 [这篇文章](https://stackoverflow.com/questions/38024514/understanding-kafka-topics-and-partitions)。
-Kafka 中，Topic 是逻辑上的概念，而 Partition 是物理上的概念。
+Kafka 中，Topic 是逻辑上的概念，而 Partition 是物理上的概念，简而言之：
 
-##    0x02    Kafka 生产者
+- topic：理解为一个消息的集合（或者表），topic 存储在 broker 中，一个 topic 可以有多个 partition 分区，一个 topic 可以有多个 Producer 来 push 消息，一个 topic 可以有多个消费者向其 pull 消息，一个 topic 可以存在一个或多个 broker 中。写入不同的 topic 即写入不同的表
+- partition：是 topic 的子集（topic 下的物理分组），每个 partition 是一个有序的队列（大文件）。不同 partition 分配在不同的 broker 上进行水平扩展从而增加 kafka 并行处理能力，同 topic 下的不同分区信息是不同的，同一分区信息是有序的；每一个分区都有一个或者多个副本，其中会选举一个 leader，fowller 从 leader 拉取数据更新自己的 log（每个分区逻辑上对应一个 log 文件夹），消费者向 leader 中 pull 信息；partition 中每一条消息都有一个有序的 offset
+
+## 0x02 Kafka 生产者 Producer
+
 Kakfa 的生产者流程如下：
 ![image](https://wx2.sbimg.cn/2020/06/21/kafka.jpg)
 
-##      0x03    Kafka 消费者（组）
-待补充
+Producer 采用 push 的方式将消息发到 broker 上进行存储，然后由 consumer 采用 pull 模式订阅并消费消息。
 
-####    消费者组
-消费者组（Consumer Group）是由一个或多个消费者实例组成的 Group，具有可扩展性和可容错性的一种机制。消费者组内的消费者共享一个消费者组 ID，这个 ID 也叫做 Group ID，组内的消费者共同对一个主题进行订阅和消费，同一个组中的消费者只能消费一个分区的消息，多余的消费者会空闲。
+![kafka-producer-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka/kafka-producer-1.png)
+
+#### 存储结构的要素
+
+- Msg: 消息，每个 msg 在 topic 下的不同 partiton 仅有一份，在 partition 中有一个唯一的 offset 用于定位
+- Offset：一个逻辑意义上的偏移，用于区分每一条消息，producer 可认为 partition 是一个大的串行文件，msg 存储时被分配了唯一的 offset
+- Replica: 副本，partition 的数据冗余备份，用于实现分布式的数据可靠性，但引入了不同副本间的数据一致性问题，带来了一定的复杂度
+- Leader/Follower: replica 的角色，leader replica 用来提供该 partition 的读写服务。Follower 不停的从 leader 侧同步写入的消息。它们之间的消息状态采用一致性策略来解决
+
+当 Producer 发送一条消息（某个 topic 下的）到 broker 中, 会根据分配 partition 规则选择被存储到哪一个 partition（基于 partition 分区的选择），消息会均匀的分布到不同的 partition 里，这样就实现了水平扩展。另外，partition 本身作为文件，可以有多个分布于不同 broker 上的副本 replica（leader/follower），这样就实现了 Msg 的多副本。
+
+![kafka-partition](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka/kafka-broker-with-partition.png)
+
+## 0x03 Kafka 消费者（组）
+
+#### 消费者组
+
+消费者组（Consumer Group）是由一个或多个消费者实例组成的 Group，具有可扩展性和可容错性的一种机制。消费者组内的 consumer 共享一个消费者组 Id（Group Id），组内的 consumer 共同对一个 topic 进行订阅和消费，同一个 group 中的 consumer 只能消费一个 partition 的消息，多余的 consumer 会空闲。
 
 1.  一个消费者群组消费一个主题中的消息，这种消费模式又称为点对点的消费方式，点对点的消费方式又被称为消息队列
 2.  一个主题中的消息被多个消费者群组共同消费，这种消费模式又称为发布 - 订阅模式
 
+#### 分区 Rebalance
 
-####    分区 Rebalance
+## 0x04 Kafka 的生产者分区选择
 
-##      0x04    Kafka 的生产者分区选择
 本小节解决的问题是：生产者发送数据到哪个分区？如何体现生产者的扩展性？
 
 生产者在生产数据的时候，可以为每条消息指定 Key，这样消息被发送到 broker 时，会根据分区规则选择被存储到哪一个分区中，如果分区规则设置的合理，那么所有的消息将会被均匀的分布到不同的分区中，这样就实现了负载均衡和水平扩展。
 
 Kafka 的 Partition 发送规则是：
+
 1.  如果不指定 Message 的 Key，则一般采用顺序轮询各个 Partition 的方式；当然也可以使用自定义策略
 2.  如果指定了 Message 的 Key，则会根据消息的 hash 值和 topic 的分区数取模来获取 Partition
-如果应用有消息顺序性（Message 有先后之分）的需要，则可以通过指定 Message 的 Key 和自定义分区类来将符合某种规则的消息发送到同一个分区。同一个分区消息是有序的，同一个分区只有一个消费者就可以保证消息的顺序性消费。
+    如果应用有消息顺序性（Message 有先后之分）的需要，则可以通过指定 Message 的 Key 和自定义分区类来将符合某种规则的消息发送到同一个分区。同一个分区消息是有序的，同一个分区只有一个消费者就可以保证消息的顺序性消费。
 
 比如，在实现 OpenSSH 终端会话（Session）审计时，生产者端为每条消息都按照 SessionId 指定 key 值，这样可以保证每个会话的数据一定被顺序性消费的。
+
 ```golang
 msg := &sarama.ProducerMessage{
         Topic: topic_name,
@@ -63,25 +85,31 @@ msg := &sarama.ProducerMessage{
 }
 ```
 
-##      0x05    Kafka 的消费者组的意义
+## 0x05 Kafka 的消费者组的意义
+
 1.  消费者组机制提供了 Kafka 消费端的高可用，实际项目中强烈推荐以此方式来部署消费端。
 2.  消费者组实现了一种发布 - 订阅模式的概念
 
-##      0x06    消费 Lag 计算及意义
+## 0x06 消费 Lag 计算及意义
+
 为什么要（如何）计算 Kafka 的消费延迟？这个问题是我在腾讯 T9 升 T10 的评审们提问过的。使用消息队列，在消费端一定要处理好这个问题。当生产者大批量写入数据时，Kafka Consumer 消费会存在延迟情况，我们需要查看消息堆积情况，就是所谓的消息 Lag。原因可能是因为消费端性能，亦或是消费端的消费速度本来就比较慢。
 
 此时监控消费 Lag 的指标，非常有意义，是否需要对消费端进行扩容等等。那么如何计算消费 Lag 呢？
 
-####	计算 Lag
+#### 计算 Lag
+
 在计算 Lag 之前先普及几个基本概念：
--	LEO（LOG-END-OFFSET）: 这里主要是指堆 Consumer 可见的 Offset. 即 HW（High Watermark）
--	CURRENT-OFFSET: Consumer 消费到的具体位移
-从此二者意义可知 $$Lag=LEO-CURRENT-OFFSET$$，计算出来的值即为消费延迟的差值。
+
+- LEO（LOG-END-OFFSET）: 这里主要是指堆 Consumer 可见的 Offset. 即 HW（High Watermark）
+- CURRENT-OFFSET: Consumer 消费到的具体位移
+  从此二者意义可知 $$Lag=LEO-CURRENT-OFFSET$$，计算出来的值即为消费延迟的差值。
 
 这里首先要记得，消费 Lag 是针对于某个消费者组 Id 的 Lag，通过官方方包里提供的 `kafka-consumer-groups.sh` 工具即可获取此值：
+
 ```bash
 /data/home/user00/application/kafka_2.12-2.2.0/bin/kafka-consumer-groups.sh --describe --bootstrap-server 1.2.3.4:19092  --group group_name
 ```
+
 比如，项目中的一个消费者组的 Lag 数据如下：
 ![image](https://wx2.sbimg.cn/2020/06/21/kafkalag.png)
 
@@ -91,15 +119,19 @@ topidc1             0          1057030         1057030         0               k
 topidc1             1          1118889         1118889         0               kafka-python-1.4.7.dev-fe05daa9-a6f3-47c5-8801-2a28b6a4b7a5 /2.2.2.2    kafka-python-1.4.7.dev
 ```
 
-####	计算 LAG 的方法 1 -- Broker
+#### 计算 LAG 的方法 1 -- Broker
+
 Broker 消费方式 offset 获取的实现思路为：
+
 1.  根据 Topic 获取消费该 Topic 的 Group 信息
 2.  通过 Consumer-API 读取 Broker 上指定 Group 和 Topic 的消费情况，可以获取到 `clientId`,`CURRENT-OFFSET`,`patition`，`host` 等数据
 3.  通过 Consumer-API 获取 LogEndOffset（可见 offset）
 4.  将上面 2 处信息合并，计算 Lag
 
-####	计算 LAG 的方法 2 --Zookeeper
+#### 计算 LAG 的方法 2 --Zookeeper
+
 Zookeeper 消费方式 offset 获取的 实现思路为：
+
 1.  根据 topic 获取消费该 topic 的 group
 2.  读取 Zookeeper 上指定 group 和 topic 的消费情况，可以获取到 `clientId`,`CURRENT-OFFSET`,`patition` 等
 3.  通过 Consumer-API 获取 LogEndOffset（可见 offset）
@@ -141,8 +173,10 @@ if __name__ == '__main__':
     print topic_offset,group_offset,lag
 ```
 
-##  0x07    重复消费
+## 0x07 重复消费
+
 由于数据存储在 Kafka 中，我们可以根据某个 Offset 来实现固定 Offset 区间的消费：这里注意，`consumer_start_offset` 一定要大于等于 `consumer.beginning_offsets(consumer.assignment())` 计算出来的分区的起始 offset
+
 ```python
 #coding=utf-8
 
@@ -175,9 +209,10 @@ for message in consumer:
 print count
 ```
 
-##	0x08    Python-kafka 库的基础用法
+## 0x08 Python-kafka 库的基础用法
 
-####	生产者
+#### 生产者
+
 Kafka 的生产者代码如下：其中调用了 `send` 方法向 Kafka 写入数据，该方法的 [原型如下](https://kafka-python.readthedocs.io/en/master/apidoc/KafkaProducer.html)：
 `send(topic, value=None, key=None, headers=None, partition=None, timestamp_ms=None)`
 
@@ -202,7 +237,8 @@ class KafkaProducer():
             print e
 ```
 
-####	消费者
+#### 消费者
+
 [KafkaConsumer 的文档](https://kafka-python.readthedocs.io/en/master/apidoc/KafkaConsumer.html) 在此。
 
 ```python
@@ -234,8 +270,10 @@ class Kafka_consumer():
             print e
 ```
 
-####	测试
+#### 测试
+
 （TO BE CONTINUED）
+
 ```python
 def main():
     '''
@@ -257,15 +295,18 @@ def main():
         print i.value
 ```
 
-##  0x09    Kafka 的应用场景
+## 0x09 Kafka 的应用场景
+
 项目使用的 Kafka 整体模型如下图所示，N 个生产者，针对每个 Topic 默认开启 2 个消费者组来消费：
 ![image](https://wx1.sbimg.cn/2020/06/19/kafka.png)
 
-##  0x0A    参考
--   [Understanding Kafka Topics and Partitions](https://stackoverflow.com/questions/38024514/understanding-kafka-topics-and-partitions)
--   [KafkaConsumer](https://kafka-python.readthedocs.io/en/master/apidoc/KafkaConsumer.html)
--   [通过 python 操作 kafka](https://juejin.im/entry/5be53704f265da615e04f86c)
--   [Kafka offset 管理](https://www.jianshu.com/p/449074d97daf)
--   [Aug 2019 - Kafka Consumer Lag programmatically](https://stackoverflow.com/questions/57302244/aug-2019-kafka-consumer-lag-programmatically)
+## 0x0A 参考
+
+- [Understanding Kafka Topics and Partitions](https://stackoverflow.com/questions/38024514/understanding-kafka-topics-and-partitions)
+- [KafkaConsumer](https://kafka-python.readthedocs.io/en/master/apidoc/KafkaConsumer.html)
+- [通过 python 操作 kafka](https://juejin.im/entry/5be53704f265da615e04f86c)
+- [Kafka offset 管理](https://www.jianshu.com/p/449074d97daf)
+- [Aug 2019 - Kafka Consumer Lag programmatically](https://stackoverflow.com/questions/57302244/aug-2019-kafka-consumer-lag-programmatically)
+- [简单理解 Kafka 的消息可靠性策略](https://cloud.tencent.com/developer/article/1752150)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
