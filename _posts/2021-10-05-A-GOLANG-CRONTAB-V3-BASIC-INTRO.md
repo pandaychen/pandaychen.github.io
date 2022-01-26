@@ -145,6 +145,7 @@ type Cron struct {
 #### entries 成员
 
 刚才说到 `entries` 为何设计为指针 `slice`，原因在于 cron 核心逻辑中，每次循环开始时都会对 `Cron.entries` 进行排序，排序字段依赖于每个 `Entry` 结构的 `Next` 成员，排序依赖于下面的原则：
+
 1.  按照触发时间正向排序，越先触发的越靠前
 2.  `IsZero` 的任务向后面排
 3.  由于可能存在相同周期的任务 Job，所以排序是不稳定的
@@ -177,6 +178,11 @@ func (s byTime) Less(i, j int) bool {
 
 #### AddJob 方法
 
+`AddJob`方法通过两种方法将任务节点 entry 添加到`Cron.entries`中：
+
+1.  初始化时，直接`append`
+2.  运行状态下，通过 channel 方式异步添加，避免加锁
+
 ```golang
 // AddJob adds a Job to the Cron to be run on the given schedule.
 // The spec is parsed using the time zone of this Cron instance as the default.
@@ -202,10 +208,10 @@ func (c *Cron) Schedule(schedule Schedule, cmd Job) EntryID {
 		Job:        cmd,
 	}
 	if !c.running {
-        //
+        //直接加
 		c.entries = append(c.entries, entry)
 	} else {
-        //
+        //异步
 		c.add <- entry
 	}
 	return entry.ID
@@ -214,8 +220,14 @@ func (c *Cron) Schedule(schedule Schedule, cmd Job) EntryID {
 
 #### run 方法
 
-cron 的核心 `run` 方法的实现如下，这个是很经典的 `for-select` 异步处理模型，避免的对 `entries` 加锁：
+cron 的核心 `run` 方法的实现如下，这个是很经典的 `for-select` 异步处理模型，避免的对 `entries` 加锁，非常值得借鉴。其核心有如下几点：
 
+1.  一个定时任务（集）的实现，内部采用排序数组，取数组首位元素的时间作为 timer 触发时间（感觉可以优化为最小堆？）
+    - 每个 entry 都包含了该 entry 下一次执行的绝对时间，本轮执行完成后立即计算下一轮时间，等待下次循环时排序更新
+    - 每次循环开始对 entries 按下次执行时间升序排序，只需要对第一个 entry 启动定时器即可
+    - 定时器事件触发时，轮询 entries 里需要执行的 entries 直到第一个不满足条件的，由于数组是升序，后面无需再遍历
+    - 同时，第一个定时器处理结束开启下次定时器时，也只需要更新执行过的 entries 的 Next（下次执行时间），不需要更新所有的 entries
+2.  `Cron`内部数据结构的维护
 
 ```golang
 func (c *Cron) run() {
@@ -254,6 +266,7 @@ func (c *Cron) run() {
                 for _, e := range c.entries {
                     // 可能存在相同时间出发的任务
                     if e.Next.After(now) || e.Next.IsZero() {
+                        // 后面都不需要遍历了！
                         break
                     }
                     // 执行 Job 的 func()
