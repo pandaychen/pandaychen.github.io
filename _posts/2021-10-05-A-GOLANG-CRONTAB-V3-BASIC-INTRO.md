@@ -13,9 +13,11 @@ tags:
 
 ## 0x00 前言
 
+[cron](https://github.com/robfig/cron/) 是一个用于管理定时任务的库（单机），基于 Golang 实现 Linux 中 crontab 的功能
+
 ## 0x01 使用
 
-#### crontab
+#### Linux 的 crontab
 
 crontab 基本格式：
 
@@ -32,7 +34,7 @@ crontab 基本格式：
 
 #### 基础例子
 
-用法极丰富，V3 版本也支持标准的 `crontab` 格式，可以参考 [此文](https://segmentfault.com/a/1190000023029219)：<br>
+用法极丰富，V3 版本也支持标准的 `crontab` 格式，具体用法细节可以参考 [此文](https://segmentfault.com/a/1190000023029219)：<br>
 
 ```golang
 func main() {
@@ -79,9 +81,9 @@ func main() {
 
 #### 核心数据结构
 
-对于 Cron 的整体逻辑，最关键的两个数据结构就是 `Entry` 和 `Cron`：<br>
+对于 cron 库的整体逻辑，最关键的两个数据结构就是 `Entry` 和 `Cron`<br>
 
-1、Job：抽象一个定时任务，cron 调度一个 Job，就去执行 Job 的 `Run()` 方法 < br>
+1、`Job`：抽象一个定时任务，cron 调度一个 `Job`，就去执行 `Job` 的 `Run()` 方法 <br>
 
 ```golang
 type Job interface {
@@ -89,7 +91,59 @@ type Job interface {
 }
 ```
 
-1、Schedule：描述一个 job 如何循环执行的抽象
+
+`FuncJob`：`FuncJob` 实际就是一个 `func()` 类型，实现了 `Run()` 方法：
+```golang
+type FuncJob func()
+func (f FuncJob) Run() { 
+    f() 
+}
+```
+
+在实际应用中，我们需要对 `Job` 结构做一些扩展，于是就有了 `JobWrapper`，使用修饰器机制加工 Job（传入一个 `Job`，返回一个 `Job`），有点像 gin 中间件，**包装器可以在执行实际的 Job 前后添加一些逻辑**，然后使用一个 `Chain` 将这些 `JobWrapper` 组合到一起。
+
+比如给 `Job` 添加这样一些属性：
+
+-   在 `Job` 回调方法中捕获 `panic` 异常
+-   如果 `Job` 上次运行还未结束，推迟本次执行
+-   如果 `Job` 上次运行还未结束，跳过本次执行
+-   记录每个 `Job` 的执行情况
+
+```golang
+type JobWrapper func(Job) Job
+
+type Chain struct {
+  wrappers []JobWrapper
+}
+
+func NewChain(c ...JobWrapper) Chain {
+  return Chain{c}
+}
+```
+
+2、`Chain` 结构 <br>
+`Chain` 是 `JobWrapper` 的数组，调用 `Chain` 对象的 `Then(j Job)` 方法应用这些 `JobWrapper`，返回最终的 `Job`：
+
+
+```golang
+type Chain struct {
+  wrappers []JobWrapper
+}
+
+func NewChain(c ...JobWrapper) Chain {
+  return Chain{c}
+}
+
+func (c Chain) Then(j Job) Job {
+  for i := range c.wrappers {
+      // 注意：应用 JobWrapper 的顺序
+    j = c.wrappers[len(c.wrappers)-i-1](j)
+  }
+  return j
+}
+```
+
+3、`Schedule`：描述一个 job 如何循环执行的抽象，需要实现`Next`方法，此方法返回任务下次被调度的时间
 
 ```golang
 // Schedule describes a job's duty cycle.
@@ -100,12 +154,14 @@ type Schedule interface {
 }
 ```
 
-scheduler 的实例化结构有：
+`Scheduler` 的实例化结构有：
 
-- `ConstantDelaySchedule`:https://github.com/robfig/cron/blob/v3/constantdelay.go
+- `ConstantDelaySchedule`：[实现](https://github.com/robfig/cron/blob/v3/constantdelay.go)
+- `SpecSchedule`：[实现]()，默认选择，提供了对 Cron 表达式的解析能力
 
-2、Entry 结构：抽象了一个 job<br>
-每当使用 `AddJob` 注册一个定时调用策略，就会为该策略生成一个唯一的 `Entry`，Entry 里会存储被执行的时间、需要被调度执行的实体 Job
+
+4、`Entry` 结构：抽象了一个 job<br>
+每当使用 `AddJob` 注册一个定时调用策略，就会为该策略生成唯一的 `Entry`，`Entry` 里会存储被执行的时间、需要被调度执行的实体 `Job`
 
 ```golang
 type Entry struct {
@@ -118,7 +174,7 @@ type Entry struct {
 }
 ```
 
-3、`Cron`[结构](https://github.com/robfig/cron/blob/v3/cron.go#L13)：<br>
+5、`Cron`[结构](https://github.com/robfig/cron/blob/v3/cron.go#L13)：<br>
 关于 `Cron` 结构，有一些细节，`entries` 为何设计为一个指针 `slice`？
 
 ```golang
@@ -172,15 +228,83 @@ func (s byTime) Less(i, j int) bool {
 }
 ```
 
-4、`Chain` 结构 <br>
+##    0x03  内置 JobWrapper 介绍
 
-## 核心方法
+####    Recover：捕捉 panic，避免进程异常退出
+此 wrapper 比较好理解，在执行内层的 Job 逻辑前，添加 recover() 调用。如果 Job.Run() 执行过程中有 panic。这里的 recover() 会捕获到，输出调用堆栈
+```golang
+// cron.go
+func Recover(logger Logger) JobWrapper {
+  return func(j Job) Job {
+    return FuncJob(func() {
+      defer func() {
+        if r := recover(); r != nil {
+          const size = 64 << 10
+          buf := make([]byte, size)
+          buf = buf[:runtime.Stack(buf, false)]
+          err, ok := r.(error)
+          if !ok {
+            err = fmt.Errorf("%v", r)
+          }
+          logger.Error(err, "panic", "stack", "...\n"+string(buf))
+        }
+      }()
+      j.Run()
+    })
+  }
+}
+```
+
+####        DelayIfStillRunning
+实现了已有任务运行推迟的逻辑。核心是通过一个（任务共用的）互斥锁 `sync.Mutex`，每次执行任务前获取锁，执行结束之后释放锁。所以在上一个任务结束前，下一个任务获取锁会阻塞，从而保证的任务的串行执行。
+```golang
+// chain.go
+func DelayIfStillRunning(logger Logger) JobWrapper {
+  return func(j Job) Job {
+    var mu sync.Mutex
+    return FuncJob(func() {
+      start := time.Now()
+      // 下一个任务阻塞等待获取锁
+      mu.Lock()
+      defer mu.Unlock()
+      if dur := time.Since(start); dur > time.Minute {
+        logger.Info("delay", "duration", dur)
+      }
+      j.Run()
+    })
+  }
+}
+```
+
+####    SkipIfStillRunning
+和 `DelayIfStillRunning` 机制不一样，该方法是跳过执行，通过无缓冲 channel 机制实现。执行任务时，从通道中取值，如果成功，执行，否则跳过。执行完成之后再向通道中发送一个值，确保下一个任务能执行。初始发送一个值到通道中，保证第一个任务的执行。
+
+```golang
+func SkipIfStillRunning(logger Logger) JobWrapper {
+  return func(j Job) Job {
+    // 定义一个无缓冲 channel
+    var ch = make(chan struct{}, 1)
+    ch <- struct{}{}
+    return FuncJob(func() {
+      select {
+      case v := <-ch:
+        j.Run()
+        ch <- v
+      default:
+        logger.Info("skip")
+      }
+    })
+  }
+}
+```
+
+## 0x04 核心方法分析
 
 #### AddJob 方法
 
-`AddJob`方法通过两种方法将任务节点 entry 添加到`Cron.entries`中：
+`AddJob` 方法通过两种方法将任务节点 entry 添加到 `Cron.entries` 中：
 
-1.  初始化时，直接`append`
+1.  初始化时，直接 `append`
 2.  运行状态下，通过 channel 方式异步添加，避免加锁
 
 ```golang
@@ -208,10 +332,10 @@ func (c *Cron) Schedule(schedule Schedule, cmd Job) EntryID {
 		Job:        cmd,
 	}
 	if !c.running {
-        //直接加
+        // 直接加
 		c.entries = append(c.entries, entry)
 	} else {
-        //异步
+        // 异步
 		c.add <- entry
 	}
 	return entry.ID
@@ -227,7 +351,9 @@ cron 的核心 `run` 方法的实现如下，这个是很经典的 `for-select` 
     - 每次循环开始对 entries 按下次执行时间升序排序，只需要对第一个 entry 启动定时器即可
     - 定时器事件触发时，轮询 entries 里需要执行的 entries 直到第一个不满足条件的，由于数组是升序，后面无需再遍历
     - 同时，第一个定时器处理结束开启下次定时器时，也只需要更新执行过的 entries 的 Next（下次执行时间），不需要更新所有的 entries
-2.  `Cron`内部数据结构的维护
+2.  `Cron` 内部数据结构的维护，采用 channel 实现无锁机制，缺点是可能会有误差（ms 级），不过在此项目是能够容忍的，以 Job 异步添加为例（运行中添加 entry，走异步方式，有 duration 的延迟）：
+    -   某个 Job 之间的 delta 差，可能多出了 duration 的延迟，可以容忍
+    -   定时器实现里，会扫描所有当前时间之前的 entries 来执行，增加了容错
 
 ```golang
 func (c *Cron) run() {
@@ -314,7 +440,7 @@ func (c *Cron) run() {
 
 ![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/dcrontab/crontab-core-event-loop.png)
 
-## 参考
+## 0x05     参考
 
 - [golang cron v3 定时任务](https://blog.cugxuan.cn/2020/06/04/Go/golang-cron-v3/)
 - [v3-repo](https://github.com/robfig/cron/tree/v3)
