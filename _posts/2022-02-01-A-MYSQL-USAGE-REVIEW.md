@@ -58,7 +58,7 @@ PARTITION BY RANGE (TO_DAYS(hiredate) ) (
 
 2、`HASH` 分区 <br>
 和 `RANGE` 分区类似，区别在于 `LIST` 是枚举值列表的集合，`RANGE` 是连续的区间值的集合。`LIST` 分区只支持 `INT`，非整形字段需要通过函数转换成 `INT`
-```SQL
+```sql
 CREATE TABLE `t_my_list`(
     a int(11),
     b int(11),
