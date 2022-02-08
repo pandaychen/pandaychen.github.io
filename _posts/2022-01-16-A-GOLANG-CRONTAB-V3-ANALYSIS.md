@@ -122,8 +122,7 @@ func (np *NodePool) PickNodeByJobName(jobName string) string {
 }
 ```
 
-4.	`Dcron` 的核心方法 <br>
-
+3、`Dcron` 的核心方法 <br>
 -	`addJob`：屏蔽同名（ID）任务，调用 `cronv3` 的接口注册任务
 -	`allowThisNodeRun`：任务排他实现
 
@@ -165,7 +164,7 @@ func (d *Dcron) allowThisNodeRun(jobName string) bool {
 ```
 
 
-5、`JobWarpper`：前文说到过 Cron 库支持的 `JobWarpper` 功能，这里为了实现 ** 单个同名（ID）任务只在一个节点上运行的功能 **，封装了 `JobWarpper`：<br>
+4、`JobWarpper`：前文说到过 Cron 库支持的 `JobWarpper` 功能，这里为了实现 ** 单个同名（ID）任务只在一个节点上运行的功能 **，封装了 `JobWarpper`：<br>
 ```golang
 //JobWarpper is a job warpper
 type JobWarpper struct {
