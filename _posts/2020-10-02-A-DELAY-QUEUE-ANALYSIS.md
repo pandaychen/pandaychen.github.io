@@ -79,7 +79,7 @@ Sorted Set 是一个有序的 Set，Set 内元素的排序基于其加入集合�
 
 注意：`ZRANGEBYSCORE` 的指令是：`ZRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count]`，其中 `min` 和 `max` 可以是 `-inf` 和 `+inf` ，它提供了可以在不知道 SortSet 的最低和最高 Score 值的情况下获取到我们需要的排序结果。
 
-另外，还有两个细节需要考虑：
+另外，还有两个细节需要考虑：<br>
 1、使用 `ZRANGEBYSCORE` 获取到任务后，任务并没有从集合中删除。这样需要使用 `ZREM` 指令，删除这条任务，以达到队列模拟 `Pop` 的效果
 
 2、此外，由于多消费者组合使用 `ZRANGEBYSCORE` 和 `ZREM` 的过程并非原子的，当有多个消费者时会存在竞争，可能使得一条消息被消费多次。在现网项目中，需要保证多消费者操作的原子性，解决方法是使用 [Lua 原子脚本封装](https://github.com/bitleak/lmstfy/blob/master/engine/redis/timer.go#L19)：
