@@ -22,7 +22,7 @@ tags:
 ![kafka-basic](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka/kafka2.1.png)
 
 - Producer：生产者，可以将数据发布到所选择的 topic 中
-- Consumer：消费者，**可以使用 Consumer Group 进行标识**，在 topic 中的每条记录都会被分配给订阅消费组中的一个消费者实例，消费者实例可以分布在多个进程中或者多个机器上
+- Consumer：消费者，** 可以使用 Consumer Group 进行标识 **，在 topic 中的每条记录都会被分配给订阅消费组中的一个消费者实例，消费者实例可以分布在多个进程中或者多个机器上
 - Broker：消息中间件处理节点（服务器），一个节点就是一个 broker，一个 Kafka 集群由一个或多个 broker 组成
 
 那么，对 Kakfa 的可用性主要着眼于下面几个环节：
@@ -127,10 +127,12 @@ msg := &sarama.ProducerMessage{
 
 #### 关于分区的细节
 
-这里特别需要注意 hash 算法的选择！由于 kafka 的 partition 计算，消费者组的 partition 指定都是依赖于 client 端的，所以不同语言（如 java/golang 等）对同一个 key，采用不同的 hash 算法计算得到的分区结果是不一定相同的，曾经见过有同事遇到相同消息（key 相同）最终落到的不同的 partition，原因是因为使用了不同语言的客户端计算的消息，最终 key 的结果是不一样的。一般记住下面的规则就好（以 java 客户端为例），三大类 partition 计算方案:
+**这里特别需要注意 hash 算法的选择！**由于 kafka 的 partition 计算，消费者组的 partition 指定都是依赖于 client 端的，所以不同语言（如 java/golang 等）对同一个 key，采用不同的 hash 算法计算得到的分区结果是不一定相同的，曾经遇见过这种 Case：用户侧产生的相同消息（key 相同）最终落到的不同的 partition，原因是因为使用了不同语言的客户端计算的消息，最终 key 的结果是不一样的（由于 Hash 算法不同，得到 key 不同，最终落到不同的 partition）。
 
-1. 消息 msg 指定 partition 就使用指定的 partition（第二种方法）
-2. 消息 msg 没有指定 partition 且没有指定 Partitioner（partition 选择器），分 2 种情况：
+一般记住下面的规则就好（以 java 客户端为例），三大类 partition 计算方案:
+
+1. 消息 msg 指定 partition 就使用指定的 partition（第二种方法）进行发送
+2. 消息 msg 没有指定 partition 且没有指定 Partitioner（partition 选择器），又分为 `2` 种情况：
    - 指定 Key：对 key 进行 hash 取模 详见: `org.apache.kafka.clients.producer.internals.DefaultPartitioner`
    - 没有指定 Key: 轮询方式
 3. 自定义 Partitioner（partition 选择器，第三种方法）
@@ -177,12 +179,12 @@ offsets.retention.minutes = 1440s
 
 此方法下先获取数据，再提交 commit offset，最后进行业务处理。异常情况下，消费者处理消息，先更新 offset，再做业务处理，做业务处理失败，消费者重启，消息就丢了。配置选项如下：
 
-```bash
+```golang
 enable.auto.commit = true
 auto.commit.interval.ms = 1s    #假设是 1s 提交一次
 ```
 
-上述配置的 consumer 收到消息就返回正确给 broker, 但是如果业务逻辑没有走完中断了，实际上这个消息没有消费成功。这种场景适用于可靠性要求不高的业务。其中 auto.commit.interval.ms 代表了自动提交的间隔。比如设置为 1s 提交 1 次，那么在 1s 内的故障重启，会从当前消费 offset 进行重新消费时，1s 内未提交但是已经消费的 msg, 会被重新消费到。
+上述配置的 consumer 收到消息就返回正确给 broker, 但是如果业务逻辑没有走完中断了，实际上这个消息没有消费成功。这种场景适用于可靠性要求不高的业务。其中 `auto.commit.interval.ms` 代表了自动提交的间隔。比如设置为 `1s` 提交 `1` 次，那么在 `1s` 内的故障重启，会从当前消费 offset 进行重新消费时，`1s` 内未提交但是已经消费的 Msg, 会被重新消费。
 
 #### Exactly once
 
@@ -191,11 +193,21 @@ auto.commit.interval.ms = 1s    #假设是 1s 提交一次
 - 保证生产者的幂等性
 - 进行原子性的消息存储，业务逻辑异步慢慢的从存储中取出消息进行处理
 
+
+####  消费者组提交 offset（位移）
+Consumr offset 代表了 kafka Consumer Group 保存其消费的进度。
+![kafka-consumer-offset1.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka/kafka-consumer-offset1.png)
+
+![kafka-consumer-offset2.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka/kafka-consumer-offset2.png)
+
 ## 0x05 Kafka 的幂等性以及实现
 
-在项目中，一般遵循的原则是，相比数据丢失，重复投递 / 消费是符合业务预期的，可以通过一些幂等性设计来规避这个问题。本小节来分析下如下设计 Kafka 的幂等性。
+在项目中，一般遵循的原则是，**相比数据丢失，重复投递 / 消费是符合业务预期的，可以通过一些幂等性设计来规避这个问题**。本小节来分析下如下设计 Kafka 的幂等性。
 
 #### 重复消费的问题以及解决
+解决 Consumer 端幂等性的问题，得结合业务的特性来实现，举几个例子：
+1. 若数据不需要持久化（或者有 `TTL` 的数据），可以使用 redis 的 `SET` 数据结构来实现重复消费的去重
+2. 数据需要持久化时，对数据绑定（或计算）`UUID`，分布式的场景可以使用 snowflake 算法生成唯一 Id。然后再使用 MySQL 的 `UNIQUE KEY` 配合 `INSERT INTO ... ON DUPLICATE KEY UPDATE` 等方式来去重
 
 ## 0x06 让人讨厌的 Rebalance（重平衡）
 
@@ -230,11 +242,11 @@ Rebalance 触发的原因一般有如下几种：
 ####  避免 Rebalance 的方法
 
 在现网中，如何避免消费客户端频繁出现 Rebalance？基于以上描述，有两类非必要的 Rebalance 场景需要优化，如下：
-1. 因Consumer 未能及时发送心跳，导致 Consumer 被踢出 Group 而引发的 Rebalance
+1. 因 Consumer 未能及时发送心跳，导致 Consumer 被踢出 Group 而引发的 Rebalance
    -     设置 `session.timeout.ms = 6s`
    -     设置 `heartbeat.interval.ms = 2s`
    -     保证 Consumer 实例在被判定为离线之前，能够发送至少 `3` 轮的心跳请求，即 `session.timeout.ms >= 3 *heartbeat.interval.ms`
-2. Consumer 消费时间过长（较重的消费逻辑）导致的 Rebalance。假设 Consumer 消费数据时需要将消息处理之后写入到 MySQL，如果写 Mysql 的最长时间是 `3min`，那么你可以将`max.poll.interval.ms`设置为 `4min` 左右或者足够大
+2. Consumer 消费时间过长（较重的消费逻辑）导致的 Rebalance。假设 Consumer 消费数据时需要将消息处理之后写入到 MySQL，如果写 Mysql 的最长时间是 `3min`，那么你可以将 `max.poll.interval.ms` 设置为 `4min` 左右或者足够大
 
 
 ## 0x07 Producer 实践心得
@@ -372,6 +384,9 @@ func (h msgConsumerGroup) ConsumeClaim(sess sarama.ConsumerGroupSession, claim s
 
 #### consumer group 的并发机制
 
+
+####  consumer group 的消费 offset（位移）
+
 #### 注意！sess.Commit 的细节
 
 ## 0x0A sarama 库的问题：阿里云的建议
@@ -390,7 +405,7 @@ Sarama Go 客户端存在以下已知问题：
 
 1. 建议尽早将 Sarama Go 客户端替换为 Confluent Go 客户端，后续参考其封装下。
 2. 如果无法在短期内替换客户端，请注意以下事项：
-   - **针对生产环境，请将位点重置策略设置为 Newest（latest）；针对测试环境，或者其他明确可以接收大量重复消息的场景，设置为 Oldest（earliest）**，这点很重要
+   - ** 针对生产环境，请将位点重置策略设置为 Newest（latest）；针对测试环境，或者其他明确可以接收大量重复消息的场景，设置为 Oldest（earliest）**，这点很重要
    - 如果发生了位点重置，产生大量堆积，可以使用消息队列 Kafka 版控制台提供的重置消费位点功能，手动重置消费位点到某一时间点，无需改代码或换 Consumer Group（如果不重置的话会产生大量的重复数据）
 
 ## 0x0A 参考
