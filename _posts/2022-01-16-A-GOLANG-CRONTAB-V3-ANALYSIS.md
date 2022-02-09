@@ -203,10 +203,10 @@ dcron 的核心运行数据流如下：
 4.	cron 任务的封装和存储（dcron 是存储在 redis 中）
 
 
-####	分布式场景的使用流程
-1.	`1.1.1.1` 机器，运行 `1` 个进程，注册 serviceA、serviceB
-2.	`1.1.1.2` 机器，运行 `1` 个进程，注册 serviceB、serviceC
-3.	`1.1.1.3` 机器，运行 `2` 个进程，其中 1 个注册 serviceA、serviceC，另外一个注册 serviceA、serviceB、serviceC
+####	分布式dcron的使用流程
+-	`1.1.1.1` 机器，运行 `1` 个进程，注册 serviceA、serviceB
+-	`1.1.1.2` 机器，运行 `1` 个进程，注册 serviceB、serviceC
+-	`1.1.1.3` 机器，运行 `2` 个进程，其中进程一注册 serviceA、serviceC，另外一个进程注册 serviceA、serviceB、serviceC
 
 ![tasks](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/dcrontab/task.png)
 
@@ -214,7 +214,7 @@ dcron 的核心运行数据流如下：
 #### 分布式一致性 hash 的使用
 回顾下，分布式一致性 hash 算法解决了分布式环境中因服务节点的变动而导致的缓存大量的失效的问题，也常应用于负载均衡的场景中，从 dcron 的实现思路中，如定时任务触发时的实现，最终会通过 `PickNodeByJobName` 方法（一致性 hash 的选取 node 实现）获取到一个节点，然后任务在这个选中的节点上运行。
 
-在 dcron 中，一致性 hash 主要用处在于下面 2 个地方：
+在 dcron 中，一致性 hash 主要用处体现在：
 -	对每个注册到中心（redis/etcd 等）的节点（进程），由 dcron 按照一致性 hash 结合虚拟节点的生成算法，初始化 hash ring（只对当前在线的节点或进程计算），定时更新
 -	对于每个存活的 dcron 节点（进程），其注册的 job 任务到期触发执行时，先使用一致性 hash 算法从 hash ring 中选择一个节点，由于分布式一致性 hash 的特性，所有 dcron 节点选择出的节点 `NodeId` 必然是相同的（各个节点对一致性 hash 查找算法传入的 key 也需要一致）
 
