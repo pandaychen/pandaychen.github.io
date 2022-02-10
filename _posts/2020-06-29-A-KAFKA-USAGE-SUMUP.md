@@ -36,12 +36,12 @@ Partition 中的每条消息都会按照时间顺序分配到一个单调递增�
 
 1、生产者 offset<br>
 生产者的 offset 更新由 Kafka 完成，根据客户端设置的分区写入策略写入给定的 partition 中
-![kafka-producer-offset](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka-producer-offset.png)
+![kafka-producer-offset](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka/kafka-producer-offset.png)
 
 2、消费者 offset<br>
 在 consumer group 机制中，每个 consumer 实例都会为它消费的 partition 维护属于自己的位置信息来记录当前消费了多少条信息。consumer group 使用 Kafka 的内部 topic `__consumer_offsets` 保存 offset 信息。由于一个 partition 只能固定的交给一个 consumer group 中的一个 consumer 消费，因此 Kafka 保存 offset 时并不直接为每个 consumer 保存，而是以 `<group.id-topic-partition -> offset>` 的格式保存。
 
-![kafka-consumer-offset](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/consumer-offset-store-format-2.png)
+![kafka-consumer-offset](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka/consumer-offset-store-format-2.png)
 
 消费者 offset 的意义，个人理解有两点：
 -   开发者可以主动告知 Kafka，已经成功消费了哪些 offset 上的数据（消费完了 commit）
@@ -49,15 +49,15 @@ Partition 中的每条消息都会按照时间顺序分配到一个单调递增�
 
 正是由于消费者 offset 机制的存在，会导致重复消费及数据丢失这两种异常的 case，后文再讨论如何优化这些问题。
 
-![kafka-comsumer-offset](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/consumer-offset-store-format.png)
+![kafka-comsumer-offset](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka/consumer-offset-store-format.png)
 
 ####    kafka 的生产消费模型
-![kafka-model](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka-data-flow.jpg)
+![kafka-model](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka/kafka-data-flow.jpg)
 
 ## 0x02 Kafka 生产者 Producer
 
 Kakfa 的生产者流程如下：
-![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka-producer-flow1.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka/kafka-producer-flow1.png)
 
 Producer 采用 push 的方式将消息发到 broker 上进行存储，然后由 consumer 采用 pull 模式订阅并消费消息。
 
