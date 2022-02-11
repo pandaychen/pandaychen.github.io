@@ -100,6 +100,10 @@ type ReverseProxy struct {
 }
 ```
 
+####	ReverseProxy 的成员
+-	`Transport`：反向代理客户端连接池，这个参数特别注意，现网 **建议采用一个设置适当参数的全局唯一连接池**，否则在高并发场景中会出现连接暴涨 / 泄漏的风险
+
+
 #### NewSingleHostReverseProxy 方法
 
 `NewSingleHostReverseProxy` 方法返回一个新的 `ReverseProxy`，将 `URLs` 请求路由到传入参数 `target` 的指定的 `Scheme`, `Host` 以及 `Base path`，也是默认的 `director` 配置，在 `NewSingleHostReverseProxy` 中源码已经对传入的 `URLs` 进行解析并且完成了 `Director` 的修改
