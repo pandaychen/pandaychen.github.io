@@ -94,8 +94,12 @@ func doRequest(addr string, port int) error {
 
 
 ##  0x03    http.Transport 结构
-<details><summary>Click to show the Code</summary>
-```bash
+-   `http.Transport` 实现了 `http.RoundTripper`，支持 HTTP/HTTPS 以及 HTTP Proxy(for either HTTP or HTTPS with CONNECT)
+-   `http.Transport` 默认实现了 TCP 连接池，会复用底层 TCP 连接，**这个特性的指导意义是，在现网的场景时，初始化一次 `http.Transport` 为全局变量，然后重复使用，这样可以避免大量创建连接**
+-   `http.Transport` 对 HTTP URLs 使用 HTTP/1.1 协议；对 HTTPS URLs 使用 HTTP/1.1 or HTTP/2，具体使用哪种协议要取决于 Transport 的配置以及服务端是否支持 HTTP/2 协议
+-   `http.Transport` 只有在遇到网络故障的情况下会重试幂等的请求。另外，http Transport 实现了 goroutine-safe
+
+```golang
 // Transport is an implementation of RoundTripper that supports HTTP,
 // HTTPS, and HTTP proxies (for either HTTP or HTTPS with CONNECT).
 //
@@ -261,7 +265,7 @@ type Transport struct {
 	// protocol negotiation. If Transport dials an TLS connection
 	// with a non-empty protocol name and TLSNextProto contains a
 	// map entry for that key (such as "h2"), then the func is
-	// called with the request's authority (such as "example.com"
+	// called with the request's authority (such as"example.com"
 	// or "example.com:1234") and the TLS connection. The function
 	// must return a RoundTripper that then handles the request.
 	// If TLSNextProto is not nil, HTTP/2 support is not enabled
@@ -303,8 +307,6 @@ type Transport struct {
 	ForceAttemptHTTP2 bool
 }
 ```
-</details>
-
 
 ##  参考
 -   [Go 语言设计与实现：9.2 HTTP](https://draveness.me/golang/docs/part4-advanced/ch09-stdlib/golang-net-http/)
