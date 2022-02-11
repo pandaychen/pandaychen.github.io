@@ -22,7 +22,7 @@ tags:
 ![kafka-basic](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka/kafka2.1.png)
 
 - Producer：生产者，可以将数据发布到所选择的 topic 中
-- Consumer：消费者，** 可以使用 Consumer Group 进行标识 **，在 topic 中的每条记录都会被分配给订阅消费组中的一个消费者实例，消费者实例可以分布在多个进程中或者多个机器上
+- Consumer：消费者，**可以使用 Consumer Group 进行标识**，在 topic 中的每条记录都会被分配给订阅消费组中的一个消费者实例，消费者实例可以分布在多个进程中或者多个机器上
 - Broker：消息中间件处理节点（服务器），一个节点就是一个 broker，一个 Kafka 集群由一个或多个 broker 组成
 
 那么，对 Kakfa 的可用性主要着眼于下面几个环节：
@@ -52,6 +52,20 @@ Request.required.acks = -1 #全量同步确认，强可靠性保证（当所有�
 Request.required.acks = 1   #leader 确认收到, 默认（仅 leader 反馈）#WaitForLocal
 Request.required.acks = 0 #不确认，但是吞吐量大（不 care 结果） #NoResponse
 ```
+
+总结下 kafka 支持的三种发送方式（非 ack 模式）的对比以及使用场景如下：
+-  可靠同步发送：适合场景最为广泛，如注册的短信、订单信息等
+-  可靠异步发送：用于链路耗时比较长的场景，对 RT 较为敏感的业务
+-  消息单向发送：适用于耗时非常短，但是对可靠性要求不高的场景，如日志收集等场景
+
+
+| 发送方式 | 发送 TPS | 发送结果反馈 | 可靠性 |
+| :-----:| :----: | :----: | :----: |
+| 可靠同步发送 | 快 | Yes | 不丢失 |
+| 可靠异步发送 | 快 | Yes | 不丢失 |
+| 消息单向发送（不确认）| 最快 | No | 可能丢失 |
+
+![kafka-3-producer](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka/kafka-3-consumer-principle.jpg)
 
 #### sarama 库的设置
 
@@ -195,14 +209,18 @@ auto.commit.interval.ms = 1s    #假设是 1s 提交一次
 
 
 ####  消费者组提交 offset（位移）
-Consumr offset 代表了 kafka Consumer Group 保存其消费的进度。
+Consumr offset 代表了 kafka Consumer Group 保存其消费的进度，既然是主动提交，在临界点就会发生下面两种问题：
+1. 重复消费：如果提交的偏移量小于客户端处理的最后一个消息的偏移量，那么处于两个偏移量直接的消息就会被重复处理。如，位移提交的动作在消费完所有拉取到的消息后才执行，那么当消费到 `X+5` 时候遇到异常。当故障恢复后，重新拉取消息是从 `X+2` 开始，导致 `X+2` 至 `X+4` 之间的消息重新消费一遍
+
+2. 消息丢失：如果提交的偏移量大于客户端处理的最后一个消息的偏移量，那么处于两个偏移量直接的消息将会丢失。如，拉取完成消息后不等消息确认完成消费既执行提交。如图，拉取 `[X+2,X+7]` 后提交位移 `X+8`，当执行到 `X+5` 时候出现异常，当故障恢复后重新拉取消息是从 `X+8` 开始，那么 `[X+5,X+7]` 之间的消息是未能被消费
+
 ![kafka-consumer-offset1.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka/kafka-consumer-offset1.png)
 
 ![kafka-consumer-offset2.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka/kafka-consumer-offset2.png)
 
 ## 0x05 Kafka 的幂等性以及实现
 
-在项目中，一般遵循的原则是，**相比数据丢失，重复投递 / 消费是符合业务预期的，可以通过一些幂等性设计来规避这个问题**。本小节来分析下如下设计 Kafka 的幂等性。
+在项目中，一般遵循的原则是，** 相比数据丢失，重复投递 / 消费是符合业务预期的，可以通过一些幂等性设计来规避这个问题 **。本小节来分析下如下设计 Kafka 的幂等性。
 
 #### 重复消费的问题以及解决
 解决 Consumer 端幂等性的问题，得结合业务的特性来实现，举几个例子：
@@ -383,7 +401,78 @@ func (h msgConsumerGroup) ConsumeClaim(sess sarama.ConsumerGroupSession, claim s
 ```
 
 #### consumer group 的并发机制
+在现网中，有这样的问题，如何提高 sarama consumer group 的并发度及优先级处理呢？[官方文档](https://godoc.org/github.com/Shopify/sarama#ConsumerGroup) 中，Consumer group 让用户可以用消费组的方式进行消费 kafka 消息，如下代码片段 `consumer.ConsumeClaim` 方法中，调用方通过 `for` 循环，从 `claim.Messages` 中不断获取 message 进行消费，然后进行 `MarkMessage` 提交偏移量的操作：
+```golang
+type groupConsumer struct {
 
+}
+
+func (consumer *groupConsumer) Setup(s sarama.ConsumerGroupSession) error {
+    return nil
+}
+
+func (consumer *groupConsumer) Cleanup(s sarama.ConsumerGroupSession) error {
+    return nil
+}
+
+func (consumer *groupConsumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+   //claim.Messages() 返回了一个存储消息体指针的 channel
+    for message := range claim.Messages() {
+        log.Info("consume msg. Topic=%s, partition=%d, offset=%d", message.Topic, message.Partition, message.Offset)
+        // 提交偏移量！（完成任务的时候给服务器发送一个 offset 的 ACK）
+        session.MarkMessage(msg, "")
+    }
+
+    return nil
+}
+```
+
+这里 `ConsumeClaim` 本身就是多 goroutine 机制，一个 partition 会开启一个 goroutine 进行处理。从 sarama 库的实现得知：在 `sess.consume(topic, partition)` 中，调用的就是上面的 `ConsumeClaim`。由此可知，sarama 为每个 topic 的每个 partition 都维护了一个 channel，并且为每个 channel 开了一个协程去处理。
+```golang
+func newConsumerGroupSession(ctx context.Context, parent *consumerGroup, claims map[string][]int32, memberID string, generationID int32, handler ConsumerGroupHandler) (*consumerGroupSession, error) {
+    // start consuming
+    for topic, partitions := range claims {
+        for _, partition := range partitions {
+            sess.waitGroup.Add(1)
+            go func(topic string, partition int32) {
+                defer sess.waitGroup.Done()
+                // cancel the as session as soon as the first
+                // goroutine exits
+                defer sess.cancel()
+                // consume a single topic/partition, blocking
+                sess.consume(topic, partition)
+            }(topic, partition)
+        }
+    }
+    return sess, nil
+}
+```
+
+![consumer-parallel-1.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka/consumer-parallel-1.png)
+
+那么实现并发度提升可以在 `ConsumeClaim` 里面做文章，现网笔者采用固定 size 的 goroutine 协程池方式提高消费任务处理的进度，不过需要解决 `session.MarkMessage` 的问题，看下面这个例子：
+
+```golang
+// 使用 channel 方式实现并发
+var maxLimit = make(chan int, 64)
+
+func (consumer *groupConsumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+    for message := range claim.Messages() {
+        maxLimit <- 1
+        go doBusiness()
+        session.MarkMessage(msg, "")
+    }
+
+    return nil
+}
+```
+
+这个例子是有问题的，异步化之后并不知道 `doBusiness` 执行的结果，`session` 就直接发送了 `ACK` 了，会导致非预期的结果。那么如何解决呢？见后文。
+
+此外，还有另外一种思路，采用本地队列 + goroutine 方式实现，如下图：
+![consumer-parallel-1.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka/consumer-parallel-2.png)
+
+不过，这里介绍的方法仅适合于消费端消费慢，并行度过低的情况。建议还是**通过增加 partition 的方式解决，直接用 kafka 的 partition 扩展性，避免在消费端增加逻辑复杂度**。
 
 ####  consumer group 的消费 offset（位移）
 
