@@ -94,7 +94,7 @@ func doRequest(addr string, port int) error {
 
 
 ##  0x03    http.Transport 结构
-<details><summary markdown="span">Click to show the Code</summary>
+<details><summary>Click to show the Code</summary>
 ```golang
 // Transport is an implementation of RoundTripper that supports HTTP,
 // HTTPS, and HTTP proxies (for either HTTP or HTTPS with CONNECT).
