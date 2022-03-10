@@ -88,7 +88,7 @@ type NodePool struct {
 
 `NodePool` 的重要方法有 2 个，`tickerUpdatePool` 和 `PickNodeByJobName`：
 
--	`tickerUpdatePool`：定时从 `driver` 中获取 **在线的所有**`Dcron` 的进程（节点）列表，计算本进程的一致性 hash ring（这里每次都是重新生成 hash ring，是否可以优化为增量动态增删？）
+-	`tickerUpdatePool`：定时从 `driver` 中获取 ** 在线的所有 **`Dcron` 的进程（节点）列表，计算本进程的一致性 hash ring（这里每次都是重新生成 hash ring，是否可以优化为增量动态增删？）
 -	`PickNodeByJobName`：根据 `jobName`，计算从一致性 hash ring 上选中的虚拟节点（有可能出现选中的不是自己，因为 `updatePool` 是取到所有的在线节点）
 
 所以，dcron 借助分布式一致性 hash 的特性，实现了分布式的特性。
@@ -164,7 +164,7 @@ func (d *Dcron) allowThisNodeRun(jobName string) bool {
 ```
 
 
-4、`JobWarpper`：前文说到过 Cron 库支持的 `JobWarpper` 功能，这里为了实现 **单个同名（ID）任务只在一个节点上运行的功能**，封装了 `JobWarpper`：<br>
+4、`JobWarpper`：前文说到过 Cron 库支持的 `JobWarpper` 功能，这里为了实现 ** 单个同名（ID）任务只在一个节点上运行的功能 **，封装了 `JobWarpper`：<br>
 ```golang
 //JobWarpper is a job warpper
 type JobWarpper struct {
@@ -316,6 +316,16 @@ func (m *Map) Get(key string) string {
 1.	采用 etcd/consul 等中间件的 notify 方式，通知各个节点主动更新 `NodePool`
 2.	给 dcron 节点加上主动心跳上报，开发者可以及时感知进程在线情况
 3.	dcron 的 REDIS 存储是采用 `Scan` 指令，即扫描通用前缀获取当前注册的所有节点的列表，如果 redis 集群不支持此指令的话，那么可能需要换其他的方式（如采用 `LIST` 结构存储所有的节点 id）
+
+####	Kubernetes 部署
+现网中，我们是如此在 kubernetes 部署的，并且实现了如下几点优化：
+![dcron-k8s-change](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/dcrontab/dcron-k8s-change.png)
+-	增加了 namespace 的支持，比如任务是属于某个 namespace 下的
+-	增加了 etcd 支持，采用 etcd 存储每个 pod 节点信息及任务信息（实际上 pod 节点和主机节点的功能一样）
+-	对外部提供 API 接口增加删除任务
+
+这样，以 Service 方式部署于 kubernetes 中，初始化默认生成多个 pod 副本就可以实现任务定时执行的高可用了。
+
 
 ##	0x05	总结
 本文分析了分布式任务调度中间件 dcron 的实现。每个启动的 dcron 示例都将其注册入分布式存储，各个 dcron 使用一致性 hash 算法来选举出执行单个任务的节点来保证唯一性，所有节点都按照写入的 cron 预执行，在任务执行入口处根据一致性 hash 算法来判断该任务是否应该由当前节点执行。
