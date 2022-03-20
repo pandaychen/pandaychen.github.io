@@ -438,9 +438,14 @@ func (c *Cron) run() {
 }
 ```
 
+上述的代码的核心流程如下图：
+
 ![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/dcrontab/crontab-core-event-loop.png)
 
-## 0x05     参考
+##  0x05  小结
+本文分析了基于 Golang 实现的单机定时任务库。
+
+## 0x06     参考
 
 - [golang cron v3 定时任务](https://blog.cugxuan.cn/2020/06/04/Go/golang-cron-v3/)
 - [v3-repo](https://github.com/robfig/cron/tree/v3)

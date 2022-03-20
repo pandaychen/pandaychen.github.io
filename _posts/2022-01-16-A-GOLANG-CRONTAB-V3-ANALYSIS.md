@@ -322,7 +322,10 @@ func (m *Map) Get(key string) string {
 ![dcron-k8s-change](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/dcrontab/dcron-k8s-change.png)
 -	增加了 namespace 的支持，比如任务是属于某个 namespace 下的
 -	增加了 etcd 支持，采用 etcd 存储每个 pod 节点信息及任务信息（实际上 pod 节点和主机节点的功能一样）
--	对外部提供 API 接口增加删除任务
+-	对外部提供 API 接口操作任务的增加 / 删除，需要注意，由于 dcron 的任务是存储在单进程的内存中（其他进程不可见），有如下几种可选的改造或应用方式：
+	-	以 Service + 单个 pod 启动：同时启动多个 Service，注册的时候向多个 Service 均发送定时任务的注册请求
+	-	以 Service + 单个 pod 启动：依据 Service 对 pod 的负载均衡方式（比如轮询），向所有的 pod 发送定时任务的注册请求，此方式不够优雅
+	-	以单 Service + 多个 pod 启动：单 pod 下，在 dcron 中增加异步任务同步模块，注册任务接口将任务写入分布式存储（如 Etcd/redis 等），任务同步模块实时将任务取出，存储到自己的 dcron 中，比较推荐此方式实现
 
 这样，以 Service 方式部署于 kubernetes 中，初始化默认生成多个 pod 副本就可以实现任务定时执行的高可用了。
 
