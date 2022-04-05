@@ -24,6 +24,8 @@ ants 提供了两种执行模式：
 2、`ants.NewPoolWithFunc(pool_size, func(interface{}))`<br>
 这种方式创建的 Pool 需要指定任务处理函数，需调用 `p.Invoke(arg)` 提交任务，`arg` 是传递给 `func(interface{})` 的参数，此 Pool 适合关注结果的并发任务执行场景 <br>
 
+现网中，大部分使用`2`的方式，因为需要关注任务执行的结果。
+
 ## 0x02 整体分析
 
 ants 的运行流程图如下，比较直观，我们按照如下几个核心模块进行分析：
