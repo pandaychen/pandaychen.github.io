@@ -202,7 +202,7 @@ func Cause(e error) Codes {
 	if e == nil {
 		return OK
 	}
-	ec, ok := errors.Cause(e).(Codes)
+	ec, ok := errors.Cause(e).(Codes)	// 调用 errors.Cause 方法获取到最底层的错误
 	if ok {
 		return ec
 	}
@@ -253,7 +253,98 @@ func (s *helloServer) SayHello(ctx context.Context, in *pb.HelloRequest) (*pb.He
 2. `warden/internal/status` 包内包装了 `ecode.Status` 和 `grpc.Status` 进行互相转换的方法 [代码位置](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/internal/status/status.go)
 3. `warden` 的 `client` 和 `server` 则使用转换方法将 `gRPC` 底层返回的 `error` 最终转换为 `ecode.Status` [代码位置](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/client.go#L162)
 
+##	0x04	错误码的一个细节
+在分析客户端熔断 breaker 拦截器的时候，`MarkFailed` 需要对服务端返回的错误进行筛选。见如下 [代码](https://github.com/go-kratos/kratos/blob/v1.0.x/pkg/net/rpc/warden/client.go#L177)：
+```golang
+func onBreaker(breaker breaker.Breaker, err *error) {
+	if err != nil && *err != nil {
+		if ecode.EqualError(ecode.ServerErr, *err) || ecode.EqualError(ecode.ServiceUnavailable, *err) || ecode.EqualError(ecode.Deadline, *err) || ecode.EqualError(ecode.LimitExceed, *err) {
+			breaker.MarkFailed()
+			return
+		}
+	}
+	// 其余错误，包含非错误会 MarkSuccess
+	breaker.MarkSuccess()
+}
+```
+
+从上面的代码可以知道，`onBreaker` 中通过 `ecode.EqualError` 方法从 `err` 中剥离中最原始的 `error` 并与下述错误码比较。通过触发熔断器 `MarkFailed` 技数更新的错误仅限于如下几种，其余的错误（比如类似业务逻辑错误等）熔断器 `MarkSuccess`：
+-	`ecode.ServerErr`
+-	`ecode.ServiceUnavailable`
+-	`ecode.Deadline`：针对接口调用超时 `context.DeadlineExceeded` 的转换型 `ecode.Deadline`
+-	`ecode.LimitExceed`：服务端限流拦截器返回的 [错误](https://github.com/go-kratos/kratos/blob/v1.0.x/pkg/ratelimit/bbr/bbr.go#L220)
+
+##	0x05	优雅的 golang 错误处理
+在前文中，`Cause` 方法是调用了 `github.com/pkg/errors` 错误处理库提供的实现来处理，这是非常优雅的处理办法（对于需要比较错误，或者是获取底层错误的场景十分方便），如下例：
+```golang
+import (
+   "database/sql"
+   "fmt"
+
+   "github.com/pkg/errors"
+)
+
+func ori()error{
+        return sql.ErrNoRows
+}
+
+func foo() error {
+   return errors.Wrap(sql.ErrNoRows, "foo failed")
+}
+
+func bar() error {
+   return errors.WithMessage(foo(), "bar failed")
+}
+
+func main() {
+        err := bar()
+        if errors.Cause(err) == sql.ErrNoRows {
+                fmt.Printf("data not found, %v\n", err)
+                fmt.Printf("%+v\n", err)
+        } else if err != nil {
+                // unknown error
+        }
+
+        err1 := ori()
+        if errors.Cause(err1) == sql.ErrNoRows {
+                fmt.Println("hit on 2")
+        }
+}
+```
+
+使用 `errors.WithMessage` 或者 `errors.Wrap` 封装底层的错误，封装完暴露给上层，上层拿到 `err` 后，再通过 `errors.Cause(err)` 就可以获取到底层的错误类型比进行比较了。`errors` 库提供了如下 `3` 个方法：
+```golang
+// 只附加新的信息
+func WithMessage(err error, message string) error
+
+// 只附加调用堆栈信息
+func WithStack(err error) error
+
+// 同时附加堆栈和信息
+func Wrap(err error, message string) error
+```
+
+####	Cause 的实现
+从源码来看，`Cause` 使用 for 循环一直找到最根本（最底层）的那个 error 并返回给上层：
+```golang
+func Cause(err error) error {
+	type causer interface {
+		Cause() error
+	}
+
+	for err != nil {
+		cause, ok := err.(causer)
+		if !ok {
+			break
+		}
+		err = cause.Cause()
+	}
+	return err
+}
+```
 
 
-##	0x04	参考
+##	0x06	参考
 -	[ecode 使用文档](https://github.com/go-kratos/kratos/blob/master/doc/wiki-cn/ecode.md)
+-	[Go 语言 (golang) 的错误 (error) 处理的推荐方案](https://www.flysnow.org/2019/01/01/golang-error-handle-suggestion.html)
+-	[Golang 错误处理最佳实践](https://medium.com/@dche423/golang-error-handling-best-practice-cn-42982bd72672)
