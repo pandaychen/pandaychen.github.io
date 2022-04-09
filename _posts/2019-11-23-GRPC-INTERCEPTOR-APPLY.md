@@ -353,7 +353,22 @@ func StreamClientInterceptor(ctx context.Context, desc *grpc.StreamDesc, cc *grp
 }
 ```
 
-##  0x04	参考
+##	0x04	拦截器链路径上对错误的处理
+通常，一个服务的调用流程如下，其中某个服务采用了 gRPC 的拦截器链实现，包含了服务端，服务端又内置了客户端去调用其他的 gRPC 服务，那么这个时候需要注意对错误的传递及处理：
+![kraots-cs-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kratos/kratos-cs-flow-interceptor.png)
+
+![kratos-cs-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kratos/blog-kratos-2.png)
+
+以服务端的拦截器执行顺序（真正执行了 `handler` 方法）为例：
+-	RPC 逻辑：通过运行业务逻辑或者是 RPC 客户端获取结果。获取 `resp3`，以及 `err3`，返回到拦截器 2 的 `handler`
+-	拦截器 2：获取到 `resp3` 和 `err3`，同时视情况是否需要对 `resp3` 和 `err3` 进行加工 / 记录或者处理（比如熔断、限流、日志、metrics 等），处理完得到 `resp2` 及 `err2` 返回给拦截器 1 的 `handler`
+-	拦截器 1：同样，获取到 `resp2` 和 `err2` 后，加工生成 `resp1` 和 `err1` 返回给客户端
+
+客户端收到服务端的 `resp1` 和 `err1` 后，假设客户端也有拦截器链，那么按照相同的方式，将 `resp1` 和 `err1` 在各个拦截器中流转并做相应的处理，处理完成得到最终的结果。
+
+所以，这里各个拦截器的放置顺序就显得非常重要，比如为啥 `panic` 拦截器要放在第一个位置？如果放在后面的位置，那么假设前面拦截器运行过程中发生了 panic，就无法捕获到异常了。同理，需要对错误进行处理的拦截器，如果放置的位置不合适，获取不到相关的错误，那么该拦截器就无意义了（比如对于客户端的 breaker 熔断 / 超时重试 / 参数检查拦截器的位置，一般而言，是按照先检查输入参数 -> 熔断拦截器 -> 超时重试的顺序，因为熔断需要检查超时错误，但是对于参数校验错误就不关心）
+
+##  0x05	参考
 -   [gRPC 之 Interceptors](https://www.do1618.com/archives/1467/grpc-%E4%B9%8B-interceptors/)
 -   [gRPC server insterceptor for golang](https://github.com/mercari/go-grpc-interceptor)
 
