@@ -26,6 +26,8 @@ gRPC 提供了拦截器（Interceptor）机制，可以完成这个功能。<br>
 ##  0x01    Interceptor 分析
 gRPC 中使用 `UnaryInterceptor` 来实现 Unary RPC 一元拦截器，使用 `StreamInterceptor` 来实现 Stream RPC 流式的拦截器，而且既可以在客户端进行拦截，也可以对服务器端进行拦截。
 
+![type](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grpc/grpc-interceptor-type2.png)
+
 ####	一元拦截器（grpc.UnaryInterceptor）
 gRPC 的一元拦截器包含服务端 `UnaryServerInterceptor` 和客户端 `UnaryClientInterceptor`，这里我们分析 `UnaryServerInterceptor`:
 
@@ -120,7 +122,7 @@ server.Serve(listener)
 
 ##		0x02	拦截器链
 基于开发的经验，不难想到，多个 Interceptor 的模式可以如下图所示去实现（经典的洋葱模式）：
-![img](https://wx1.sbimg.cn/2020/09/18/GoHgw.png)
+![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grpc/grpc-onion.png)
 
 设想下，如何设计链式的 Interceptor？我脑海中浮现两个方案：
 -   闭包方式调用：类似 `f = interceptor1(ctx,f1);f1 = interceptor2(ctx,f2);....;fn = RPC(ctx)` 这样的方式
@@ -145,7 +147,7 @@ func OneInterceptor() grpc.UnaryServerInterceptor {
 ```
 那么根据以上特点，我们可以将 `handler` 继续传入拦截器，再利用 Golang 的闭包性质将拦截器打包成新的 `handler`，然后再将新的 `handler` 传入下一个拦截器，下一个拦截器继续打包成 `handler`，再依次传递下去，形成链式关系（interceptor chain）。通过这种方式可以将单个拦截器扩展为链式拦截器，实现与 HTTP 中间件数组（如 `gin`）相同的效果。
 
-![img]()
+![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grpc/grpc-interceptor-order1.png)
 
 下面给出两个开源的实现：
 ####  go-grpc-interceptor 的实现
@@ -176,7 +178,7 @@ func (m *multiUnaryServerInterceptor) chain(i int, ctx context.Context, req inte
 }
 ```
 它的调用顺序如下图所示：
-![image]()
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grpc/grpc-interceptor-order.png)
 
 使用该拦截器链的方式如下，例子来源于此 [server.go](https://github.com/pandaychen/grpc_in_action/blob/master/chain_interceptor/server.go)：
 ```golang
@@ -276,7 +278,7 @@ const promiseClient = new MyServicePromiseClient(
 const client = new MyServiceClient(
     host, creds, {'streamInterceptors': [interceptor1, interceptor2, interceptor3]});
 ```
-![img](https://wx1.sbimg.cn/2020/08/28/6gzXJ.png)
+![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grpc/grpc-web-interceptors.png)
 我们从下面的例子来看下这个执行流程：
 
 ####    服务端
