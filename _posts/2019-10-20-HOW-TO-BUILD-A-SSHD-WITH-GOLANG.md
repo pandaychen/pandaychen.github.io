@@ -618,6 +618,52 @@ func SSHDialTimeout(network, addr string, config *ssh.ClientConfig, timeout time
 }
 ```
 
+不过，在现网中，我们是通过在交互式的 session 发送 `SendRequest` 来实现 keepalive，如下面的客户端代码：
+```golang
+func Client() {
+        //....
+        session, _ := client.NewSession()
+        defer session.Close()
+        session.Stdout = os.Stdout
+        session.Stderr = os.Stderr
+        session.Stdin = os.Stdin
+        modes := ssh.TerminalModes{
+                ssh.ECHO:          1,
+                ssh.ECHOCTL:       0,
+                ssh.TTY_OP_ISPEED: 14400,
+                ssh.TTY_OP_OSPEED: 14400,
+        }
+        termFD := int(os.Stdin.Fd())
+        w, h, _ := terminal.GetSize(termFD)
+        termState, _ := terminal.MakeRaw(termFD)
+        defer terminal.Restore(termFD, termState)
+        err = session.RequestPty("xterm-256color", h, w, modes)
+        go func() {
+                for {
+                        time.Sleep(time.Second * time.Duration(30))
+                        // 在当前的 session 中发送 keepalive
+                        session.SendRequest("keepalive@openssh.com", true, nil)
+                }
+        }()
+        session.Shell()
+        session.Wait()
+        //...
+}
+```
+
+有个细节是，SSHD 服务端必须对 `keepalive@openssh.com` 这个 `Request` 有 reply 行为，不然的话，客户端会阻塞在 `session.SendRequest` 方法上；SSHD 服务端需要添加如下 [代码](https://github.com/pandaychen/golang_in_action/blob/master/sshserver/sshserver.go#L167)：
+```golang
+go func() {
+    for req := range requests {
+        switch req.Type {
+        //......
+        case "keepalive@openssh.com":
+            req.Reply(true, nil)
+        }
+    }
+}()
+```
+
 ####    客户端 SetEnv 问题
 SSH 客户端可以使用 [`Setenv` 方法](https://godoc.org/golang.org/x/crypto/ssh#Session.Setenv) 在 ssh 会话中设置环境变量，其原理也是通过 `ssh.SendRequest` 方法，但是这里需要注意的是：<br>
 在 SSH 服务端的配置 `/etc/ssh/sshd_config` 中需要加上这样的配置，如下：

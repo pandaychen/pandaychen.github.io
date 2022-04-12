@@ -26,6 +26,8 @@ gRPC 提供了拦截器（Interceptor）机制，可以完成这个功能。<br>
 ##  0x01    Interceptor 分析
 gRPC 中使用 `UnaryInterceptor` 来实现 Unary RPC 一元拦截器，使用 `StreamInterceptor` 来实现 Stream RPC 流式的拦截器，而且既可以在客户端进行拦截，也可以对服务器端进行拦截。
 
+![type](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grpc/grpc-interceptor-type2.png)
+
 ####	一元拦截器（grpc.UnaryInterceptor）
 gRPC 的一元拦截器包含服务端 `UnaryServerInterceptor` 和客户端 `UnaryClientInterceptor`，这里我们分析 `UnaryServerInterceptor`:
 
@@ -120,7 +122,7 @@ server.Serve(listener)
 
 ##		0x02	拦截器链
 基于开发的经验，不难想到，多个 Interceptor 的模式可以如下图所示去实现（经典的洋葱模式）：
-![img](https://wx1.sbimg.cn/2020/09/18/GoHgw.png)
+![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grpc/grpc-onion.png)
 
 设想下，如何设计链式的 Interceptor？我脑海中浮现两个方案：
 -   闭包方式调用：类似 `f = interceptor1(ctx,f1);f1 = interceptor2(ctx,f2);....;fn = RPC(ctx)` 这样的方式
@@ -145,7 +147,7 @@ func OneInterceptor() grpc.UnaryServerInterceptor {
 ```
 那么根据以上特点，我们可以将 `handler` 继续传入拦截器，再利用 Golang 的闭包性质将拦截器打包成新的 `handler`，然后再将新的 `handler` 传入下一个拦截器，下一个拦截器继续打包成 `handler`，再依次传递下去，形成链式关系（interceptor chain）。通过这种方式可以将单个拦截器扩展为链式拦截器，实现与 HTTP 中间件数组（如 `gin`）相同的效果。
 
-![img]()
+![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grpc/grpc-interceptor-order1.png)
 
 下面给出两个开源的实现：
 ####  go-grpc-interceptor 的实现
@@ -176,7 +178,7 @@ func (m *multiUnaryServerInterceptor) chain(i int, ctx context.Context, req inte
 }
 ```
 它的调用顺序如下图所示：
-![image]()
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grpc/grpc-interceptor-order.png)
 
 使用该拦截器链的方式如下，例子来源于此 [server.go](https://github.com/pandaychen/grpc_in_action/blob/master/chain_interceptor/server.go)：
 ```golang
@@ -276,7 +278,7 @@ const promiseClient = new MyServicePromiseClient(
 const client = new MyServiceClient(
     host, creds, {'streamInterceptors': [interceptor1, interceptor2, interceptor3]});
 ```
-![img](https://wx1.sbimg.cn/2020/08/28/6gzXJ.png)
+![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grpc/grpc-web-interceptors.png)
 我们从下面的例子来看下这个执行流程：
 
 ####    服务端
@@ -353,7 +355,22 @@ func StreamClientInterceptor(ctx context.Context, desc *grpc.StreamDesc, cc *grp
 }
 ```
 
-##  0x04	参考
+##	0x04	拦截器链路径上对错误的处理
+通常，一个服务的调用流程如下，其中某个服务采用了 gRPC 的拦截器链实现，包含了服务端，服务端又内置了客户端去调用其他的 gRPC 服务，那么这个时候需要注意对错误的传递及处理：
+![kraots-cs-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kratos/kratos-cs-flow-interceptor.png)
+
+![kratos-cs-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kratos/blog-kratos-2.png)
+
+以服务端的拦截器执行顺序（真正执行了 `handler` 方法）为例：
+-	RPC 逻辑：通过运行业务逻辑或者是 RPC 客户端获取结果。获取 `resp3`，以及 `err3`，返回到拦截器 2 的 `handler`
+-	拦截器 2：获取到 `resp3` 和 `err3`，同时视情况是否需要对 `resp3` 和 `err3` 进行加工 / 记录或者处理（比如熔断、限流、日志、metrics 等），处理完得到 `resp2` 及 `err2` 返回给拦截器 1 的 `handler`
+-	拦截器 1：同样，获取到 `resp2` 和 `err2` 后，加工生成 `resp1` 和 `err1` 返回给客户端
+
+客户端收到服务端的 `resp1` 和 `err1` 后，假设客户端也有拦截器链，那么按照相同的方式，将 `resp1` 和 `err1` 在各个拦截器中流转并做相应的处理，处理完成得到最终的结果。
+
+所以，这里各个拦截器的放置顺序就显得非常重要，比如为啥 `panic` 拦截器要放在第一个位置？如果放在后面的位置，那么假设前面拦截器运行过程中发生了 panic，就无法捕获到异常了。同理，需要对错误进行处理的拦截器，如果放置的位置不合适，获取不到相关的错误，那么该拦截器就无意义了（比如对于客户端的 breaker 熔断 / 超时重试 / 参数检查拦截器的位置，一般而言，是按照先检查输入参数 -> 熔断拦截器 -> 超时重试的顺序，因为熔断需要检查超时错误，但是对于参数校验错误就不关心）
+
+##  0x05	参考
 -   [gRPC 之 Interceptors](https://www.do1618.com/archives/1467/grpc-%E4%B9%8B-interceptors/)
 -   [gRPC server insterceptor for golang](https://github.com/mercari/go-grpc-interceptor)
 
