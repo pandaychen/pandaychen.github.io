@@ -176,7 +176,7 @@ func chainUnaryClient(handlers []grpc.UnaryClientInterceptor) grpc.UnaryClientIn
 
 ##	0x02	客户端拦截器分析
 
-![warden-client-interceptor-chain]()
+![warden-client-interceptor-chain](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/warden-client-interceptors.png)
 
 ####	对外接口 Use
 Warden 的客户端对外暴露了 [`Use()` 方法](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/client.go#L249)，用于添加自定义的客户端拦截器。
