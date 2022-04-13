@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      微服务基础之熔断保护（Breaker）
-subtitle:
+subtitle:	熔断器机制基础
 date:       2020-04-01
 author:     pandaychen
 header-img:
@@ -25,7 +25,7 @@ tags:
 ##  0x01	原理
 熔断器的本质就是状态机，包含了熔断检测、熔断关闭、数据统计三个模块。如下图状态机中三种状态的变迁：
 
-OPEN ------ HALFOPEN ------ CLOSED
+OPEN `------` HALFOPEN `------` CLOSED
 
 -	OPEN 状态：熔断器打开，使用快速失败返回，调用链结束
 
@@ -39,7 +39,7 @@ OPEN ------ HALFOPEN ------ CLOSED
 
 ![image](https://s1.ax1x.com/2020/04/23/J093dg.png)
 
-当 Service-E 服务出现故障时，Service-B 的熔断检测模块，** 主动 ** 检测到 Client 调用 Service-E 服务错误率达到设置阈值，从而 ** 主动 ** 开启熔断，开启熔断的结果，是访问 Service-E 的请求全部返回错误，或者按照默认值处理；当 Service-E 服务恢复时，** 自动 ** 关闭熔断状态。这里的好处：
+当 Service-E 服务出现故障时，Service-B 的熔断检测模块，**主动** 检测到 Client 调用 Service-E 服务错误率达到设置阈值，从而 **主动** 开启熔断，开启熔断的结果，是访问 Service-E 的请求全部返回错误，或者按照默认值处理；当 Service-E 服务恢复时，**自动** 关闭熔断状态。这里的好处：
 -   保护了 Service-B 自身的稳定性
 -   降低对 Service-E 的透传请求，防止服务链路上引发雪崩效应
 
@@ -160,11 +160,8 @@ func (b *sreBreaker) MarkFailed() {
 }
 ```
 
-
-
 ##	0x04	总结
-本文介绍了微服务中常用熔断机制的原理，熔断机制是预防服务雪崩的最有效的一种手段。目前在 gRPC 项目中，就使用了 [Hystrix-Go](https://github.com/afex/hystrix-go) 作为客户端的熔断实现，当然 Kratos 中的自适应熔断算法（基于 Google-SRE 设计）的现网应用效果可能会更优雅。
-下一篇文章来分析下 Hystrix-Go 是如何实现熔断策略的。
+本文介绍了微服务中常用熔断机制的原理，熔断机制是预防服务雪崩的最有效的一种手段。目前在 gRPC 项目中，就使用了 [Hystrix-Go](https://github.com/afex/hystrix-go) 作为客户端的熔断实现，当然 Kratos 中的自适应熔断算法（基于 Google-SRE 设计）的现网应用效果可能会更优雅。下一篇文章来分析下 Hystrix-Go 是如何实现熔断策略的。
 
 ##  0x05	参考
 -   [微服务 - 熔断机制](http://blog.zhuxingsheng.com/blog/micro-service-fuse-mechanism.html)
