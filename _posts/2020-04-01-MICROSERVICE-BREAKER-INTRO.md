@@ -25,6 +25,8 @@ tags:
 ##  0x01	原理
 熔断器的本质就是状态机，包含了熔断检测、熔断关闭、数据统计三个模块。如下图状态机中三种状态的变迁：
 
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2020/0401/3-breaker.png)
+
 OPEN `------` HALFOPEN `------` CLOSED
 
 -	OPEN 状态：熔断器打开，使用快速失败返回，调用链结束
@@ -33,11 +35,11 @@ OPEN `------` HALFOPEN `------` CLOSED
 
 -	CLOSED 状态：熔断器关闭，正常调用
 
-![image](https://s1.ax1x.com/2020/04/24/J0JYb8.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2020/0401/1-breaker.png)
 
 ##	0x02	熔断算法指标的量化
 
-![image](https://s1.ax1x.com/2020/04/23/J093dg.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2020/0401/2-breaker.png)
 
 当 Service-E 服务出现故障时，Service-B 的熔断检测模块，**主动** 检测到 Client 调用 Service-E 服务错误率达到设置阈值，从而 **主动** 开启熔断，开启熔断的结果，是访问 Service-E 的请求全部返回错误，或者按照默认值处理；当 Service-E 服务恢复时，**自动** 关闭熔断状态。这里的好处：
 -   保护了 Service-B 自身的稳定性

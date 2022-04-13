@@ -23,7 +23,7 @@ ringbuffer 的实现主要依赖于读写指针的移动（head-ReadIndex/tail-W
 - 通过 `mod m_size` 得出 ReadIndex/WriteIndex 的相对位置，进而实现 "环形" 的机制
 - 写入 / 读取操作时需要考虑边界情况，写入需要移动 `tail` 指针，读取需要移动 `head` 指针
 
-![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/blob/master/blog_img/2022/queue/ringbuffer-2.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/queue/ringbuffer-2.png)
 
 ##  0x02  现网应用
 基于 ringbuffer 可以实现无锁的通信，在现网项目中，会遇到进程间通信的场景，及两个进程（进程 `A` 和进程 `B`）需要进行双向数据通信，如何无锁化实现呢？这就可以借用 ringbuffer，实现思路如下：
@@ -45,6 +45,7 @@ ringbuffer 的实现主要依赖于读写指针的移动（head-ReadIndex/tail-W
 - `DataHead`：内存数据头结构
 - `DataUnit`：内存数据体结构（变长）
 
+
 ```cpp
 struct NodeDataHead
 {
@@ -62,6 +63,7 @@ struct NodeDataUnit
 ```
 
 ##  0x04  总结
+代码实现[在此](https://github.com/pandaychen/d-ringbuffer)
 
 ##  0x05  参考
 - [Circular buffer](https://en.wikipedia.org/wiki/Circular_buffer)
