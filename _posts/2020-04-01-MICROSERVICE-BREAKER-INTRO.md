@@ -59,7 +59,21 @@ OPEN `------` HALFOPEN `------` CLOSED
 -	探测服务恢复：如何量化情况好转：多长时间之后超时请求数低于多少关闭熔断
 -	关闭熔断：情况好转，恢复目标服务调用
 
-##	0x03	熔断器的应用方式
+##	0x03	熔断器的转换流程
+![status-change](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/breaker/breaker-status-change.png)
+从上小节可知，熔断器的本质是状态机：
+-	Close（正常）: 此刻正常阶段， 不会影响用户请求
+-	Open（熔断） 此刻处于熔断阶段， 内部服务不可用
+-	HalfOpen（半开放阶段）: 此刻处于恢复阶段，放行零星请求，尝试满足某种条件关闭熔断器
+
+所以实现或分析熔断器就需要考虑下面的切换过程：
+1.	在什么条件下， 会从[正常阶段]， 切换到[熔断中阶段] —> 即动作`B`
+2.	在什么条件下， 会从[熔断中]，切换到[恢复阶段] —> 即动作`D`
+3.	在什么条件下， 会从[半开放阶段], 重新切换到[熔断中阶段]—> 即动作`F`
+4.	在什么条件下， 会从[半开放阶段], 重新切换到[正常状态]—> 即动作`G`
+
+
+##	0x04	熔断器的应用方式
 熔断器的使用主体一般是客户端侧（也可以是服务侧中的客户端调用），比如在 Kratos 中，默认集成熔断器功能的组件有：
 -	RPC client: [pkg/net/rpc/warden/client](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/client.go)
 -	Mysql client：pkg/database/sql
@@ -162,13 +176,14 @@ func (b *sreBreaker) MarkFailed() {
 }
 ```
 
-##	0x04	总结
+##	0x05	总结
 本文介绍了微服务中常用熔断机制的原理，熔断机制是预防服务雪崩的最有效的一种手段。目前在 gRPC 项目中，就使用了 [Hystrix-Go](https://github.com/afex/hystrix-go) 作为客户端的熔断实现，当然 Kratos 中的自适应熔断算法（基于 Google-SRE 设计）的现网应用效果可能会更优雅。下一篇文章来分析下 Hystrix-Go 是如何实现熔断策略的。
 
-##  0x05	参考
+##  0x06	参考
 -   [微服务 - 熔断机制](http://blog.zhuxingsheng.com/blog/micro-service-fuse-mechanism.html)
 -   [CircuitBreaker](https://martinfowler.com/bliki/CircuitBreaker.html)
 -	[Kratos-Breaker 文档](https://github.com/go-kratos/kratos/blob/master/doc/wiki-cn/breaker.md)
 -	[Golang 中使用断路器](https://yangxikun.com/golang/2019/08/10/golang-circuit.html)
+-	[golang微服务熔断(breaker)](https://l1905.github.io/golang/熔断/2021/01/05/golang-breaker/)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
