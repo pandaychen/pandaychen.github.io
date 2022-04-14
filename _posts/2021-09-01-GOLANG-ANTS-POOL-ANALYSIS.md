@@ -13,7 +13,7 @@ tags:
 
 ## 0x00 前言
 
-本文分析下协程池库 ants 的实现，仓库 [在此](https://github.com/panjf2000/ants)，此库基于 fasthttp 的协程池实现。
+本文分析下协程池库 ants 的实现，仓库 [在此](https://github.com/panjf2000/ants)，此库基于 fasthttp 的协程池[实现](https://github.com/valyala/fasthttp/blob/master/workerpool.go)。
 
 ## 0x01 ants 协程池使用
 
