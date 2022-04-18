@@ -60,7 +60,7 @@ Opentracing 定义了两种引用关系: ChildOf 和 FollowFrom，分别来看�
 6、Trace<br>
 Trace 表示一次完整的追踪链路，trace 由一个或多个 Span 组成。它表示从头到尾的一个请求的调用链，它的标识符是 traceID。 下图示例表示了一个由 8 个 Span 组成的 trace:
 
-```javascript
+```text
         [Span A]  ←←←(the root span)
             |
      +------+------+
@@ -77,7 +77,7 @@ Trace 表示一次完整的追踪链路，trace 由一个或多个 Span 组成�
 ```
 
 以时间轴的展现方式如下：
-```javascript
+```text
 ––|–––––––|–––––––|–––––––|–––––––|–––––––|–––––––|–––––––|–> time
 
  [Span A···················································]
@@ -145,7 +145,7 @@ childSpan.Tag("http.status_code", statusCode)
 
 4、在分布式系统中发送 RPC 请求时会带上 Tracing 数据，包括 TraceId、ParentSpanId、SpanId、Sampled 等。可以在 HTTP 请求中使用 Extract/Inject 方法在 HTTP Request Headers 上透传数据。即 <font color="#dd0000"> 在 Client 端执行 `Inject`，在 Server 端执行 `Extract`</font>， 目前 Zipkin 已有组件支持以 HTTP、gRPC 这两种 RPC 协议透传 Context 信息。总体数据流程如下：
 
-```javascript
+```text
    Client Span                                                Server Span
 ┌──────────────────┐                                       ┌──────────────────┐
 │                  │                                       │                  │
@@ -501,9 +501,37 @@ func injectSpanContext(ctx context.Context, tracer opentracing.Tracer, clientSpa
 
 
 ##	0x05	数据库追踪
-待续....
+见此，[Xorm实现tracing机制](https://pandaychen.github.io/2020/06/29/A-XORM-USAGE-SUMUP/#0x06----xorm-tracing-%E5%AE%9E%E7%8E%B0)
 
-##  0x06    参考
+##	0x06	TraceId的生成机制
+这里引用下阿里云推荐的traceId生成规则：
+
+![ali](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/microservice/tracing-id-generate-rules-ali.png)
+
+####	TraceId 生成规则
+TraceId 一般由接收请求经过的第一个服务器产生。规则是：服务器 IP + ID 产生的时间 + 自增序列 + 当前进程号（忽略`|`号），如`0ad1348f|1403169275002|1003|56696`：
+
+-	前 `8` 位 `0ad1348f` 即产生 TraceId 的机器的 IP（`16`进制，每`2`位转换一次，`10.209.52.143`），**可以根据这个规律来查找到请求经过的第一个服务器**
+-	中间 `13` 位 `1403169275002` 是产生 TraceId 的时间
+-	之后的 `4` 位 `1003` 是一个自增的序列，从 `1000` 涨到 `9000`，到达 `9000` 后回到 `1000` 回环
+-	最后的 `5` 位 `56696` 是当前的进程 ID，为了防止单机多进程出现 TraceId 冲突的情况，所以在 TraceId 末尾添加了当前的进程 ID
+
+####	SpanId 生成规则
+SpanId 代表本次调用在整个调用链路树中的（相对）位置。
+
+假设一个 Web 系统 A 接收了一次用户请求，那么在这个系统日志中，记录下的 SpanId 是 `0`，代表是整个调用的根节点，如果 A 系统处理这次请求，需要通过 RPC 依次调用 B、C、D 三个系统，那么在 A 系统的客户端日志中，SpanId 分别是 `0.1`，`0.2` 和 `0.3`，在 B、C、D 三个系统的服务端日志中，SpanId 也分别是 `0.1`，`0.2` 和 `0.3`；如果 C 系统在处理请求的时候又调用了 E，F 两个系统，那么 C 系统中对应的客户端日志是 `0.2.1` 和 `0.2.2`，E、F 两个系统对应的服务端日志也是 `0.2.1` 和 `0.2.2`。如果把一次调用中所有的 SpanId 收集起来，可以组成一棵完整的链路树。
+
+
+##	0x07	小结
+小结下，要实现Tracing机制及Tracing应用的关键点：
+-	选择合适的数据收集端
+-	明确当前是跨进程调用还是进程内调用，如何获取到`spanContext`
+-	传输`Span`的方法，一般会放在各类header中，避免侵入业务
+-	采样率
+
+##  0x08    参考
 -	[OpenTracing API for Go](https://github.com/opentracing/opentracing-go)
 -   [阿里云：通过 Zipkin 上报 Go 应用数据](https://www.alibabacloud.com/help/zh/doc-detail/96334.htm)
 -   [Go 集成 Opentracing（分布式链路追踪）](https://juejin.im/post/6844903942309019661)
+-	[TraceId 和 SpanId 生成规则](https://help.aliyun.com/document_detail/151840.html)
+-	[go-zero链路追踪](https://go-zero.dev/cn/trace.html)
