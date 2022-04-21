@@ -16,18 +16,23 @@ tags:
 
 ##  0x01    回顾 OpenTracing 数据模型
 一个 Tracer 包含了若干个 Span，Span 是追踪链路中的基本组成元素，一个 Span 表示一个独立的工作单元，在链路追踪中可以表示一个接口的调用，一个数据库操作的调用等等。<br>
+
+-	Span：调用链路的基本单元，使用 spanId 作为唯一标识；每个服务的每次调用都对应一个 Span，在其中记录服务名称、时间等基本信息
+-	Trace：表示一个调用链路，由若干 Span 组成，使用 traceId 作为唯一标识，对应一次完整的服务请求
+
 一个 Span 中包含如下内容：
--   服务名称 (operation name)
--   服务的开始和结束时间
--   Tags：k/v 形式
--   Logs：k/v 形式
+-   服务名称 (operation name，必选)
+-	服务开始时间（必选）
+-   服务的结束时间（必选）
+-   Tags：K/V 形式
+-   Logs：K/V 形式
 -   SpanContext
 -   Refrences：该 span 对一个或多个 span 的引用（通过引用 SpanContext）
 
 详细说明下上面的字段：
 
 1、Tags<br>
-Tags 是一个 K/V 类型的键值对，用户可以自定义该标签并保存。主要用于链路追踪结果对查询过滤。例如：·http.method="GET",http.status_code=200。其中 key 值必须为字符串，value 必须是字符串，布尔型或者数值型。span 中的 tag 仅自己可见，不会随着 SpanContext 传递给后续 span
+每个 Span 可以有多个键值 K/V 对形式的 Tags，Tags 是没有时间戳的，支持简单的对 Span 进行注解和补充。Tags 是一个 K/V 类型的键值对，用户可以自定义该标签并保存。主要用于链路追踪结果对查询过滤。如某 Span 是调用 Redis ，而可以设置 `redis` 的标签，这样通过搜索 `redis` 关键字，可以查询出所有相关的 Span 以及 trace；又如 `http.method="GET",http.status_code=200`，其中 key 值必须为字符串，value 必须是字符串，布尔型或者数值型。Span 中的 Tag 仅自己可见，不会随着 SpanContext 传递给后续 Span。
 ```golang
 span.SetTag("http.method","GET")
 span.SetTag("http.status_code",200)
@@ -45,20 +50,20 @@ span.LogFields(
 PS：Opentracing 给出了一些惯用的 Tags 和 Logs，[链接](https://github.com/opentracing/specification/blob/master/semantic_conventions.md)
 
 3、SpanContext（核心字段）<br>
-SpanContext 携带着一些用于跨服务通信的（跨进程）数据，主要包含：
--   该 Span 的唯一标识信息，如：`span_id`、`trace_id`
+每个 Span 必须提供方法访问 SpanContext，SpanContext 代表跨越进程边界（在不同的 Span 中传递信息），传递到下级 Span 的状态。SpanContext 携带着一些用于跨服务通信的（跨进程）数据，主要包含：
+-   该 Span 的唯一标识信息，如：`span_id`、`trace_id`、`parent_id` 或 `sampled` 等
 -   Baggage Items，为整条追踪连保存跨服务（跨进程）的 K/V 格式的用户自定义数据
 
 4、Baggage Items<br>
-Baggage Items 与 Tags 类似，也是 K/V 键值对。与 tags 不同的是：Baggage Items 的 Key 和 Value 都只能是 string 格式，Baggage items 不仅当前 Span 可见，其会随着 SpanContext 传递给后续所有的子 Span。要小心谨慎的使用 Baggage Items：因为在所有的 span 中传递这些 Key/Value 会带来不小的网络和 CPU 开销
+Baggage Items 与 Tags 类似，也是 K/V 键值对。与 tags 不同的是：Baggage Items 的 Key 和 Value 都只能是 string 格式，Baggage items 不仅当前 Span 可见，其会随着 SpanContext 传递给后续所有的子 Span。要小心谨慎的使用 Baggage Items：因为在所有的 Span 中传递这些 Key/Value 会带来不小的网络和 CPU 开销。Baggage 是存储在 SpanContext 中的一个键值对集合。它会在一条追踪链路上的所有 Span 内全局传输，包含这些 Span 对应的 SpanContexts
 
 5、References（引用关系）<br>
 Opentracing 定义了两种引用关系: ChildOf 和 FollowFrom，分别来看：
--	ChildOf: 父 Span 的执行依赖子 Span 的执行结果时，此时子 span 对父 span 的引用关系是 ChildOf。比如对于一次 RPC 调用，服务端的 Span（子 Span）与客户端调用的 Span（父 Span）是 ChildOf 关系。
+-	ChildOf: 父 Span 的执行依赖子 Span 的执行结果时，此时子 Span 对父 Span 的引用关系是 ChildOf。比如对于一次 RPC 调用，服务端的 Span（子 Span）与客户端调用的 Span（父 Span）是 ChildOf 关系。
 -	FollowFrom：父 Span 的执不依赖子 Span 执行结果时，此时子 Span 对父 Span 的引用关系是 FollowFrom。FollowFrom 常用于异步调用的表示，例如消息队列中 Consumerspan 与 Producerspan 之间的关系。
 
 6、Trace<br>
-Trace 表示一次完整的追踪链路，trace 由一个或多个 Span 组成。它表示从头到尾的一个请求的调用链，它的标识符是 traceID。 下图示例表示了一个由 8 个 Span 组成的 trace:
+Trace 表示一次完整的追踪链路，trace 由一个或多个 Span 组成。它表示从头到尾的一个请求的调用链，它的标识符是 traceID。 下图示例表示了一个由 `8` 个 Span 组成的 trace:
 
 ```text
         [Span A]  ←←←(the root span)
@@ -91,6 +96,20 @@ Trace 表示一次完整的追踪链路，trace 由一个或多个 Span 组成�
 此外，跟踪上下文（Trace Context）也是很重要的场景，它定义了传播跟踪所需的所有信息，例如 traceID，parent-SpanId 等。OpenTracing 提供了两个处理跟踪上下文（Trace Context）的方法：
 -	`Inject(SpanContext,format,carrier)`：Inject 将跟踪上下文放入媒介，来保证跟踪链的连续性，常用于客户端
 -	`Extract(format.Carrier)`：一般从媒介（通常是 HTTP 头）获取跟踪上下文，常用于服务端
+
+####	OpenTracing API 的路径
+在 OpenTracing API 中，有三个主要对象：
+-	Tracer
+-	Span
+-	SpanContext
+Tracer 可以创建 Spans 并了解如何跨流程边界对它们的元数据进行 Inject（序列化）和 Extract（反序列化），通常的有如下流程：
+-	开始一个新的 Span
+-	Inject 一个 SpanContext 到一个载体
+-	从载体 Extract 一个 SpanContext
+-	由起点进程创建一个 Tracer，然后启动进程发起请求，每个动作产生一个 Span，如果有父子关系，Tracer 将它们关联
+-	当请求 / Span 完成后，Tracer 将跟踪信息推送到 Collector
+
+![inject-extract](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/microservice/tracing-extract-and-inject.png)
 
 ##  0x02	ZipKin-Tracing 的一般流程
 Zipkin 是一款开源的分布式实时数据追踪系统（Distributed Tracking System），由 Twitter 公司开发和贡献。其主要功能是聚合来自各个异构系统的实时监控数据。在链路追踪 Tracing Analysis 中，可以通过 Zipkin 上报 Golang 应用数据。
@@ -501,17 +520,17 @@ func injectSpanContext(ctx context.Context, tracer opentracing.Tracer, clientSpa
 
 
 ##	0x05	数据库追踪
-见此，[Xorm实现tracing机制](https://pandaychen.github.io/2020/06/29/A-XORM-USAGE-SUMUP/#0x06----xorm-tracing-%E5%AE%9E%E7%8E%B0)
+见此，[Xorm 实现 tracing 机制](https://pandaychen.github.io/2020/06/29/A-XORM-USAGE-SUMUP/#0x06----xorm-tracing-%E5%AE%9E%E7%8E%B0)
 
-##	0x06	TraceId的生成机制
-这里引用下阿里云推荐的traceId生成规则：
+##	0x06	TraceId 的生成机制
+这里引用下阿里云推荐的 traceId 生成规则：
 
 ![ali](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/microservice/tracing-id-generate-rules-ali.png)
 
 ####	TraceId 生成规则
-TraceId 一般由接收请求经过的第一个服务器产生。规则是：服务器 IP + ID 产生的时间 + 自增序列 + 当前进程号（忽略`|`号），如`0ad1348f|1403169275002|1003|56696`：
+TraceId 一般由接收请求经过的第一个服务器产生。规则是：服务器 IP + ID 产生的时间 + 自增序列 + 当前进程号（忽略 `|` 号），如 `0ad1348f|1403169275002|1003|56696`：
 
--	前 `8` 位 `0ad1348f` 即产生 TraceId 的机器的 IP（`16`进制，每`2`位转换一次，`10.209.52.143`），**可以根据这个规律来查找到请求经过的第一个服务器**
+-	前 `8` 位 `0ad1348f` 即产生 TraceId 的机器的 IP（`16` 进制，每 `2` 位转换一次，`10.209.52.143`），**可以根据这个规律来查找到请求经过的第一个服务器**
 -	中间 `13` 位 `1403169275002` 是产生 TraceId 的时间
 -	之后的 `4` 位 `1003` 是一个自增的序列，从 `1000` 涨到 `9000`，到达 `9000` 后回到 `1000` 回环
 -	最后的 `5` 位 `56696` 是当前的进程 ID，为了防止单机多进程出现 TraceId 冲突的情况，所以在 TraceId 末尾添加了当前的进程 ID
@@ -523,15 +542,23 @@ SpanId 代表本次调用在整个调用链路树中的（相对）位置。
 
 
 ##	0x07	小结
-小结下，要实现Tracing机制及Tracing应用的关键点：
+小结下，要实现 Tracing 机制及 Tracing 应用的关键点：
 -	选择合适的数据收集端
--	明确当前是跨进程调用还是进程内调用，如何获取到`spanContext`
--	传输`Span`的方法，一般会放在各类header中，避免侵入业务
+-	明确当前是跨进程调用还是进程内调用，如何获取到 `spanContext`
+-	传输 `Span` 的方法，一般会放在各类 header 中，避免侵入业务
 -	采样率
+-	对于 Tracing-Span 的代码实现而言：
+	-	如果 Tracing 不存在，那么则需要新建一个 Tracing，并且生成唯一的 TracingId
+	-	如果 Tracing 存在，那么需要查看调用代码处是一个 Span（不存在 Span，需新建），还是一个子 Span（从当前的 Span Fork 一个新的）
+	-	Span 过程中，需要明确是否在本 Span 中进行 Finish（还是不需要），记录耗时，Tags，错误信息或者日志等
 
 ##  0x08    参考
 -	[OpenTracing API for Go](https://github.com/opentracing/opentracing-go)
 -   [阿里云：通过 Zipkin 上报 Go 应用数据](https://www.alibabacloud.com/help/zh/doc-detail/96334.htm)
 -   [Go 集成 Opentracing（分布式链路追踪）](https://juejin.im/post/6844903942309019661)
 -	[TraceId 和 SpanId 生成规则](https://help.aliyun.com/document_detail/151840.html)
--	[go-zero链路追踪](https://go-zero.dev/cn/trace.html)
+-	[go-zero 链路追踪](https://go-zero.dev/cn/trace.html)
+-	[A collection of tutorials for the OpenTracing API](https://github.com/yurishkuro/opentracing-tutorial)
+-	[使用 jaeger 给你的微服务进行分布式链路追踪](https://kebingzao.com/2020/12/25/jaeger-use/)
+-	[APM 原理与框架选型](https://www.cnblogs.com/xiaoqi/p/apm.html)
+-	[官方文档](https://opentracing.io/docs/overview/tracers/)
