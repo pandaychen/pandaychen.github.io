@@ -379,4 +379,6 @@ type ServerConfig struct {
 }
 ```
 
-## 0x 参考
+## 0x02 参考
+-	[ssh包](https://pkg.go.dev/golang.org/x/crypto/ssh)
+-	[gliderlabs-ssh包](https://pkg.go.dev/github.com/gliderlabs/ssh)
