@@ -195,8 +195,163 @@ var TablePrefix = map[string]interface{}{
 ```
 
 ##  0x06    Xorm Tracing 实现
+这里采用 `xorm.io/xorm 1.0.3` 版本来实现 xorm 的 tracing 功能，支持以 Hook 钩子方式侵入 XORM 执行过程。用户侧仅需要实现 [contexts.Hook](https://gitea.com/xorm/xorm/src/branch/master/contexts/hook.go#L43) 的方法，加入 tracing 的机制即可
+
+####    xorm 的 hooker 实现
+xorm 的 `Engine` 提供了 [AddHook](https://gitea.com/xorm/xorm/src/tag/v1.3.0/engine.go#L1380) 方法，用于注入自定义钩子：
+```golang
+// AddHook adds a context Hook
+func (engine *Engine) AddHook(hook contexts.Hook) {
+    // 调用 `core.DB` 的 AddHook 方法
+	engine.db.AddHook(hook)
+}
+
+// AddHook adds hook
+func (db *DB) AddHook(h ...contexts.Hook) {
+	db.hooks.AddHook(h...)
+}
+```
+
+上述 `db.hooks.AddHook` 为 `contexts.Hooks`[类型](https://gitea.com/xorm/xorm/src/branch/master/contexts/hook.go#L14) 暴露的注册方法，传入参数为 `contexts.Hook` 类型（接口类型）：
+```golang
+type Hook interface {
+	BeforeProcess(c *ContextHook) (context.Context, error)
+	AfterProcess(c *ContextHook) error
+}
+
+type Hooks struct {
+	hooks []Hook
+}
+
+func (h *Hooks) AddHook(hooks ...Hook) {
+	h.hooks = append(h.hooks, hooks...)
+}
+```
+由此了解到，如果要实现 xorm hook，需要传入一个 `contexts.Hook`，需要实现两个方法（`BeforeProcess` 和 `AfterProcess`）就能实现这个接口。
+
+####    ContextHook
+`BeforeProcess` 方法的参数是 `ContextHook`，如下，其中的参数会用于 tracing 逻辑：
+```golang
+// ContextHook represents a hook context
+type ContextHook struct {
+	start       time.Time
+	Ctx         context.Context
+	SQL         string        // log content or SQL
+	Args        []interface{} // if it's a SQL, it's the arguments
+	Result      sql.Result
+	ExecuteTime time.Duration
+	Err         error // SQL executed error
+}
+```
+
+-   `Ctx`：本次 orm 操作的上下文，我们的 span 需要存储在这里
+-   `SQL` 和 `Args`：可作为 spanLog
+-   `Err`：错误，可以作为 spanLog
+
+####    一些细节
+以 `db.beforeProcess` 的实现为例；
+这一段就是实际 SQL 查询过程中调用日志和 Hook 的过程，从这里可以非常明显的看到日志模块传入的是值而不是指针，从而导致了我们无法修改日志模块中的上下文实现 span 的传递，只能利用全局日志实例来传递 span，这直接出现了并发安全问题
+而 Hook 的传递使用的是指针传递，将 contexts.ContextHook 的指针传入钩子函数执行流程，允许我们直接操作 Ctx
+
+```golang
+func (db *DB) beforeProcess(c *contexts.ContextHook) (context.Context, error) {
+	if db.NeedLogSQL(c.Ctx) {
+	    // <-- 重要，这里是将日志上下文转化成值传递
+	    // 所以不能修改 context.Context 的内容
+		db.Logger.BeforeSQL(log.LogContext(*c))
+	}
+	// Hook 是指针传递，所以可以修改 context.Context 的内容
+	ctx, err := db.hooks.BeforeProcess(c)
+	if err != nil {
+		return nil, err
+	}
+	return ctx, nil
+}
+
+func (db *DB) afterProcess(c *contexts.ContextHook) error {
+    // 和 beforeProcess 同理，日志上下文不能修改 context.Context 的内容
+    // 而 hook 可以
+	err := db.hooks.AfterProcess(c)
+	if db.NeedLogSQL(c.Ctx) {
+		db.Logger.AfterSQL(log.LogContext(*c))
+	}
+	return err
+}
+```
+
+
+####    Hook 实现
+实现代码在 [此](https://github.com/pandaychen/grpc-wrapper-framework/blob/master/storage/database/xorm/hook.go)。核心步骤三点：
+1、定义 `XormHook` 结构，注意不要使用该结构来进行 span 传递
+```golang
+type XormHook struct {
+	name string
+}
+```
+
+2、实现 `hook` 的公共接口 <br>
+```golang
+// 前置钩子实现
+func (h *XormHook) BeforeProcess(ctx *contexts.ContextHook) (context.Context, error) {
+	span, _ := opentracing.StartSpanFromContext(ctx.Ctx, "xorm-hook")
+
+	// 将 span 注入 c.Ctx 中
+	ctx.Ctx = context.WithValue(ctx.Ctx, xormHookSpanCtxKey, span)
+
+	return ctx.Ctx, nil
+}
+
+func (h *XormHook) AfterProcess(c *contexts.ContextHook) error {
+	sp, ok := c.Ctx.Value(xormHookSpanCtxKey).(opentracing.Span)
+	if !ok {
+		//no span,logger?
+		return nil
+	}
+	// 结束前上报
+	defer sp.Finish()
+
+	//log details
+	if c.Err != nil {
+		//log error
+		sp.LogFields(tlog.Object("err", c.Err))
+	}
+
+	// 使用 xorm 的 builder 将查询语句和参数结合
+	sql, err := builder.ConvertToBoundSQL(c.SQL, c.Args)
+	if err == nil {
+		// mark sql
+		sp.LogFields(tlog.String(enums.TagDBStatement, sql))
+	}
+	sp.LogFields(tlog.String(enums.TagDBInstance, h.name))
+	sp.LogFields(tlog.Object("args", c.Args))
+	sp.SetTag(enums.TagDBExecuteCosts, c.ExecuteTime)
+
+	return nil
+}
+```
+
+3、在 xorm 包初始化时 [挂载](https://github.com/pandaychen/grpc-wrapper-framework/blob/master/storage/database/xorm/xorm.go#L49)`XormHook`<br>
+```golang
+func NewXormClient(option *XormOption) (*XormClient, error) {
+    //...
+	xormCli.Engine, err = xorm.NewEngine(option.Driver, option.Dsn)
+	if err != nil {
+		return nil, err
+	}
+
+	xormCli.SetDefaultContext(context.WithValue(context.Background(), clientInstance, &xormCli))
+    // 注入钩子实现
+	xormCli.AddHook(NewXormHook(option.Name))
+    //...
+	return &xormCli, nil
+}
+```
+
+4、在调用时，传入上下文 `context` 至 xorm 的 `Engine.Context(ctx)`，然后运行 SQL 即可<br>
+
 
 ##  0x07    参考
 -   [基于 Xorm 框架实现分表](https://blog.csdn.net/wyhstars/article/details/80609652)
 -   [Xorm 操作指南](https://www.kancloud.cn/kancloud/xorm-manual-zh-cn)
 -   [xorm - 课时 2：高级用法讲解](https://github.com/unknwon/wuwen.org/issues/6)
+-   [Golang XORM 分布式链路追踪（源码分析）](https://gitee.com/avtion/xormWithTracing)
