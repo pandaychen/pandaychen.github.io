@@ -35,7 +35,7 @@ gRPC 官方博客的文章 [gRPC Load Balancing](https://grpc.io/blog/grpc-load-
 ##  0x01    DnsResolver + Headless-Service
 &emsp;&emsp; 这是我们项目最开始使用的 LB 解析方案，也是 TKE 集群上默认自带的服务发现方式。Headless-Service 可以将 Service 的 Endpoint 直接更新到 kubernetes 的 coreDNS 中，所以客户端只要使用 coreDNS 作为名字解析，就能获取下游所有的 Endpoint(s)，然后客户端通过传入的 LB 算法来实现负载均衡策略。
 
-![coredns.png](https://wx2.sbimg.cn/2020/06/15/coredns.png)
+![coredns.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/loadbalance/k8s-lb-headless-service.png)
 
 ##  0x02  DNS 解析的缺陷
 &emsp;&emsp; 在使用 gRPC+DnsResolver+HeadlessService 实现 Kubernetes 负载均衡方案时，有个明显的缺陷就是，DnsResolver 是定时触发主动去解析获取当前 ServiceName 对应的 Pod 列表的，如果在两次解析的间隔期间，某个 Pod 发生了重启或者漂移（导致 IP 改变），那么这种情况对我们的解析器 DNSResolver 是无法立即感知到的。
@@ -44,21 +44,21 @@ gRPC 官方博客的文章 [gRPC Load Balancing](https://grpc.io/blog/grpc-load-
 
 这种方案就是 Watch Endpoint 方式，该方案主要在客户端实现负载均衡，通过 kubernetes API 获取 Service 的 Endpont。**客户端和每个 POD 保持一个长连接**，然后使用 gRPC Client 的负载均衡策略解决问题。开源项目 [kuberesolver](https://github.com/sercand/kuberesolver) 已经实现了这种方式。在下面的篇幅中会简单分析下该项目的代码。
 
-![kuberesolver.png](https://wx2.sbimg.cn/2020/06/15/kuberesolver.png)
+![kuberesolver.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/loadbalance/k8s-lb-watcher-endpoint.png)
 
 ##  0x03  代理方案之 Proxy1 - Linkerd
 &emsp;&emsp; Linkerd 是一种基于 CNCF 的 Kubernetes 服务网格，它通过 Sidecar 的方式来实现负载均衡。Linkerd 作为 Service Sidecar 部署在 Pod 中，自动检测 HTTP/2 和 HTTP/1.x 并执行 L7 负载平衡。为服务添加 Linkerd，等价于为每个 Pod 添加了一个很小并且很高效的代理，由这些代理来监控 Kubernetes 的 API，并自动实现 gRPC 的负载均衡。<br>
 
 Linkerd 通过 webhook，在有 Pod 新增的时候，会向 Pod 中注入额外的 Container，以此获取所有的 Pod。当然作为 service mesh，拥有更多的 feature 保证服务之间的调用，如监控、请求状态、Controller 等等。
 
-![linkerd.png](https://wx2.sbimg.cn/2020/06/15/linkerd.png)
+![linkerd.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/loadbalance/k8s-lb-linkerd.png)
 
 ##  0x04  代理方案之 Proxy2 - Nginx
 Nginx 1.13.10 版本支持了 HTTP/2 的负载均衡，[Introducing gRPC Support with NGINX 1.13.10](https://www.nginx.com/blog/nginx-1-13-10-grpc/)
 
 它的原理是：gRPC 客户端与 Nginx 建立 HTTP/2 连接后，Nginx 再与后端 server 建立多个 Http/2 连接。
 
-![image](https://wx1.sbimg.cn/2020/06/16/gRPC-nginx-routing.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/loadbalance/gRPC-nginx-routing.png)
 
 Nginx gRPC 负载均衡的一般配置如下：gRPC 代理要用 `grpc_pass` 指令，协议要用 `grpc://`，同时 `upstream` 机制对 gRPC 也是同样适用的。
 
@@ -103,7 +103,7 @@ http {
 
 在基于 Istio+Envoy 实现的服务网格中，Istio 的角色是控制平面，它是实现了 Envoy 的发现协议集 xDS 的管理服务器端。Envoy 本身则作为网格的数据平面，和 Istio 通信，获得各种资源的配置并更新自身的代理规则。这里以 Istio 配置 gRPC 负载均衡为例：
 
-![envoy.png](https://wx2.sbimg.cn/2020/06/15/envoy.png)
+![envoy.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/loadbalance/k8s-lb-envoy.png)
 
 1、配置一个常规的 Kubernetes Service，作为 Backend：
 
