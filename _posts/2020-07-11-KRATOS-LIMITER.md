@@ -12,9 +12,26 @@ tags:
 ---
 
 ##  0x00    前言
-限流是当服务负载（或 Qps）超过一定量级（Load）时，主动丢弃一部分请求，是保护服务路径核心系统不被拖垮的常用方案。是服务端常用的一种过载保护的手段。
+限流是当服务负载（或 Qps）超过一定量级（Load）时，主动丢弃一部分请求，是保护服务路径核心系统不被拖垮的常用方案。是服务端常用的一种过载保护的手段。有几个知识点：
+-	little's Law：利特尔法则，估算系统的最大吞吐量
+-	系统最大吞吐量的计算
+-	EWMA：指数加权移动平均法
 
 ##	0x01	传统限流方法 VS BBR 限流
+
+####	little法则：预估系统最大吞吐量
+![little's Law](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kratos/Little-rules.jpg)
+如上图，定义一个小店的吞吐量，平均每分钟进店 `2` 个客人(`λ`)，每位客人从等待到完成交易需要 `4` 分钟(`W`)，那我们店里能承载的客人数量就是 `2 * 4 = 8` 个人；同理，可将 `λ` 看做 QPS， `W` 是每个请求需要花费的时间，那系统的吞吐量就是 `L = λ * W`。
+
+
+####	系统的最大吞吐量（重要）
+下面[这段文字](https://lailin.xyz/post/go-training-week6-4-auto-limiter.html#什么时候系统的吞吐量就是最大的吞吐量？)解释了`maxFlight`的计算逻辑：**什么时候系统的吞吐量就是最大的吞吐量？**
+
+1.	首先我们可以通过统计过去一段时间的数据，获取到平均每秒的请求量 QPS，以及请求的耗时时间，为了避免出现前面 `900ms` 一个请求都没有最后 `100ms` 请求特别多的情况，使用滑动窗口算法来进行统计
+
+2.	一般的方法是从系统启动开始，就把这些值给保存下来，然后计算一个吞吐的最大值，用这个来表示我们的最大吞吐量就可以了。但是这样存在一个问题是，我们很多系统其实都不是独占一台机器的，一个物理机上面往往有很多服务，并且一般还存在一些超卖，所以可能第一个小时最大处理能力是 `100`，但是这台节点上其他服务实例同时都在抢占资源的时候，这个处理能力最多就只能到 `80` 了
+
+3.	所以，需要一个数据来做**启发阈值**，只要这个指标达到了阈值那我们就进入流控当中。常见的选择一般是 CPU、Memory、System Load，Kratos这里采用的是CPU（`80%`），即 CPU 负载超过 `80%` 的时候，获取过去 `5s` 的最大吞吐数据（假设滑动窗口的单位是`100ms`，那么需要统计`5s/100ms=50`个窗口的值），然后再统计当前系统中的请求数量，只要**当前系统中的请求数**大于**最大吞吐**那么我们就丢弃这个请求。
 
 ####	传统限流方式
 之前文章中介绍过，传统的限流算法，如漏桶、令牌桶等，他们的缺点是单一限流和无差别限流。此外，系统需要先做压测，拿到一个初始的限流参考值，超过这个值才启动限流机制。
@@ -83,7 +100,7 @@ Sentinel 在系统自适应保护的做法是，<font color="#dd0000"> 用 load1
 ##	0x02	Kraots 的限流算法
 kratos 借鉴了 Sentinel 项目的自适应限流系统，通过综合分析服务的 cpu 使用率、请求成功的 qps 和请求成功的 rt（请求成功的响应耗时） 来做自适应限流保护。从官方文档上看，限流算法要实现的核心目标有如下两点：
 
-1. ** 自动 ** 嗅探负载和 qps，减少人工配置 && 干预
+1. **自动** 嗅探负载和 qps，减少人工配置 && 干预
 2. 削顶，<font color="#dd0000"> 保证超载时系统不被拖垮，并能以高水位 qps 继续运行 </font>
 
 BBR 限流规则依靠下面 `4` 个指标共同确定：
@@ -96,7 +113,7 @@ BBR 限流规则依靠下面 `4` 个指标共同确定：
 | rt       | 请求成功的响应耗时                                            |
 
 
-#### 滑动窗口
+####	 滑动窗口
 在自适应限流保护中，采集到的指标的时效性非常强，系统只需要采集最近一小段时间内的 qps、rt 即可，对于较老的数据，会自动丢弃。为了实现这个效果，kratos 使用了滑动窗口来保存采样数据。
 
 ![ratelimit-rolling-window](/doc/img/ratelimit-rolling-window.png)
@@ -104,17 +121,30 @@ BBR 限流规则依靠下面 `4` 个指标共同确定：
 如上图，展示了一个具有两个桶（bucket）的滑动窗口（rolling window）。整个滑动窗口用来保存最近 1s 的采样数据，每个小的桶用来保存 500ms 的采样数据。
 当时间流动之后，过期的桶会自动被新桶的数据覆盖掉，在图中，在 1000-1500ms 时，bucket 1 的数据因为过期而被丢弃，之后 bucket 3 的数据填到了窗口的头部。
 
+####	使用EWMA计算CPU使用率，避免毛刺现象
+针对单服务的CPU指标采集，采用如下公式，避免毛刺：
 
-#### 限流公式
+$$ cpu = cpu^{t-1} * \beta + cpu^{t} * (1 - \beta) $$
+
+#### 限流公式（核心！）
 在 Kratos 的限流算法中，判断是否丢弃当前请求的算法如下：
 
-$cpu > 800$$ AND $$(Now - PrevDrop) < 1s$ AND $(\frac{MaxPass * MinRt * windows}{ 1000} < InFlight$
+( $cpu > 800$$ OR $$(Now - PrevDrop) < 1s$ ) AND $(\frac{MaxPass * MinRt * windows}{1000} < InFlight$
 
-*	MaxPass 表示最近 5s 内，单个采样窗口中最大的请求数。
-*	MinRt 表示最近 5s 内，单个采样窗口中最小的响应时间。
-*	windows 表示一秒内采样窗口的数量，默认配置中是 5s 50 个采样，那么 windows 的值为 10。
+*   `cpu > 800`：表示 CPU 负载大于 `80%` 进入限流
+*	`(Now - PrevDrop) < 1s`：表示只要触发过限流（`1` 次），那么在 `1s` 内都会去做限流的判定，这是为了避免反复出现限流恢复导致请求时间和系统负载产生大量毛刺
+*	`(MaxPass * MinRt * windows / 1000) < InFlight`：判断最大负载是否小于当前实际的负载（即过载了）
+	*	`InFlight`：表示当前系统中有多少请求
+	*	`(MaxPass * MinRt * windows / 1000)`：表示过去一段时间的最大负载
+	*	`MaxPass`：表示最近 `5s` 内，单个采样窗口中最大的请求数
+	*	`MinRt`：表示最近 `5s` 内，单个采样窗口中最小的响应时间
+	*	`windows`：表示一秒内采样窗口的数量，默认配置中是 `5s` `50` 个采样，那么 `windows` 的值为 `10`
 
 所以，上面这个指标可以解读为：
+1.	CPU超过容忍值，且实时并发量超过系统吞吐量，进入过载逻辑
+2.	CPU未超过容忍值，但是有丢弃记录，且当前时间与上一次丢弃请求的时间差小于`1s`，且实时并发量超过系统吞吐量，进入过载逻辑
+
+第一种情况较易理解，第二种情况是在CPU未过负载，为了避免限流/恢复机制导致的CPU毛刺而采用了优化策略，其目的是使CPU的负载达到一个相对稳定的水平
 
 
 #### 压测报告
@@ -225,29 +255,44 @@ BBR 的核心结构定义如下：
 // BBR implements bbr-like limiter.
 type BBR struct {
 	cpu             cpuGetter
+	 // 请求数，和响应时间的采样数据，使用滑动窗口进行统计
+
 	//passStat：请求处理成功的量（滑动窗口计数器）
 	passStat        metric.RollingCounter
 	//rtStat：请求成功的响应耗时（滑动窗口计数器）
 	rtStat          metric.RollingCounter
+
+	 // 当前系统中的并发请求数
 	inFlight        int64
+
+	// 每秒钟内的采样数量，默认是10
 	winBucketPerSec int64
+	
+	 // 单个 bucket 的时间（滑动窗口）
+	bucketDuration  time.Duration
+
+	// 窗口数量
+	winSize         int
 	conf            *Config
-	prevDrop        atomic.Value	// 对应于公式的 prevDrop
-	prevDropHit     int32
-	rawMaxPASS      int64
-	rawMinRt        int64
+	prevDrop        atomic.Value
+	
+	 // 表示最近 5s 内，单个采样窗口中最大的请求数的缓存数据
+	maxPASSCache    atomic.Value
+
+	// 表示最近 5s 内，单个采样窗口中最小的响应时间的缓存数据
+	minRtCache      atomic.Value
 }
 ```
 结构体中有两个基于滑动窗口的统计结构（计数器），`passStat` 及 `rtStat`，用来统计每次经过 `Allow()` 方法时的状态结果。
 
-####	核心：Allow 方法
+####	核心：Allow 方法：判断请求是否允许通过
 先看看 `Allow` 方法的实现，在每次的服务端请求中都会调用此方法，注意下面节点：
 -	`passStat` 及 `rtStat` 的数据上报的逻辑
 -	`rt`-- 请求成功的响应耗时的计算方法
 
 `rt` 的计算方法比较巧妙：
-1.	初始化全局变量 `initTime    = time.Now()`
-2.	请求开始前计算 `	stime := time.Since(initTime)`
+1.	初始化全局变量 `initTime = time.Now()`
+2.	请求开始前计算 `stime := time.Since(initTime)`
 3.	`Allow` 返回一个函数对象 `func(info limit.DoneInfo)`，在函数对象中计算 `rt := int64((time.Since(initTime) - stime) / time.Millisecond)`
 这样就成功的避免每次需要保存前一个周期计时点了，不过引入的成本就是需要取两次当前最新的时间戳。
 
@@ -298,7 +343,7 @@ func(do limit.DoneInfo) {
 }
 ```
 
-完整的 `Allow` 实现代码如下，注意是在 `shouldDrop` 方法是基于 bbr 的限流算法来判断是否应该丢弃请求：
+完整的 `Allow` 实现代码如下，注意是在 `shouldDrop` 方法是基于 bbr 的限流算法来判断是否应该丢弃请求，常用于中间件方式：
 
 ```golang
 // Allow checks all inbound traffic.
@@ -308,7 +353,7 @@ func (l *BBR) Allow(ctx context.Context, opts ...limit.AllowOption) (func(info l
 	for _, opt := range opts {
 		opt.Apply(&allowOpts)
 	}
-	if l.shouldDrop() {
+    if l.shouldDrop() {
 		return nil, ecode.LimitExceed
 	}
 	atomic.AddInt64(&l.inFlight, 1)
@@ -328,26 +373,14 @@ func (l *BBR) Allow(ctx context.Context, opts ...limit.AllowOption) (func(info l
 }
 ```
 
-// Stats contains the metrics's snapshot of bbr.
-type Stat struct {
-	Cpu         int64
-	InFlight    int64
-	MaxInFlight int64
-	MinRt       int64
-	MaxPass     int64
-}
+小结下，`Allow`方法的逻辑如下：
 
-
-
-// Config contains configs of bbr limiter.
-type Config struct {
-	Enabled      bool
-	Window       time.Duration
-	WinBucket    int
-	Rule         string
-	Debug        bool
-	CPUThreshold int64
-}
+-	首先调用 `shouldDrop`  方法判断这个请求是否应该丢弃
+-	如果成功放行，那么当前系统中的请求数就 `+1`
+-	然后返回一个 function  用于请求结束之后，function的逻辑如下：
+	-	统计请求的响应时间
+	-	如果请求成功了，给成功的请求数 `+1`
+	-	并且当前系统中的请求数量 `Inflight-1`
 
 ####	MaxPass 计算
 `MaxPass` 表示最近 5s 内，单个采样窗口（window）中最大的请求数。换言之，就是找出当前时间戳的滑动窗口的所有桶中，最大的请求计数器的值（单个桶）：
@@ -414,12 +447,19 @@ func (l *BBR) minRT() int64 {
 }
 ```
 
+####	maxFlight
+`maxFlight`代表什么？其实就是使用little法则计算出来的系统最大吞吐量（系统的最大负载），即计算过去一段时间系统的最大负载是多少
+
+另外注意，这个值是动态变化的（依赖的`maxPASS`和`minRT`都是动态的），计算是通过滑动窗口的统计值得出。
+
+```golang
 func (l *BBR) maxFlight() int64 {
 	return int64(math.Floor(float64(l.maxPASS()*l.minRT()*l.winBucketPerSec)/1000.0 + 0.5))
 }
+```
 
-####	shouldDrop 方法
-`shouldDrop` 代码实现了前文的公式：
+####	shouldDrop 方法（核心）
+`shouldDrop`判断请求是否应该被丢弃， 代码实现了前文的公式：
 
 $$cpu > 800$$ AND $$(Now - PrevDrop) < 1s$$ AND $$(\frac{MaxPass * MinRt * windows}{ 1000} < InFlight$$
 
@@ -432,9 +472,9 @@ func (l *BBR) shouldDrop() bool {
 			return false
 		}
 		if time.Since(initTime)-prevDrop <= time.Second {
-			if atomic.LoadInt32(&l.prevDropHit) == 0 {
-				atomic.StoreInt32(&l.prevDropHit, 1)
-			}
+			//if atomic.LoadInt32(&l.prevDropHit) == 0 {
+			//	atomic.StoreInt32(&l.prevDropHit, 1)
+			//}
 			inFlight := atomic.LoadInt64(&l.inFlight)
 			return inFlight > 1 && inFlight > l.maxFlight()
 		}
@@ -454,16 +494,17 @@ func (l *BBR) shouldDrop() bool {
 }
 ```
 
-// Stat tasks a snapshot of the bbr limiter.
-func (l *BBR) Stat() Stat {
-	return Stat{
-		Cpu:         l.cpu(),
-		InFlight:    atomic.LoadInt64(&l.inFlight),
-		MinRt:       l.minRT(),
-		MaxPass:     l.maxPASS(),
-		MaxInFlight: l.maxFlight(),
-	}
-}
+`shouldDrop`方法的主要逻辑如下：
+1.	首先检查 CPU 的使用率（通过EWMA算法计算出）是否达到了阈值 `80%`
+2.	如果未超过CPU `80%`阈值，则判断一下上次触发限流到现在是否在`1s`以内
+	-	如果在`1s`内，判断当前并发请求量`inFlight`是否超过系统的最大吞吐量`maxFlight()`，如果超过了就需要丢弃
+	-	如果不在 `1s` 内或者是请求数量已经降下来了，那么把 `prevDrop` 清零然后返回 `false`，放行请求
+3.	如果超过CPU `80%`阈值，则判断一下当前并发请求量`inFlight`是否超过系统的最大吞吐量`maxFlight()`
+	-	如果超过了，则设置丢弃时间 `prevDrop`，返回 `true` 需要丢弃请求
+	-	如果没超过直接返回 `false`，放行请求
+
+这里再次注意，`maxFlight()`的值是通过滑动窗口最近`50`个窗口的**单个采样窗口中最小的响应时间**及**最大请求数**估算得出。
+
 
 ##	Limiter 组 && 初始化
 在 limiter 中，也有分组的概念，比如针对后端某个 CGI 或 RPC 方法，应用不通的限速策略及规则，这里直接就使用了 [container/group](https://github.com/go-kratos/kratos/tree/master/pkg/container/group) 来进行封装：
@@ -527,11 +568,10 @@ func newLimiter(conf *Config) limit.Limiter {
 	}
 	return limiter
 }
-
 ```
 
 
-##  参考
+##  0x04	参考
 -   [limter.go](https://github.com/go-kratos/kratos/blob/master/pkg/ratelimit/limiter.go)
 -   [Kratos-bbr-limiter](https://github.com/go-kratos/kratos/blob/master/pkg/ratelimit/bbr/bbr.go)
 -	[Sentinel - 系统自适应限流](https://github.com/alibaba/Sentinel/wiki/%E7%B3%BB%E7%BB%9F%E8%87%AA%E9%80%82%E5%BA%94%E9%99%90%E6%B5%81)
