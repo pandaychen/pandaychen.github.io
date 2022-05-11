@@ -249,9 +249,7 @@ type ContextHook struct {
 -   `Err`：错误，可以作为 spanLog
 
 ####    一些细节
-以 `db.beforeProcess` 的实现为例；
-这一段就是实际 SQL 查询过程中调用日志和 Hook 的过程，从这里可以非常明显的看到日志模块传入的是值而不是指针，从而导致了我们无法修改日志模块中的上下文实现 span 的传递，只能利用全局日志实例来传递 span，这直接出现了并发安全问题
-而 Hook 的传递使用的是指针传递，将 contexts.ContextHook 的指针传入钩子函数执行流程，允许我们直接操作 Ctx
+以 `db.beforeProcess` 的实现为例（代码如下），就是实际 SQL 查询过程中调用日志和 Hook 的过程， `Hook` 参数传递使用的是指针，即将 `contexts.ContextHook` 的指针传入钩子函数执行流程，允许我们直接操作其成员 `c.Ctx` 以达到Hook的过程。
 
 ```golang
 func (db *DB) beforeProcess(c *contexts.ContextHook) (context.Context, error) {
@@ -281,8 +279,8 @@ func (db *DB) afterProcess(c *contexts.ContextHook) error {
 
 
 ####    Hook 实现
-实现代码在 [此](https://github.com/pandaychen/grpc-wrapper-framework/blob/master/storage/database/xorm/hook.go)。核心步骤三点：
-1、定义 `XormHook` 结构，注意不要使用该结构来进行 span 传递
+实现代码在 [此](https://github.com/pandaychen/grpc-wrapper-framework/blob/master/storage/database/xorm/hook.go)。核心步骤三点：<br>
+1、定义 `XormHook` 结构，注意不要使用该结构来进行 span 传递<br>
 ```golang
 type XormHook struct {
 	name string
