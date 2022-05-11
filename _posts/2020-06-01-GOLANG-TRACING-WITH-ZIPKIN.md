@@ -314,7 +314,9 @@ func StartSpanFromContextWithTracer(ctx context.Context, tracer Tracer, operatio
 假设我们需要在 gRPC 服务中调用另外一个微服务（如 RESTFul 服务），该如何跟踪？简单来说就是使用 HTTP 头作为媒介（Carrier）来传递跟踪信息（traceID）。下一小节，来看下 gRPC 中的 Opentracing 实现。
 
 ##	0x04	gRPC 中的 OpenTracing
-本小节，介绍下 gRPC 与 OpenTracing 的结合使用，跟踪一个完整的 RPC 请求，从客户端到服务端的实现。
+本小节，介绍下 gRPC 与 OpenTracing 的结合使用，跟踪一个完整的 RPC 请求，从客户端到服务端的实现。分为两种：
+-	gRPC-client 端，使用了 `tracer.Inject` 方法，可以将 Span 的 Context 信息注入到 carrier 中，再将 carrier 写入到 metadata 中，即完成 span 信息的传递
+-	grpc-server 端，使用 `tracer.Extract` 函数将 carrier 从 metadata 中提取出来，再通过`StartSpan`与`ChildOf`方法创建新的子Span，这样 client 端与 server 端就能建立 Span 信息的关联
 
 ####	客户端
 客户端的实现如下所示：
@@ -432,7 +434,7 @@ func (c *HelloService) RPCMethod(ctx context.Context, req *pb.GetReq) (*pb.GetRe
 }
 ```
 
-前一节，说到跨进程传递 Trace 的时候需要进行的 Inject 和 Extract 操作，上面的示例代码并没有出现。那么客户端 / 服务端如何实现对 Span 的 Inject/Extract 呢？答案就是拦截器 [`otgrpc.OpenTracingServerInterceptor/OpenTracingClientInterceptor` 方法](https://github.com/grpc-ecosystem/grpc-opentracing/tree/master/go/otgrpc)，这里以 `OpenTracingClientInterceptor` 方法为例：
+前一节，说到跨进程传递 Trace 的时候需要进行的 `Inject` 和 `Extract` 操作，上面的示例代码并没有出现。那么客户端 / 服务端如何实现对 Span 的 `Inject`/`Extract` 呢？答案就是拦截器 [`otgrpc.OpenTracingServerInterceptor/OpenTracingClientInterceptor` 方法](https://github.com/grpc-ecosystem/grpc-opentracing/tree/master/go/otgrpc)，这里以 `OpenTracingClientInterceptor` 方法为例：
 ```golang
 // OpenTracingClientInterceptor returns a grpc.UnaryClientInterceptor suitable
 // for use in a grpc.Dial call.
@@ -514,7 +516,7 @@ func injectSpanContext(ctx context.Context, tracer opentracing.Tracer, clientSpa
 }
 ```
 
-从客户端 `injectSpanContext` 的实现来看，最终在 RPC 调用前，通过 `metadata.NewOutgoingContext` 将 Context 信息（包含了 Tracer），即获取了跟踪上下文并将其注入 HTTP 头，因此我们不需要再次调用 `inject` 函数。而在服务器端，从 HTTP 头中 Extract 跟踪上下文并将其放入 Golang context 中，无须手动调用 Extract 方法。<br>
+从客户端 `injectSpanContext` 的实现来看，最终在 RPC 调用前，通过 `metadata.NewOutgoingContext` 将 Context 信息（包含了 Tracer），即获取了跟踪上下文并将其注入 HTTP 头，因此我们不需要再次调用 `Inject` 函数。而在服务器端，从 HTTP 头中 `Extract` 跟踪上下文并将其放入 Golang context 中，无须手动调用 Extract 方法。<br>
 
 但对于其他基于 HTTP 的服务（如 RESTFul-API 服务），情况就并非如此，需要写代码从服务器端的 HTTP 头中提取跟踪上下文，亦或也使用拦截器实现，如 Kratos 的 bm 框架的 [Trace 拦截器](https://github.com/go-kratos/kratos/blob/master/pkg/net/http/blademaster/trace.go)
 
@@ -541,7 +543,148 @@ SpanId 代表本次调用在整个调用链路树中的（相对）位置。
 假设一个 Web 系统 A 接收了一次用户请求，那么在这个系统日志中，记录下的 SpanId 是 `0`，代表是整个调用的根节点，如果 A 系统处理这次请求，需要通过 RPC 依次调用 B、C、D 三个系统，那么在 A 系统的客户端日志中，SpanId 分别是 `0.1`，`0.2` 和 `0.3`，在 B、C、D 三个系统的服务端日志中，SpanId 也分别是 `0.1`，`0.2` 和 `0.3`；如果 C 系统在处理请求的时候又调用了 E，F 两个系统，那么 C 系统中对应的客户端日志是 `0.2.1` 和 `0.2.2`，E、F 两个系统对应的服务端日志也是 `0.2.1` 和 `0.2.2`。如果把一次调用中所有的 SpanId 收集起来，可以组成一棵完整的链路树。
 
 
-##	0x07	小结
+##	0x07	一些代码上的细节
+
+####	进程内与跨进程
+
+在实现 tracing 逻辑的时候，一定要注意 Span 是否跨进程！二者的实现是不同的：
+
+1.	进程（同一个服务）内，通常用 `StartSpanFromContext`[实现](https://pkg.go.dev/github.com/opentracing/opentracing-go#StartSpanFromContext) 或 `SpanFromContext`[实现](https://pkg.go.dev/github.com/opentracing/opentracing-go#SpanFromContext) 来模拟从 context 中启动一个子 span，
+2.	对于 gRPC 中 client 的 `context` 和 server 的 `context` 是跨进程 `context`，必须采用 `tracer.Inject`（客户端）以及 `tracer.Extract`（服务端）的方式，通过 `metadata` 来传递；
+3.	对于 http 框架，与 gRPC 类似（见下面例子）
+
+
+####	生成span的方法
+官方给出了`4`种常用[例子](https://pkg.go.dev/github.com/opentracing/opentracing-go#section-readme)：
+
+1、Creating a Span given an existing Go context.Context<br>
+If you use context.Context in your application, OpenTracing's Go library will happily rely on it for Span propagation. To start a new (blocking child) Span, you can use StartSpanFromContext.
+```golang
+func xyz(ctx context.Context, ...) {
+	//...
+	span, ctx := opentracing.StartSpanFromContext(ctx, "operation_name")
+	defer span.Finish()
+	span.LogFields(
+		log.String("event", "soft error"),
+		log.String("type", "cache timeout"),
+		log.Int("waited.millis", 1500))
+	//...
+}
+```
+
+2、Starting an empty trace by creating a "root span"<br>
+```golang
+//It's always possible to create a "root" Span with no parent or other causal reference.
+func xyz() {
+	...
+	sp := opentracing.StartSpan("operation_name")
+	defer sp.Finish()
+	...
+}
+```
+
+3、Creating a (child) Span given an existing (parent) Span<br>
+```golang
+func xyz(parentSpan opentracing.Span, ...) {
+	//...
+	sp := opentracing.StartSpan(
+		"operation_name",
+		opentracing.ChildOf(parentSpan.Context()))
+	defer sp.Finish()
+	//...
+}
+```
+
+4、Serializing to the wire<br>
+跨进程`Inject`：
+```golang
+func makeSomeRequest(ctx context.Context) ... {
+	if span := opentracing.SpanFromContext(ctx); span != nil {
+		httpClient := &http.Client{}
+		httpReq, _ := http.NewRequest("GET", "http://myservice/", nil)
+
+		// Transmit the span's TraceContext as HTTP headers on our
+		// outbound request.
+		opentracing.GlobalTracer().Inject(
+			span.Context(),
+			opentracing.HTTPHeaders,
+			opentracing.HTTPHeadersCarrier(httpReq.Header))
+
+		resp, err := httpClient.Do(httpReq)
+		//...
+	}
+	//...
+}
+```
+
+4、Deserializing from the wire<br>
+跨进程`Extract`：
+```golang
+//...
+http.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+	var serverSpan opentracing.Span
+	appSpecificOperationName := ...
+	wireContext, err := opentracing.GlobalTracer().Extract(
+		opentracing.HTTPHeaders,
+		opentracing.HTTPHeadersCarrier(req.Header))
+	if err != nil {
+		// Optionally record something about err here
+	}
+
+	// Create the span referring to the RPC client if available.
+	// If wireContext == nil, a root span will be created.
+	serverSpan = opentracing.StartSpan(
+		appSpecificOperationName,
+		ext.RPCServerOption(wireContext))
+
+	defer serverSpan.Finish()
+
+	ctx := opentracing.ContextWithSpan(context.Background(), serverSpan)
+	...
+}
+```
+
+####	StartSpanFromContext 的第二个返回值
+先看 `StartSpanFromContext` 方法的定义：
+```golang
+type contextKey struct{}
+
+var activeSpanKey = contextKey{}
+
+
+func StartSpanFromContext(ctx context.Context, operationName string, opts ...StartSpanOption) (Span, context.Context) {
+	//调用StartSpanFromContextWithTracer
+	return StartSpanFromContextWithTracer(ctx, GlobalTracer(), operationName, opts...)
+}
+
+func StartSpanFromContextWithTracer(ctx context.Context, tracer Tracer, operationName string, opts ...StartSpanOption) (Span, context.Context) {
+	if parentSpan := SpanFromContext(ctx); parentSpan != nil {
+		opts = append(opts, ChildOf(parentSpan.Context()))
+	}
+	span := tracer.StartSpan(operationName, opts...)
+	return span, ContextWithSpan(ctx, span)
+}
+
+// ContextWithSpan returns a new `context.Context` that holds a reference to
+// the span. If span is nil, a new context without an active span is returned.
+func ContextWithSpan(ctx context.Context, span Span) context.Context {
+	if span != nil {
+		if tracerWithHook, ok := span.Tracer().(TracerContextWithSpanExtension); ok {
+			ctx = tracerWithHook.ContextWithSpanHook(ctx, span)
+		}
+	}
+	return context.WithValue(ctx, activeSpanKey, span)
+}
+```
+
+可以看到`StartSpanFromContext`方法的第`2`个返回值最终来源于`ContextWithSpan`的`context.WithValue`，就是使用`StartSpanFromContext`创建了子Span的时候，同时生成了一个子context，用于后续的进程内tracing的context上下文，如果在之后还需要启动进程内的函数调用，那么就需要传入这个新的context（**而不是创建之前的context**），如果不需要的话，那么可以忽略掉这个返回值
+
+
+##	0x08	一个综合的示例
+下图演示了一个HTTP->RPC的调用路径上的Span传递方法：
+![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/microservice/tracing-flow-all-detail.png)
+
+##	0x09	小结
 小结下，要实现 Tracing 机制及 Tracing 应用的关键点：
 -	选择合适的数据收集端
 -	明确当前是跨进程调用还是进程内调用，如何获取到 `spanContext`
@@ -552,7 +695,7 @@ SpanId 代表本次调用在整个调用链路树中的（相对）位置。
 	-	如果 Tracing 存在，那么需要查看调用代码处是一个 Span（不存在 Span，需新建），还是一个子 Span（从当前的 Span Fork 一个新的）
 	-	Span 过程中，需要明确是否在本 Span 中进行 Finish（还是不需要），记录耗时，Tags，错误信息或者日志等
 
-##  0x08    参考
+##  0x0A    参考
 -	[OpenTracing API for Go](https://github.com/opentracing/opentracing-go)
 -   [阿里云：通过 Zipkin 上报 Go 应用数据](https://www.alibabacloud.com/help/zh/doc-detail/96334.htm)
 -   [Go 集成 Opentracing（分布式链路追踪）](https://juejin.im/post/6844903942309019661)
