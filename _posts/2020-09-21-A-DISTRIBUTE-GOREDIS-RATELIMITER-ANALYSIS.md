@@ -15,15 +15,14 @@ tags:
 
 本文梳理下基于 Redis 实现的分布式限流的策略和算法。这里主要关注 <font color="#dd0000"> 分布式 </font> 的场景，主要的实现算法有如下几类：
 
-- 计数器
-- 固定窗口
-- 滑动窗口
-- 漏桶
-- 令牌桶
+- 计数器限流
+- 固定时间窗口限流
+- 滑动时间窗口限流
+- 漏桶限流
+- 令牌桶限流
 
 ## 0x01 Why Redis && Lua？
-
-分布式限流本质上是一个集群并发问题，Redis + Lua 的方案非常适合此场景：
+在一个分布式系统中，存在多个微服务提供服务。所以当瞬间的流量同时访问同一个资源，如何让计数器在分布式系统中正常计数？ 同时在计算资源访问时，可能会涉及多个计算，如何保证计算的原子性？分布式限流本质上是一个集群并发问题，Redis + Lua 的方案非常适合此场景：
 
 1. Redis 单线程特性，适合解决分布式集群的并发问题
 2. Redis 本身支持 Lua 脚本执行，可以实现原子执行的效果
@@ -37,6 +36,7 @@ Redis 执行 Lua 脚本会以原子性方式进行，在执行脚本时不会再
 3.  为了保证安全性，在 Lua 脚本中不要定义自己的全局变量，以免污染 Redis 内嵌的 Lua 环境。因为 Lua 脚本中你会使用一些预制的全局变量，比如说 `redis.call()`
 4.  注意 Lua 脚本的时间复杂度，Redis 的单线程同样会阻塞在 Lua 脚本的执行中，Lua 脚本不要进行高耗时操作
 5.  Redis 要求单个 Lua 脚本操作的 key 必须在同一个 Redis 节点上，因此 Redis Cluster 方式需要设置 `HashTag`（实际中不太建议这样操作）
+
 
 ## 0x02 常用方法
 
@@ -204,7 +204,7 @@ func (l *Limiter) incr(name string, period time.Duration, n int64) (int64, error
 }
 ```
 
-## 0x0 Go-Redis 提供的分布式限流库
+## 0x03 Go-Redis 提供的分布式限流库
 
 go-redis 官方提供了一个分布式限频库：[Rate limiting for go-redis：redis_rate](https://github.com/go-redis/redis_rate)
 
@@ -234,7 +234,145 @@ func main() {
 
 redis-rate 提供的 Lua 脚本实现 [在此](https://github.com/go-redis/redis_rate/blob/v9/lua.go)
 
-## 参考
+##  0x04    go-zero 的分布式限流实现
+go-zero 提供了两种分布式的限流实现，分别基于 [计数器 periodlimit](https://github.com/zeromicro/go-zero/blob/master/core/limit/periodlimit.go) 和 [令牌桶 tokenlimit](https://github.com/zeromicro/go-zero/blob/master/core/limit/tokenlimit.go)：
+
+**注意：这两种算法的限流区间都是基于秒为单位的。**
+
+| 方案 | 原理 | 适用场景 |
+| :-----:|  :----: | :----: |
+| periodlimit | 单位时间限制访问次数 | 需要强行限制数据的传输速率 |
+| tokenlimit | 令牌桶限流 | 限制数据的平均传输速率，同时允许某种程度的突发传输 |
+
+####    计数器 - periodlimit
+该算法是采用 `EXPIRE KEY TTL` 的机制来模拟滑动窗口的限流效果，和上面的 <计数器> 实现有些类似，利用 `TTL` 做限流窗口的 Span，使用 `INCRBY` 累计做限流值的累加：
+
+![period-limit](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/gozero-tech/period-limiter1.png)
+
+1、限流的核心 lua[逻辑](https://github.com/zeromicro/go-zero/blob/master/core/limit/periodlimit.go#L12)<br>
+
+-   `key[1]`：访问资源的标识
+-   `ARGV[1]`：`limit` => 请求总数（QPS），超过则限速
+-   `ARGV[2]`：window 大小 => 滑动窗口，用 ttl 模拟出滑动的效果
+
+```lua
+--to be compatible with aliyun redis, we cannot use `local key = KEYS[1]` to reuse the key
+local limit = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])        --window size
+local current = redis.call("INCRBY", KEYS[1], 1)
+if current == 1 then
+    -- 如果是第一次访问，设置过期时间 TTL 为 window size（因为是只限制一段时间的访问次数）
+    redis.call("EXPIRE", KEYS[1], window)
+end
+if current < limit then
+    --  Allow
+    return 1
+elseif current == limit then
+    --  hit limiter quota
+    return 2
+else
+    --  may need drop
+    return 0
+end
+```
+
+2、原子性保证 <br>
+-   periodlimit 借助 Redis 的 `INCRBY` 做资源访问计数
+-   采用 LuaScript 实现整个（窗口）计算，保证计算的原子性
+
+
+3、缺点 <br>
+如果在服务某个时间点有大量并发请求，periodlimit 短期时间内达到 `limit` 阈值，且设置的时间范围 `window` 还远远没有到达。后续请求的处理就成为问题。periodlimit 中并没有处理，而是返回 code，交给了开发者自己处理：
+-   如果不做处理，那就是简单的将请求拒绝
+-   如果需要处理这些请求，开发者可以借助队列将请求缓冲，减缓请求的压力；或借助于延时队列异步处理
+
+
+####    令牌桶 - tokenlimit
+tokenLimit 相对于 periodlimit 方案，可以允许一部分瞬间的突发流量，桶内存量 token 即可作为流量缓冲区平滑处理突发流量，其工作流程；
+-   单位时间按照一定速率匀速的生产 token 放入桶内，直到达到桶容量上限
+-   处理请求，每次尝试获取一个或多个令牌，如果拿到则处理请求，失败则拒绝请求。
+
+
+![token-limiter](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/gozero-tech/token-limiter1.png)
+
+核心的参数如下：
+-   `ARGV[1]`：`rate`，表示每秒生成 token 数量，即 token 生成速度
+-   `ARGV[2]`：`capacity`，桶容量
+-   `ARGV[3]`：`now`，当前请求令牌的时间戳
+-   `ARGV[4]`：`requested`，当前请求 token 数量
+-   `KEYS[1]`：访问资源的标识
+-   `KEYS[2]`：保存上一次访问的刷新时间戳
+-   `fill_time`：桶容量 / token 速率，即需要多少单位时间（秒）才能填满桶
+-   `ttl`：`ttl` 为填满时间的 2 倍
+-   `last_tokens`：当前时刻桶容量
+
+1、限流的 Lua 脚本核心逻辑如下，该原子化的脚本返回 `allowed` 即是否可以活获得预期的 token<br>
+```lua
+local rate = tonumber(ARGV[1])
+local capacity = tonumber(ARGV[2])
+local now = tonumber(ARGV[3])
+local requested = tonumber(ARGV[4])
+local fill_time = capacity/rate
+local ttl = math.floor(fill_time*2)
+
+--  桶容量是存储在 KEYS[1] 的 kv 中
+local last_tokens = tonumber(redis.call("get", KEYS[1]))
+if last_tokens == nil then
+    --  如果当前桶容量为 0, 说明是第一次进入, 则默认容量为桶的最大容量
+    last_tokens = capacity
+end
+
+-- 上一次刷新的时间
+local last_refreshed = tonumber(redis.call("get", KEYS[2]))
+-- 第一次进入则设置刷新时间为 0
+if last_refreshed == nil then
+    last_refreshed = 0
+end
+--  计算距离上次请求的时间跨度（注意这里的单位是：秒）
+local delta = math.max(0, now-last_refreshed)
+--  距离上次请求的时间跨度, 总共能生产 token 的数量, 如果超多最大容量则丢弃多余的 token
+local filled_tokens = math.min(capacity, last_tokens+(delta*rate))
+--  计算本次请求 token 数量是否足够，filled_tokens；当前的容量；requested：请求的令牌数
+local allowed = filled_tokens >= requested
+
+--  new_tokens：令牌桶剩余数量
+local new_tokens = filled_tokens
+-- 允许本次 token 申请, 更新剩余数量
+if allowed then
+    new_tokens = filled_tokens - requested
+end
+-- 更新剩余 token 数量，注意过期时间是 fill_time 的 2 倍
+redis.call("setex", KEYS[1], ttl, new_tokens)
+-- 更新刷新时间
+redis.call("setex", KEYS[2], ttl, now)
+return allowed
+```
+
+2.  限流器定义 <br>
+```golang
+type TokenLimiter struct {
+    rate int        // 每秒生产速率
+    burst int       // 桶容量
+
+    store *redis.Redis
+    tokenKey       string       //redis-key
+    timestampKey   string       // 桶刷新时间 key
+    rescueLock     sync.Mutex
+    redisAlive     uint32       // redis 健康标识
+    // redis 故障时采用进程内 令牌桶限流器
+    rescueLimiter  *xrate.Limiter
+    monitorStarted bool    // redis 监控探测任务标识
+}
+```
+
+####    分布式限流器的降级处理
+tokenLimiter 的一个亮点是实现了 redis 故障时的兜底策略，即故障时启动单机版的 ratelimit 做备用限流机制。如果 redis limiter 失效，至少还可以在单服务的 rate limiter 兜底。其降级的[流程图](https://zhuanlan.zhihu.com/p/311320469)如下所示：
+![go-zero-limiter](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/gozero-tech/period-limiter2.jpeg)
+
+####    小结
+go-zero 中的 tokenlimit 限流方案适用于瞬时流量冲击，现实请求场景并不以恒定的速率。令牌桶相当预请求，当真实的请求到达不至于瞬间被打垮。
+
+## 0x05 参考
 
 - [分布式系统限流服务 - Golang&Redis](http://hbchen.com/post/distributed/2019-05-05-rate-limit/)
 - [go-redis 的 redis_rate 项目](https://github.com/go-redis/redis_rate/blob/v9/rate.go)
@@ -243,3 +381,4 @@ redis-rate 提供的 Lua 脚本实现 [在此](https://github.com/go-redis/redis
 - [基于 Redis 和 Lua 的分布式限流](http://remcarpediem.net/2019/04/06/%E5%9F%BA%E4%BA%8ERedis%E5%92%8CLua%E7%9A%84%E5%88%86%E5%B8%83%E5%BC%8F%E9%99%90%E6%B5%81/)
 - [Redis Best Practices： Basic Rate Limiting](https://redislabs.com/redis-best-practices/basic-rate-limiting/)
 - [Rate Limiting Algorithms using Redis](https://medium.com/@SaiRahulAkarapu/rate-limiting-algorithms-using-redis-eb4427b47e33)
+- [Go 分布式令牌桶限流 + 兜底策略](https://segmentfault.com/a/1190000041275724)
