@@ -289,11 +289,12 @@ end
 
 ####    令牌桶 - tokenlimit
 tokenLimit 相对于 periodlimit 方案，可以允许一部分瞬间的突发流量，桶内存量 token 即可作为流量缓冲区平滑处理突发流量，其工作流程；
--   单位时间按照一定速率匀速的生产 token 放入桶内，直到达到桶容量上限
--   处理请求，每次尝试获取一个或多个令牌，如果拿到则处理请求，失败则拒绝请求。
+-   假设令牌平均生产速率`r`，则每隔`1/r`秒一个令牌被加入到桶中
+-   假设桶中最多可以存放`b`个令牌，单位时间按照一定速率匀速的生产 token 放入桶内，直到达到桶容量上限。如果令牌到达时令牌桶已经满了，那么这个令牌会被丢弃
+-   处理请求，每次尝试获取一个或多个令牌，如果拿到则处理请求，失败则拒绝请求（限流逻辑）
 
 
-![token-limiter](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/gozero-tech/token-limiter1.png)
+![token-limiter](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/gozero-tech/token-limiter1.png)
 
 核心的参数如下：
 -   `ARGV[1]`：`rate`，表示每秒生成 token 数量，即 token 生成速度
@@ -348,7 +349,7 @@ redis.call("setex", KEYS[2], ttl, now)
 return allowed
 ```
 
-2.  限流器定义 <br>
+2、限流器定义 <br>
 ```golang
 type TokenLimiter struct {
     rate int        // 每秒生产速率
@@ -358,21 +359,93 @@ type TokenLimiter struct {
     tokenKey       string       //redis-key
     timestampKey   string       // 桶刷新时间 key
     rescueLock     sync.Mutex
-    redisAlive     uint32       // redis 健康标识
-    // redis 故障时采用进程内 令牌桶限流器
-    rescueLimiter  *xrate.Limiter
+    redisAlive     uint32       // redis 健康标识（atomic）
+    rescueLimiter  *xrate.Limiter    // redis 故障时采用进程内令牌桶限流器
     monitorStarted bool    // redis 监控探测任务标识
 }
 ```
 
+3、获取令牌<br>
+```golang
+func (lim *TokenLimiter) reserveN(now time.Time, n int) bool {
+    // 判断redis是否健康
+    // redis故障时采用进程内限流器
+    // 兜底保障
+    if atomic.LoadUint32(&lim.redisAlive) == 0 {
+        return lim.rescueLimiter.AllowN(now, n)
+    }
+    // 执行脚本获取令牌
+    resp, err := lim.store.Eval(
+        script,
+        []string{
+            lim.tokenKey,
+            lim.timestampKey,
+        },
+        []string{
+            strconv.Itoa(lim.rate),
+            strconv.Itoa(lim.burst),
+            strconv.FormatInt(now.Unix(), 10),
+            strconv.Itoa(n),
+        })
+    // redis allowed == false
+    // Lua boolean false -> r Nil bulk reply
+    // 特殊处理key不存在的情况
+    if err == redis.Nil {
+        return false
+    } else if err != nil {
+        logx.Errorf("fail to use rate limiter: %s, use in-process limiter for rescue", err)
+        // 执行异常，开启redis健康探测任务，然后采用进程内限流器作为兜底
+        lim.startMonitor()
+        return lim.rescueLimiter.AllowN(now, n)
+    }
+
+    code, ok := resp.(int64)
+    if !ok {
+        logx.Errorf("fail to eval redis script: %v, use in-process limiter for rescue", resp)
+        lim.startMonitor()
+        return lim.rescueLimiter.AllowN(now, n)
+    }
+
+    // redis allowed == true
+    // Lua boolean true -> r integer reply with value of 1
+    return code == 1
+}
+
+// redis健康探测定时任务
+func (lim *TokenLimiter) waitForRedis() {
+    ticker := time.NewTicker(pingInterval)
+    // 健康探测成功时回调此函数
+    defer func() {
+        ticker.Stop()
+        lim.rescueLock.Lock()
+        lim.monitorStarted = false
+        lim.rescueLock.Unlock()
+    }()
+
+    for range ticker.C {
+        // ping属于redis内置健康探测命令
+        if lim.store.Ping() 
+            // 健康探测成功，设置健康标识
+            atomic.StoreUint32(&lim.redisAlive, 1)
+            return
+        }
+    }
+}
+```
+
+上面的代码实现了分布式限流+降级本地限流的逻辑：
+![limiter-flow]()
+
 ####    分布式限流器的降级处理
 tokenLimiter 的一个亮点是实现了 redis 故障时的兜底策略，即故障时启动单机版的 ratelimit 做备用限流机制。如果 redis limiter 失效，至少还可以在单服务的 rate limiter 兜底。其降级的[流程图](https://zhuanlan.zhihu.com/p/311320469)如下所示：
-![go-zero-limiter](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/gozero-tech/period-limiter2.jpeg)
+![go-zero-limiter](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/gozero-tech/token-limiter2.jpeg)
 
 ####    小结
 go-zero 中的 tokenlimit 限流方案适用于瞬时流量冲击，现实请求场景并不以恒定的速率。令牌桶相当预请求，当真实的请求到达不至于瞬间被打垮。
 
-## 0x05 参考
+##  0x05    总结
+
+## 0x06 参考
 
 - [分布式系统限流服务 - Golang&Redis](http://hbchen.com/post/distributed/2019-05-05-rate-limit/)
 - [go-redis 的 redis_rate 项目](https://github.com/go-redis/redis_rate/blob/v9/rate.go)
