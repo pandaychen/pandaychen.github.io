@@ -434,7 +434,7 @@ func (lim *TokenLimiter) waitForRedis() {
 ```
 
 上面的代码实现了分布式限流+降级本地限流的逻辑：
-![limiter-flow]()
+![limiter-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/gozero-tech/limiter-flow.png)
 
 ####    分布式限流器的降级处理
 tokenLimiter 的一个亮点是实现了 redis 故障时的兜底策略，即故障时启动单机版的 ratelimit 做备用限流机制。如果 redis limiter 失效，至少还可以在单服务的 rate limiter 兜底。其降级的[流程图](https://zhuanlan.zhihu.com/p/311320469)如下所示：
@@ -444,6 +444,12 @@ tokenLimiter 的一个亮点是实现了 redis 故障时的兜底策略，即故
 go-zero 中的 tokenlimit 限流方案适用于瞬时流量冲击，现实请求场景并不以恒定的速率。令牌桶相当预请求，当真实的请求到达不至于瞬间被打垮。
 
 ##  0x05    总结
+本文列举了几种常用的基于Redis的分布式限流的实现，实现的特点为：
+1.  采用Redis+Lua脚本实现，保证原子性
+2.  常用的方式有令牌桶，计数器等，采用Redis模拟实现
+3.  限流支持的时间单位不同，有的精度较高
+4.  考虑到Redis的可用性，在Redis不可用时降级为本地限流器是一种非常好的设计思路
+
 
 ## 0x06 参考
 
