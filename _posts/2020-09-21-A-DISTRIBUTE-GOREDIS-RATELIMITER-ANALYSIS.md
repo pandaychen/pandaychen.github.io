@@ -245,7 +245,7 @@ go-zero 提供了两种分布式的限流实现，分别基于 [计数器 period
 | tokenlimit | 令牌桶限流 | 限制数据的平均传输速率，同时允许某种程度的突发传输 |
 
 ####    计数器 - periodlimit
-该算法是采用 `EXPIRE KEY TTL` 的机制来模拟滑动窗口的限流效果，和上面的 <计数器> 实现有些类似，利用 `TTL` 做限流窗口的 Span，使用 `INCRBY` 累计做限流值的累加：
+该算法是采用 `EXPIRE KEY TTL` 的机制来模拟滑动窗口的限流效果，和上面的计数器机制实现有些类似，利用 `TTL` 做限流窗口的 Span，使用 `INCRBY` 累计做限流值的累加：
 
 ![period-limit](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/gozero-tech/period-limiter1.png)
 
