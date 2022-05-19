@@ -88,7 +88,7 @@ type NodePool struct {
 
 `NodePool` 的重要方法有 2 个，`tickerUpdatePool` 和 `PickNodeByJobName`：
 
--	`tickerUpdatePool`：定时从 `driver` 中获取 ** 在线的所有 **`Dcron` 的进程（节点）列表，计算本进程的一致性 hash ring（这里每次都是重新生成 hash ring，是否可以优化为增量动态增删？）
+-	`tickerUpdatePool`：定时从 `driver` 中获取 **在线的所有**`Dcron` 的进程（节点）列表，计算本进程的一致性 hash ring（这里每次都是重新生成 hash ring，是否可以优化为增量动态增删？）
 -	`PickNodeByJobName`：根据 `jobName`，计算从一致性 hash ring 上选中的虚拟节点（有可能出现选中的不是自己，因为 `updatePool` 是取到所有的在线节点）
 
 所以，dcron 借助分布式一致性 hash 的特性，实现了分布式的特性。
@@ -164,7 +164,7 @@ func (d *Dcron) allowThisNodeRun(jobName string) bool {
 ```
 
 
-4、`JobWarpper`：前文说到过 Cron 库支持的 `JobWarpper` 功能，这里为了实现 ** 单个同名（ID）任务只在一个节点上运行的功能 **，封装了 `JobWarpper`：<br>
+4、`JobWarpper`：前文说到过 Cron 库支持的 `JobWarpper` 功能，这里为了实现 **单个同名（ID）任务只在一个节点上运行的功能**，封装了 `JobWarpper`：<br>
 ```golang
 //JobWarpper is a job warpper
 type JobWarpper struct {

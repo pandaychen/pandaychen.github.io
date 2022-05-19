@@ -89,9 +89,16 @@ func doRequest(addr string, port int) error {
 
 ![golang-roundtripper-1.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2020/http/golang-roundtripper-1.png)
 
+`net/http` 库发送 http 请求，最后都是调用 `transport` 的 `RoundTrip` 方法，说白了，就是你给它一个 `Request`, 它给你一个 `Response`：
+```golang
+//RoundTrip executes a single HTTP transaction, returning the Response for the request req.
+//（RoundTrip 代表一个 http 事务，给一个请求返回一个响应）
+type RoundTripper interface {
+    RoundTrip(*Request) (*Response, error)
+}
+```
 
 ##  0x02    http.Client 结构
-
 
 ##  0x03    http.Transport 结构
 -   `http.Transport` 实现了 `http.RoundTripper`，支持 HTTP/HTTPS 以及 HTTP Proxy(for either HTTP or HTTPS with CONNECT)
@@ -308,6 +315,157 @@ type Transport struct {
 }
 ```
 
-##  参考
+####	`RoundTrip` 方法
+下面代码是 `httputil.ReverseProxy` 中用来转发请求的[逻辑](https://cs.opensource.google/go/go/+/refs/tags/go1.18.2:src/net/http/httputil/reverseproxy.go;l=299)，最终还是调用 `transport.RoundTrip(outreq)` 来发送 http 请求：
+```golang
+func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	//...
+	transport := p.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	// 向下游发起请求
+	res, err := transport.RoundTrip(outreq)
+	if err != nil {
+		p.getErrorHandler()(rw, outreq, err)
+		return
+	}
+	//...
+}
+```
+
+看下 `roundTrip` 方法的实现，完全遵守了原生库的约定：
+```golang
+// RoundTrip implements the RoundTripper interface.
+//
+// For higher-level HTTP client support (such as handling of cookies
+// and redirects), see Get, Post, and the Client type.
+//
+// Like the RoundTripper interface, the error types returned
+// by RoundTrip are unspecified.
+func (t *Transport) RoundTrip(req *Request) (*Response, error) {
+	return t.roundTrip(req)
+}
+
+// roundTrip implements a RoundTripper over HTTP.
+func (t *Transport) roundTrip(req *Request) (*Response, error) {
+	t.nextProtoOnce.Do(t.onceSetNextProtoDefaults)
+	ctx := req.Context()
+	trace := httptrace.ContextClientTrace(ctx)
+
+	if req.URL == nil {
+		req.closeBody()
+		return nil, errors.New("http: nil Request.URL")
+	}
+	if req.Header == nil {
+		req.closeBody()
+		return nil, errors.New("http: nil Request.Header")
+	}
+	scheme := req.URL.Scheme
+	isHTTP := scheme == "http" || scheme == "https"
+	if isHTTP {
+		for k, vv := range req.Header {
+			if !httpguts.ValidHeaderFieldName(k) {
+				return nil, fmt.Errorf("net/http: invalid header field name %q", k)
+			}
+			for _, v := range vv {
+				if !httpguts.ValidHeaderFieldValue(v) {
+					return nil, fmt.Errorf("net/http: invalid header field value %q for key %v", v, k)
+				}
+			}
+		}
+	}
+
+	if t.useRegisteredProtocol(req) {
+		altProto, _ := t.altProto.Load().(map[string]RoundTripper)
+		if altRT := altProto[scheme]; altRT != nil {
+			if resp, err := altRT.RoundTrip(req); err != ErrSkipAltProtocol {
+				return resp, err
+			}
+		}
+	}
+	if !isHTTP {
+		req.closeBody()
+		return nil, &badStringError{"unsupported protocol scheme", scheme}
+	}
+	if req.Method != "" && !validMethod(req.Method) {
+		return nil, fmt.Errorf("net/http: invalid method %q", req.Method)
+	}
+	if req.URL.Host == "" {
+		req.closeBody()
+		return nil, errors.New("http: no Host in request URL")
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			req.closeBody()
+			return nil, ctx.Err()
+		default:
+		}
+
+		// treq gets modified by roundTrip, so we need to recreate for each retry.
+		treq := &transportRequest{Request: req, trace: trace}
+		cm, err := t.connectMethodForRequest(treq)
+		if err != nil {
+			req.closeBody()
+			return nil, err
+		}
+
+		// Get the cached or newly-created connection to either the
+		// host (for http or https), the http proxy, or the http proxy
+		// pre-CONNECTed to https server. In any case, we'll be ready
+		// to send it requests.
+		pconn, err := t.getConn(treq, cm)
+		if err != nil {
+			t.setReqCanceler(req, nil)
+			req.closeBody()
+			return nil, err
+		}
+
+		var resp *Response
+		if pconn.alt != nil {
+			// HTTP/2 path.
+			t.setReqCanceler(req, nil) // not cancelable with CancelRequest
+			resp, err = pconn.alt.RoundTrip(req)
+		} else {
+			resp, err = pconn.roundTrip(treq)
+		}
+		if err == nil {
+			return resp, nil
+		}
+
+		// Failed. Clean up and determine whether to retry.
+
+		_, isH2DialError := pconn.alt.(http2erringRoundTripper)
+		if http2isNoCachedConnError(err) || isH2DialError {
+			t.removeIdleConn(pconn)
+			t.decConnsPerHost(pconn.cacheKey)
+		}
+		if !pconn.shouldRetryRequest(req, err) {
+			// Issue 16465: return underlying net.Conn.Read error from peek,
+			// as we've historically done.
+			if e, ok := err.(transportReadFromServerError); ok {
+				err = e.err
+			}
+			return nil, err
+		}
+		testHookRoundTripRetried()
+
+		// Rewind the body if we're able to.
+		if req.GetBody != nil {
+			newReq := *req
+			var err error
+			newReq.Body, err = req.GetBody()
+			if err != nil {
+				return nil, err
+			}
+			req = &newReq
+		}
+	}
+}
+```
+
+##  0x0A	参考
 -   [Go 语言设计与实现：9.2 HTTP](https://draveness.me/golang/docs/part4-advanced/ch09-stdlib/golang-net-http/)
 -   [Diving deep into net/http : A look at http.RoundTripper](https://lanre.wtf/blog/2017/07/24/roundtripper-go/)
