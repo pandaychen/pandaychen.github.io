@@ -45,6 +45,25 @@ tags:
 
 关于 go-redis 连接池的实现可见此文 [Go-Redis 连接池（Pool）源码分析](https://pandaychen.github.io/2020/02/22/A-REDIS-POOL-ANALYSIS/)
 
+
+####  连接池的大小的合理性
+在go-redis中，在高并发的场景下，如果连接池的size设置过小，可能会导致`connection pool timeout`的[报错](https://github.com/go-redis/redis/issues/195)。一般通过如下策略优化：
+- 优化耗时过久的操作
+- 调大连接池的大小
+- 合理设置`PoolTimeout`、`IdleTimeout`、`ReadTimeout`、`MinIdleConns`以及`WriteTimeout`等[参数](https://github.com/go-redis/redis/blob/master/options.go#L31)的值
+
+如：
+```golang
+ Cluster = redis.NewClient(&redis.ClusterOptions{
+        Addrs:        addresses,
+        PoolSize:     512,
+        PoolTimeout:  2 * time.Minute,
+        IdleTimeout:  10 * time.Minute,
+        ReadTimeout:  2 * time.Minute,
+        WriteTimeout: 1 * time.Minute,
+    })
+```
+
 ####  健康度检查
 使用 go-redis 初始化的时候，建议开启如下配置：
 ```golang
@@ -73,7 +92,7 @@ func InitRedisClient(config *config.Config) error {
         return nil
 }
 
-//异步监控
+// 异步监控
 func (c *Client) StartRedisMonitor() {
         ticker := time.NewTicker(pingInterval)
         for range ticker.C {
@@ -182,7 +201,7 @@ OK
 ```
 
 ####  ZSET：有序不重复集合
-ZSET即有序集合，通常用来实现延时队列或者排行榜（如销量 / 积分排行、成绩排行等等）。ZSET 通常包含 `3` 个 关键字操作：
+ZSET 即有序集合，通常用来实现延时队列或者排行榜（如销量 / 积分排行、成绩排行等等）。ZSET 通常包含 `3` 个 关键字操作：
 - `key` （与 redis 通常操作的 key value 中的 key 一致）
 - `score` （**用于排序的分数**，该分数是有序集合的关键，可以是双精度或者是整数）
 - `member` （指传入的 obj，与 key value 中的 value 一致）
@@ -194,6 +213,7 @@ ZSET即有序集合，通常用来实现延时队列或者排行榜（如销量 
 4.  ZSET 的成员 `member` 是唯一的, 但分数 `score` 却允许重复
 5.  ZSET 是通过哈希表实现的，所以添加 / 删除 / 查找的复杂度都是 `O(1)`
 6.  从使用意义来看，`ZSET` 中只有 `score` 值非常重要，`value` 值没有特别的意义，只需要保证它是唯一的就可以
+7.  `ZREMRANGEBYSCORE key startScore endScore`会删除`[startScore,endScore]`区间的数据（包含左右区间）
 
 ```golang
 127.0.0.1:6379>  zadd key1 1 a 2 b 3 c
@@ -206,6 +226,8 @@ ZSET即有序集合，通常用来实现延时队列或者排行榜（如销量 
 1) "c"
 2) "b"
 3) "a"
+127.0.0.1:6379> ZREMRANGEBYSCORE key1 1 3
+(integer) 3
 ```
 
 ####  【WARNING】慎用的操作
@@ -220,7 +242,7 @@ ZSET即有序集合，通常用来实现延时队列或者排行榜（如销量 
 主要是利用 Redis 的 List 数据结构，实现 Broker 机制，又细分为三种模式：
 1、List<br>
 
-- 使用生产者：`LPUSH`；消费者：`RBPOP`或`RPOP`模拟队列
+- 使用生产者：`LPUSH`；消费者：`RBPOP` 或 `RPOP` 模拟队列
 
 2、Stream<br>
 3、PUB/SUB（订阅）<br>
@@ -232,13 +254,66 @@ ZSET即有序集合，通常用来实现延时队列或者排行榜（如销量 
 - 使用 `ZADD taskGroupKey time1 taskid` 将任务写入 ZSET
 - 主逻辑不断以轮询方式 `ZRANGE taskGroupKey curTime MAXTIME withscores` 获取 `[curTime,MAXTIME)` 之间的任务，记为已经到期的延时任务（集）
 - 处理延时任务，处理完成后删除即可
-- 保存当前时间戳`curTime`，作为下一次轮询时的`ZRANGE`指令的范围起点
+- 保存当前时间戳 `curTime`，作为下一次轮询时的 `ZRANGE` 指令的范围起点
 
 
 ####  滑动窗口
-1、通过Redis构建滑动窗口并实现计数器限流<br>
+场景 1、通过 Redis 构建滑动窗口并实现计数器限流 <br>
 
+比如，系统要限定用户的某个行为在指定的时间里只能允许发生 `N` 次，采用滑动窗口的方式实现。利用 `ZSET` 可实现滑动窗口的机制。如下图所示，使用 ZSET 记录所有用户的访问历史数据，每个 `key` 表示不同的用户，用 `score` 标记时间范围的刻度，`value` 这里无意义，仅用于唯一性考虑。该流程大致流程如下：
+![redis-rolling](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/redis/redis-rolling-window1.png)
 
+1.  当用户 A 访问时，向 ZSET 中添加 `ZADD usernameA ${curTime} ${uuid}`，其中 `score` 值 `$curtime` 为当前时间戳，`value` 值 `${uuid}` 为保证唯一性的字符串（或者改用毫秒时间戳减少 `size`）
+2.  针对用户 `usernameA`，限流只需要计算指定的时间区间的总数 `ZCOUNT usernameA ${startTime} ${endTime}`，将此值与限流值 `limiter` 比较即可；通过 `score` 值圈出时间窗口，实现了滑动窗口的效果
+3.  对于 `score` 窗口之外的数据，会有占用内存过大的风险，有两个方法优化：
+  - 异步清理 `score` 过期的数据（滑动窗口外的数据）
+  - 若某个时间段检查用户并并未触发限流（滑动窗口内的行为是空记录），那么可以直接删掉 ZSET 的此 `key` 以减少内存占用
+4.  该方案的 Redis 操作都是针对同一个 `key` 的，使用 `pipeline` 可以显著提升存取效率
+5.  该方案的缺点是要记录时间窗口内所有的行为记录，如果这个并发量很大，会消耗大量的内存
+
+通常分布式场景使用lua脚本实现，如下：
+```lua
+--KEYS[1]:限流对应的key
+--ARGV[1]:一分钟之前的时间戳（假设按照1分钟为滑动窗口的区间）
+--ARGV[2]:此时此刻的时间戳（score值）
+--ARGV[3]:允许通过的最大数量
+--ARGV[4]:member名称（随机生成）
+redis.call('zremrangeByScore', KEYS[1], 0, ARGV[1])
+local res = redis.call('zcard', KEYS[1])
+if (res == nil) or (res < tonumber(ARGV[3])) then
+    redis.call('zadd', KEYS[1], ARGV[2], ARGV[4])
+    return 0
+else return 1 end
+```
+
+场景2、通过 `EXPIRE` 实现滑动窗口计数器限流<br>
+和上面使用ZSET不同，这里用`EXPIRE`来模拟窗口（注意：仅能使用秒为单位），从某个时间点开始每次请求过来请求数`+=1`，同时判断当前时间窗口内请求数是否超过限制，超过限制则拒绝该请求，然后下个时间窗口开始时计数器清零等待请求，lua代码如下：
+
+```lua
+-- KYES[1]: 限流器 key
+-- ARGV[1]:qos, 单位时间内最多请求次数
+-- ARGV[2]: 单位限流窗口时间
+-- 请求最大次数, 等于 p.quota
+local limit = tonumber(ARGV[1])
+-- 窗口即一个单位限流周期, 这里用过期模拟窗口效果, 等于 p.permit
+local window = tonumber(ARGV[2])
+-- 请求次数 + 1, 获取请求总数
+local current = redis.call("INCRBY",KYES[1],1)
+-- 如果是第一次请求, 则设置过期时间并返回 成功
+if current == 1 then
+  redis.call("EXPIRE",KYES[1],window)
+  return 1
+-- 如果当前请求数量小于 limit 则返回 成功
+elseif current < limit then
+  return 1
+-- 如果当前请求数量 ==limit 则返回 最后一次请求
+elseif current == limit then
+  return 2
+-- 请求数量 > limit 则返回 失败
+else
+  return 0
+end
+```
 
 
 ##	0x05	参考
