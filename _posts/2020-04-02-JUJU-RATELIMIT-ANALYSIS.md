@@ -138,10 +138,10 @@ func NewBucketWithQuantumAndClock(fillInterval time.Duration, capacity, quantum 
 
 | `rate` | `tb.fillInterval` | `tb.quantum` |
 | :-----:| :----: | :----: |
-| `10000`| `1`	| `100µs` |
-| `1000`| `1`	| `1ms` |
-| `100`| `1`	| `10ms` |
-| `10`| `1`	| `100ms` |
+| `10000`| `1s`	| `100µs` |
+| `1000`| `1s`	| `1ms` |
+| `100`| `1s`	| `10ms` |
+| `10`| `1s`	| `100ms` |
 
 ```golang
 // NewBucketWithRate returns a token bucket that fills the bucket
@@ -204,7 +204,7 @@ func (tb *Bucket) WaitMaxDuration(count int64, maxWait time.Duration) bool {}
 	-	`TakeMaxDuration` 仅在令牌的等待时间不大于 `maxWait` 时才从存储桶中提取令牌
 	-	如果令牌变得比 `maxWait` 更长的时间才可用，则不执行任何操作返回`false`
 	-	否则返回调用者应等待直到令牌实际可用的时间，以及`true`
-7.	`Wait`方法：阻塞等待直能获取 `count` 令牌
+7.	`Wait`方法：阻塞等待到可以申请到`count`个令牌的时间，注意，这里仅仅是最低等待时间，如果这期间令牌被其他请求拿走，可能等待到期后，还是无法获取足够的令牌（需要应用自己尝试）
 8.	`WaitMaxDuration`方法：`WaitMaxDuration` 仅在需要等待不超过 `maxWait` 的情况下才会从存储桶中获取令牌。返回是否已从存储桶中删除了所有令牌。如果未删除任何令牌，则立即返回。
 
 
@@ -216,6 +216,7 @@ func (tb *Bucket) WaitMaxDuration(count int64, maxWait time.Duration) bool {}
 ```golang
 // Rate returns the fill rate of the bucket, in tokens per second.
 func (tb *Bucket) Rate() float64 {
+	//通用的方法：转为1e9
 	return 1e9 * float64(tb.quantum) / float64(tb.fillInterval)
 }
 ```
@@ -263,11 +264,18 @@ func (tb *Bucket) adjustavailableTokens(tick int64) {
 }
 ```
 3、`take`方法<br>
+提个问题，`waitTime`这个值做何用？
+
+`take`方法是获取令牌的核心方法，主要实现如下逻辑（针对请求令牌的请求）：
+1.	根据当前的时间计算出当前时刻，可用的令牌数：`avail`（由`currentTick`和`adjustavailableTokens`两个方法计算出来）
+2.	如果当前令牌桶存量可用，直接返回
+3.	如果当前令牌桶存量不够，则返回需要等待的时间`waitTime`
 
 ```golang
 // now 表示获取令牌的时间，也就是当前时间
 // count 表示获取的令牌数量
 // maxWait 表示等待的最长时间
+// 返回值：（至少需要等待的时间，申请令牌成功/失败）
 func (tb *Bucket) take(now time.Time, count int64, maxWait time.Duration) (time.Duration, bool) {
 	if count <= 0 {
 		return 0, true
@@ -304,17 +312,73 @@ func (tb *Bucket) take(now time.Time, count int64, maxWait time.Duration) (time.
 	if waitTime > maxWait {
 		return 0, false
 	}
+	//更新桶中可用令牌数（注意！这里可能为负值）
 	tb.availableTokens = avail
 	// 如果 waitTime != 0，调用方需要阻塞等待 waitTime 的时间，才能拿到count个令牌
 	return waitTime, true
 }
 ```
 
-####	TakeAvailable方法
+注意到上面这段代码，根据`tb.quantum`和`tb.fillInterval`，惰性计算出还需要等待的时间（才能获得足够令牌）间隔：
 ```golang
-
+func (tb *Bucket) take(now time.Time, count int64, maxWait time.Duration) (time.Duration, bool) {
+	//...
+	// 这里avail为负，表示还欠多少个令牌（本次总量为count）
+	endTick := tick + (-avail+tb.quantum-1)/tb.quantum
+	// 计算下一个放入令牌的时间
+	endTime := tb.startTime.Add(time.Duration(endTick) * tb.fillInterval)
+	// 计算需要等待的时间
+	waitTime := endTime.Sub(now)
+	//...
+}
 ```
 
+####	核心方法：available
+`available`[方法](https://github.com/juju/ratelimit/blob/master/ratelimit.go#L171)直接返回当前令牌桶的可用数目，可能为负值
+```golang
+// available is the internal version of available - it takes the current time as
+// an argument to enable easy testing.
+func (tb *Bucket) available(now time.Time) int64 {
+	//加锁
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	tb.adjustavailableTokens(tb.currentTick(now))
+	return tb.availableTokens
+}
+```
+
+
+####	TakeAvailable方法
+`adjustavailableTokens`方法返回了指定数目`count`个令牌（不能超过令牌桶限额）
+```golang
+// TakeAvailable takes up to count immediately available tokens from the
+// bucket. It returns the number of tokens removed, or zero if there are
+// no available tokens. It does not block.
+func (tb *Bucket) TakeAvailable(count int64) int64 {
+	//加锁
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	return tb.takeAvailable(tb.clock.Now(), count)
+}
+
+// takeAvailable is the internal version of TakeAvailable - it takes the
+// current time as an argument to enable easy testing.
+func (tb *Bucket) takeAvailable(now time.Time, count int64) int64 {
+	if count <= 0 {
+		return 0
+	}
+	tb.adjustavailableTokens(tb.currentTick(now))
+	if tb.availableTokens <= 0 {
+		//无可用token
+		return 0
+	}
+	if count > tb.availableTokens {
+		count = tb.availableTokens
+	}
+	tb.availableTokens -= count
+	return count
+}
+```
 
 ####	Take方法
 `Take`实现了惰性求值的逻辑，注意需要加锁，获取当前时间`tb.clock.Now()`
@@ -328,15 +392,15 @@ func (tb *Bucket) Take(count int64) time.Duration {
 }
 ```
 
-####     adjustavailableTokens 方法的解释
+##	0x04     adjustavailableTokens 方法的解释
 `adjustavailableTokens`，该方法是用来计算当前时刻桶中可取的令牌总数。前面说了，令牌桶算法实现是每隔一段固定的时间向桶中放令牌，这个时间间隔足够合适，令牌的限速效果就越平滑。
 这个 [方法的实现](https://github.com/juju/ratelimit/blob/master/ratelimit.go#L312)，并非使用 Buffered Channel 及其他辅助结构实现，而是采用了一种很精妙的计算方式，类似于惰性求值，计算方法描述如下：
 
-假设令牌桶容量为 $capacity$ ，上一次放令牌的时间为 $$t_1$$（`latestTick`），当时桶中的令牌数 $$k_1$$（`availableTokens`），默认存放令牌的单位时间间隔为 $$t_i$$，每次向令牌桶中放 $$x$$ 个令牌。现在调用 `TakeAvailable()` 方法来获取令牌，将这个时刻记为 $$t_2$$。在 $$t_2$$ 时刻，令牌桶中可用的令牌数可以使用下式推算：
+假设令牌桶容量为 $capacity$ ，上一次放令牌的时间为 $t_1$ （`latestTick`），当时桶中的令牌数 $k_1$ （`availableTokens`），默认存放令牌的单位时间间隔为 $t_i$ ，每次向令牌桶中放 $x$ 个令牌。现在调用 `TakeAvailable()` 方法来获取令牌，将这个时刻记为 $t_2$ 。在 $t_2$  时刻，令牌桶中可用的令牌数可以使用下式推算：
 
 $$current=k_1+x*\frac{(t_2-t_1)}{t_i}$$
 
-桶中可用的令牌数目就是 $$cuurent$$ 和 $$capacity$$ 的最大值
+桶中可用的令牌数目就是 $cuurent$ 和 $capacity$ 的最大值
 
 ![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2020/0402/2-limit.png)
 
@@ -390,54 +454,25 @@ func (tb *Bucket) takeAvailable(now time.Time, count int64) int64 {
 	tb.availableTokens -= count
 	return count
 }
-```
 
-`currentTick` 方法是计算 $$\frac{t_2-t_1}{t_i}$$ 的值
-
-```golang
-// currentTick returns the current time tick, measured from tb.startTime
 func (tb *Bucket) currentTick(now time.Time) int64 {
 	return int64(now.Sub(tb.startTime) / tb.fillInterval)
 }
 ```
 
-####	take 方法
-提个问题，`waitTime`这个值做何用？
-```golang
-// take is the internal version of Take - it takes the current time as
-// an argument to enable easy testing.
-func (tb *Bucket) take(now time.Time, count int64, maxWait time.Duration) (time.Duration, bool) {
-	if count <= 0 {
-		return 0, true
-	}
+其中，`currentTick` 方法是计算 $\frac{t_2-t_1}{t_i}$ 的值
 
-	tick := tb.currentTick(now)
-	tb.adjustavailableTokens(tick)
-	avail := tb.availableTokens - count
-	if avail >= 0 {
-		tb.availableTokens = avail
-		return 0, true
-	}
-	// Round up the missing tokens to the nearest multiple
-	// of quantum - the tokens won't be available until
-	// that tick.
 
-	// endTick holds the tick when all the requested tokens will
-	// become available.
-	endTick := tick + (-avail+tb.quantum-1)/tb.quantum
-	endTime := tb.startTime.Add(time.Duration(endTick) * tb.fillInterval)
-	waitTime := endTime.Sub(now)
-	if waitTime > maxWait {
-		return 0, false
-	}
 
-	//更新桶中可用令牌数
-	tb.availableTokens = avail
-	return waitTime, true
-}
-```
+##	0x05	示例
+![juju](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/limiter/juju-limit.png)
 
-##  0x04  参考
+##	0x06	总结
+从本令牌桶的实现来看，有两个关键点：
+-	申请令牌的并发请求，涉及到共享变量改动（如可用令牌数）的改动，需要加锁访问
+-	整个令牌桶的生产速率是一定的，所以在某个时间点上，桶的令牌数目是固定的（不care有无申请），这就是令牌桶限流机制的核心
+
+##  0x07  参考
 -   [JUJU-limit 实现](https://github.com/juju/ratelimit)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
