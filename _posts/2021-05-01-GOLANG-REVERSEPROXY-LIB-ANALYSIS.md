@@ -38,8 +38,10 @@ tags:
 #### httputil.ReverseProxy 结构
 
 `ReverseProxy` 包含两个重要的属性： `Director` 和 `ModifyResponse`，这两个属性都是函数类型。
+
 1、`Director` 属性 <br>
 当接收到客户端请求时，`ServeHTTP` 函数首先调用 `Director` 函数对接受到的请求体进行修改，例如修改请求的目标地址、请求头等；然后使用修改后的请求体发起新的请求
+
 2、`ModifyResponse` 属性 <br>
 接收到响应后，调用 `ModifyResponse` 函数对响应进行修改，最后将修改后的响应体拷贝并响应给客户端，这样就实现了反向代理的整个流程
 
