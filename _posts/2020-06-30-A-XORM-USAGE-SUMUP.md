@@ -94,6 +94,7 @@ func (a *Account) AfterInsert() {
 ```
 
 ##  0x04    Xorm 常用函数及方法
+参考[官方文档](https://gobook.io/read/gitea.com/xorm/manual-zh-CN/)
 
 ##  0x05    基于 Xorm 的自动分表
 本小节简单介绍下如何利用 Xorm 实现 Mysql 分表

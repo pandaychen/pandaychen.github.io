@@ -181,6 +181,7 @@ func (cb *CircuitBreaker) Execute(req func() (interface{}, error)) (interface{},
 1.	判断是否 `Closed`，如是，放行所有请求；并且判断时间是否达到 `Interval` 周期，从而清空计数，调用 `toNewGeneration` 进入新周期（清空计数）；
 2.	如果是 `Open` 状态，返回 `ErrOpenState`，—不放行所有请求；同样判断周期时间，到达则同样调用 `toNewGeneration` 进入新周期
 3.	如果是 `HalfOpen` 状态，则判断是否已放行 `MaxRequests` 个请求，如未达到则放行；否则返回: `ErrTooManyRequests`，此函数一旦放行请求，就调用 `conut.onRequest` 对请求计数加 `1`，进入请求逻辑
+
 ```golang
 /*
 beforeRequest 函数的核心功能：判断是否放行请求，计数或达到切换新条件刚切换。
@@ -214,9 +215,29 @@ func (cb *CircuitBreaker) beforeRequest() (uint64, error) {
 ```
 
 ####	步骤 2：req
-req: 获取请求结果
+`req`方法: 获取请求结果，注意这里做了`defer`，防止在`req()`执行中异常退出。
 
-####	步骤 3；afterRequest
+```golang
+// 核心执行函数 Execute： 该函数分为三步 beforeRequest、 执行请求、 afterRequest
+func (cb *CircuitBreaker) Execute(req func() (interface{}, error)) (interface{}, error) {
+	//...
+	defer func() {
+		e := recover()
+		if e != nil {
+			cb.afterRequest(generation, false)
+			panic(e) //if panic，继续 panic 给上层调用者去 recover，有趣
+		}
+	}()
+
+	// 执行真正的用户调用
+	result, err := req()
+
+	//...
+}
+```
+
+
+####	步骤 3：afterRequest
 `afterRequest` 的作用是上一步业务请求的结果进行对成功 / 失败进行计数，达到条件则切换状态；注意参数 `cb.afterRequest(generation, cb.isSuccessful(err))` 中 `isSuccessful`，默认只是判断是否为 `nil`，在实际中这样是有问题的，**我们需要指定进行熔断失败计数的错误类型**，比如服务调用超时，服务不可达等，其他业务逻辑错误不应该作为熔断器失败的计数统计条件；
 
 `afterRequest` 的逻辑是
@@ -300,6 +321,7 @@ func (cb *CircuitBreaker) setState(state State, now time.Time) {
 
 ####	在何处迁移状态
 所以，参照前文 [微服务基础之熔断保护（Breaker）](https://pandaychen.github.io/2020/04/01/MICROSERVICE-BREAKER-INTRO/#0x03 - 熔断器的转换流程) 熔断状态机迁移的状态机，有下面几处调用了状态迁移方法：
+
 1、动作 `B`：当熔断器从关闭状态到打开状态时，由每次熔断器调用 `Execute` 中的 `afterRequest` 方法来检查并设置 <br>
 ```golang
 func (cb *CircuitBreaker) afterRequest(before uint64, success bool) {
