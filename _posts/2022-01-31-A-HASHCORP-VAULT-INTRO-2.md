@@ -2,7 +2,7 @@
 layout:     post
 title:      Hashcorp Vault 实战（应用篇）
 subtitle:   更安全的 Secret 存储系统：Vault
-date:       2020-01-03
+date:       2022-01-31
 author:     pandaychen
 header-img: img/super-mario.jpg
 catalog: true
