@@ -317,6 +317,8 @@ func (m *Map) Get(key string) string {
 2.	给 dcron 节点加上主动心跳上报，开发者可以及时感知进程在线情况
 3.	dcron 的 REDIS 存储是采用 `Scan` 指令，即扫描通用前缀获取当前注册的所有节点的列表，如果 redis 集群不支持此指令的话，那么可能需要换其他的方式（如采用 `LIST` 结构存储所有的节点 id）
 
+此外，定时任务可以通过api接口方式，动态注册到各个dcron节点中；或者提供删除定时任务的接口
+
 ####	Kubernetes 部署
 现网中，我们是如此在 kubernetes 部署的，并且实现了如下几点优化：
 ![dcron-k8s-change](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/dcrontab/dcron-k8s-change.png)
