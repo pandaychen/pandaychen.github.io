@@ -65,8 +65,13 @@ func WithValue(parent Context, key, val interface{}) Context
 ##  0x01    进程内传递
 进程内超时传递自然使用 `context.WithTimeout` 来实现了。
 
+![inner](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kratos/timeout-inner.jpg)
+
 ##  0x02    跨进程传递
 在这篇博客 [gRPC 系列——grpc 超时传递原理](https://xiaomi-info.github.io/2019/12/30/grpc-deadline/)，介绍了跨进程（语言）的超时传递的场景。先给出结论：<font color="#dd0000">gRPC 框架确实是通过 HTTP2 HEADERS Frame 中的 grpc-timeout 字段来实现跨进程传递超时时间，Go 和 Java 服务（基于 gRPC）之间，超时也会随着调用链传递 </font>。
+
+![outer](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kratos/timeout-outer.jpg)
+
 
 ####	问题描述
 简单描述下问题，出问题的业务方的服务调用路径如下，业务反馈 `DoXORM` 服务（基于 Xorm 改造，加入 `ctx` 支持）偶现错误 <font color="#dd0000">context deadline exceeded</font>，很明显错误是由于 `context.WithTimeout()` 超时导致的。
@@ -563,12 +568,84 @@ func (s *Server) handle() grpc.UnaryServerInterceptor {
 ##	0x05	思考
 这里有个疑问，为何仅仅在 gRPC 的 client 端才嵌入超时传递的 `Shrink` 逻辑呢？而 Warden 的服务端却不需要 `Shrink` 逻辑？
 
-
 ##	0x06	Database 中超时传递的实现
 基于上面 gRPC 的经验，理解 Database 中的超时传递实现也就不难了。
-（未完待续）
 
-##  0x07	参考
+####  Kratos的封装
+看下[Query](https://github.com/go-kratos/kratos/blob/v1.0.x/pkg/database/sql/sql.go#L476)方法的封装：
+
+1.  从context中获取真正的超时时间：`Shrink`方法，生成新的子context `c`，注意到这个context是带超时控制的！
+2.  将`c`传入`stmt.QueryContext`方法
+3.  等待执行结果或者超时错误返回
+
+```golang
+// Shrink will decrease the duration by comparing with context's timeout duration
+// and return new timeout\context\CancelFunc.
+func (d Duration) Shrink(c context.Context) (Duration, context.Context, context.CancelFunc) {
+	if deadline, ok := c.Deadline(); ok {
+		if ctimeout := xtime.Until(deadline); ctimeout < xtime.Duration(d) {
+			// deliver small timeout
+			return Duration(ctimeout), c, func() {}
+		}
+	}
+	ctx, cancel := context.WithTimeout(c, xtime.Duration(d))
+	return d, ctx, cancel
+}
+
+// Query executes a prepared query statement with the given arguments and
+// returns the query results as a *Rows.
+func (s *Stmt) Query(c context.Context, args ...interface{}) (rows *Rows, err error) {
+  //.......
+	stmt, ok := s.stmt.Load().(*sql.Stmt)
+	if !ok {
+		err = ErrStmtNil
+		return
+	}
+
+  //从context中获取真正的超时时间
+	_, c, cancel := s.db.conf.QueryTimeout.Shrink(c)
+	rs, err := stmt.QueryContext(c, args...)
+	s.db.onBreaker(&err)
+	_metricReqDur.Observe(int64(time.Since(now)/time.Millisecond), s.db.addr, s.db.addr, "stmt:query")
+	if err != nil {
+		err = errors.Wrapf(err, "query:%s, args:%+v", s.query, args)
+		cancel()
+		return
+	}
+	rows = &Rows{Rows: rs, cancel: cancel}
+	return
+}
+```
+
+
+####   超时在何处触发？
+通过跟踪`stmt.QueryContext`方法，一步步跟踪下去，最终到达[ctxDriverQuery](https://cs.opensource.google/go/go/+/refs/tags/go1.18.2:src/database/sql/ctxutil.go;drc=7791e934c882fd103357448aee0fd577b20013ce;l=46)方法，这里看到了熟悉的代码（看`select`的逻辑）：
+
+```golang
+func ctxDriverQuery(ctx context.Context, queryerCtx driver.QueryerContext, queryer driver.Queryer, query string, nvdargs []driver.NamedValue) (driver.Rows, error) {
+	if queryerCtx != nil {
+		return queryerCtx.QueryContext(ctx, query, nvdargs)
+	}
+	dargs, err := namedValueToValue(nvdargs)
+	if err != nil {
+		return nil, err
+	}
+
+  //如果ctx超时或者被cancel，则触发ctx.Done()
+	select {
+	default:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return queryer.Query(query, dargs)
+}
+```
+
+##  0x07  总结
+本文梳理了Kratos框架的超时传递实现机制。
+
+##  0x08	参考
 -   [gRPC 系列——grpc 超时传递原理](https://xiaomi-info.github.io/2019/12/30/grpc-deadline/)
 -	  [Golang 如何正确使用 Context](https://juejin.im/post/5d6b5dc3e51d4561ce5a1c94)
 -	  [Go Context 的踩坑经历](https://zhuanlan.zhihu.com/p/34417106)
+-   [How to Manage Database Timeouts and Cancellations in Go](https://www.alexedwards.net/blog/how-to-manage-database-timeouts-and-cancellations-in-go)
