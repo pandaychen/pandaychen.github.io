@@ -26,11 +26,19 @@ tags:
 -   服务的高可用
 -   存储的高可用
 
+####  服务的高可用
+一般现网中通常采用两种高可用的部署方式：
+1.  前面挂CLB负载均衡
+2.  Vault 本身的active-standby模式
+
 官方给出了如下文档，供参考：
--   基于LB的部署：https://www.vaultproject.io/docs/concepts/ha#behind-load-balancers
+-   基于LB的部署，[文档](https://www.vaultproject.io/docs/concepts/ha#behind-load-balancers)
 
 
-####   使用Mysql作为后端存储
+
+####  存储的高可用
+
+######   使用Mysql作为后端存储
 我们项目中是采用MySQL作为后端存储的，[官方文档](https://www.vaultproject.io/docs/configuration/storage/mysql#mysql-examples)：
 
 ```text
@@ -69,6 +77,22 @@ api_addr = "http://1.1.1.1:8200"
 cluster_addr = "http://1.1.1.1:8201"
 ```
 
+
+####  官方推荐的HA部署
+官方给了几种高可用集群的组件文档，这里简单罗列一下：
+1、[Vault High Availability with Consul](https://learn.hashicorp.com/tutorials/vault/ha-with-consul?in=vault/day-one-consul)：后端使用consul集群的active-standby模式<br>
+
+![vault-consul](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/vault/vault-ha-consul.png)
+
+下图是具体的部署架构：
+![vault-consul](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/vault/vault-ha-consul-1.png)
+
+
+2、Vault-LB 与active-standby模式<br>
+
+![vault-mysql](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/vault/vault-rds.png)
+
+
 ##  0x02    Secrets Engines
 Secrets Engines的本质是什么？如kv就是常用的一种Secrets Engine。Secret Engine 就是体现了Vault系统的可插拔性。它允许在保持 Vault 核心稳定的前提下，支持多种不同的加密渠道，每种渠道有各自的优点和适用范围，同时能够通过统一的接口进行管理，默认Vault集群有如下的Engine：
 
@@ -89,7 +113,7 @@ define/your/own/path/    kv           kv_97d4cb4c           n/a
 ####    kv
 关于kv，有几个要点：
 1.  可以使用`enable`指令，将 kv 加载到其他位置，如`vault secrets enable -path=other/path kv`，同一个引擎engine可以被加载到不同的路径下（可以想象为同一个 engine 类的多个实例），每个路径下的数据都是彼此独立的，它们之间不会互相干扰
-2.  kv有两个版本：`Version 1`和`Version 2`，区别是`Version 2`提供了键值对的版本化存储，可以保存一定数量的历史版本（类似于Etcd的MVCC）。通过下面的指令，将v1升级至V2，参考下面的例子
+2.  kv有两个[版本](https://www.vaultproject.io/docs/secrets/kv)：`Version 1`和`Version 2`，区别是`Version 2`提供了键值对的版本化存储，可以保存一定数量的历史版本（类似于Etcd的MVCC）。通过下面的指令，将v1升级至V2，参考下面的例子
 3.  同一路径不能被重复创建
 
 
