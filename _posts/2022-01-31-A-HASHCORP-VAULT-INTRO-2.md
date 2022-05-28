@@ -21,10 +21,17 @@ tags:
 3.  vault-API调用
 
 
-##  0x01    部署高可用vault集群
+##  0x01    vault的高可用模式
 官方文档提供了HA的[部署方案](https://www.vaultproject.io/docs/concepts/ha)，有两个地方都需要考虑：
 -   服务的高可用
 -   存储的高可用
+
+####  vault的HA机制
+
+Vault 支持多服务器部署模式（运行多个 Vault 服务器）以实现高可用性。使用支持高可用的数据存储时，会自动启用高可用模式。可以通过启动服务器并查看输出数据存储信息之后是否紧跟着输出`HA available`来判断数据存储是否支持高可用性模式；如果是的话，则 Vault 将自动使用 HA 模式。
+
+为了获得高可用性，其中某个 Vault 服务器节点会在数据存储中成功获取锁。获取到锁的服务器节点将成为主节点；所有其他节点成为备节点。此时，如果备节点收到请求，它们将根据集群的当前配置和状态进行请求转发或客户端重定向。
+
 
 ####  服务的高可用
 一般现网中通常采用两种高可用的部署方式：
@@ -80,6 +87,7 @@ cluster_addr = "http://1.1.1.1:8201"
 
 ####  官方推荐的HA部署
 官方给了几种高可用集群的组件文档，这里简单罗列一下：
+
 1、[Vault High Availability with Consul](https://learn.hashicorp.com/tutorials/vault/ha-with-consul?in=vault/day-one-consul)：后端使用consul集群的active-standby模式<br>
 
 ![vault-consul](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/vault/vault-ha-consul.png)
@@ -92,6 +100,12 @@ cluster_addr = "http://1.1.1.1:8201"
 
 ![vault-mysql](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/vault/vault-rds.png)
 
+3、基于AzureRM 的[部署方案](https://github.com/hashicorp/terraform-azurerm-vault)<br>
+
+![vault-azure](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/vault/vault-azure.png)
+
+4、使用DynamoDB做后端的[部署模式](https://github.com/avantoss/vault-infra)<br>
+![vault-dynamodb](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/vault/vault-DynamoDB.png)
 
 ##  0x02    Secrets Engines
 Secrets Engines的本质是什么？如kv就是常用的一种Secrets Engine。Secret Engine 就是体现了Vault系统的可插拔性。它允许在保持 Vault 核心稳定的前提下，支持多种不同的加密渠道，每种渠道有各自的优点和适用范围，同时能够通过统一的接口进行管理，默认Vault集群有如下的Engine：
