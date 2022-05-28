@@ -1,6 +1,6 @@
 ---
 layout: post
-title: 数据结构与算法回顾（四）：环形内存缓冲区 ringbuffer（TODO FIX）
+title: 数据结构与算法回顾（四）：环形内存缓冲区 ringbuffer
 subtitle: 一种高效进程间通信的机制：环形内存缓冲区
 date: 2022-04-05
 header-img: img/super-mario.jpg
