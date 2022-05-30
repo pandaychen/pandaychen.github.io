@@ -31,7 +31,7 @@ func main() {
 
 httprouter 基于 Radix Tree 实现，Radix Tree 的特点是拥有共同前缀的节点也共享同一个父节点。经典例子：
 
-```javascript
+```text
 Priority   Path             Handle
 9          \                *<1>
 3          ├s               nil
