@@ -46,7 +46,6 @@ ringbuffer 的实现主要依赖于读写指针的移动（head-ReadIndex/tail-W
 - `DataHead`：内存数据头结构
 - `DataUnit`：内存数据体结构（变长）
 
-
 ```cpp
 struct NodeDataHead
 {
@@ -67,6 +66,7 @@ struct NodeDataUnit
 `ShmRingQueue`是管理结构：
 -	`NodeDataHead`：指向管理头节点
 -	`m_pBuff`：指向数据区首地址
+
 ```cpp
 class ShmRingQueue
 {
@@ -83,7 +83,6 @@ ShmRingQueue::ShmRingQueue(char *pShmBuff)
 	m_pBuff = pShmBuff + sizeof(NodeDataHead);
 }
 ```
-
 
 ####	功能方法
 主要是利用`iWrite`、`iRead`计算出当前的一些指标（基于环形结构）：
