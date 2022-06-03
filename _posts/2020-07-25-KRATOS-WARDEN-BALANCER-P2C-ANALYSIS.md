@@ -62,14 +62,13 @@ best = least_connection_choice([nodeA, nodeB])
 [官方的文档](https://github.com/go-kratos/kratos/blob/master/doc/wiki-cn/warden-balancer.md) 上给出了实现的一些关键细节，先列举下，然后再结合代码做下分析：
 
 #### P2C (Pick of two choices) 算法描述
-本算法通过随机选择两个 `node` 选择优胜者来避免羊群效应，并通过 ewma（指数加权移动平均法） 尽量获取服务端的实时状态。
+本算法通过随机选择两个 `node` 选择优胜者来避免羊群效应，并通过 EWMA 尽量获取服务端的实时状态。
 
 针对 **服务端** 的指标：
 服务端获取最近 `500ms` 内的 CPU 使用率（针对容器场景：需要将 `cgroup` 设置的限制考虑进去，并除于 CPU 核心数），并将 CPU 使用率乘与 1000 后塞入每次 gRPC 请求中的的 `Trailer` 中夹带返回
 
 
-针对 **客户端** 的指标：
-主要参数：
+针对 **客户端** 的指标，主要参数如下：
 * server_cpu：通过每次请求中服务端塞在 trailer 中的 cpu_usage 拿到服务端最近 500ms 内的 cpu 使用率
 * inflight：当前客户端正在发送并等待 response 的请求数（pending request）
 * latency: 加权移动平均算法计算出的接口延迟
@@ -77,6 +76,7 @@ best = least_connection_choice([nodeA, nodeB])
 
 ####	权重计算
 计算权重的公式如下：
+
 $$\frac{success*metaWeight}{cpu*\sqrt{lag}*(inflight+1)}$$
 
 这个公式的含义很直观，对权重有积极影响的因子，如成功率，初始权重等，位于分子；对权重有消极影响的因子，如cpu负载（过高）、lag延迟（过大）、以及积压的请求数inflight，放在分母的位置。（为了防止除法溢出，inflight做了加`1`处理）
@@ -120,6 +120,9 @@ const (
 -	`svrCPU`：保存了服务端返回的最近一段时间的 CPU 使用率
 -	`stamp`：保存上次计算权重的时间戳（Nano）
 
+gRPC客户端的连接池如下图所示：
+![p2c-subconn](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kratos/loadbalance/GRPC-LB-P2C.png)
+
 ```golang
 type subConn struct {
 	// metadata
@@ -142,6 +145,7 @@ type subConn struct {
 	reqs int64
 }
 ```
+
 
 `p2c.subConn` 实现的方法：
 -	`valid`：
@@ -177,6 +181,12 @@ func (sc *subConn) cost() uint64 {
 	return load
 }
 ```
+
+####	指标的计算详解-inflight
+![inflight](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/kratos/loadbalance/GRPC-LB-P2C-1.png)
+
+
+
 
 ####	LB 核心逻辑 -- Builder
 `p2cPickerBuilder.Build` 在每次后端节点有增减的情况下调用，初始化时会调用一次，`readySCs` 保存了后端服务器的基础信息，从代码实现上看，也是做了对节点的初始化工作：
@@ -462,11 +472,11 @@ return pc.conn, func(di balancer.DoneInfo) {
 }, nil
 ```
 
-
-
 ###	统计节点
 
+```text
 //INFO 07/24-07:50:56.452 /root/delete/kratos-note/pkg/net/rpc/warden/balancer/p2c/p2c.go:292 p2c  : [{addr:127.0.0.1:8081 score:783813.9288438039 cs:1000 lantency:2612717 cpu:789 inflight:1 reqs:1}]
+```
 
 ```golang
 // statistics is info for log
