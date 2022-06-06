@@ -2,7 +2,7 @@
 layout: post
 title: Golang 的分布式任务队列：machinery 分析（一）
 subtitle: 如何使用 Golang 实现通用的任务调度作业模型
-date: 2020-11-02
+date: 2020-11-03
 author: pandaychen
 catalog: true
 tags:
