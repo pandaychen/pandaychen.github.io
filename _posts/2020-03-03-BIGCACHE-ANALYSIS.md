@@ -86,7 +86,7 @@ bigCache 对高并发及百万级别缓存都支持极好，不过其无持久�
 
 ## 0x02 用户数据（数据序列化 / pack）
 
-在许多高性能的组件实现，针对数据部分的存储大都会将其由 `string` 类型按照一定的 pack 格式转为 `binary` 类型以减少内存占用，在 bigCache 也是类似做法，每个要插入的 key-value 由 `5` 部分组成，分别是：
+在许多高性能的组件实现，针对数据部分的存储大都会将其由 `string` 类型按照一定的 pack 格式转为 `binary` 类型以减少内存占用，在 bigCache 也是类似[做法](https://github.com/allegro/bigcache/blob/master/encoding.go)，每个要插入的 key-value 由 `5` 部分组成，分别是：
 
 - 时间戳 （`8`byte）：使用时间戳来实现到期后的 `expire` 功能
 - key 的 hash 值 （`8`byte）
@@ -153,7 +153,8 @@ func resetKeyFromEntry(data []byte) {
 }
 ```
 
-最终是通过 `binary.PutUvarint` + `BytesQueue.copy` 方法，将 pack 后的数据及长度写入到 `bytesQueue.array` 中：
+最终是通过 `binary.PutUvarint` + `BytesQueue.copy` [方法](https://github.com/allegro/bigcache/blob/master/queue/bytes_queue.go#L158)，将 pack 后的数据及长度写入到 `bytesQueue.array` 中
+
 `binary.PutUvarint`，该方法主要是将 `uint64` 类型放入 buf 中，并返回写入的字节数。如果 buf 过小，`PutUvarint` 将抛出 panic。
 
 ```golang
@@ -364,12 +365,10 @@ type cacheShard struct {
 
 ## 0x06 bigCache 对外接口
 
-本小节，我们看下 bigCache 的数据操作过程。<br>
-
+本小节，我们看下 bigCache 的数据操作过程。
 BigCache 对外提供了如下接口：
 
 1、`bigCache.Get`：获取数据<br>
-
 2、`bigCache.Set`：插入数据<br>
 插入数据时，若发现key已存在，并不会覆盖原来数据，而是将原数据置为无效，再将新数据插入；此目的有二：
 -	因为`[]byte`类型的value在queue中的长度固定，新插入的数据和原来的长度未必相等
@@ -379,7 +378,7 @@ BigCache 对外提供了如下接口：
 bigCache删除数据的思路和普通的 Cache 很不一样，删除操作`Delete`并不直接删除数据，而是删除 `cacheShard.hashmap` 中的 key，然后将数据部分（`data[timestampSizeInBytes:]`）置为 `0`（见[resetKeyFromEntry](https://github.com/allegro/bigcache/blob/master/shard.go#L262)方法），并没有归还内存。
 
 此外，bigCache 可以为插入的数据设置过期时间，bigCache 中自动删除数据有`2`种场景：
-1.	在插入数据时删除过期数据（为了不影响插入性能，每次最多删除一条数据，前文已描述）
+1.	在插入数据时删除过期数据（为了不影响插入性能，每次最多删除一条数据，实现[在此](https://github.com/allegro/bigcache/blob/master/shard.go#L145)）
 2.	通过设置 `CleanWindow`的值，启动 goroutine 后台定时批量删除过期数据（**注意：bigCache 的缺点是所有数据的过期时间都是一样的，需要注意缓存失效的问题**）
 
 
@@ -414,11 +413,7 @@ func (c *BigCache) getShard(hashedKey uint64) (shard *cacheShard) {
 }
 ```
 
-这里以 `bigCache.Get` 方法为例，其步骤为：
-
-1.  根据 `fnv` 算法计算出用户 key 的 `hash` 值 `hashedKey`
-2.  `getShard` 方法：通过 `hashedKey` 获取数据存储到哪一个 `shard` 中
-3.  调用 `shard` 的 `get` 方法获取存储的数据
+下面单独分析各个接口。
 
 #### 插入数据 bigCache.Set
 
@@ -536,6 +531,31 @@ func (q *BytesQueue) canInsertBeforeHead(need int) bool {
 }
 ```
 
+####	一个常用的技巧：在插入时删除过期数据
+[removeOldestEntry](https://github.com/allegro/bigcache/blob/master/shard.go#L320)方法是删除一条过期（最久）的数据，这里简单分析下其实现：
+```golang
+func (s *cacheShard) removeOldestEntry(reason RemoveReason) error {
+	oldest, err := s.entries.Pop()
+	if err == nil {
+		hash := readHashFromEntry(oldest)
+		if hash == 0 {
+			// entry has been explicitly deleted with resetKeyFromEntry, ignore
+			return nil
+		}
+		delete(s.hashmap, hash)
+		s.onRemove(oldest, reason)
+		if s.statsEnabled {
+			delete(s.hashmapStats, hash)
+		}
+		return nil
+	}
+	return err
+}
+```
+
+为何`BytesQueue.Pop`能获取到最久的数据呢？
+
+
 #### 删除数据 bigCache.Delete
 
 删除的操作和我们通常实现 Cache 的不太一样，bigCache 删除数据的流程如下：
@@ -580,9 +600,13 @@ func (s *cacheShard) del(key string, hashedKey uint64) error {
 ```
 
 ##### 查询数据 bigCache.Get
+`bigCache.Get` 查询方法的步骤为：
 
-查询数据
+1.  根据 `fnv` 算法计算出用户 key 的 `hash` 值 `hashedKey`
+2.  `getShard` 方法：通过 `hashedKey` 获取数据存储到哪一个 `shard` 中
+3.  调用 `shard` 的 `get` 方法获取存储的数据
 
+查找方法的调用链为`BigCache.getShard` ==> `cacheShard.get` ==> `BytesQueue.get`，代码如下：
 ```golang
 // Get reads entry for the key.
 // It returns an ErrEntryNotFound when
@@ -593,16 +617,25 @@ func (c *BigCache) Get(key string) ([]byte, error) {
 	return shard.get(key, hashedKey)
 }
 
+//根据uint64的key值获取shard分片index
+func (c *BigCache) getShard(hashedKey uint64) (shard *cacheShard) {
+	return c.shards[hashedKey&c.shardMask]
+}
+
 func (s *cacheShard) get(key string, hashedKey uint64) ([]byte, error) {
+	//shard加锁
     s.lock.RLock()
 
-    //getWrappedEntry 根据
+    //getWrappedEntry 先根据s.hashmap查询到itemIndex，itemIndex即是key保存在byteQueue的array中的位置
 	wrappedEntry, err := s.getWrappedEntry(hashedKey)
 	if err != nil {
 		s.lock.RUnlock()
 		return nil, err
 	}
+
+	//解码原始数据，先严格检查key是否与value中保存的是否一致
 	if entryKey := readKeyFromEntry(wrappedEntry); key != entryKey {
+		// hash发生了冲突，有概率发生
 		s.lock.RUnlock()
 		s.collision()
 		if s.isVerbose {
@@ -610,14 +643,18 @@ func (s *cacheShard) get(key string, hashedKey uint64) ([]byte, error) {
 		}
 		return nil, ErrEntryNotFound
 	}
+	//解码原始数据
 	entry := readEntry(wrappedEntry)
 	s.lock.RUnlock()
+
+	//查询命中计数
 	s.hit(hashedKey)
 
 	return entry, nil
 }
 
 func (s *cacheShard) getWrappedEntry(hashedKey uint64) ([]byte, error) {
+	//查询key在byteQueue中的位置
 	itemIndex := s.hashmap[hashedKey]
 
     // 未找到
@@ -626,7 +663,7 @@ func (s *cacheShard) getWrappedEntry(hashedKey uint64) ([]byte, error) {
 		return nil, ErrEntryNotFound
 	}
 
-    //itemIndex 是索引
+    //itemIndex 是索引（注意itemIndex是uint32类型）
 	wrappedEntry, err := s.entries.Get(int(itemIndex))
 	if err != nil {
 		s.miss()
@@ -637,7 +674,7 @@ func (s *cacheShard) getWrappedEntry(hashedKey uint64) ([]byte, error) {
 }
 ```
 
-`s.entries.Get(int(itemIndex))` 的实现如下，`index` 是数据区域的存储下标，先拿到 `blockSize` 即存储数据的长度，那么 `q.array[index+headerEntrySize : index+headerEntrySize+blockSize]` 就是待查询的序列化数据：
+`s.entries.Get(int(itemIndex))` 的实现如下，`index` 是数据区域的存储下标，先拿到 `blockSize` 即存储数据的长度，那么 `q.array[index+headerEntrySize:index+headerEntrySize+blockSize]` 就是待查询的序列化数据：
 
 ```golang
 // Get reads entry from index
@@ -804,7 +841,7 @@ bigCache 为何不提供更新的操作？其实这是显而易见的 <br>
 
 ## 0x09 总结 && 使用场景
 
-从开源的实现来看，相较于 `sync.Map`，更多的作者更偏爱使用 `shard map` + `RWMutex` 实现缓存。下图厘清了bigcache的完整架构，from[golang本地缓存(bigcache/freecache/fastcache等)选型对比及原理总结](https://zhuanlan.zhihu.com/p/487455942)：
+从开源的实现来看，相较于 `sync.Map`，更多的作者更偏爱使用 `shard map` + `RWMutex` 实现缓存。下图厘清了bigcache的完整架构，from[此文](https://zhuanlan.zhihu.com/p/487455942)：
 
 ![bigcache-total-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/cache/bigcache/bigcache-total-flow.png)
 
