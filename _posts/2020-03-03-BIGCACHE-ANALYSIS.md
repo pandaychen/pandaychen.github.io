@@ -4,7 +4,7 @@ title:      Golang 高性能 LocalCache：BigCache 设计与分析
 subtitle:   如何在 Golang 构建一个高性能的本地缓存
 date:       2020-03-03
 author:     pandaychen
-header-img: img/golang-tools-fun.png
+header-img: 
 catalog: true
 category:   false
 tags:
@@ -98,7 +98,7 @@ const (
 ```
 
 最终的存储 Unit 如下图所示：
-![img](https://wx2.sbimg.cn/2020/09/17/G2DyJ.png)
+![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/cache/bigcache/bigcache1.png)
 
 `wrapEntry` 完成的上述 pack 的过程（通用的方法），将 key 和 value 都 pack：
 
@@ -145,7 +145,7 @@ func resetKeyFromEntry(data []byte) {
 ```
 
 最终是通过 `binary.PutUvarint` + `BytesQueue.copy` 方法，将 pack 后的数据及长度写入到 `bytesQueue.array` 中：
-`binary.PutUvarint`，该方法主要是将 `uint64` 类型放入 buf 中，并返回写入的字节数。如果 buf 过小，PutUvarint 将抛出 panic。
+`binary.PutUvarint`，该方法主要是将 `uint64` 类型放入 buf 中，并返回写入的字节数。如果 buf 过小，`PutUvarint` 将抛出 panic。
 
 ```golang
 func (q *BytesQueue) push(data []byte, len int) {
@@ -174,13 +174,13 @@ func (q *BytesQueue) copy(data []byte, len int) {
 
 关于 bigCache 的数据序列化存储可参见下图：
 
-![img](https://wx1.sbimg.cn/2020/09/17/G25NT.png)
+![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/cache/bigcache/bigcache2.png)
 
 ## 0x03 核心数据结构
 
 bigCache 的核心数据结构如下图所示：
 
-![img](https://wx1.sbimg.cn/2020/09/17/GCx8j.png)
+![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/cache/bigcache/bigcache-4.png)
 
 1.  `bigCache`：管理节点
 2.  `cacheShard`：分段（shard）缓存
