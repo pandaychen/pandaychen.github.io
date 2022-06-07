@@ -65,6 +65,17 @@ func (c *Cache) bucket(key string) *bucket {
 }
 ```
 
+##	0x02	核心代码分析
+
+####	bucket
+`bucket`[结构](https://github.com/karlseguin/ccache/blob/master/bucket.go#L14)，本质上就是一个带锁的`map`，数据的读/写/删除操作最终会落地在此：
+```golang
+type bucket struct {
+	sync.RWMutex
+	lookup map[string]*Item
+}
+```
+
 ##	0x03	LRU 的实现
 
 ####	实现原理
