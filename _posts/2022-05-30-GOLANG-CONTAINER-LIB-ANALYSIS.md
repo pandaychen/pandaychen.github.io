@@ -1,6 +1,6 @@
 ---
 layout: post
-title: 数据结构与算法回顾（四）：golang 的 container 包
+title: 数据结构与算法回顾（五）：golang 的 container 包
 subtitle: list、heap 和 ring
 date: 2022-05-30
 header-img: img/super-mario.jpg
@@ -23,7 +23,8 @@ golang 的标准库 `container` 中，提供了 heap/list/ring 的实现。本�
 ![heap-as-array](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/heap/heap-as-array.png)
 
 ####  	源码分析
-标准库的 heap 是一个 `interface`，因此开发者需要实现相关的接口（共 `5` 个，包含了 `sort.Interface` 的 `3` 个），在源码分析时，特别注意这几个公共接口的嵌入位置：
+标准库的 heap 是一个 `interface`，因此开发者需要完成三件事：
+1、实现相关的接口（共 `5` 个，包含了 `sort.Interface` 的 `3` 个），在源码分析时，特别注意这几个公共接口的嵌入位置<br>
 ```golang
 type Interface interface {
     sort.Interface      // 继承了 sort.Interface
@@ -32,10 +33,39 @@ type Interface interface {
 }
 ```
 
+2、提供承载数据的slice<br>
+这里注意两件事：
+-	对于原生结构，如`[]int`等，开发者实现的`Swap`比较简单，直接`h[i], h[j] = h[j], h[i]`交换即可
+-	对于符合结构，如`[]*Item`，开发者实现`Swap`机制有两种选择：
+	1.	按照原生方式实现
+	2.	只利用`[]*Item`作为存储，在`Item`加上`index`成员，充当堆的下标（参考优先级队列的实现），这时`Swap`就需要考虑`Item.index`的交换
+
+3、以上完成后，可以调用heap库暴露的方法来操作heap（PS：接口都需要传入上述接口的实例化对象）<br>
+另外，这里特别注意的是不要混淆`heap.Push`和自己slice实现的`Push`方法：
+-	开发者实现的`Push`方法仅仅是对slice操作
+-	`heap.Push`调用了slice的`Push`操作，还需要额外的调整用以维护heap性质
+
+```golang
+// 建堆
+func Init(h Interface)
+// 插入元素
+func Push(h Interface, x interface{})
+// 弹出root元素
+func Pop(h Interface) interface{}
+// Update元素(包括优先级)
+func Fix(h Interface, i int)
+// 删除
+func Remove(h Interface, i int) interface{}
+```
+
 回想下，minheap 的插入 / 删除过程：
 - 向 minheap 中插入 `Push` 一个元素的时候，将此元素插入到最右子树的最后一个节点中，然后调用 `up` 向上调整保证最小堆性质
 - 从 minheap 中取出堆顶元素（最小的）时，先把该元素和右子树最后一个节点交换，然后 `Pop` 出最后一个节点，然后对根节点调用 `down` 方法向下调整保证最小堆性质
 - 从 minheap 的任意位置取数据都类似上面的做法
+
+
+####	一个容易忽略的点：`Swap`方法
+上面已经讨论，主要涉及到非标准型结构的交换问题
 
 ####  主要方法分析
 
@@ -200,12 +230,68 @@ func (h *IntHeap) Push(x interface{}) {
 ####	heap 的应用
 1.	定时器
 2.	优先级队列
-3.	排序
+3.	heap排序
 
 
-####  使用 heap 实现优先级队列
+这里使用 heap 实现优先级队列，如下定义，调用代码[在此](https://github.com/pandaychen/golang_in_action/blob/master/datastruct/heap/heap-app2.go#L59)：
+```golang
+// An Item is something we manage in a priority queue.
+type Item struct {
+    value    string // The value of the item; arbitrary.
+    priority int    // The priority of the item in the queue.
+    // The index is needed by update and is maintained by the heap.Interface methods.
+    index int // The index of the item in the heap.
+}
 
+// A PriorityQueue implements heap.Interface and holds Items.
+type PriorityQueue []*Item
 
+func (pq PriorityQueue) Len() int { return len(pq) }
+
+func (pq PriorityQueue) Less(i, j int) bool {
+    // We want Pop to give us the highest, not lowest, priority so we use greater than here.
+    return pq[i].priority > pq[j].priority
+}
+
+func (pq PriorityQueue) Swap(i, j int) {
+    pq[i], pq[j] = pq[j], pq[i]
+    // pq[i].index = i
+    // pq[j].index = j
+	//pq[j].index,pq[i].index =  pq[i].index,pq[j].index 
+	pq[i].index, pq[j].index = i, j
+}
+
+func (pq *PriorityQueue) Push(x interface{}) {
+    n := len(*pq)
+    item := x.(*Item)
+    item.index = n
+    *pq = append(*pq, item)
+}
+
+func (pq *PriorityQueue) Pop() interface{} {
+    old := *pq
+    n := len(old)
+    item := old[n-1]
+    item.index = -1 // for safety
+    *pq = old[0 : n-1]
+    return item
+}
+
+// update modifies the priority and value of an Item in the queue.
+func (pq *PriorityQueue) update(item *Item, value string, priority int) {
+    item.value = value
+    item.priority = priority
+    heap.Fix(pq, item.index)
+}
+```
+
+与上例子不同的是，优先级队列有个`update`方法，该方法用以实时调整heap某个元素的priority，调整之后会触发`heap.Fix`方法对heap进行重排序以达到heap的特性
+
+####	小结
+使用标准库的heap，需要明确这几项：
+1.	定义自己的接口，实现heap所需要的方法
+2.	注意package的方法，和结构体的方法，虽然同名，但是功能完全不一样
+3.	`heap.Fix`、`heap.Remove`方法的使用场景
 
 ##	0x02	ring
 ring 实现了环形链表的功能。
@@ -213,7 +299,14 @@ ring 实现了环形链表的功能。
 ##	0x03	list
 
 
-## 0x09  参考
+##	0x04	番外：go-zero提供的数据结构
+1、queue<br>
+[Queue](https://github.com/zeromicro/go-zero/blob/master/core/collection/fifo.go)是go-zero提供的先进先出的安全队列
+2、set<br>
+[Set](https://github.com/zeromicro/go-zero/blob/master/core/collection/set.go)提供了集合的实现
+
+## 0x05  参考
 -  [Wikipedia - 堆](https://zh.wikipedia.org/wiki/%E5%A0%86%E7%A9%8D)
 -	[goim 关于 ring 的 issue](https://github.com/Terry-Mao/goim/issues/109)
 -	[go 标准库 container 支持 multi goroutine 吗？](https://groups.google.com/g/golang-china/c/JdbR_CGo3ao/m/apyVG5grRVEJ)
+-	[Usage of the Heap Data Structure in Go (Golang), with Examples](https://www.tugberkugurlu.com/archive/usage-of-the-heap-data-structure-in-go-golang-with-examples)
