@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      微服务基础之多级服务缓存（Cache）
-subtitle:
+subtitle:   微服务应用中缓存的使用策略、问题及解决
 date:       2020-04-10
 author:     pandaychen
 header-img:
@@ -40,8 +40,12 @@ tags:
 ##	0x02	缓存架构构建
 
 
-##	0x03	穿透问题
+##	0x03	缓存的问题
+缓存的问题，通常有缓存穿透，缓存击穿和缓存雪崩这几种：
 
+-   缓存穿透（cache penetration）：表示程序要访问的缓存key不在缓存key的取值范围里
+-   缓存击穿（hotspot invalid）：表示缓存数据失效了。和cache penetration的区别是缓存的key还是存在的，只是这个key的数据失效了
+-   缓存雪崩（cache avalanche）：表示大量缓存都失效了，像雪崩一样
 
 ##	0x04 	缓存和 Mysql 的配合
 
@@ -55,5 +59,10 @@ tags:
 ##	0x06	参考
 -	[缓存更新的套路](https://coolshell.cn/articles/17416.html)
 -	[分布式之数据库和缓存双写一致性方案解析](https://www.cnblogs.com/rjzheng/p/9041659.html?hmsr=joyk.com&utm_source=joyk.com&utm_medium=referral)
+-   [微服务缓存原理与最佳实践](https://talkgo.org/t/topic/1505)
+-   [go-zero缓存设计之业务层缓存](https://www.bookstack.cn/read/go-zero-1.3-zh/buiness-cache.md)
+-   [go-zero缓存设计之持久层缓存](https://www.bookstack.cn/read/go-zero-1.3-zh/redis-cache.md)
+-   [DB缓存机制](https://www.bookstack.cn/read/go-zero-1.3-zh/sql-cache.md)
+-   [防止缓存击穿之进程内共享调用](https://www.bookstack.cn/read/go-zero-1.3-zh/sharedcalls.md)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

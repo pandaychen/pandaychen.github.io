@@ -599,7 +599,7 @@ func (s *cacheShard) del(key string, hashedKey uint64) error {
 }
 ```
 
-##### 查询数据 bigCache.Get
+#### 查询数据 bigCache.Get
 `bigCache.Get` 查询方法的步骤为：
 
 1.  根据 `fnv` 算法计算出用户 key 的 `hash` 值 `hashedKey`
