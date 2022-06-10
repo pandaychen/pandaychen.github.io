@@ -6,8 +6,8 @@ date:       2022-06-02
 author:     pandaychen
 catalog:    true
 tags:
-    - 缓存
-	- gozero
+  - 缓存
+  - GoZero
 ---
 
 ##  0x00    开篇
@@ -87,6 +87,7 @@ type lru interface {
 1、初始化缓存 <br>
 -	初始化缓存命中统计模块
 -	初始化时间轮，用于设置 key 自动过期的定时器
+
 ```golang
 func NewCache(expire time.Duration, opts ...CacheOption) (*Cache, error) {
 	cache := &Cache{
@@ -180,6 +181,7 @@ func (c *Cache) SetWithExpire(key string, value interface{}, expire time.Duratio
 -	删除 key
 -	删除 LRU 链中的 key
 -	并且从时间轮中移除该 key（异步的）
+
 ```golang
 // Del deletes the item with the given key from c.
 func (c *Cache) Del(key string) {
@@ -287,7 +289,7 @@ func (cs *cacheStat) IncrementMiss() {
 ```
 
 ##	0x05	总结
-官网文件给的结构体很直观了：
+官网文档给的结构图很直观了：
 ![cache](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/cache/go-zero/lru-cache1.jpg)
 
 ##  0x06	参考
