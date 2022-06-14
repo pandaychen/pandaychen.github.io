@@ -27,7 +27,7 @@ tags:
 ![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/bash/ctrl-a.png)
 -	`CTRL`+`B`：当前光标向前移动 `1` 位 / 个字符（直至首位）（按字符移动（左向））
 -	`CTRL`+`C`：取消当前行指令，停止当前运行的命令。如果一个命令运行时间过久，或者你误运行了，可以使用本指令来强制停止或退出
-![img]()
+![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/bash/ctrl-c.png)
 -	`CTRL`+`D`：从当前光标开始，向后依次删除 `1` 个字符，即删除光标后的一个字符；如果当前行无字符，直接退出当前会话（和 `exit` 指令类似）
 -	`CTRL`+`W`：删除光标前的一个单词（注意，和 `CTRL`+`U` 不一样，`CTRL`+`W` 不会删除光标前的所有东西，而是只删除一个单词）。如下面的例子，输入为 `ifconfig eth1`，光标在 `h` 处，本指令操作结果如下：
 ![img1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/bash/ctrl-w1.png)
@@ -75,7 +75,54 @@ tags:
 - `ALT` + `T` ：交换光标处和之前位置的两个单词
 - `ALT` + `Backspace`：与 `CTRL` + `W` 类似，分隔符有些差别
 
-##  0x04  模拟键盘操作的状态机实现
+##  0x04  Terminal input sequences
 
-##  0x05  参考
+```text
+<char>                                         -> char
+<esc> <nochar>                                 -> esc
+<esc> <esc>                                    -> esc
+<esc> <char>                                   -> Alt-keypress or keycode sequence
+<esc> '[' <nochar>                             -> Alt-[
+<esc> '[' (<modifier>) <char>                  -> keycode sequence, <modifier> is a decimal number and defaults to 1 (xterm)
+<esc> '[' (<keycode>) (';'<modifier>) '~'      -> keycode sequence, <keycode> and <modifier> are decimal numbers and default to 1 (vt)
+```
+
+```text
+vt sequences:
+<esc>[1~    - Home        <esc>[16~   -             <esc>[31~   - F17
+<esc>[2~    - Insert      <esc>[17~   - F6          <esc>[32~   - F18
+<esc>[3~    - Delete      <esc>[18~   - F7          <esc>[33~   - F19
+<esc>[4~    - End         <esc>[19~   - F8          <esc>[34~   - F20
+<esc>[5~    - PgUp        <esc>[20~   - F9          <esc>[35~   - 
+<esc>[6~    - PgDn        <esc>[21~   - F10         
+<esc>[7~    - Home        <esc>[22~   -             
+<esc>[8~    - End         <esc>[23~   - F11         
+<esc>[9~    -             <esc>[24~   - F12         
+<esc>[10~   - F0          <esc>[25~   - F13         
+<esc>[11~   - F1          <esc>[26~   - F14         
+<esc>[12~   - F2          <esc>[27~   -             
+<esc>[13~   - F3          <esc>[28~   - F15         
+<esc>[14~   - F4          <esc>[29~   - F16         
+<esc>[15~   - F5          <esc>[30~   -
+
+xterm sequences:
+<esc>[A     - Up          <esc>[K     -             <esc>[U     -
+<esc>[B     - Down        <esc>[L     -             <esc>[V     -
+<esc>[C     - Right       <esc>[M     -             <esc>[W     -
+<esc>[D     - Left        <esc>[N     -             <esc>[X     -
+<esc>[E     -             <esc>[O     -             <esc>[Y     -
+<esc>[F     - End         <esc>[1P    - F1          <esc>[Z     -
+<esc>[G     - Keypad 5    <esc>[1Q    - F2       
+<esc>[H     - Home        <esc>[1R    - F3       
+<esc>[I     -             <esc>[1S    - F4       
+<esc>[J     -             <esc>[T     - 
+```
+
+##  0x05  模拟键盘操作的状态机实现
+
+
+##  0x06  参考
 - [ascii](https://zh.wikipedia.org/zh/ASCII)
+- [ANSI_escape_code](https://en.wikipedia.org/wiki/ANSI_escape_code)
+- [ANSI Escape Sequences](https://gist.github.com/fnky/458719343aabd01cfb17a3a4f7296797)
+- [](http://www.braun-home.net/michael/info/misc/VT100_commands.htm)
