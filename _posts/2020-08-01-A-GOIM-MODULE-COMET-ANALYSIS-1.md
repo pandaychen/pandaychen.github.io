@@ -6,7 +6,7 @@ date:       2020-08-01
 author:     pandaychen
 catalog:    true
 tags:
-    - Kratos
+    - GOIM
 ---
 
 
@@ -15,6 +15,9 @@ tags:
 1.	Comet 主方法
 2.	Comet 主要数据结构
 3.	Comet 管理服务（与 Job 模块通信）
+
+Comet模块的位置：
+![COMET](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/2022/goim/goim2-arch.png)
 
 ##	0x01	Comet 模块
 Comet 模块为用户代理 Server（主要提供对外服务），用于客户端的连接，根据情况可部署多个 Comet-Server（扩展）。Comet 模块支持 Tcp, Http, WebSocket, TLS WebSocket 等多种服务。
@@ -130,4 +133,13 @@ type Bucket struct {
 
 
 ##  参考
-https://yeqown.github.io/2020/04/02/%E6%B6%88%E6%81%AF%E6%8E%A8%E9%80%81%E6%9E%B6%E6%9E%84-based-GOIM/
+-	[消息推送架构-Based-GOIM](https://yeqown.github.io/2020/04/02/%E6%B6%88%E6%81%AF%E6%8E%A8%E9%80%81%E6%9E%B6%E6%9E%84-based-GOIM/)
+-	[goim 架构与定制](https://tsingson.github.io/tech/goim-go-01/)
+-	[goim 及分布式工程解构](https://github.com/talkgo/night/issues/363)
+-	[goim via nats](https://github.com/tsingson/ex-goim/releases)
+-	[goim源码剖析](https://laohanlinux.github.io/2016/12/22/goim%E6%BA%90%E7%A0%81%E5%89%96%E6%9E%90/)
+-	[goim v2.0](https://github.com/Terry-Mao/goim/blob/master/README_cn.md)
+-	[分享 直播 -- 弹幕系统简介](https://ruby-china.org/topics/39574)
+-	[对于router服务存在的疑问](https://github.com/Terry-Mao/goim/issues/33)
+-	[bilibili 架构师 | 高并发实时弹幕系统的实战之路](https://zhuanlan.zhihu.com/p/22016939)
+-	[goim 中的 data flow 数据流转及优化思考](https://tsingson.github.io/tech/goim-go-04/)
