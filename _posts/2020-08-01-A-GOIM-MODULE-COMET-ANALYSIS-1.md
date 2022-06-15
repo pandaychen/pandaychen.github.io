@@ -17,7 +17,7 @@ tags:
 3.	Comet 管理服务（与 Job 模块通信）
 
 Comet模块的位置：
-![COMET](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/2022/goim/goim2-arch.png)
+![COMET](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/goim/goim2-arch.png)
 
 ##	0x01	Comet 模块
 Comet 模块为用户代理 Server（主要提供对外服务），用于客户端的连接，根据情况可部署多个 Comet-Server（扩展）。Comet 模块支持 Tcp, Http, WebSocket, TLS WebSocket 等多种服务。
@@ -141,5 +141,5 @@ type Bucket struct {
 -	[goim v2.0](https://github.com/Terry-Mao/goim/blob/master/README_cn.md)
 -	[分享 直播 -- 弹幕系统简介](https://ruby-china.org/topics/39574)
 -	[对于router服务存在的疑问](https://github.com/Terry-Mao/goim/issues/33)
--	[bilibili 架构师 | 高并发实时弹幕系统的实战之路](https://zhuanlan.zhihu.com/p/22016939)
+-	[高并发实时弹幕系统的实战之路](https://zhuanlan.zhihu.com/p/22016939)
 -	[goim 中的 data flow 数据流转及优化思考](https://tsingson.github.io/tech/goim-go-04/)

@@ -6,7 +6,7 @@ date: 2020-07-17
 author: pandaychen
 catalog: true
 tags:
-  - GoIM
+  - GOIM
 ---
 
 ## 0x00 前言
