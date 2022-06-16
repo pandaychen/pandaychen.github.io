@@ -1,7 +1,7 @@
 ---
 layout: post
 title: 使用 Golang 实现 SSH 和 SSHD（二）
-subtitle: golang-ssh 库使用（实战篇）
+subtitle: golang-ssh 库使用 && gliderlabs/ssh 分析（实战篇）
 date: 2020-11-01
 author: pandaychen
 catalog: true
@@ -10,6 +10,7 @@ tags:
 ---
 
 ## 0x00 前言
+先记录一下自己实现sshd（proxy）相关系统中需要搞懂的几个重要的ssh数据结构
 
 ## 0x01 重要结构
 
@@ -379,6 +380,19 @@ type ServerConfig struct {
 }
 ```
 
-## 0x02 参考
+##	0x03	gliderlabs/ssh库实现分析
+这个库封装了golang-ssh的接口，使得可以通过该库直接开发我们需要的ssh应用，如sshd、ssh交互式命令行等等。此外，该库在重要的位置都预留了用户钩子，开发者可以将自己的逻辑内嵌进去。
+
+####	代码组织：
+-	[server.go](https://github.com/gliderlabs/ssh/blob/master/server.go)：封装了sshd实现相关的结构及接口
+-	[session.go](https://github.com/gliderlabs/ssh/blob/master/session.go)：封装了ssh-session相关的结构及接口
+-	[ssh.go](https://github.com/gliderlabs/ssh/blob/master/ssh.go)：提供了供用户调用的外部接口，如`Serve`、`ListenAndServe`等等
+-	[tcpip.go](https://github.com/gliderlabs/ssh/blob/master/tcpip.go)：提供了端口转发的实现，以及`DirectTCPIPHandler`方法（可直接调用）
+-	[agent.go](https://github.com/gliderlabs/ssh/blob/master/agent.go)：提供了ssh-agent相关的接口及实现
+-	[context.go](https://github.com/gliderlabs/ssh/blob/master/context.go)：封装`context.Context`，加入ssh的属性，使得每条连接都关联一个唯一的context
+
+
+
+## 0x04 参考
 -	[ssh包](https://pkg.go.dev/golang.org/x/crypto/ssh)
 -	[gliderlabs-ssh包](https://pkg.go.dev/github.com/gliderlabs/ssh)
