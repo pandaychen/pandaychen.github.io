@@ -118,11 +118,41 @@ xterm sequences:
 <esc>[J     -             <esc>[T     - 
 ```
 
+####  输出文本
+- 如`F5`，vt sequence为`<esc>[15~`，在golang中会显示为：`[27,91,49,53,126]`
+- 如`UpArrow`，xterm sequence为`<esc>[A`，golang显示为：`[27,91,65]`
+
+
 ##  0x05  模拟键盘操作的状态机实现
 
+##  0x06  VT100 commands and control sequences
+参考[此文](http://www.braun-home.net/michael/info/misc/VT100_commands.htm)
 
-##  0x06  参考
+##  0x07  其他细节
+
+####  终端的区别：vt100 VS xterm
+终端类型，vt100/vt102/vt220/xterm直接的区别是什么？引用此问题[What's the difference between various $TERM variables?](https://unix.stackexchange.com/questions/43945/whats-the-difference-between-various-term-variables)
+
+xterm is supposed to be a superset of vt220, in other words it's like vt220 but has more features. For example, xterm usually supports colors, but vt220 doesn't. You can test this by pressing z inside top.
+
+In the same way, vt220 has more features than vt100. For example, vt100 doesn't seem to support F11 and F12.
+
+Compare their features and escape sequences that your system thinks they have by running infocmp <term type 1> <term type 2>, e.g. infocmp vt100 vt220.
+
+The full list varies from system to system. You should be able to get the list using toe, toe /usr/share/terminfo, or find ${TERMINFO:-/usr/share/terminfo}. If none of those work, you could also look at ncurses' terminfo.src, which is where most distributions get the data from these days.
+
+But unless your terminal looks like this or this, there's only a few others you might want to use:
+
+- xterm-color - if you're on an older system and colors don't work
+- putty, konsole, Eterm, rxvt, gnome, etc. - if you're running an XTerm emulator and some of the function keys, Backspace, Delete, Home, and End don't work properly
+- screen - if running inside GNU screen (or tmux)
+- linux - when logging in via a Linux console (e.g. Ctrl+Alt+F1)
+- dumb - when everything is broken
+
+##  0x08  参考
 - [ascii](https://zh.wikipedia.org/zh/ASCII)
 - [ANSI_escape_code](https://en.wikipedia.org/wiki/ANSI_escape_code)
 - [ANSI Escape Sequences](https://gist.github.com/fnky/458719343aabd01cfb17a3a4f7296797)
-- [](http://www.braun-home.net/michael/info/misc/VT100_commands.htm)
+- [VT100 commands and control sequences](http://www.braun-home.net/michael/info/misc/VT100_commands.htm)
+- [Go进阶19:如何开发多彩动感的终端UI应用](https://mojotv.cn/tutorial/golang-term-tty-pty-vt100)
+- [TERMINAL TYPE DESCRIPTIONS SOURCE FILE](https://invisible-island.net/ncurses/terminfo.src.html)
