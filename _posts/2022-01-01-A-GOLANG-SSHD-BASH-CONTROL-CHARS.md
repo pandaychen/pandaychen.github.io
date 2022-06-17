@@ -126,28 +126,62 @@ xterm sequences:
 ##  0x05  模拟键盘操作的状态机实现
 
 ##  0x06  VT100 commands and control sequences
-参考[此文](http://www.braun-home.net/michael/info/misc/VT100_commands.htm)
+`vt100`是一个非常常用的终端类型，`vt100`控制码是用来在在终端显示的代码，比如在终端上任意坐标用不同的颜色显示字符；其中所有的控制符都是由`\033`打头（`8`进制、即`ESC`的`ASCII`码），格式分下列两种：
+- 数字形式，如`\033``[``<数字>``m` 
+- 控制字符形式，如`\033``[``字母`
+
+####  控制码
+```text
+\033[0m		// 关闭所有属性
+\033[1m		// 设置为高亮
+\033[4m		// 下划线
+\033[5m		// 闪烁
+\033[7m		// 反显
+\033[8m		// 消隐
+\033[nA		// 光标上移 n 行
+\033[nB		// 光标下移 n 行
+\033[nC		// 光标右移 n 行
+\033[nD		// 光标左移 n 行
+\033[y;xH	// 设置光标位置
+\033[2J		// 清屏
+\033[K		// 清除从光标到行尾的内容
+\033[s		// 保存光标位置
+\033[u		// 恢复光标位置
+\033[?25l	// 隐藏光标
+\033[?25h	// 显示光标
+```
+
+####  控制码-颜色类
+`\033[30m – \033[37m` 为设置前景色，`\033[40m – \033[47m` 为设置背景色
+```text
+\033[30m ---- \033[37m   //设置前景色，0-7为 黑 红 绿 黄 蓝 紫 青 白
+\033[40m ---- \033[47m   //设置背景色，0-7为 黑 红 绿 黄 蓝 紫 青 白
+```
+
+更详细的指令请参考[此文](http://www.braun-home.net/michael/info/misc/VT100_commands.htm)
+
+
 
 ##  0x07  其他细节
 
 ####  终端的区别：vt100 VS xterm
-终端类型，vt100/vt102/vt220/xterm直接的区别是什么？引用此问题[What's the difference between various $TERM variables?](https://unix.stackexchange.com/questions/43945/whats-the-difference-between-various-term-variables)
+终端类型，`vt100`/`vt102`/`vt220`/`xterm`直接的区别是什么？引用此问题[What's the difference between various $TERM variables?](https://unix.stackexchange.com/questions/43945/whats-the-difference-between-various-term-variables)
 
-xterm is supposed to be a superset of vt220, in other words it's like vt220 but has more features. For example, xterm usually supports colors, but vt220 doesn't. You can test this by pressing z inside top.
+`xterm` is supposed to be a superset of `vt220`, in other words it's like `vt220` but has more features. For example, `xterm` usually supports colors, but `vt220` doesn't. You can test this by pressing `z` inside `top`.
 
-In the same way, vt220 has more features than vt100. For example, vt100 doesn't seem to support F11 and F12.
+In the same way, `vt220` has more features than `vt100`. For example, `vt100` doesn't seem to support `F11` and `F12`.
 
-Compare their features and escape sequences that your system thinks they have by running infocmp <term type 1> <term type 2>, e.g. infocmp vt100 vt220.
+Compare their features and escape sequences that your system thinks they have by running infocmp <term type 1> <term type 2>, e.g. infocmp `vt100` `vt220.`
 
-The full list varies from system to system. You should be able to get the list using toe, toe /usr/share/terminfo, or find ${TERMINFO:-/usr/share/terminfo}. If none of those work, you could also look at ncurses' terminfo.src, which is where most distributions get the data from these days.
+The full list varies from system to system. You should be able to get the list using toe, toe `/usr/share/terminfo`, or find `${TERMINFO:-/usr/share/terminfo}`. If none of those work, you could also look at ncurses' terminfo.src, which is where most distributions get the data from these days.
 
 But unless your terminal looks like this or this, there's only a few others you might want to use:
 
-- xterm-color - if you're on an older system and colors don't work
-- putty, konsole, Eterm, rxvt, gnome, etc. - if you're running an XTerm emulator and some of the function keys, Backspace, Delete, Home, and End don't work properly
-- screen - if running inside GNU screen (or tmux)
-- linux - when logging in via a Linux console (e.g. Ctrl+Alt+F1)
-- dumb - when everything is broken
+- `xterm-color` - if you're on an older system and colors don't work
+- `putty`, konsole, Eterm, rxvt, gnome, etc. - if you're running an XTerm emulator and some of the function keys, Backspace, Delete, Home, and End don't work properly
+- `screen` - if running inside GNU screen (or tmux)
+- `linux` - when logging in via a Linux console (e.g. Ctrl+Alt+F1)
+- `dumb` - when everything is broken
 
 ##  0x08  参考
 - [ascii](https://zh.wikipedia.org/zh/ASCII)
@@ -156,3 +190,5 @@ But unless your terminal looks like this or this, there's only a few others you 
 - [VT100 commands and control sequences](http://www.braun-home.net/michael/info/misc/VT100_commands.htm)
 - [Go进阶19:如何开发多彩动感的终端UI应用](https://mojotv.cn/tutorial/golang-term-tty-pty-vt100)
 - [TERMINAL TYPE DESCRIPTIONS SOURCE FILE](https://invisible-island.net/ncurses/terminfo.src.html)
+- [控制终端代码 - Linux 控制终端转义和控制序列](http://manpages.ubuntu.com/manpages/bionic/zh_CN/man4/console_codes.4.html)
+- [VT100 Terminal Package](https://github.com/xyproto/vt100/)
