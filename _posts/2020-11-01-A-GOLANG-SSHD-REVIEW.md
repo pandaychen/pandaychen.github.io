@@ -383,7 +383,7 @@ type ServerConfig struct {
 ##	0x03	gliderlabs/ssh库实现分析
 这个库封装了golang-ssh的接口，使得可以通过该库直接开发我们需要的ssh应用，如sshd、ssh交互式命令行等等。此外，该库在重要的位置都预留了用户钩子，开发者可以将自己的逻辑内嵌进去。
 
-####	代码组织：
+####	代码组织
 -	[server.go](https://github.com/gliderlabs/ssh/blob/master/server.go)：封装了sshd实现相关的结构及接口
 -	[session.go](https://github.com/gliderlabs/ssh/blob/master/session.go)：封装了ssh-session相关的结构及接口
 -	[ssh.go](https://github.com/gliderlabs/ssh/blob/master/ssh.go)：提供了供用户调用的外部接口，如`Serve`、`ListenAndServe`等等
@@ -392,6 +392,100 @@ type ServerConfig struct {
 -	[context.go](https://github.com/gliderlabs/ssh/blob/master/context.go)：封装`context.Context`，加入ssh的属性，使得每条连接都关联一个唯一的context
 
 
+####	Session
+`ssh.Session`抽象了一条ssh会话，以及该会话可以获取到的所有属性
+```golang
+type Session interface {
+	gossh.Channel
+
+	// User returns the username used when establishing the SSH connection.
+	User() string
+
+	// RemoteAddr returns the net.Addr of the client side of the connection.
+	RemoteAddr() net.Addr
+
+	// LocalAddr returns the net.Addr of the server side of the connection.
+	LocalAddr() net.Addr
+
+	// Environ returns a copy of strings representing the environment set by the
+	// user for this session, in the form "key=value".
+	Environ() []string
+
+	// Exit sends an exit status and then closes the session.
+	Exit(code int) error
+
+	// Command returns a shell parsed slice of arguments that were provided by the
+	// user. Shell parsing splits the command string according to POSIX shell rules,
+	// which considers quoting not just whitespace.
+	Command() []string
+
+	// RawCommand returns the exact command that was provided by the user.
+	RawCommand() string
+
+	// Subsystem returns the subsystem requested by the user.
+	Subsystem() string
+
+	// PublicKey returns the PublicKey used to authenticate. If a public key was not
+	// used it will return nil.
+	PublicKey() PublicKey
+
+	// Context returns the connection's context. The returned context is always
+	// non-nil and holds the same data as the Context passed into auth
+	// handlers and callbacks.
+	//
+	// The context is canceled when the client's connection closes or I/O
+	// operation fails.
+	Context() Context
+
+	// Permissions returns a copy of the Permissions object that was available for
+	// setup in the auth handlers via the Context.
+	Permissions() Permissions
+
+	// Pty returns PTY information, a channel of window size changes, and a boolean
+	// of whether or not a PTY was accepted for this session.
+	Pty() (Pty, <-chan Window, bool)
+
+	// Signals registers a channel to receive signals sent from the client. The
+	// channel must handle signal sends or it will block the SSH request loop.
+	// Registering nil will unregister the channel from signal sends. During the
+	// time no channel is registered signals are buffered up to a reasonable amount.
+	// If there are buffered signals when a channel is registered, they will be
+	// sent in order on the channel immediately after registering.
+	Signals(c chan<- Signal)
+
+	// Break regisers a channel to receive notifications of break requests sent
+	// from the client. The channel must handle break requests, or it will block
+	// the request handling loop. Registering nil will unregister the channel.
+	// During the time that no channel is registered, breaks are ignored.
+	Break(c chan<- bool)
+}
+```
+
+上面公共接口对应的实例化实现如下：
+```golang
+type session struct {
+	sync.Mutex
+	gossh.Channel
+	conn              *gossh.ServerConn
+	handler           Handler
+	subsystemHandlers map[string]SubsystemHandler
+	handled           bool
+	exited            bool
+	pty               *Pty
+	winch             chan Window
+	env               []string
+	ptyCb             PtyCallback
+	sessReqCb         SessionRequestCallback
+	rawCmd            string
+	subsystem         string
+	ctx               Context
+	sigCh             chan<- Signal
+	sigBuf            []Signal
+	breakCh           chan<- bool
+}
+```
+
+这里有个比较重要的成员`gossh.Channel`
 
 ## 0x04 参考
 -	[ssh包](https://pkg.go.dev/golang.org/x/crypto/ssh)
