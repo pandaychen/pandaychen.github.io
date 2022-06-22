@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      使用 Golang 实现 SSH 和 SSHD
+title:      使用 Golang 实现 SSH 和 SSHD（一）
 subtitle:   golang-ssh 库使用（入门篇）
 date:       2019-10-20
 author:     pandaychen
