@@ -392,8 +392,8 @@ type ServerConfig struct {
 -	[context.go](https://github.com/gliderlabs/ssh/blob/master/context.go)：封装`context.Context`，加入ssh的属性，使得每条连接都关联一个唯一的context
 
 
-####	Session
-`ssh.Session`抽象了一条ssh会话，以及该会话可以获取到的所有属性
+####	Session结构
+`ssh.Session`抽象了一条ssh会话，以及该会话可以获取到的所有关联的属性
 ```golang
 type Session interface {
 	gossh.Channel
@@ -466,7 +466,7 @@ type Session interface {
 type session struct {
 	sync.Mutex
 	gossh.Channel
-	conn              *gossh.ServerConn
+	conn              *gossh.ServerConn	//指向上层的连接
 	handler           Handler
 	subsystemHandlers map[string]SubsystemHandler
 	handled           bool
@@ -485,7 +485,182 @@ type session struct {
 }
 ```
 
-这里有个比较重要的成员`gossh.Channel`
+这里有个比较重要的成员`gossh.Channel`，见第一节，该数据结构是SSH数据层面通信的核心结构（对应原生库的实例化[结构](https://cs.opensource.google/go/x/crypto/+/793ad666:ssh/channel.go;l=150)是`channel`），其核心方法如下：
+-	`SendRequest`：request类型的请求发送
+-	`Read`：读取明文数据
+-	`Write`：写入明文数据
+
+封装`gossh.Channel`的意义是，一是可以直接调用`gossh.Channel`暴露的方法来完成ssh数据层面的转发/发送；二是可以基于此来实现ssh会话数据的劫持（即SSH会话审计）
+
+####	默认的session处理方法：DefaultSessionHandler
+项目提供了默认的ssh session处理方法`DefaultSessionHandler`，在`DefaultSessionHandler`方法中，只提供了常见的`reqeusts`的处理，并未提供`pty/tty`之类的对接（需要由开发者自行实现），比如：
+-	基于`top`命令的带tty的命令行[实现](https://github.com/pandaychen/openssh-magic-change/blob/master/sshd/top.go)
+-	基于`/bin/bash`的bash命令交互式[实现](https://github.com/pandaychen/openssh-magic-change/blob/master/sshd/tty.go)
+
+```golang
+func DefaultSessionHandler(srv *Server, conn *gossh.ServerConn, newChan gossh.NewChannel, ctx Context) {
+	ch, reqs, err := newChan.Accept()		//获取ssh的channel及requests
+	if err != nil {
+		return
+	}
+	sess := &session{
+		Channel:           ch,
+		conn:              conn,
+		handler:           srv.Handler,
+		ptyCb:             srv.PtyCallback,
+		sessReqCb:         srv.SessionRequestCallback,
+		subsystemHandlers: srv.SubsystemHandlers,
+		ctx:               ctx,
+	}
+	sess.handleRequests(reqs)
+}
+```
+
+`handleRequests`方法，提供了不少标准协议的`requests`类型实现，参见RFC[文档](https://datatracker.ietf.org/doc/html/rfc4250#section-4.9.3)，这里注意两点：
+1.	数据需要按照ssh的协议格式编码，如`gossh.Unmarshal`
+2.	需要应答的请求，一定要调用`req.Reply`进行响应
+
+```golang
+func (sess *session) handleRequests(reqs <-chan *gossh.Request) {
+	for req := range reqs {
+		switch req.Type {
+		case "shell", "exec":
+			if sess.handled {
+				req.Reply(false, nil)
+				continue
+			}
+
+			var payload = struct{ Value string }{}
+			gossh.Unmarshal(req.Payload, &payload)
+			sess.rawCmd = payload.Value
+
+			// If there's a session policy callback, we need to confirm before
+			// accepting the session.
+			if sess.sessReqCb != nil && !sess.sessReqCb(sess, req.Type) {
+				sess.rawCmd = ""
+				req.Reply(false, nil)
+				continue
+			}
+
+			sess.handled = true
+			req.Reply(true, nil)
+
+			go func() {
+				sess.handler(sess)
+				sess.Exit(0)
+			}()
+		case "subsystem":
+			if sess.handled {
+				req.Reply(false, nil)
+				continue
+			}
+
+			var payload = struct{ Value string }{}
+			gossh.Unmarshal(req.Payload, &payload)
+			sess.subsystem = payload.Value
+
+			// If there's a session policy callback, we need to confirm before
+			// accepting the session.
+			if sess.sessReqCb != nil && !sess.sessReqCb(sess, req.Type) {
+				sess.rawCmd = ""
+				req.Reply(false, nil)
+				continue
+			}
+
+			handler := sess.subsystemHandlers[payload.Value]
+			if handler == nil {
+				handler = sess.subsystemHandlers["default"]
+			}
+			if handler == nil {
+				req.Reply(false, nil)
+				continue
+			}
+
+			sess.handled = true
+			req.Reply(true, nil)
+
+			go func() {
+				handler(sess)
+				sess.Exit(0)
+			}()
+		case "env":
+			if sess.handled {
+				req.Reply(false, nil)
+				continue
+			}
+			var kv struct{ Key, Value string }
+			gossh.Unmarshal(req.Payload, &kv)
+			sess.env = append(sess.env, fmt.Sprintf("%s=%s", kv.Key, kv.Value))
+			req.Reply(true, nil)
+		case "signal":
+			var payload struct{ Signal string }
+			gossh.Unmarshal(req.Payload, &payload)
+			sess.Lock()
+			if sess.sigCh != nil {
+				sess.sigCh <- Signal(payload.Signal)
+			} else {
+				if len(sess.sigBuf) < maxSigBufSize {
+					sess.sigBuf = append(sess.sigBuf, Signal(payload.Signal))
+				}
+			}
+			sess.Unlock()
+		case "pty-req":
+			if sess.handled || sess.pty != nil {
+				req.Reply(false, nil)
+				continue
+			}
+			ptyReq, ok := parsePtyRequest(req.Payload)
+			if !ok {
+				req.Reply(false, nil)
+				continue
+			}
+			if sess.ptyCb != nil {
+				ok := sess.ptyCb(sess.ctx, ptyReq)
+				if !ok {
+					req.Reply(false, nil)
+					continue
+				}
+			}
+			sess.pty = &ptyReq
+			sess.winch = make(chan Window, 1)
+			sess.winch <- ptyReq.Window
+			defer func() {
+				// when reqs is closed
+				close(sess.winch)
+			}()
+			req.Reply(ok, nil)
+		case "window-change":
+			if sess.pty == nil {
+				req.Reply(false, nil)
+				continue
+			}
+			win, ok := parseWinchRequest(req.Payload)
+			if ok {
+				sess.pty.Window = win
+				sess.winch <- win
+			}
+			req.Reply(ok, nil)
+		case agentRequestType:
+			// TODO: option/callback to allow agent forwarding
+			SetAgentRequested(sess.ctx)
+			req.Reply(true, nil)
+		case "break":
+			ok := false
+			sess.Lock()
+			if sess.breakCh != nil {
+				sess.breakCh <- true
+				ok = true
+			}
+			req.Reply(ok, nil)
+			sess.Unlock()
+		default:
+			// TODO: debug log
+			req.Reply(false, nil)
+		}
+	}
+}
+```
+
 
 ## 0x04 参考
 -	[ssh包](https://pkg.go.dev/golang.org/x/crypto/ssh)
