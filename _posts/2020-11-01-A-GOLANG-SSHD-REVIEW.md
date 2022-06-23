@@ -665,3 +665,4 @@ func (sess *session) handleRequests(reqs <-chan *gossh.Request) {
 ## 0x04 参考
 -	[ssh包](https://pkg.go.dev/golang.org/x/crypto/ssh)
 -	[gliderlabs-ssh包](https://pkg.go.dev/github.com/gliderlabs/ssh)
+-	[Understanding SSH](https://containerssh.io/development/containerssh/ssh/)
