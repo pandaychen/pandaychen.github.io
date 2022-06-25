@@ -15,7 +15,7 @@ tags:
 ## 0x01 重要结构
 
 1、Channel<br>
-A Channel is an ordered, reliable, flow-controlled, duplex stream that is multiplexed over an SSH connection.
+A Channel is an ordered, reliable, flow-controlled, duplex stream that is multiplexed over an SSH connection.（注，个人理解是channel最大的作用是给开发者提供了读取SSH明文的手段）
 
 ```golang
 type Channel interface {
