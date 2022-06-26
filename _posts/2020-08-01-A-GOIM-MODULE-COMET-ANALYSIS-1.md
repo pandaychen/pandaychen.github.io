@@ -1,7 +1,7 @@
 ---
 layout:     post
-title:      GoIM 源码分析：Comet（一）
-subtitle:   分析基于 GoIM 对外服务模块 Comet
+title:      GoIM 源码分析（一）：Comet
+subtitle:   分析 GoIM 对外服务模块 Comet
 date:       2020-08-01
 author:     pandaychen
 catalog:    true
