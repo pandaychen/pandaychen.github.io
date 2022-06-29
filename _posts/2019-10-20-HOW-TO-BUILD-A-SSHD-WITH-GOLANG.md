@@ -526,6 +526,7 @@ Proxycommand是SSH的代理机制，如下图所示：
 ![proxycommand](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/ssh-proxycommand.jpg)
 
 通常有两种方式：
+
 1、通过SSH原生方式<br>
 ProxyCommand配置为：
 
