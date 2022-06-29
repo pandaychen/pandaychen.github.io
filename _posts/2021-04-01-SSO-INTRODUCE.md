@@ -70,7 +70,7 @@ OAuth2 是一个授权协议，有四种 Flow 流。
 ![normal-saml-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/auth/sso/normal-saml2-flow.png)
 
 以 IDP Okta 的 SAML2 APP 服务验证流程为例：
-![okta-saml2]()
+![okta-saml2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/auth/sso/okta_saml_guidance_saml_flow.png)
 
 
 ####  SAML2的协议实例
@@ -85,7 +85,7 @@ OIDC（OpenID Connect）等于 （Identity, Authentication） + OAuth 2.0。OIDC
 ## 0x05 JWT（JSON Web Token）
 JWT 定义了一种简洁自包含的方法用于通信双方之间以 JSON 对象的形式安全的传递信息（[官方定义](https://jwt.io/introduction)），本质是带有数字签名的格式化数据，支持多种签名方法：
 - HMAC算法：常用于用户名/口令认证之后的token生成
-- 非对称加密算法（如RSA/ECDSA等）：推荐，持有私钥的一方是进行签名的，公钥被分发给子系统用来验证签名，常用于APIGATEWAY等场景
+- 非对称加密算法（如RSA/ECDSA等）：推荐，持有私钥的一方是进行签名的，公钥被分发给子系统用来验证签名，常用于APIGATEWAY等场景（避免共享对此秘钥，代价是性能相对于对称加密降低）
 
 
 举例来说：服务器认证后生成如下 JSON 对象+数字签名发回用户（为了标识该数据不可篡改，需要对此JSON进行签名）；客户端与服务端通信时依赖此JSON来认定用户身份，如下图：
@@ -101,12 +101,56 @@ JWT 定义了一种简洁自包含的方法用于通信双方之间以 JSON 对�
 
 
 ####  JWT结构
-- Header：用于描述元信息，如产生 signature 的算法，`{"typ": "JWT","alg": "HS256"}`
-- Payload：用于携带希望向服务端传递的信息。可以添加[官方字段](https://en.wikipedia.org/wiki/JSON_Web_Token)，例如：`iss(Issuer)`、`sub(Subject)`、`exp(Expirationtime)`，也可以添加自定义的字段
-- Signature：签名，签名的算法[见](https://en.wikipedia.org/wiki/JSON_Web_Token)
+1、`Header`：用于描述元信息，如产生 `signature` 的算法类型等<br>
+```json
+{
+	"typ": "JWT",
+	"alg": "HS256"
+}
+```
+
+2、`Payload`：用于携带希望向服务端传递的信息<br>
+可以添加[官方字段](https://en.wikipedia.org/wiki/JSON_Web_Token)，例如：`iss(Issuer)`、`sub(Subject)`、`exp(Expirationtime)`，也可以添加自定义的字段
+
+3、`Signature`：签名<br>
+签名的算法[见](https://en.wikipedia.org/wiki/JSON_Web_Token)，比如，使用HMAC算法签名的方法为（注意采用的是Base64URL算法）：
+```javascript
+HMAC_SHA256(base64UrlEncode(header) + "." + base64UrlEncode(payload), secret)
+```
 
 ![jwt-struct](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/auth/sso/sso-jwt-1.png)
 
+
+####  Base64URL算法
+JWT 在有些场合可能会放到 URL（比如 `api.example.com/?token=jwt-token`）。为了避免Base64 中的`3`个字符`+`、`/`和`=`对转义的影响，所以要使用Base64URL算法：
+- 省略`=`
+- `+`替换成`-`
+- `/`替换成`_`
+
+####  JWT的使用方式
+客户端收到服务器返回的 JWT，可以储存在 Cookie 里面，也可以储存在 localStorage；客户端需要携带JWT进行通信，通常放在 HTTP 请求的头信息`Authorization`字段里面（也可以放在 `Cookie` ，但是这样不能跨域）；还有另外一种场景，若跨域的时候，可以把JWT 放在 POST 请求的数据体里面
+
+```javascript
+Authorization: Bearer <token>
+```
+
+1、认证：HMAC场景<br>
+![jwt-hmac](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/auth/sso/jwt-auth-app-1-with-hmac.png)
+
+2、认证：RSA场景<br>
+![jwt-rsa](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/auth/sso/jwt-auth-app-2-with-rsa.png)
+
+3、认证：基于RSA的子系统场景<br>
+![jwt-rsa-subsystem](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/auth/sso/jwt-auth-for-multiple-subsystem.png)
+
+
+####  JWT的优缺点
+- JWT 默认是不加密，但也是可以加密的。生成原始 Token 以后，可以用密钥再加密一次
+- JWT 不加密的情况下，不能将秘密数据写入 JWT
+- JWT 不仅可以用于认证，也可以用于交换信息。有效使用 JWT，可以降低服务器查询数据库的次数
+- JWT 的最大缺点是，由于服务器不保存 session 状态，因此无法在使用过程中废止某个 token，或者更改 token 的权限。也就是说，一旦 JWT 签发了，在到期之前就会始终有效，除非服务器部署额外的逻辑
+- JWT 本身包含了认证信息，一旦泄露，任何人都可以获得该令牌的所有权限。为了减少盗用，JWT 的有效期应该设置得比较短。对于一些比较重要的权限，使用时应该再次对用户进行认证
+- 为了减少盗用，JWT 不应该使用 HTTP 协议明码传输，要使用 HTTPS 协议传输
 
 ## 0x06 区别
 
@@ -138,5 +182,6 @@ JWT 定义了一种简洁自包含的方法用于通信双方之间以 JSON 对�
 - [SAML2.0入门指南](https://www.jianshu.com/p/636c1ee16eba)
 - [OpenID Connect 协议入门指南](https://www.jianshu.com/p/be7cc032a4e9)
 - [OAuth2.0 协议入门指南](https://www.jianshu.com/p/6392420faf99)
+- [JSON Web Token 入门教程](https://www.ruanyifeng.com/blog/2018/07/json_web_token-tutorial.html)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

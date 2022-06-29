@@ -521,6 +521,72 @@ Certificate added: /root/.ssh/id_rsa-cert.pub ()
 SSH_AUTH_SOCK=/tmp/ssh-IcFeG5r3XuQA/agent.26302
 ```
 
+####    proxycommand机制介绍
+Proxycommand是SSH的代理机制，如下图所示：
+![proxycommand](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/ssh-proxycommand.jpg)
+
+通常有两种方式：
+
+1、通过SSH原生方式<br>
+ProxyCommand配置为：
+
+```bash
+ssh -W HostC:PortC -l USER -i PRIVATE_KEY -p PortB HostB
+```
+
+本方法原理是通过ssh命令自提供的代理机制，在机器A上建立与B的SSH连接（B机器与C机器建立连接在先），最终A连接C完成；A上ssh_config配置文件内容如下：
+```bash
+Host B
+    HostName %h
+    User xxx
+    Port 12345
+    IdentityFile ~/.ssh/id_dsa
+
+Host C
+    HostName %h
+    User xxx 
+    Port 22
+    IdentityFile ~/.ssh/id_rsa
+    ProxyCommand ssh -W %h:%p B
+```
+
+2、通过第三方软件连接<br>
+常用的有`nc`、`corkscrew`等等，以`nc`为例，配置为：
+```bash
+nc -X 5 -x HostB:PortB HostC PortC  #-X 指定与代理服务器的通信协议 SOCKS4/SOCKS5/HTTPS
+```
+
+原理是利用`nc`在机器A上使用`nc`命令与代理服务器建立连接，该代理连接的B机器与C机器的SSH建立连接，最终A连接C完成；A上ssh_config配置文件内容如下：
+
+```bash
+Host C
+    HostName %h
+    User xxxx 
+    Port 22
+    IdentityFile ~/.ssh/id_rsa
+    ProxyCommand nc -X 5 -x B:12345 %h %p
+```
+
+####    proxycommand的实战
+通过corkscrew可以很轻松的搭建ssh-proxy，笔者修改了原始的corkscrew，支持多个代理跳转，[项目](https://github.com/pandaychen/corkscrew)，一种可能的配置方式如下（`~/.ssh/config`）：
+```bash
+ForwardAgent yes
+StrictHostKeyChecking no
+Port 22
+ProxyCommand bash -c "/bin/corkscrew %r@%h"
+```
+
+上面是个非常有用的配置，`%r`、`%h`用来代替最终命令中的登录用户和登录ip（即动态的配置）；当然，`/bin/corkscrew`也可以换成其他的工具，在项目中我们是自己实现的proxycommand工具，加多了一些如权限控制，免密登录的特性。
+
+PS：新版本的ssh客户端还支持`Match`指令，该指令可以决定是否触发子配置（类似PreCheck预先检查）：
+```bash
+Match exec "/bin/sometools check %h %r"
+ForwardAgent yes
+StrictHostKeyChecking no
+Port 22
+ProxyCommand bash -c "/bin/sometools proxy %r@%h"
+```
+
 ##	0x04	其他应用
 基于 golang-SSH 库还有很多有趣的应用，这里列举几个：<br>
 -   [SSH Tron](https://github.com/zachlatta/sshtron)：此包实现了一个在线多人贪吃蛇服务
@@ -698,3 +764,4 @@ func (s *Session) Setenv(name, value string) error {
 -   [Writing an SSH server in Go](https://blog.gopheracademy.com/advent-2015/ssh-server-in-go/)
 -   [SSH Agent Explained](https://smallstep.com/blog/ssh-agent-explained/)
 -   [SSH Agent Forwarding 原理](https://blog.csdn.net/sdcxyz/article/details/41487897)
+-   [ssh命令之ProxyCommand选项](https://dslztx.github.io/blog/2017/05/19/ssh%E5%91%BD%E4%BB%A4%E4%B9%8BProxyCommand%E9%80%89%E9%A1%B9/)
