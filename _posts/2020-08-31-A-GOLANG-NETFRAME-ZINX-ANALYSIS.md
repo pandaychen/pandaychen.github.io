@@ -19,11 +19,13 @@ zinx的[开发文档](https://aceld.gitbooks.io/zinx/content/)基本上描述的
 2.  Reactor反应堆模式，基于事件驱动的循环
 3.  基于TLV的协议通信，避免粘包
 
-本文分析下zinx网络框架的实现的核心思路。
+本文就以上面3个维度分析下zinx网络框架的实现的核心思路。
 
 ##  0x01    zinx的架构
+![architecture](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/zinx/zinx-1.png)
 
 ##  0x02    代码分析
+先看下Zinx的网络抽象通用定义：
 
 
 ##  0x03    数据流程
