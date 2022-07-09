@@ -11,13 +11,13 @@ tags:
 ---
 
 ##  0x00    开篇
-cronsun 是一个分布式任务系统，单个节点和 Linux 机器上的 `crontab` 类似，目的是解决多台 Linux 机器上 crontab 任务管理不方便的问题，同时提供任务高可用的支持（当某个节点死机的时候可以自动调度到正常的节点执行），此外，有页面及邮件支持。
+cronsun 是一个分布式任务系统，单个节点和 Linux 机器上的 `crontab` 类似，目的是解决多台 Linux 机器上 crontab 任务管理不方便的问题，同时提供任务高可用的支持（当某个节点死机的时候可以自动调度到正常的节点执行），此外，有页面胚子及告警邮件支持等。
 
 本文分析下其实现的思路，之前已有相关文章：
 1.  [Golang CRON 库 Crontab 的使用与设计](https://pandaychen.github.io/2021/10/05/A-GOLANG-CRONTAB-V3-BASIC-INTRO/)
 2.  [基于 CRON 库扩展的分布式 Crontab 的实现](https://pandaychen.github.io/2022/01/16/A-GOLANG-CRONTAB-V3-ANALYSIS/)
 
-##	0x05	总结
+##	0x01	cronsun架构
 
 ```text
                                       [web]
@@ -43,9 +43,11 @@ cronsun 是一个分布式任务系统，单个节点和 Linux 机器上的 `cro
 ##	核心代码分析
 
 
-##	总结
+##	0x03  总结
 本项目
 
 
-##  0x06	参考
+##  0x04	参考
 -	[分布式任务系统 cronsun](http://bos.itdks.com/786da33844604637be5479c3a16af11e.pdf)
+- [还在用crontab? 分布式定时任务了解一下](https://www.cnblogs.com/kevinwan/p/14497753.html)
+- [分布式crontab架构](https://www.cnblogs.com/aganippe/p/16012588.html)

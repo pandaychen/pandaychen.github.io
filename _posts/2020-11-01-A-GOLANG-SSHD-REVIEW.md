@@ -51,6 +51,34 @@ type Channel interface {
 }
 ```
 
+####   session channel 类型
+While there are theoretically other types of channels possible, we currently only support session channels. The client can request channels to be opened at any time.
+We currently support the following requests on the session channel. These are described in RFC 4254.
+
+1、`env`<br>
+Sets an environment variable for the soon to be executed program.
+
+2、`pty`<br>
+Requests an interactive terminal for user input.
+
+3、`shell`<br>
+Requests the default shell to be executed.
+
+4、`exec`<br>
+Requests a specific program to be executed.
+
+5、`subsystem`<br>
+Requests a well-known subsystem (e.g. sftp) to be executed.
+
+6、`window-change`<br>
+Informs the server that an interactive terminal window has changed size. This is only sent once the program has been started with the requests above.
+
+7、`signal`<br>
+Requests the server to send a signal to the currently running process.
+
+8、`exit-status`<br>
+to the client from the server when the program exits to inform the client of the exit code.
+
 2、Request 和 Reply<br>
 协议交互的收发包协议结构：
 
