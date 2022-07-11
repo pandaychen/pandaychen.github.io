@@ -17,7 +17,7 @@ tags:
 -	LRU 支持
 -	缓存命中率统计
 -	并发安全，解决缓存击穿问题
--	解决缓存击穿问题（`syncx.SharedCalls`，类似 singleflight 机制）
+-	解决缓存击穿问题（`syncx.SingleFlight`机制）
 
 实际存储是最基础的锁 + map 机制，没啥好说的。
 
@@ -69,7 +69,7 @@ type (
 		expire         time.Duration // 过期时间
 		timingWheel    *TimingWheel // 框架封装的定时器
 		lruCache       lru //LRU 组件
-		barrier        syncx.SharedCalls// 缓存并发安全组件，可以解决缓存击穿的问题
+		barrier        syncx.SingleFlight// 缓存并发安全组件，可以解决缓存击穿的问题
 		unstableExpiry mathx.Unstable // 生成随机数的插件
 		stats          *cacheStat 	// 统计命中率模块
 	}
@@ -96,7 +96,7 @@ func NewCache(expire time.Duration, opts ...CacheOption) (*Cache, error) {
 		data:           make(map[string]interface{}),
 		expire:         expire,
 		lruCache:       emptyLruCache, // 默认是一个空的 LRU 结构，可以通过 opts 来控制
-		barrier:        syncx.NewSharedCalls(),// 解决缓存击穿的核心方法
+		barrier:        syncx.NewSingleFlight(),// 解决缓存击穿的核心方法
 		unstableExpiry: mathx.NewUnstable(expiryDeviation),// 框架自己做的一个并发安全的随机数
 	}
 
@@ -155,7 +155,7 @@ func (c *Cache) doGet(key string) (interface{}, bool) {
 ```
 
 3、`Set` 操作 <br>
-注意 `Set` 操作时，如果 key 已经存在，那么 `c.timingWheel.MoveTimer` 更新时间轮的定时器；否则调用 `c.timingWheel.SetTimer` 初始化定时器。
+注意 `Set` 操作时，如果 key 已经存在，那么 `c.timingWheel.MoveTimer` 更新时间轮的定时器；否则调用 `c.timingWheel.SetTimer` 初始化定时器。（注意加锁与操作顺序）
 
 ```golang
 // Set sets value into c with key.
@@ -166,9 +166,9 @@ func (c *Cache) Set(key string, value interface{}) {
 // SetWithExpire sets value into c with key and expire with the given value.
 func (c *Cache) SetWithExpire(key string, value interface{}, expire time.Duration) {
 	c.lock.Lock()
-	_, ok := c.data[key]
+	_, ok := c.data[key]	//判断KEY是否存在
 	c.data[key] = value
-	c.lruCache.add(key)
+	c.lruCache.add(key)		//添加到LRU
 	c.lock.Unlock()
 
 	expiry := c.unstableExpiry.AroundDuration(expire)
@@ -189,10 +189,10 @@ func (c *Cache) SetWithExpire(key string, value interface{}, expire time.Duratio
 // Del deletes the item with the given key from c.
 func (c *Cache) Del(key string) {
 	c.lock.Lock()
-	delete(c.data, key)
-	c.lruCache.remove(key)
+	delete(c.data, key)	// 删除元素
+	c.lruCache.remove(key)	//移除LRU
 	c.lock.Unlock()
-	c.timingWheel.RemoveTimer(key)
+	c.timingWheel.RemoveTimer(key)	//移除定时器， 注意先解锁，后移除
 }
 ```
 
@@ -220,7 +220,7 @@ PS：golang 标准库的 container/list 默认不是并发安全的，所以这�
 type keyLru struct {
 	limit    int // 总长度
 	evicts   *list.List // cache中LRU的链
-	elements map[string]*list.Element// 存放的是元素在链表中的地址。利用 MAP 查询，不用遍历链表即可找到需要的元素的地址
+	elements map[string]*list.Element// 存放的是元素在链表中的地址。利用 Map 查询，不用遍历链表即可找到需要的元素的地址，典型的空间换时间思路
 	onEvict  func(key string) // 删除的回调方法
 }
 ```
@@ -243,12 +243,12 @@ func (klru *keyLru) add(key string) {
 	klru.elements[key] = elem // 记录这个元素的地址
 
 	if klru.evicts.Len()> klru.limit {
-		klru.removeOldest()// 如果链表的最大长度超过配置，移除最老的元素
+		klru.removeOldest()// 如果链表的最大长度超过配置，则移除最老的元素
 	}
 }
 
 func (klru *keyLru) removeOldest() {
-	elem := klru.evicts.Back()// 取链表最后一个元素
+	elem := klru.evicts.Back()// 或取链表最后一个元素
 	if elem != nil {
 		klru.removeElement(elem) // 移除元素
 	}
@@ -261,28 +261,113 @@ func (klru *keyLru) removeOldest() {
 ```golang
 func (klru *keyLru) remove(key string) {
 	if elem, ok := klru.elements[key]; ok {
-		klru.removeElement(elem)
+		klru.removeElement(elem)		//移除元素
 	}
 }
 
 func (klru *keyLru) removeElement(e *list.Element) {
 	klru.evicts.Remove(e)// 移除链表中的元素
 	key := e.Value.(string)// 获取 Key
-	delete(klru.elements, key)// 移除 MAP 中的元素
+	delete(klru.elements, key)// 移除 Map 中的元素
 	klru.onEvict(key) // 执行删除的后置操作
 }
 ```
 
 ##	0x03	解决缓存击穿
+cache库使用`syncx.SingleFlight`[机制](https://github.com/zeromicro/go-zero/blob/master/core/syncx/singleflight.go#L12)解决缓存击穿问题，同[Singleflight 机制](https://pandaychen.github.io/2020/02/22/A-CACHE-STUDY/#singleflight-机制)
+
+`SingleFlight`方法作用是：**可以使得同时多个请求只需要发起一次拿结果的调用，其他请求"坐享其成"即可，该设计有效减少了资源服务的并发压力，可以有效防止缓存击穿**。当我们需要高频并发访问一个资源时，就可以使用 `SingleFlight` 机制。核心代码实现如下：
+
+```golang
+//Take方法：获取KEY的值，如果这个值不存在，那么执行fetch方法，拿到返回值设置到缓存里，并返回。
+//当出现并发情况时，barrier方法会保证并发安全
+func (c *Cache) Take(key string, fetch func() (interface{}, error)) (interface{}, error) {
+	if val, ok := c.doGet(key); ok {	//直接获取KEY的值
+		c.stats.IncrementHit() //记录命中
+		return val, nil
+	}
+
+	var fresh bool
+	//核心方法，barrier保证并发安全性
+	val, err := c.barrier.Do(key, func() (interface{}, error) {
+		//1.这里进行了一次double check。解决并发时，有些协程可能已经把数据查出来并加载到缓存了。
+		if val, ok := c.doGet(key); ok {
+			return val, nil
+		}
+
+		v, e := fetch()//执行方法，获取CACHE。这个方法应该尽量的保证效率
+		if e != nil {
+			return nil, e
+		}
+
+		fresh = true
+		c.Set(key, v) //设置缓存
+		return v, nil
+	})
+ 	//...
+
+	if fresh {
+		//fetch 获取到数据为空，记录miss次数
+		c.stats.IncrementMiss()
+		return val, nil
+	}
+
+	// 直接把之前查到的数据返回，并记录命中次数
+	c.stats.IncrementHit()
+	return val, nil
+}
+```
+
+上面的`c.barrier.Do`方法实现如下：
+```golang
+func (g *flightGroup) Do(key string, fn func() (interface{}, error)) (interface{}, error) {
+	c, done := g.createCall(key)
+	if done {
+		return c.val, c.err
+	}
+
+	g.makeCall(c, key, fn)
+	return c.val, c.err
+}
+
+func (g *flightGroup) createCall(key string) (c *call, done bool) {
+	g.lock.Lock()
+	if c, ok := g.calls[key]; ok {
+		g.lock.Unlock()
+		c.wg.Wait()
+		return c, true
+	}
+
+	c = new(call)
+	c.wg.Add(1)
+	g.calls[key] = c
+	g.lock.Unlock()
+
+	return c, false
+}
+
+func (g *flightGroup) makeCall(c *call, key string, fn func() (interface{}, error)) {
+	defer func() {
+		g.lock.Lock()
+		delete(g.calls, key)
+		g.lock.Unlock()
+		c.wg.Done()
+	}()
+
+	c.val, c.err = fn()
+}
+```
+
+![singleflight](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/cache/singleflight.webp)
 
 
 ##	0x04	缓存的命中统计
 ```golang
 type cacheStat struct {
-	name         string // 名称，最后打印日志记录是要用到
+	name         string // 名称，用于最后打印日志记录
 	hit          uint64 // 命中缓存次数
 	miss         uint64 // 未命中次数
-	sizeCallback func() int // 自定义回调函数，会在打印结果的时候用到
+	sizeCallback func() int // 自定义回调函数，打印结果的时候使用
 }
 
 func (cs *cacheStat) IncrementHit() {
@@ -302,5 +387,12 @@ func (cs *cacheStat) IncrementMiss() {
 
 ![cache](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/cache/go-zero/lru-cache1.jpg)
 
+####	基于LRU淘汰算法
+LRU的核心思想是，
+-	新数据插入到链表头部
+-	每当缓存命中（即缓存数据被访问），则将该数据移到链表头部
+-	当链表list容量满的时候，将链表尾部的数据丢弃
+
 ##  0x06	参考
 -	[进程内缓存助你提高并发能力](https://learnku.com/articles/57360)
+-	[更简的并发代码，更强的并发控制](https://zhuanlan.zhihu.com/p/364073325)
