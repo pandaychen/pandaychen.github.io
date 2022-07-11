@@ -77,6 +77,7 @@ type (
 ```
 
 其中 `lru` 可以由用户自行实现，go-zero 也基于 `container/list` 实现了一个版本 `keyLru` 供开发者 [使用](https://github.com/zeromicro/go-zero/blob/master/core/collection/cache.go#L208)；
+
 ```golang
 type lru interface {
 	add(key string)
@@ -155,6 +156,7 @@ func (c *Cache) doGet(key string) (interface{}, bool) {
 
 3、`Set` 操作 <br>
 注意 `Set` 操作时，如果 key 已经存在，那么 `c.timingWheel.MoveTimer` 更新时间轮的定时器；否则调用 `c.timingWheel.SetTimer` 初始化定时器。
+
 ```golang
 // Set sets value into c with key.
 func (c *Cache) Set(key string, value interface{}) {
@@ -198,9 +200,9 @@ func (c *Cache) Del(key string) {
 go-zero 提供了 lru 的实现接口及一个内置的 `keyLru` 实现，开发者可以自己实现对应的 LRU 逻辑：
 ```golang
 type lru interface {
-		add(key string)		// 调用 LRU 的方法操作一个 key
-		remove(key string)
-	}
+	add(key string)		// 调用 LRU 的方法操作一个 key
+	remove(key string)
+}
 ```
 
 #### LRU 核心思路
@@ -213,6 +215,7 @@ type lru interface {
 
 ####	KeyLRU 的实现
 PS：golang 标准库的 container/list 默认不是并发安全的，所以这里针对的 LRU 的操作必须要加锁（go-zero 中 LRU 的操作和 map 操作共用一把锁）
+
 ```golang
 type keyLru struct {
 	limit    int // 总长度
@@ -228,6 +231,7 @@ type keyLru struct {
 -	当元素已经存在（依靠`elements`），直接移动到最前
 -	不存在直接添加在最前
 -	当LRU超过容量限制时，删掉末尾的（同时还需要删除缓存中的该元素）
+
 ```golang
 func (klru *keyLru) add(key string) {
 	if elem, ok := klru.elements[key]; ok {
@@ -253,6 +257,7 @@ func (klru *keyLru) removeOldest() {
 
 2、`remove` 操作<br>
 删除数据时，还需要删除LRU链
+
 ```golang
 func (klru *keyLru) remove(key string) {
 	if elem, ok := klru.elements[key]; ok {
@@ -291,6 +296,10 @@ func (cs *cacheStat) IncrementMiss() {
 
 ##	0x05	总结
 官网文档给的结构图很直观了：
+1.	存储map
+2.	基于list的LRU实现
+3.	基于时间轮timewheel的过期清理
+
 ![cache](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/cache/go-zero/lru-cache1.jpg)
 
 ##  0x06	参考
