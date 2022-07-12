@@ -1,6 +1,6 @@
 ---
 layout: post
-title: Cronsun：任务计划统一集中管理系统设计与分析
+title: Cronsun：任务统一集中管理（调度）系统设计与分析
 subtitle: 分析一款典型的分布式任务调度系统
 date: 2022-06-20
 header-img: img/super-mario.jpg
@@ -51,3 +51,5 @@ cronsun 是一个分布式任务系统，单个节点和 Linux 机器上的 `cro
 -	[分布式任务系统 cronsun](http://bos.itdks.com/786da33844604637be5479c3a16af11e.pdf)
 - [还在用crontab? 分布式定时任务了解一下](https://www.cnblogs.com/kevinwan/p/14497753.html)
 - [分布式crontab架构](https://www.cnblogs.com/aganippe/p/16012588.html)
+- [设计一个分布式定时任务系统](https://yeqown.xyz/2022/01/27/设计一个分布式定时任务系统/)
+- [替代crontab，统一定时任务管理系统cronsun简介](https://cloud.tencent.com/developer/article/1072323)
