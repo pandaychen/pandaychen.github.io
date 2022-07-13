@@ -396,3 +396,4 @@ LRU的核心思想是，
 ##  0x06	参考
 -	[进程内缓存助你提高并发能力](https://learnku.com/articles/57360)
 -	[更简的并发代码，更强的并发控制](https://zhuanlan.zhihu.com/p/364073325)
+-	[通过 SingleFlight 模式学习 Go 并发编程](https://www.cnblogs.com/kevinwan/p/16185722.html)

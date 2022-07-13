@@ -41,6 +41,34 @@ cronsun 是一个分布式任务系统，单个节点和 Linux 机器上的 `cro
 简化为如下架构：
 ![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/dcrontab/crontab-normal-flow-with-etcd.png)
 
+值得说明的是：
+1.	图中的worker节点通常是单机部署，上面部署一个Cron-Node 节点，主要负责调度和执行任务
+2.	图中的master节点（即Cron-Web节点）一般是无状态的，容易实现水平扩展，主要负责管理任务、查看任务执行日志
+
+####	可靠性说明
+1、worker节点的可靠性<br>
+-	cronnode被设计成一个常驻进程，追求稳定和高可用
+-	若cronnode和etcd服务的连接中断了
+	-	断开连接之前已经下发的任务会正常执行
+	-	在断开连接期间新建、修改、删除的任务无法更新到节点
+	-	自动和etcd进行重连
+	-	和etcd重新连接上后，会重新加载和该节点相关的全部任务，保证正确性；
+-	若cronnode和MongoDB数据库的连接中断了
+	-	所有任务依然会正常执行
+	-	在断开连接期间执行完成的任务，日志会因为无法写入到MongoDB而看不到任务的执行记录和任务日志，不影响任务正常执行
+	-	会自动和MongoDB进行重连，重连后执行记录和任务日志会正常写入MongoDB
+
+2、master节点的可靠性<br>
+-	若cronweb进程崩溃了
+	-	不影响cronnode节点和任务正常执行
+	-	报警邮件无法发送
+-	若cronweb和etcd服务的连接中断
+	-	cronweb无法访问
+	-	报警邮件无法发送
+-	若cronweb和MongoDB服务的连接中断
+	-	cronweb无法访问
+	-	报警邮件无法发送
+-	可以部署多个cron-web节点，可以访问任一节点正常管理任务和查看日志
 
 笔者阅读过的分布式crontab实现，几乎都是与该架构类似（不同之处是etcd替换为redis或其他一些分布式存储）；
 1.  [gocron](https://github.com/ouqiang/gocron)：定时任务管理系统，文档见[此](https://github.com/ouqiang/gocron/wiki)
