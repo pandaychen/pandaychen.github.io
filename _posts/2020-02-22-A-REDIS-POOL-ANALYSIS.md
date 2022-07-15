@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      Go-Redis 连接池（Pool）源码分析
-subtitle:
+subtitle:   分析一款典型的redis连接池实现
 date:       2020-02-22
 author:     pandaychen
 header-img:
@@ -12,7 +12,7 @@ tags:
 ---
 
 ##  0x00    介绍
-&emsp;&emsp;连接池技术，一般是客户端侧高效管理和复用连接，避免重复创建（带来的性能损耗，特别是 `TLS`）和销毁连接的一种技术手段。在项目中灵活使用连接池，对降低服务器负载十分有帮助。如 go-xorm 的 [连接池](https://github.com/go-xorm/manual-zh-CN/blob/master/chapter-01/1.engine.md)、go-redis 的 [连接池](https://github.com/go-redis/redis/tree/master/internal/pool)，本文就来分析下 go-redis 中的连接池实现。
+&emsp;&emsp;连接池技术，一般是客户端侧高效管理和复用连接，避免重复创建（带来的性能损耗，特别是 `TLS`）和销毁连接的一种技术手段。在项目中灵活使用连接池，对降低服务器负载十分有帮助；此外，在司内的DB托管场景，如遇后台升配、代理扩容等场景，如果服务内置了连接池，一般不需要重启（因为连接池会自动尝试重建）。如 go-xorm 的 [连接池](https://github.com/go-xorm/manual-zh-CN/blob/master/chapter-01/1.engine.md)、go-redis 的 [连接池](https://github.com/go-redis/redis/tree/master/internal/pool)，本文就来分析下 go-redis 中的连接池实现。
 
 总览下连接池的核心 [代码结构](https://github.com/go-redis/redis/blob/master/internal/pool/pool.go)，go-redis 的连接池实现分为如下几个部分：
 1.	连接池初始化、管理连接
