@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      Go-Redis 连接池（Pool）源码分析
-subtitle:   分析一款典型的redis连接池实现
+subtitle:   分析一款典型的 redis 连接池实现
 date:       2020-02-22
 author:     pandaychen
 header-img:
@@ -12,27 +12,54 @@ tags:
 ---
 
 ##  0x00    介绍
-&emsp;&emsp;连接池技术，一般是客户端侧高效管理和复用连接，避免重复创建（带来的性能损耗，特别是 `TLS`）和销毁连接的一种技术手段。在项目中灵活使用连接池，对降低服务器负载十分有帮助；此外，在司内的DB托管场景，如遇后台升配、代理扩容等场景，如果服务内置了连接池，一般不需要重启（因为连接池会自动尝试重建）。如 go-xorm 的 [连接池](https://github.com/go-xorm/manual-zh-CN/blob/master/chapter-01/1.engine.md)、go-redis 的 [连接池](https://github.com/go-redis/redis/tree/master/internal/pool)，本文就来分析下 go-redis 中的连接池实现。
+&emsp;&emsp; 连接池技术，一般是客户端侧高效管理和复用连接，避免重复创建（带来的性能损耗，特别是 `TLS`）和销毁连接的一种技术手段。在项目中灵活使用连接池，对降低服务器负载十分有帮助；此外，在司内的 DB 托管场景，如遇后台升配、代理扩容等场景，如果服务内置了连接池，一般不需要重启（因为连接池会自动尝试重建）。如 go-xorm 的 [连接池](https://github.com/go-xorm/manual-zh-CN/blob/master/chapter-01/1.engine.md)、go-redis 的 [连接池](https://github.com/go-redis/redis/tree/master/internal/pool)，本文就来分析下 go-redis 中的连接池实现。
 
 总览下连接池的核心 [代码结构](https://github.com/go-redis/redis/blob/master/internal/pool/pool.go)，go-redis 的连接池实现分为如下几个部分：
 1.	连接池初始化、管理连接
 2.	建立与关闭连接
-3.	获取与放回连接
+3.	获取与放回连接，核心实现[Get](https://github.com/go-redis/redis/blob/master/internal/pool/pool.go#L244)、[Put](https://github.com/go-redis/redis/blob/master/internal/pool/pool.go#L354)
 4.	监控统计 && 连接保活配置
+
+连接池主要的思想是把新建的连接暂存到连接池中，当请求结束后不关闭连接，而是放回到连接池中，需要的时候从连接池中取出连接使用；同时，根据一定的策略（如超时）定时回收连接；此外，有些连接池还会对连接池中未失效的连接进行健康度检测，防止连接异常
+
+####    go-redis 连接池的特点
+-   使用 slice 存储（构建）连接池，每个单位代表一个连接
+-   支持自动关闭（回收）空闲的连接
+-   支持设置连接的最大存活时间
+-   支持统计连接池的状态
+-   不支持单个连接的健康检查，需要用户自行在业务层实现
+
 
 ##  0x01    Pool 相关的结构体
 连接池 [选项](https://github.com/go-redis/redis/blob/master/internal/pool/pool.go#L51) 定义：
-```go
+```golang
 type Options struct {
-	Dialer  func(context.Context) (net.Conn, error)
-	OnClose func(*Conn) error
+	Dialer  func(context.Context) (net.Conn, error)    // 新建连接的工厂函数
+	OnClose func(*Conn) error                   // 关闭连接的回调函数
 
 	PoolSize           int          // 连接池大小
-	MinIdleConns       int
-	MaxConnAge         time.Duration
-	PoolTimeout        time.Duration
+	MinIdleConns       int          // 最小空闲连接数
+	MaxConnAge         time.Duration        // 连接池获取的超时时间
+	PoolTimeout        time.Duration        // 空闲连接的超时时间
 	IdleTimeout        time.Duration    // 空闲连接的超时时间
-	IdleCheckFrequency time.Duration    // 检查空闲连接频率
+	IdleCheckFrequency time.Duration    // 检查空闲连接频率（超时空闲连接清理的间隔时间）
+}
+```
+
+上面的选项是在初始化 go-redis 客户端时，需要合理设置。项目中一般我们做如下设置：
+```golang
+func InitRedisClient() *redis.Client{
+    //...
+    return redis.NewClient(&redis.Options{
+        Addr:     redis_addr,
+        Password: redis_cfg.RedisPass, // no password set
+        DB:       0,                  // use default DB
+        ReadTimeout:  time.Millisecond * time.Duration(500),
+        WriteTimeout: time.Millisecond * time.Duration(500),
+        IdleTimeout: time.Second * time.Duration(60),
+        PoolSize:    64,
+        MinIdleConns: 16,
+    })
 }
 ```
 
@@ -51,33 +78,34 @@ type Conn struct {
 }
 ```
 
-连接池的结构体定义：
-```go
+####    核心结构：ConnPool
+连接池 `ConnPool` 的结构体定义：
+```golang
 type ConnPool struct {
-    opt *Options // 连接池配置
+    opt *Options // 连接池参数配置，如上
 
-    dialErrorsNum uint32 // 连接错误次数，atomic
+    dialErrorsNum uint32 // 连接失败的错误次数，atomic
 
     lastDialErrorMu sync.RWMutex // 上一次连接错误锁，读写锁
-    lastDialError   error // 上一次连接错误
+    lastDialError   error // 上一次连接错误（保存了最近一次的连接错误）
 
-    queue chan struct{}
+    queue chan struct{}     // 轮转队列，是一个 channel 结构
 
     connsMu      sync.Mutex // 连接队列锁
-    conns        []*Conn // 连接队列
-    idleConns    []*Conn // 空闲连接队列
+    conns        []*Conn // 连接队列（连接队列，维护了未被删除所有连接）
+    idleConns    []*Conn // 空闲连接队列（空闲连接队列，维护了所有的空闲连接）
     poolSize     int // 连接池大小
     idleConnsLen int // 空闲连接队列长度
 
-    stats Stats // 连接池统计的结构体
+    stats Stats // 连接池统计的结构体（包含了使用数据）
 
     _closed  uint32 // 连接池关闭标志，atomic
     closedCh chan struct{} // 通知连接池关闭通道（用于主协程通知子协程的常用方法）
 }
 ```
 
-连接池统计 Stats 的结构定义：
-```go
+连接池统计 `Stats` 的结构定义：
+```golang
 // Stats contains pool state information and accumulated stats.
 type Stats struct {
 	Hits     uint32 // number of times free connection was found in the pool
@@ -91,7 +119,7 @@ type Stats struct {
 ```
 
 ##  0x02    Pool 接口
-首先，封装 Pool 的接口实现方法，如下：
+首先，封装 Pool 的接口实现方法 `Pooler`，如下：
 ```go
 type Pooler interface {
     NewConn(context.Context) (*Conn, error) // 创建连接
@@ -111,9 +139,15 @@ type Pooler interface {
 
 ##  0x03    连接池管理功能
 
-####    1、初始化连接池
-使用工厂函数创建全局 Pool 对象，首先会初始化一个 ConnPool 实例，赋予 PoolSize 大小的连接队列和轮转队列，接着会根据 MinIdleConns 参数维持一个最小连接数，以保证连接池中有这么多数量的连接处于活跃状态。IdleTimeout 和 IdleCheckFrequency 参数用来在每过一段时间内会对连接池中不活跃的连接做清理操作。再看 ConnPool 结构体的定义，conns 和 idleConns 这两个队列，conns 就是连接队列，而 idleConns 就是轮转队列。
-```go
+####    1、初始化（新建）连接池
+使用工厂函数创建全局 `Pool` 对象，首先会初始化一个 `ConnPool` 实例，初始化 `PoolSize` 大小的连接队列和轮转队列；然后在 `checkMinIdleConns` 方法中，会根据 `MinIdleConns` 参数维持一个最小连接数，以保证连接池中有这么多数量的连接处于活跃状态。
+
+`IdleTimeout` 和 `IdleCheckFrequency` 参数用来在每过一段时间内会对连接池中不活跃的连接做清理操作，如果同时设置了，则异步开启回收连接的 goroutine，即 `reaper` 方法；再看 `ConnPool` 结构体的定义，`conns` 和 `idleConns` 这两个队列，`conns` 就是连接队列，而 `idleConns` 就是轮转队列。两者作用如下：
+
+-   `conns`：
+-   `idleConns`：
+
+```golang
 func NewConnPool(opt *Options) *ConnPool {
     p := &ConnPool{
         opt: opt,   //Save 配置
@@ -140,6 +174,7 @@ func NewConnPool(opt *Options) *ConnPool {
     return p
 }
 
+// 根据 MinIdleConns 参数，初始化即创建指定数量的连接
 func (p *ConnPool) checkMinIdleConns() {
 	if p.opt.MinIdleConns == 0 {
 		return
@@ -169,16 +204,24 @@ func (p *ConnPool) addIdleConn() error {
 	}
 
 	p.connsMu.Lock()
-	p.conns = append(p.conns, cn)   //conns 增加
-	p.idleConns = append(p.idleConns, cn) //idleConns 增加
-	p.connsMu.Unlock()
+	defer p.connsMu.Unlock()
+
+	// It is not allowed to add new connections to the closed connection pool.
+	if p.closed() {
+		_ = cn.Close()
+		return ErrClosed
+	}
+
+	p.conns = append(p.conns, cn)       // 增加连接队列
+	p.idleConns = append(p.idleConns, cn)   // 增加轮转队列
 	return nil
 }
 
 ```
 
 ####    2、关闭连接池
-```go
+关闭连接池方法如下，主要完成释放连接资源的工作：
+```golang
 func (p *ConnPool) Close() error {
     // 原子性检查连接池是否已经关闭，若没关闭，则将关闭标志置为 1
     if !atomic.CompareAndSwapUint32(&p._closed, 0, 1) {
@@ -208,10 +251,14 @@ func (p *ConnPool) Close() error {
 }
 ```
 
-##  0x04    单个连接管理
+下一节，分析下连接池的管理功能，如何从连接池取出和放回连接。
+
+##  0x04    连接池的单个连接管理
+
+通过 `dialConn` 方法生成新建的连接，注意参数 `cn.pooled`，通常情况下新建的连接会插入到连接池的 `conns` 队列中，当发现连接池的大小超出了设定的连接大小时，这时候新建的连接的 `cn.pooled` 属性被设置为 `false`，该连接未来将会被删除，不会落入连接池
 
 ####    1、建立连接
-```go
+```golang
 func (p *ConnPool) newConn(ctx context.Context, pooled bool) (*Conn, error) {
     // 拨号
     cn, err := p.dialConn(ctx, pooled)
@@ -278,51 +325,16 @@ func (p *ConnPool) tryDial() {
 ```
 
 ####    2、从连接池取出连接
-```go
-// Get returns existed connection from the pool or creates a new one.
-func (p *ConnPool) Get(ctx context.Context) (*Conn, error) {
-    if p.closed() {
-        return nil, ErrClosed
-    }
+从连接池中获取一个连接的过程如下：
+1、首先，检查连接池是否被关闭，如果被关闭直接返回 `ErrClosed` 错误 <br>
 
-    err := p.waitTurn(ctx)
-    if err != nil {
-        return nil, err
-    }
+2、尝试在轮转队列 `queue` 中占据一个位置（即尝试申请一个令牌），如果抢占的等待时间超过连接池的超时时间，会返回 `ErrPoolTimeout` 错误，见下面的 `waitTurn` 方法 <br>
 
-    for {
-        p.connsMu.Lock()
-        cn := p.popIdle()
-        p.connsMu.Unlock()
+轮转队列的主要作用是协调连接池的生产 - 消费过程，即使用令牌机制保证每往轮转队列中添加一个元素时，可用的连接资源的数量就减少一。若无法立即写入，该过程将尝试等待 `PoolTimeout` 时间后，返回相应结果。
 
-        if cn == nil {
-            break
-        }
+注意下面的 `timers` 基于 `sync.Pool` 做了优化。
 
-        if p.isStaleConn(cn) {
-            _ = p.CloseConn(cn)
-            continue
-        }
-
-        atomic.AddUint32(&p.stats.Hits, 1)
-        return cn, nil
-    }
-
-    atomic.AddUint32(&p.stats.Misses, 1)
-
-    newcn, err := p.newConn(ctx, true)
-    if err != nil {
-        p.freeTurn()
-        return nil, err
-    }
-
-    return newcn, nil
-}
-
-func (p *ConnPool) getTurn() {
-    p.queue <- struct{}{}
-}
-
+```golang
 func (p *ConnPool) waitTurn(ctx context.Context) error {
     select {
     case <-ctx.Done():
@@ -358,11 +370,10 @@ func (p *ConnPool) waitTurn(ctx context.Context) error {
         return ErrPoolTimeout
     }
 }
+```
 
-func (p *ConnPool) freeTurn() {
-    <-p.queue
-}
-
+3、通过 `popIdle` 方法，尝试从连接池的空闲连接队列 `p.idleConns` 中获取一个已有连接，如果该连接已过期，则关闭并丢弃该连接，继续重复相同尝试操作，直至获取到一个连接或连接队列为空为止 <br>
+```golang
 func (p *ConnPool) popIdle() *Conn {
     if len(p.idleConns) == 0 {
         return nil
@@ -372,13 +383,74 @@ func (p *ConnPool) popIdle() *Conn {
     cn := p.idleConns[idx]
     p.idleConns = p.idleConns[:idx]
     p.idleConnsLen--
+    // 每次都强行补充连接至 MinIdleConns
     p.checkMinIdleConns()
     return cn
 }
 ```
 
+4、如果上一步无法获取到已有连接，则新建一个连接，如果没有返回错误则直接返回，如果新建连接时返回错误，则释放掉轮转队列中的位置，返回连接错误 <br>
+
+完整的 `Get` 方法实现如下：
+```golang
+// Get returns existed connection from the pool or creates a new one.
+func (p *ConnPool) Get(ctx context.Context) (*Conn, error) {
+    if p.closed() {
+        // 首先，检查连接池是否被关闭，如果被关闭直接返回 `ErrClosed` 错误
+        return nil, ErrClosed
+    }
+
+    err := p.waitTurn(ctx)
+    if err != nil {
+        return nil, err
+    }
+
+    for {
+        p.connsMu.Lock()
+        cn := p.popIdle()
+        p.connsMu.Unlock()
+
+        if cn == nil {
+            break
+        }
+
+        // 如果连接已经过期，那么强行关闭此链接，然后重新从空闲队列中获取
+        if p.isStaleConn(cn) {
+            _ = p.CloseConn(cn)
+            continue
+        }
+
+        atomic.AddUint32(&p.stats.Hits, 1)
+        return cn, nil
+    }
+
+    atomic.AddUint32(&p.stats.Misses, 1)
+    // 从池中无法获取连接，则新建一个连接，如果没有返回错误则直接返回，如果新建连接时返回错误，则释放掉轮转队列中的位置，返回连接错误
+    newcn, err := p.newConn(ctx, true)
+    if err != nil {
+        p.freeTurn()
+        return nil, err
+    }
+
+    return newcn, nil
+}
+
+func (p *ConnPool) getTurn() {
+    p.queue <- struct{}{}
+}
+
+
+func (p *ConnPool) freeTurn() {
+    <-p.queue
+}
+```
+
 ####    3、向连接池放回连接
-```go
+从 `ConnPool` 中取出的连接一般来说都是要放回到连接池中的，具备包含 2 点：
+-   直接向空闲连接队列中插入这个连接，并把轮转队列的资源释放掉
+-   若连接的标记 `cn.pooled` 为不要被池化，则会直接释放这个连接
+
+```golang
 func (p *ConnPool) Put(cn *Conn) {
     // 检查连接中是否还有数据没被读取
     if cn.rd.Buffered()> 0 {
@@ -405,7 +477,8 @@ func (p *ConnPool) Put(cn *Conn) {
 ```
 
 ####    4、移除和关闭连接
-在 Pool 的实现中，移除（Remove）和关闭连接（CloseConn），底层调用的都是 removeConnWithLock 函数：
+删除方法 `removeConn` 会从连接池的 `conns` 队列中移除这个连接，在 `ConnPool` 的实现中，移除（`Remove`）和关闭连接（`CloseConn`），底层调用的都是 `removeConnWithLock` 函数，删除的方法是比较指针的值，然后进行 slice 的删除操作：
+
 ```go
 func (p *ConnPool) Remove(cn *Conn, reason error) {
     p.removeConnWithLock(cn)
@@ -458,7 +531,8 @@ func (p *ConnPool) closeConn(cn *Conn) error {
 ```
 
 ####    5、监控 && 回收过期连接
-在 `NewConnPool` 方法中，若传入的 Option 配置了空闲连接超时和检查空闲连接频率，则新启动一个用于检查并清理过期连接的 goroutine，每隔 frequency 时间遍历检查连接池中是否存在过期连接，并清理。其代码如下：
+连接池是怎么自动收割长时间不使用的空闲连接的？注意到在 `NewConnPool` 方法中，若传入的 `Option` 配置了空闲连接超时和检查空闲连接频率，则新启动一个用于检查并清理过期连接的 goroutine，每隔 `frequency` 时间遍历检查（并取出）连接池中是否存在过期连接，对过期连接做删除和关闭连接操作，并释放轮转资源。其代码如下：
+
 ```go
 //frequency 指定了多久进行一次检查，这里直接作为定时器 ticker 的触发间隔
 func (p *ConnPool) reaper(frequency time.Duration) {
