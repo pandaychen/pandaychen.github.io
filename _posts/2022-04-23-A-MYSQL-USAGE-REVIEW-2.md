@@ -88,7 +88,7 @@ select name from table where name='lisi'
 
 
 ####  索引：按需添加
-** 多增加一个索引，就会多生成一颗非聚簇索引树。** 在做插入操作的时候，需要同时维护这几颗树的变化，因此，如果索引太多，插入性能就会下降。因此，索引并非越多越好，如下面增加多一个索引之后的视图：
+**多增加一个索引，就会多生成一颗非聚簇索引树。**在做插入操作的时候，需要同时维护这几颗树的变化，因此，如果索引太多，插入性能就会下降。因此，索引并非越多越好，如下面增加多一个索引之后的视图：
 ```sql
 create index index_birthday on table(birthday);
 ```
@@ -153,6 +153,102 @@ mysql> EXPLAIN  SELECT b FROM t_test WHERE b=2;
 
 此外，联合索引相对于单索引，可以提升查询效率。索引列越多，通过索引筛选出的数据越少。比如要查询需要回表的 `SELECT *` 操作，联合索引筛选出需要回表的数据可能更小。
 
+
+####  总结：开发者需要了解的索引应用
+这里先汇总下，MYSQL 索引的应用：
+######  聚簇索引（`pk` 为主键）
+- 主键等值查询：`SELECT * FROM t WHERE pk=100`
+- 按主键范围查询：`SELECT * FROM t WHERE pk>10 AND pk<10000`，key 为 PRIMARY，type 为 range。通过 `10` 和 `10000` 这两个 `pk` 叶子节点的父节点 key 定位在这个范围的 page，然后直接顺序读这些 page 即可
+- 按主键排序：`SELECT * FROM t ORDER BY pk LIMIT 10`，key 为 PRIMARY，type 为 index，并没有 Using filesort。因为 pk 上的数据是有序的，就在索引树上遍历顺序取 `10` 行记录即可
+
+
+######  辅助索引的应用
+和聚簇索引一样，同样可以按索引列等值查询、排序、按索引列范围查询，但是辅助索引上可能没有查询语句 `SELECT` 的列，这就引出了 innodb 非聚簇索引独有的耗时操作回表，和重要的 SQL 优化手段 **覆盖索引**。
+
+1、覆盖索引与回表问题 <br>
+覆盖索引是指从辅助索引就可以得到查询结果，不需要回聚簇索引中查询，注意，**在辅助索引既可能是等值查询，也可能是范围查询，也可能是全索引扫描**（因为辅助索引也有自己的一颗 `B+` 树），只要不回表。反之，回表就是对二级索引中一次查询得到每个主键，都需要回聚簇索引中查询每行数据。如 `SELECT *` 往往会造成回表，一般的 SQL 规范都会要求尽量避免。覆盖索引可以减少 I/O 数量，提升查询性能
+
+`COUNT` 是一种特殊的覆盖索引（虽然它往往是一种扫描遍历），由于 `COUNT` 没有 `SELECT` 具体列，只是统计个数。例如 `SELECT COUNT(*) FROM table`，如果 table 有一个辅助索引，辅助索引的体积远小于聚簇索引，就不会走聚簇索引。
+
+2、回表太多还不如顺序扫描 <br>
+
+3、联合索引的应用 <br>
+
+3.1、最左前缀原则 <br>
+联合索引最重要的概念是 **最左前缀原则**，即最左前缀原则指的是 `WHERE` 查询从索引的最左列开始匹配索引，并且不跳过索引中的列。
+- 不是从最左前缀开始匹配的，索引全部失效
+- 从最左前缀开始匹配，中间出现跳跃或者范围查询导致了索引失效，只有从左开始匹配的索引生效（即部分生效，右边的列索引失效。需要理解优化器对范围查询的工作方式）
+
+```sql
+--  假设有复合索引 `(a, b, c)`，主键 `(pk1, pk2)`
+
+-- 符合最左前缀原则，索引生效
+SELECT b FROM test WHERE a=xxx;
+SELECT pk2, b FROM test WHERE a=xxx AND b=xxx;
+SELECT pk1, pk2, a, b FROM test WHERE a=xxx AND b=xxx AND c=xxx;
+
+
+-- 违反最左前缀原则，索引失效
+SELECT * FROM test WHERE b=xxx;
+SELECT * FROM test WHERE b=xxx AND c=xxx;
+
+
+-- 跳跃中间列，只有最左列索引生效
+SELECT * FROM test WHERE a=xxx AND c=xxx;
+
+-- 索引 a, b 生效，c 失效
+SELECT * FROM test WHERE a=xxx AND b>xxx AND c=xxx;
+```
+
+3.2、使用复合索引优化 ORDEY BY<br>
+```SQL
+--  假设有复合索引 `(a, b, c)`，主键 `(pk1, pk2)`
+
+-- 符合最左前缀原则，索引生效
+SELECT * FROM t WHERE a=xxx ORDER BY b
+SELECT * FROM t WHERE a=xxx AND b=xxx ORDER BY c
+
+-- 违反最左前缀原则，索引失效
+SELECT * FROM t WHERE a=xxx ORDER BY c
+```
+
+3.3、复合索引 + 最左前缀 + 覆盖索引 <br>
+以上的例子索引虽然生效但是需要回表，但是覆盖索引就可以不用回表了，这种方式 `ORDEY BY` 的排序方式是有序索引顺序扫描，`EXPLAIN` 的 type 为 index，Extra 显示 Using index
+
+此外，需要理解的重要一点是，联合索引的意义，比如 `(a,b)` 是联合索引，那么在辅助索引树中就意味着，在 `a` 相等的情况下，那么 `b` 也是相对有序的，看下面的例子：
+
+```sql
+--  复合索引 (a, b)，主键 pk
+
+-- 如果不覆盖索引，优化器可能不走索引，type 为 ALL，Using filesort
+SELECT * FROM t ORDER BY a ASC;
+SELECT * FROM t ORDER BY a DESC;
+
+
+-- 以下为覆盖索引，没有回表的问题，ORDER BY 会走索引
+-- 单列排序，Using index
+SELECT pk FROM t ORDER BY a ASC;
+SELECT pk, a FROM t ORDER BY a ASC;
+SELECT pk, a, b FROM t ORDER BY a ASC;
+
+-- 多列排序，Using index
+SELECT pk, a, b FROM t ORDER BY a, b ASC;
+SELECT pk, a, b FROM t ORDER BY a DESC, b DESC;
+
+-- 不合最左前缀，Using index, Using filesort
+SELECT pk, a, b FROM t ORDER BY b DESC, a DESC;
+
+-- 排序升降序不同，Using index, Using filesort
+SELECT pk, a, b FROM t ORDER BY a ASC, b DESC;
+```
+
+那么，最佳实践就是：
+- 减少额外排序，通过索引返回有序结果
+- `WHERE` 的列和 `ORDER BY` 的使用相同的索引
+- `ORDER BY` 的顺序符合最左前缀
+- `ORDER BY` 的顺序要么都升序，要么都降序，保持一致（MySQL8.0 可以创建不同升降序的索引，如 `ALTER TABLE t ADD INDEX idx_a_b_c (a, b DESC, c)`）
+- Using filesort 的调参优化方式：调大 `sort_buffer_size` 和 `max_length_for_sort_data` 参数
+
 ##  0x03  索引的要点及使用建议
 工作中，对 MySQL 索引的应用一般分为正面场景和反面场景：
 - 正面场景启发我们何时去使用？
@@ -214,7 +310,7 @@ SELECT * FROM test WHERE key_col_1=val_1 OR not_key_col_2=val_2;
 +----------+------------+---------------------------------------+
 ```
 
-2、在拉取全表数据场景时的优化，不要使用`SELECT xx FROM xx LIMIT 5000,1000` 这种形式批量拉取，其实这个 SQL 每次都是全表扫描；建议添加自增 id 做索引，将 SQL 改为 `SELECT xx FROM xx WHERE id>5000 and id<6000`<br>
+2、在拉取全表数据场景时的优化，不要使用 `SELECT xx FROM xx LIMIT 5000,1000` 这种形式批量拉取，其实这个 SQL 每次都是全表扫描；建议添加自增 id 做索引，将 SQL 改为 `SELECT xx FROM xx WHERE id>5000 and id<6000`<br>
 
 ```text
 +----------+------------+-----------------------------------------------------+
@@ -236,8 +332,8 @@ SELECT * FROM test WHERE key_col_1=val_1 OR not_key_col_2=val_2;
 +----------+------------+-----------------------------------------------------+
 ```
 
-4、尽量早做过滤，使 `JOIN` 或者 `UNION` 等后续操作的数据量尽量小<br>
-5、把能在逻辑层算的提到逻辑层来处理，不要在MYSQL字段计算，如一些数据排序、时间函数计算等<br>
+4、尽量早做过滤，使 `JOIN` 或者 `UNION` 等后续操作的数据量尽量小 <br>
+5、把能在逻辑层算的提到逻辑层来处理，不要在 MYSQL 字段计算，如一些数据排序、时间函数计算等 <br>
 
 ##  0x04  索引的应用及优化
 对于我们工作中使用索引优化查询问题，对前一节内容再进行下扩充：
@@ -411,7 +507,7 @@ Extra 为 explain 得到的附加信息，常见的信息有：
 
 1.  对查询频次较高，且数据量比较大的表建立索引
 2.  索引不是多多益善。对于增删改等 DML 操作比较频繁的表来说，要考虑到空间的浪费和维护、选择索引的开销，最好的索引设计就是用尽量少尽量小的索引覆盖尽量多的查询
-3.  对 `SELECT...WHERE` 型查询、`JOIN` 关联查询首先想到的就是加索引。如果 `WHERE` 子句中的组合比较多，那么有些经验挑选原则：** 常用列、基数（cardinality）大的列、选择度高的列的组合 **。如果表的字段太多，应该把一些不常用的字段分离到另一张表，这样在只需要常用字段的查询中可以节省 IO 开销
+3.  对 `SELECT...WHERE` 型查询、`JOIN` 关联查询首先想到的就是加索引。如果 `WHERE` 子句中的组合比较多，那么有些经验挑选原则：**常用列、基数（cardinality）大的列、选择度高的列的组合**。如果表的字段太多，应该把一些不常用的字段分离到另一张表，这样在只需要常用字段的查询中可以节省 IO 开销
 4.  使用主键。主键的快速查询得益于其自带的唯一且 `NOT NULL` 的索引。建议大表应该有一个自增的主键来唯一标识一行，建议使用 `bigint`
 5.  使用唯一索引，区分度越高，使用索引的效率越高
 6.  使用短索引或索引前缀优化。索引也是使用硬盘上的 `B+` 树来存储的。假如构成索引的字段总长度比较短，那么在给定大小的存储块内可以存储更多的索引值，相应的可以有效的提升 MySQL 访问索引的 I/O 效率
