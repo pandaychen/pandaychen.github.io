@@ -24,6 +24,10 @@ tags:
 -   分区表对于应用是透明的
 -   MySQL 中的分区表是把一张大表拆成了多张表，每张表有自己的索引，从逻辑上看是一张表，但物理上存储在不同文件中
 -   大多数需求场景是为了快速清理过期数据（避免数据量过大）
+-   关于分区表的MYSQL，该建的索引还得建，该优化的查询还得优化
+
+
+> 分区是把一张表的数据分成N多个区块，这些区块可以在同一个磁盘上，也可以在不同的磁盘上。就访问数据库应用而言，逻辑上就只有一个表或者一个索引，但实际上这个表可能有N个物理分区对象组成，每个分区都是一个独立的对象，可以独立处理，可以作为表的一部分进行处理。分区对应用来说是完全透明的，不影响应用的业务逻辑。
 
 常用的几种分区方式：
 -   `RANGE` 分区：范围分区，最常用，基于属于一个给定连续区间的列值，把多行分配给分区。最常见的是基于时间字段，`RANGE` 分区的特点是多个分区的范围要连续，但是不能重叠，默认情况下使用 `VALUES LESS THAN` 属性，即每个分区不包括指定的那个值
@@ -128,13 +132,44 @@ PARTITION BY KEY(s1)
 PARTITIONS 10;
 ```
 
+`KEY`分区的原理：通过MySQL内置hash算法对分片键计算hash值后再对分区数取模。
+
 ####    其他要点
 1.  分区表的创建需要主键（primary key）包含分区列
 2.  在分区表中唯一索引（unique index）仅在当前分区文件唯一，而不是全局唯一
 3.  分区表唯一索引推荐使用类似 `UUID` 的全局唯一实现
 4.  分区表不解决性能问题，如果使用非分区列查询，性能反而会更差
 
+##  0x02    项目中如何使用分区表
+在项目中如何使用分区表：
+1.  根据容量评估分区表方案，并且选择合适的分区方式，考虑单表容量`500W`级别左右
+2.  若选择`KEY`分区，那么分区表的总数就是固定size的，也不需要动态建表；若选择按`RANGE`（时间）分区，那么要考虑如何动态新建分区策略
+3.  如要使用`varchar`列进行分区，那么只能使用`KEY`分区方式，其他方式均不支持`varchar`列
 
-## 0x02 参考
+##  0x03    分区表操作
+1、对`RANGE`分区，通过异步启动goroutine的方式，由主服务拉起，自动建表<br>
+```golang
+func ticker(){
+    //.....
+    now := time.Now()
+
+	tomorrow, _ := time.ParseDuration("24h")
+	pname := now.Add(tomorrow).Format("20060102")
+	dayAfterTomorrow, _ := time.ParseDuration("48h")
+	timestr := now.Add(dayAfterTomorrow).Format("2006-01-02")
+
+	sql := fmt.Sprintf("alter table t_table add partition (partition p%s VALUES LESS THAN (UNIX_TIMESTAMP('%s')))", pname, timestr)
+	ExecuteSQL(sql)
+    //....
+}
+```
+
+2、指定分区查询<br>
+```sql
+SELECT col_a,create_time from t_table partition(p20220717) where username ="pandaychen";
+```
+
+
+## 0x04 参考
 -   [哪些场景我不建议用分区表？](https://learn.lianglianglee.com/%E4%B8%93%E6%A0%8F/MySQL%E5%AE%9E%E6%88%98%E5%AE%9D%E5%85%B8/14%20%20%E5%88%86%E5%8C%BA%E8%A1%A8%EF%BC%9A%E5%93%AA%E4%BA%9B%E5%9C%BA%E6%99%AF%E6%88%91%E4%B8%8D%E5%BB%BA%E8%AE%AE%E7%94%A8%E5%88%86%E5%8C%BA%E8%A1%A8%EF%BC%9F.md)
 
