@@ -15,6 +15,8 @@ tags:
 -   索引的使用
 -   插入 / 查询优化
 
+![mysql-optimization](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/mysql/mysql-optimistic-all.png)
+
 ##  0x01    分区表
 对于操作日志、任务日志等大量日志的存储场景，方便管理，比如日志仅保留最近半年（遇到使用 innodb 引擎的 MySQL 进行 `delete` 操作后，底层文件不会变小的问题），过期的冷备等，采用分区表是个不错的选择。关于分区表的使用，需要理解下面几点：
 -   **分区表设计不解决性能问题，更多的是解决数据迁移和备份的问题**
