@@ -158,6 +158,19 @@ gc 39 @64.199s 02010.046+29024+0.32 ms clock, 1.1+0/18/3195+7.7 ms cpu, 15532->1
 
 ####    工具5：压测工具wrk
 
+####    工具6：番外
+摘自[Hi, 使用多年的go pprof检查内存泄漏的方法居然是错的](https://colobu.com/2019/08/20/use-pprof-to-compare-go-memory-usage/)一文，是一个不错的思路。
+
+pprof也可以比较两个时间点的分配的内存的差值，通过比较差值，就容易看到哪些地方产生的内存残留的比较多，没有被内存释放，极有可能是内存泄漏的点。通过下面的方式产生两个时间点的堆的profile,之后使用pprof工具进行分析。
+
+1.  首先确保已经配置了pprof的http路径，可以访问`http://ip:port/debug/pprof/`查看
+2.  导出时间点`1`的堆的profile：`curl -s http://127.0.0.1:8080/debug/pprof/heap > base.heap`, 把它作为基准点
+3.  等待一段时间后导出时间点`2`的堆的profile：`curl -s http://127.0.0.1:8080/debug/pprof/heap > current.heap`
+4.  现在可以比较这两个时间点的堆的差异了，通过`go tool pprof --base base.heap current.heap`
+5.  后续操作和正常的`go tool pprof`一样， 比如使用top查看使用堆内存最多的几处地方的内存增删情况等
+
+![diff](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/pprof/pprof-console-diff.png)
+
 ##  0x02    pprof 实战
 
 ####    prepare
@@ -457,6 +470,8 @@ func main() {
 
 ##  0x02    具体 Case1
 
+
+
 ##  0x03    具体 Case2：使用pprof优化内存使用
 个人认为该[例子](https://cloud.tencent.com/developer/article/1489186)还是比较典型的，通过pprof来优化程序逻辑，场景是Redis，源实例的key情况，主要是string类型和hash类型，而且hash类型存在大key（一个hash有`2800w`的member），所以这里怀疑是先从RDB读了一部分string，然后读到大key的时候内存突增：
 
@@ -499,7 +514,7 @@ ROUTINE ======================== github.com/CodisLabs/redis-port/pkg/rdb.(*Loade
 ```
 
 3、前后调用关系的调用栈图 <br>
-![case2-mem]()
+![case2-mem](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/pprof/pprof-mem-case2.png)
 
 4、定位问题及解决 <br>
 redis-port 在解析 RDB 时，是按 key 为粒度来处理的，遇到大 key 时，value 可能有好几个 `GB`，然后 redis-port 直接使用了标准库 `bytes.Buffer` 来存储解析出来的 value，Buffer 在空间不够的时候会自己 grow，策略是当前 capacity `2` 倍的增长速度（避免频繁内存分配）。Buffer 在空间不够时，申请一个当前空间 `2` 倍的 byte 数组，然后把老的 copy 到这里，这个峰值内存就是 `3` 倍的开销，如果 value 大小 `5GB`，读到 `4GB` 空间不够，那么创建一个 `8GB` 的新 buffer，那么峰值就是 `12GB` 了，此外 Buffer 的初始大小是 `64` 字节，在增长到 `4GB` 的过程中也会创建很多的临时 `[]byte`，gc 不及时也是额外的内存开销，所以 `4.5GB` 的 RDB，在有大 key 的情况下，峰值内存用到 `15GB` 也就可以理解了。
@@ -528,3 +543,4 @@ func (b *Buffer) grow(n int) int {
 -   [【实践】使用 Go pprof 做内存性能分析](https://cloud.tencent.com/developer/article/1489186)
 -   [内存泄漏（增长）火焰图](https://heapdump.cn/article/1661654)
 -   [go tool pprof](https://github.com/hyper0x/go_command_tutorial/blob/master/0.12.md)
+-   [Hi, 使用多年的go pprof检查内存泄漏的方法居然是错的?!](https://colobu.com/2019/08/20/use-pprof-to-compare-go-memory-usage/)
