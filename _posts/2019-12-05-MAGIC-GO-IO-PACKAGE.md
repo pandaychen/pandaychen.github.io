@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      神奇的 Golang-IO 包
-subtitle:
+subtitle:	golang-IO 包使用经验（一）
 date:       2020-01-01
 author:     pandaychen
 header-img:
@@ -317,7 +317,7 @@ func (t *trickle) Read(p []byte) (n int, err error) {
 ```
 
 上面这段代码大体执行流程如下：
-![img](https://wx2.sbimg.cn/2020/09/07/9DsCd.png)
+![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/golang-dev/io_pipe_method.png)
 
 
 ####	io.Pipe 分析
