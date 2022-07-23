@@ -365,7 +365,62 @@ func (p *pipe) write(b []byte) (n int, err error) {
 在 `io.Pipe` 的实现中，每次 `Read` 需要等待 `Write` 写完，是串行的。即 `io.Pipe` 描述了这样一种场景，即产生了一条数据，紧接着就要处理掉这条数据的场景。此外，从其实现来看，在 `Write` 流程中，将参数 `b` 这个 slice 放到 `p.data` 中，这是一次引用赋值。然后在 `Read` 流程中，把 `p.data` copy 出去，本质上相当于 copy 了 write 的原始数据，并没有用占用临时 slice 存储，减少了内存使用量。
 
 
-##	0x04	一些 IO 优化的 tips
+##	0x04	使用io.copyN传输文件
+
+####	下载/上传文件
+`CopyN`方法借用了`io.LimitReader`的能力，而`LimitReader(r Reader, n int64) Reader`返回一个内容长度受限的`Reader`，当从这个`Reader`中读取了`n`个字节一会就会遇到EOF。其实现如下：
+```golang
+func CopyN(dst Writer, src Reader, n int64) (written int64, err error) {
+	written, err = Copy(dst, LimitReader(src, n))
+	if written == n {
+		return n, nil
+	}
+	if written < n && err == nil {
+		// src stopped early; must have been EOF.
+		err = EOF
+	}
+	return
+}
+```
+
+`CopyN`提供了一定的保护措施，可以传输指定size的文件后自行退出。就是提供了一个保护的功能，其它和普通的`Reader`无区别。那么使用`CopyN`传输文件：
+
+1、上传文件：使用`os.Open`打开需要传输的文件，然后使用`os.Lstat`获取FileInfo，然后开始传输`io.CopyN(net.Conn, os.File,os.FileInfo.Size())`<br>
+2、下载文件：使用`os.Create`创建写入文件，然后实现`io.CopyN(os.File, net.Conn，os.FileInfo.Size())`<br>
+3、下载文件，还可以使用`ReadAtLeast`与`LimitReader`进行配合<br>
+
+```golang
+func main() {
+	// 建立连接
+	conn, err := net.Dial("tcp", "127.0.0.1:80")
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	// 发送请求, http 1.0 协议
+	fmt.Fprintf(conn, "GET / HTTP/1.0\r\n\r\n")
+	// 读取response
+	var sb strings.Builder
+	buf := make([]byte, 256)
+	rr := io.LimitReader(conn, 102400)
+	for {
+		n, err := io.ReadAtLeast(rr, buf, 256)
+		if err != nil {
+			if err != io.EOF && err != io.ErrUnexpectedEOF {
+				fmt.Println("read error:", err)
+			}
+			break
+		}
+		sb.Write(buf[:n])
+	}
+
+	fmt.Println("response:", sb.String())
+	fmt.Println("total response size:", sb.Len())
+}
+```
+
+
+##	0x05	一些 IO 优化的 tips
 
 ####	关于 io.Copy 的优化
 在前面讨论过，`io.Copy` 此方法，从 `src` 拷贝数据到 `dst`，中间会借助字节 slice 作为 buffer。可以使用 `io.CopyBuffer` 替代 `io.Copy`，并使用 `sync.Pool` 缓存 buffer, 以减少临时对象的申请和释放。见 issue：[io: consider reusing buffers for io.Copy to reduce GC pressure](https://github.com/golang/go/issues/12450)
@@ -422,8 +477,9 @@ func copyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
 }
 ```
 
-##	0x05	参考
+##	0x06	参考
 -	[Go 编程技巧 --io.Reader/Writer](https://segmentfault.com/a/1190000013358594)
 -	[理解 golang io.Pipe](https://www.jianshu.com/p/aa207155ca7d?utm_campaign=maleskine&utm_content=note&utm_medium=seo_notes&utm_source=recommendation)
+-	[从 io.Reader 中读数据](https://colobu.com/2019/02/18/read-data-from-net-Conn/#io-LimitReader)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
