@@ -465,10 +465,12 @@ func main() {
 -   少用性能差的命令，如 `Smembers` 等
 
 ####    golang库
-
+-   在高并发场景下，一些系统调用可能会影响服务响应速度，如获取本地Ip等，可以优化为初始化后缓存，不要每次请求都获取一次，见Case1
 
 
 ##  0x02    具体 Case1
+从pprof的CPU采样图发现如下图的耗时情况，排查到原因是客户端组包时使用系统调用获取上报机器的本地ip（每次请求都调用一次），结果在高并发压测时大量系统调用呆滞负载上升，影响性能。
+![case-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/pprof/pprof-optimise-1.png)
 
 
 
