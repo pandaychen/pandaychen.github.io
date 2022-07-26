@@ -56,7 +56,10 @@ benchmark 测试用例常用函数
 | heap| 	堆内存分配情况的记录 |  	默认每分配 512K 字节时取样一次 |
 |block|Goroutine 阻塞事件的记录 | 默认每发生一次阻塞事件时取样一次 |
 
-
+```bash
+go tool pprof http://ip:port/debug/pprof/goroutine
+go tool pprof http://ip:port/debug/pprof/heap
+```
 
 ######  查看方式
 常用指令 1：`go tool pprof [options] [binary] -o xxxx`<br>
