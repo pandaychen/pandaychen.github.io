@@ -27,7 +27,7 @@ User`<--->`Browser`<--->`WebSocket`<--->`SSH`<--->`(TTY)RemoteServer
 ####    数据流
 中间的 Proxy 代理层，负责将 websocket 流转换为 SSH 流（核心是输入和输出的转发）：
 
-![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2019/1029-ssh.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2019/1029-ssh-flow1.png)
 
 ##  0x02    实现
 作为一个 SSH 远程登陆系统，认证是及其重要的一环，我们将上面的数据流扩展下，加入必要的身份及票据认证，如下图<br>
