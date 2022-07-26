@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      项目中 golang 相关的优化 Case 处理及解决
-subtitle:   如何使用 Golang 的 Pprof 工具进行内存分析以及 sync.Pool 优化
+subtitle:   调优系列：如何使用 Golang 的 Pprof 工具进行内存分析以及 sync.Pool 优化（一）
 date:       2020-07-18
 author:     pandaychen
 catalog:    true
