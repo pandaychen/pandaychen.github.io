@@ -522,20 +522,20 @@ func parseTarget(target string) (host, port string, err error) {
 ```
 
 ##	0x05	DnsResolver 的应用
-在项目中，`DnsResolver` 与 [CoreDNS](https://github.com/coredns/coredns) 搭配是一个不错的选择，不过需要注意的是，解析 `DNS` 的时间，`DnsResolver` 中默认是 30 分钟，个人感觉可以优化下。
+在项目中，`DnsResolver` 与 [CoreDNS](https://github.com/coredns/coredns) 搭配是一个不错的选择，不过需要注意的是，解析 `DNS` 的时间，`DnsResolver` 中默认是 `30` 分钟，个人感觉可以优化下。
 
 笔者的项目部署在 TKE 上，使用 CoreDNS 作为服务发现媒介，gRPC 使用 `DnsResolver` 作为解析器：
 
 集群的 CoreDNS 部署情况，通过 Deployment 方式部署，分配的集群内 IP 地址为：`172.16.0.3` 和 `172.16.1.2`：
-![image](https://wx2.sbimg.cn/2020/04/29/coredns-1.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2019/dnsresolver/coredns-1.png)
 
 通过 `nslookup` 查询下服务名字（服务必须以 Headless-Service 方式部署）的解析情况：
-![image](https://wx1.sbimg.cn/2020/04/29/coredns-1.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2019/dnsresolver/coredns-ns-lookup.png)
 
-![image](https://wx2.sbimg.cn/2020/04/29/coredns-2.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2019/dnsresolver/coredns-ns-lookup2.png)
 
 gRPC resovler 的连接池建立情况：
-![image](https://wx1.sbimg.cn/2020/04/29/coredns-grpc-.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2019/dnsresolver/coredns-grpc-tcp-long-conn.png)
 
 
 ##	0x06	总结

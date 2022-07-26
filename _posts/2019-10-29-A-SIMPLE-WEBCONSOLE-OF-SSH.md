@@ -27,10 +27,7 @@ User`<--->`Browser`<--->`WebSocket`<--->`SSH`<--->`(TTY)RemoteServer
 ####    数据流
 中间的 Proxy 代理层，负责将 websocket 流转换为 SSH 流（核心是输入和输出的转发）：
 
-![image](https://s2.ax1x.com/2019/11/06/MP6Zfs.png)
-
-![image](https://wx1.sbimg.cn/2020/08/04/oMP4j.png)
-
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2019/1029-ssh.png)
 
 ##  0x02    实现
 作为一个 SSH 远程登陆系统，认证是及其重要的一环，我们将上面的数据流扩展下，加入必要的身份及票据认证，如下图<br>
@@ -98,7 +95,7 @@ if err != nil {
 ####    SSH 的层次结构 Client/Channel/Request
 下图直观展示了 SSH 的架构：
 
-![image](https://s2.ax1x.com/2019/11/05/KzgajS.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2019/1029-ssh.png)
 
 -   Client: 实现了 SSH 抽象的客户端
 -   Channel 和 Request:
@@ -219,7 +216,7 @@ go func() {
 
 ##  0x04    登录效果验证
 直接在浏览器中输入已认证的 `url`，成功通过 `WebConsole` 连上远端的 SSH 服务器，大功告成 <br>
-![image](https://s2.ax1x.com/2019/11/01/KHvxHS.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2019/web-console-1.png)
 
 
 ##  0x05    总结
