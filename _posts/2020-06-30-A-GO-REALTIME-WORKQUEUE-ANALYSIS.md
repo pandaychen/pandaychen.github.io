@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      GoWorker 高性能队列分析（一）
+title:      GoWorker 高性能队列分析
 subtitle:   分析一款基于 Golang 后台队列任务执行框架：benmanns/goworker
 date:       2020-06-30
 author:     pandaychen
@@ -20,12 +20,12 @@ tags:
 
 goworker 兼容 Resque，所以可以使用 Rails/PHP 和 Resque 推送你的作业，然后利用 goworker 在后台执行。例如 发送 push，发送邮件， 通用统计 等等的任务。整个项目小巧而精悍，源码十分值得一读。
 
-此外，goworker 是基于 resque 的用 golang 语言封装的库，Resque 是使用 Redis 创建后台任务，存储进队列，并随后执行。它是 rails 下最常用的后台任务管理工具之一。（暂时还未使用过）
+此外，goworker 是基于 resque 的用 golang 语言封装的库，Resque 是使用 Redis 创建后台任务，存储进队列，并随后执行。它是 rails 下最常用的后台任务管理工具之一。
 
 分析此项目，准备从如下两个方面着手：
 1.      封装 Redis 的 `LIST` 实现的 Queue 模型
 2.      Worker 的并发模型
-3.		golang Select 机制典型的应用
+3.		golang `select` 机制典型的应用
 
 ##      0x01    简单使用
 -	通过
