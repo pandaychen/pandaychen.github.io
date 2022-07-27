@@ -14,6 +14,11 @@ tags:
 ##  0x00  前言
 健康检查（HealthCheck）机制用于检测后端服务节点是否正常工作，通常应用于负载均衡下的业务，如果后端节点的状态探测异常，将会把该实例下线，保证服务的可用性。
 
+服务的健康检测一般是指的是检测服务是否正常运行：
+
+- 是否存在，因为程序逻辑错误或者 OOM 等进程不存在
+- 存在是否可以正常的响应请求，尽管进程存在但可能因为请求量过大或者程序逻辑错误，导致服务 HANG 住，无法正常对外请求
+
 健康检查的要素有如下几点：
 - 后端服务信息（如`ip:port`）、协议及发送健康检查的数据
 - 健康检查所使用的协议以及发送的数据（比如 HTTP 协议的话检查所访问的 url path, HTTP method, 认证信息等，TCP 协议的话可能是发送特定的数据表示请求做健康检查等）
@@ -90,6 +95,12 @@ facebook 开源的库 [grace](https://github.com/facebookarchive/grace)，可以
 
 ##  0x03  Kubernetes 中的 gRPC 服务
 
+
+####  健康检查的方式
+- 端口检测，判断服务端口是否存活
+- API，发出 API 请求，查看是否正常回应（超时返回错误）
+- 执行命令，写自定义命令判断服务是否正常运行
+
 ####  gRPC 的健康检查协议
 &emsp;&emsp;gRPC 中提供了健康检查的协议，[文档在此](https://github.com/grpc/grpc/blob/master/doc/health-checking.md)。所以，RPC 服务需要实现 `Check` 和 `Watch` 这2个方法。此外，官方文档还建议使用的 package 及 service 命令方式如下：
 > The suggested format of service name is package_names.ServiceName, such as grpc.health.v1.Health.
@@ -147,8 +158,92 @@ func main(){
 }
 ```
 
+客户端健康检查代码如下：
+```golang
+import (
+  healthpb "google.golang.org/grpc/health/grpc_health_v1"
+)
 
-##  0x04  参考文档
+// 调用健康检查
+healthClient := healthpb.NewHealthClient(conn)
+ir := &healthpb.HealthCheckRequest{
+	Service: "grpc.health.v1.Health", //常填写服务名字
+}
+	
+// 调用Check检查服务是否正常
+deadline, cancelFunc := context.WithDeadline(context.Background(), time.Now().Add(5*time.Second))
+healthCheckResponse, err := healthClient.Check(deadline, ir)
+if err != nil {
+	return
+}
+fmt.Println(healthCheckResponse)
+cancelFunc()
+```
+
+##  0x04  consul的健康检查支持
+比如在[grpclb2consul](https://github.com/pandaychen/grpclb2consul/blob/master/consul_discovery/register.go#L161)项目中，使用consul接口注册服务，可以选择以gRPC健康检查的方式，如下：
+```golang
+registerfunc := func() error {
+  //健康检查
+  healthcheck := &consulapi.AgentServiceCheck{
+    Interval:                       DefaultCheckInterval,                                                                        // 健康检查间隔                                            // 健康检查间隔
+    GRPC:                           fmt.Sprintf("%s:%d/%s", c.GeneNodeData.Ip, c.GeneNodeData.Port, c.GeneNodeData.ServiceName), // grpc 支持，执行健康检查的地址，service 会传到 Health.Check 函数中
+    DeregisterCriticalServiceAfter: DefaultDeregisterCriticalServiceAfter,                                                       // 注销时间，相当于过期时间
+  }
+
+  crs := &consulapi.AgentServiceRegistration{
+    ID:      c.GeneNodeData.UniqID, //uniq-id
+    Name:    c.GeneNodeData.ServiceName,
+    Address: c.GeneNodeData.Ip,   // 服务 IP
+    Port:    c.GeneNodeData.Port, // 服务端口
+    Tags:    tags,                // tags，可以为空([]string{})
+    Meta:    c.GeneNodeData.Metadata,
+    Check:   healthcheck}
+  err := c.ConsulAgent.Agent().ServiceRegister(crs) //单例模式
+  if err != nil {
+    c.Logger.Error("Register with consul error", zap.String("errmsg", err.Error()))
+    return fmt.Errorf("Register with consul error: %s\n", err.Error())
+  }
+  return nil
+}
+```
+
+服务注册后，consul Agent会使用上述`AgentServiceCheck`参数来进行健康检查（使用的是gRPC标准健康检查协议），同时服务端要实现健康检查的[接口](https://github.com/pandaychen/grpclb2consul/blob/master/example/server.go#L71)：
+```golang
+func (h *HealthyCheck) Check(ctx context.Context, in *pb.HealthCheckRequest) (*pb.HealthCheckResponse, error) {
+	//more check method/logic could be add
+	fmt.Println("call health check", in.Service)
+	return &pb.HealthCheckResponse{Status: pb.HealthCheckResponse_SERVING}, nil
+	//return &pb.HealthCheckResponse{Status: pb.HealthCheckResponse_NOT_SERVING }, nil
+}
+```
+
+如果`Check`方法持续返回`pb.HealthCheckResponse_NOT_SERVING`时，consul Agent会启动`DeregisterCriticalServiceAfter`机制，在`DefaultDeregisterCriticalServiceAfter`之后会把服务标记为下线，达到了健康检查的效果
+
+##  0x05  官方提供的探针
+[grpc-health-probe](https://github.com/grpc-ecosystem/grpc-health-probe)，这里提供了的gRPC的客户端健康检查工具，可以直接编译拿来使用（打包到镜像中）：
+
+![grpc-health-probe]()
+
+```yaml
+spec:
+  containers:
+  - name: server
+    image: "[YOUR-DOCKER-IMAGE]"
+    ports:
+    - containerPort: 5000
+    readinessProbe:
+      exec:
+        command: ["/bin/grpc_health_probe", "-addr=:5000"]
+      initialDelaySeconds: 5
+    livenessProbe:
+      exec:
+        command: ["/bin/grpc_health_probe", "-addr=:5000"]
+      initialDelaySeconds: 10
+```
+
+
+##  0x05  参考文档
 - [GRPC Health Checking Protocol](https://github.com/grpc/grpc/blob/master/doc/health-checking.md)
 - [A command-line tool to perform health-checks for gRPC applications in Kubernetes etc.](https://github.com/grpc-ecosystem/grpc-health-probe)
 - [LIVENESS PROBES ARE DANGEROUS](https://srcco.de/posts/kubernetes-liveness-probes-are-dangerous.html)
