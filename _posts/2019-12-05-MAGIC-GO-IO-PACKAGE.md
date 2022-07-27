@@ -477,6 +477,36 @@ func copyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
 }
 ```
 
+上述优化可以在`frp`项目中找到，这里使用了 `io.CopyBuffer` 来把两个连接之间的流量转发：
+```golang
+// Join two io.ReadWriteCloser and do some operations.
+func Join(c1 io.ReadWriteCloser, c2 io.ReadWriteCloser) (inCount int64, outCount int64) {
+	var wait sync.WaitGroup
+	pipe := func(to io.ReadWriteCloser, from io.ReadWriteCloser, count *int64) {
+		defer to.Close()
+		defer from.Close()
+		defer wait.Done()
+
+		buf := pool.GetBuf(16 * 1024)
+		defer pool.PutBuf(buf)
+		*count, _ = io.CopyBuffer(to, from, buf)
+	}
+
+	wait.Add(2)
+	go pipe(c1, c2, &inCount)
+	go pipe(c2, c1, &outCount)
+	wait.Wait()
+	return
+}
+```
+
+此外，golang的`httputil.reverseproxy`实现，也加入了此[机制](https://github.com/golang/go/commit/492a62e945555bbf94a6f9dd6d430f712738c5e0)：
+```text
+net/http/httputil: add hook for managing io.Copy buffers per request
+Adds ReverseProxy.BufferPool for users with sensitive allocation
+requirements. Permits avoiding 32 KB of io.Copy garbage per request.
+```
+
 ##	0x06	参考
 -	[Go 编程技巧 --io.Reader/Writer](https://segmentfault.com/a/1190000013358594)
 -	[理解 golang io.Pipe](https://www.jianshu.com/p/aa207155ca7d?utm_campaign=maleskine&utm_content=note&utm_medium=seo_notes&utm_source=recommendation)
