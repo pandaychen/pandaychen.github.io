@@ -1,29 +1,48 @@
 ---
 layout:     post
 title:      Kubernetes 应用改造（二）：健康检查
-subtitle:   健康检查与探针的日常应用和封装
+subtitle:   健康检查与探针的应用
 date:       2019-12-08
 author:     pandaychen
+header-img: img/golang-horse-fly.png
 catalog:    true
 tags:
     - Kubernetes
 ---
 
-##  0x00	Kubernetes 中的探针
-&emsp;&emsp; Kubernetes 服务的 <font color="#dd0000"> 主动健康检查机制 </font> 是通过健康探针来实现的。Kubernetes 提供了两种探针：
+
+##  0x00  前言
+健康检查（HealthCheck）机制用于检测后端服务节点是否正常工作，通常应用于负载均衡下的业务，如果后端节点的状态探测异常，将会把该实例下线，保证服务的可用性。
+
+健康检查的要素有如下几点：
+- 后端服务信息（如`ip:port`）、协议及发送健康检查的数据
+- 健康检查所使用的协议以及发送的数据（比如 HTTP 协议的话检查所访问的 url path, HTTP method, 认证信息等，TCP 协议的话可能是发送特定的数据表示请求做健康检查等）
+- 判断服务健康的依据：
+  - 基本的连通性
+  - 响应的内容，比如表示服务健康的 HTTP 响应状态码是哪些，响应的 body 内容需要包含什么内容等
+  - 不健康的策略：检查不通过几次算服务不健康（对于 Connection Refused 错误一般建议直接标记为不健康而不是等几次失败再标记为不健康）；以及健康恢复的策略：从不健康到健康需要通过几次检查才算恢复健康
+
+- 健康检查的间隔，健康检查太频繁可能会影响被检查的服务，间隔太长可能会失去健康检查的意义无法及时探查到不健康的状态
+- 超时，健康检查的请求也需要设置超时
+
+##  0x01	Kubernetes的健康检查
+&emsp;&emsp; Kubernetes 服务的主动健康检查机制是通过健康探针来实现的。Kubernetes 提供了两种探针：
 
 #### 就绪探针 (Readiness Probe)
-&emsp;&emsp; 在 Pod 启动时，Kubelet 使用 Readiness probe（就绪探针）来确定容器是否已经就绪可以接受流量。只有当 Pod 中的容器都处于就绪状态时 Kubelet 才会认定该 Pod 处于就绪状态。该信号的作用是控制哪些 Pod 应该作为 service 的后端。如果 Pod 处于非就绪状态，那么它们将会被从 Service 的 Load balancer 中移除
+&emsp;&emsp; 在 Pod 启动时，Kubelet 使用 Readiness probe（就绪探针）来确定容器是否已经就绪可以接受流量。只有当 Pod 中的容器都处于就绪状态时 Kubelet 才会认定该 Pod 处于就绪状态。该信号的作用是控制哪些 Pod 应该作为 Service 的后端。如果 Pod 处于非就绪状态，那么它们将会被从 Service 的 Load balancer 中移除
+
+![readinessprobe](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/google-kubernetes-probe-readiness6ktf.gif)
 
 #### 存活探针 (Liveness Probe)
 &emsp;&emsp; 在 Pod 运行中，Kubelet 使用 Liveness probe（存活探针）来确定何时重启容器。例如，当应用程序处于运行状态但无法做进一步操作，Liveness 探针将捕获到 Deadlock，重启处于该状态下的容器，使应用程序在存在 bug 的情况下依然能够继续运行下去
-<br>
+
+![livenessprobe](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/google-kubernetes-probe-livenessae14.gif)
 
 ####	就绪探针的意义
 很常见的一个场景，某个服务刚启动，需要做一系列的初始化工作（比如初始化 Mysql/Redis/Kafka 等），需要一些时间，而这段时间里，不希望 Kubernetes 把流量导入到这些还未初始化完成的 Pod 上。所以就绪探针非常适合这种场景，只有 Pod 就绪后 Kubernetes 才会把请求打过来，如果非就绪状态，这些 Pod 会从 Service 的 Load balancer 中短暂移除
 
-日常项目服务中的就绪探测功能通常用 CGI 接口来实现（当然也可以用命令工具），如下所示一个 Readiness Probe（就绪探针）的一般实现：<br>
-在服务端，一般以一个单独的 goroutine 启动 CGI Server，实现 `/ready` 的逻辑，在 `/ready` 的处理逻辑中加入对初始化的检查，如检查 Mysql 是否建立连接成功、Redis 数据查询是否可用等等。
+就绪探针常用 HTTP-CGI 接口来实现：<br>
+在服务端，一般以一个单独的 goroutine 启动 CgiServer，实现 `/ready` 的逻辑，在逻辑中加入对初始化的检查，如检查 Mysql 是否建立连接成功、Redis 数据查询是否可用等等。
 ```yaml
 readinessProbe:
   httpGet:
@@ -53,7 +72,7 @@ Kubernetes 终止一个完全健康的容器有很多原因，常见的有：
 
 facebook 开源的库 [grace](https://github.com/facebookarchive/grace)，可以实现 httpserver 的优雅退出。
 
-一般而言，Kubernetes 清除一个 Pod 需要走完下面五部曲：
+一般而言，Kubernetes 清除一个 Pod 需要走完下面 5 步：
 
 1.  Pod 被设置为 <font color="#dd0000"> 终止 </font> 状态，并从所有服务的端点列表中删除，此时，Pod 停止获得新的流量。在 Pod 中运行的容器不会受到影响
 
@@ -69,10 +88,10 @@ facebook 开源的库 [grace](https://github.com/facebookarchive/grace)，可以
 5. `SIGKILL` 信号被发送到 Pod，并删除 Pod
 如果容器在优雅等待期结束后仍在运行，则会发送 `SIGKILL` 信号并强制删除。 此时，所有 Kubernetes 对象也会被清除，至此，Kubernetes 清理 Pod 的整个流程结束
 
-##  0x02  Kubernetes 中的 gRPC 服务
+##  0x03  Kubernetes 中的 gRPC 服务
 
 ####  gRPC 的健康检查协议
-&emsp;&emsp;gRPC 中提供了健康检查的协议，[文档在此](https://github.com/grpc/grpc/blob/master/doc/health-checking.md)。所以，RPC 服务需要实现 `Check` 和 `Watch` 这两个方法。官方文档建议的实现方式如下：
+&emsp;&emsp;gRPC 中提供了健康检查的协议，[文档在此](https://github.com/grpc/grpc/blob/master/doc/health-checking.md)。所以，RPC 服务需要实现 `Check` 和 `Watch` 这2个方法。此外，官方文档还建议使用的 package 及 service 命令方式如下：
 > The suggested format of service name is package_names.ServiceName, such as grpc.health.v1.Health.
 
 健康检查的协议如下：
@@ -101,7 +120,32 @@ service Health {
 }
 ```
 
-####  gRPC 健康检查 demo
+在后端逻辑的实现中，我们需要在 gRPC-Server 端实现这个健康检查的协议：
+```golang
+import (
+    //......
+     "google.golang.org/grpc/health/grpc_health_v1"
+    //......
+)
+
+// HealthImpl 健康检查实现
+type HealthService struct{}
+
+// Check 实现健康检查接口，在实际中需要更加复杂的健康检查策略，比如根据服务器 CPU、内存负载等
+func (h *HealthService) Check(ctx context.Context, req *grpc_health_v1.HealthCheckRequest) (*grpc_health_v1.HealthCheckResponse, error) {
+  ...
+  return &grpc_health_v1.HealthCheckResponse{
+          Status: grpc_health_v1.HealthCheckResponse_SERVING,
+  }, nil
+}
+
+func main(){
+  //...
+  server := grpc.NewServer(...)
+  grpc_health_v1.RegisterHealthServer(server, &HealthService{})
+  //...
+}
+```
 
 
 ##  0x04  参考文档
@@ -109,3 +153,5 @@ service Health {
 - [A command-line tool to perform health-checks for gRPC applications in Kubernetes etc.](https://github.com/grpc-ecosystem/grpc-health-probe)
 - [LIVENESS PROBES ARE DANGEROUS](https://srcco.de/posts/kubernetes-liveness-probes-are-dangerous.html)
 - [Health checking gRPC servers on Kubernetes](https://kubernetes.io/blog/2018/10/01/health-checking-grpc-servers-on-kubernetes/)
+- [健康检查功能相关的一些备忘](https://mozillazg.com/2019/01/notes-about-design-health-checking.html)
+- [Kubernetes best practices: Setting up health checks with readiness and liveness probes](https://cloud.google.com/blog/products/gcp/kubernetes-best-practices-setting-up-health-checks-with-readiness-and-liveness-probes)
