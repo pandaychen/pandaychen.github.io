@@ -223,7 +223,7 @@ func (h *HealthyCheck) Check(ctx context.Context, in *pb.HealthCheckRequest) (*p
 ##  0x05  官方提供的探针
 [grpc-health-probe](https://github.com/grpc-ecosystem/grpc-health-probe)，这里提供了的gRPC的客户端健康检查工具，可以直接编译拿来使用（打包到镜像中）：
 
-![grpc-health-probe]()
+![grpc-health-probe](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grpc/health-probe.jpg)
 
 ```yaml
 spec:
