@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      GoWorker 高性能队列分析
+title:      GoWorker 高性能队列分析（一）
 subtitle:   分析一款基于 Golang 后台队列任务执行框架：benmanns/goworker
 date:       2020-06-30
 author:     pandaychen
@@ -9,6 +9,7 @@ catalog: true
 category:   false
 tags:
     - 任务队列
+    - 队列
 ---
 
 
