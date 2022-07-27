@@ -38,6 +38,63 @@ benchmark 测试用例常用函数
 -	`b.RunParallel()`：使用协程并发测试
 -	`b.SetBytes(n int64)`：设置单次循环使用的内存数量
 
+1、示例一<br>
+```golang
+func BenchmarkSprintf(b *testing.B){
+	num:=10
+	b.ResetTimer()
+	for i:=0;i<b.N;i++{
+		fmt.Sprintf("%d",num)
+	}
+}
+```
+
+输出如下，`-8`表示运行时`GOMAXPROCS`的值，接着的`20000000`表示运行for循环的次数，即调用被测试代码的次数，最后的`117 ns/op`表示每次耗时`117ns`。以上是测试时间默认是`1`秒，也就是`1s`调用`2000w`次，单次消耗`117ns`
+```text
+//go test -bench=. -run=none
+BenchmarkSprintf-8      20000000               117 ns/op
+PASS
+ok      xxxx       2.474s
+```
+
+2、示例二<br>
+通过benchmark对比不同实现的性能，指令为`go test -bench=. -benchmem -run=none`，加入`-benchmem`显示每次操作分配内存的次数，以及每次操作分配的字节数：
+```golang
+func BenchmarkSprintf(b *testing.B){
+	num:=10
+	b.ResetTimer()
+	for i:=0;i<b.N;i++{
+		fmt.Sprintf("%d",num)
+	}
+}
+
+func BenchmarkFormat(b *testing.B){
+	num:=int64(10)
+	b.ResetTimer()
+	for i:=0;i<b.N;i++{
+		strconv.FormatInt(num,10)
+	}
+}
+
+func BenchmarkItoa(b *testing.B){
+	num:=10
+	b.ResetTimer()
+	for i:=0;i<b.N;i++{
+		strconv.Itoa(num)
+	}
+}
+```
+
+输出如下，看起来内存分配是导致性能差异的原因:)
+```text
+//go test -bench=. -benchmem -run=none
+BenchmarkSprintf-8      20000000               110 ns/op              16 B/op          2 allocs/op
+BenchmarkFormat-8       50000000                31.0 ns/op             2 B/op          1 allocs/op
+BenchmarkItoa-8         50000000                33.1 ns/op             2 B/op          1 allocs/op
+PASS
+ok      xxxxx       5.610s
+```
+
 ####   【重要】工具 2：pprof
 
 ######  生成方式
@@ -549,3 +606,4 @@ func (b *Buffer) grow(n int) int {
 -   [内存泄漏（增长）火焰图](https://heapdump.cn/article/1661654)
 -   [go tool pprof](https://github.com/hyper0x/go_command_tutorial/blob/master/0.12.md)
 -   [Hi, 使用多年的go pprof检查内存泄漏的方法居然是错的?!](https://colobu.com/2019/08/20/use-pprof-to-compare-go-memory-usage/)
+-   [Go语言实战笔记（二十二）| Go 基准测试](https://www.flysnow.org/2017/05/21/go-in-action-go-benchmark-test.html)
