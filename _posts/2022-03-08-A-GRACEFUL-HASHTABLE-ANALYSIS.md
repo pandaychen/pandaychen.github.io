@@ -96,12 +96,178 @@ int32_t CreateCommHashTable(CommHashTable **t_pCommHashTable, uint32_t t_uTotalT
 ```
 
 ####  插入
+插入分两种情况：
+-	插入主链
+-	若主链已满，则插入到扩展链，同时建立该元素（在扩展链）与主链上最后一个元素的连接（index）
 
+
+```cpp
+int32_t InsertServerIpHashTable(CommHashTable *t_pHashTable, uint32_t t_uServerip)
+{
+	if (!t_pHashTable)
+		return RET_ERROR;
+
+	ServerIp *pHead = ((ServerIp *)t_pHashTable->pHashArray) + GetServerIpNodePos(t_uServerip);
+	if (pHead == NULL){
+		return RET_ERROR;
+	}
+	int32_t i = 1;
+	for (i = 1; i < HASH_CONFICT_NODE_MUTI; i++)
+	{
+		if (pHead[i].uServerip == t_uServerip){
+			pHead[i].uServeripCount++;
+			return RET_RIGHT;
+		}
+		else{
+			//free node
+			if (pHead[i].uServerip == 0){
+				pHead[i].uServerip = t_uServerip;
+				pHead[i].uServeripCount = 1;
+				pHead[0].uServerip++;
+				t_pHashTable->iNodeCount++;
+				return RET_RIGHT;
+			}
+		}
+	}
+	uint32_t uNextIndex = pHead[HASH_CONFICT_NODE_MUTI - 1].uNextIndex;
+	if (uNextIndex && uNextIndex <= SERVERIP_HASH_BUCKET){
+		ServerIp *pConflictArray = (ServerIp *)(t_pHashTable->pConflictArray);
+		uint32_t uFind = uNextIndex;
+		while (uNextIndex && uNextIndex <= SERVERIP_HASH_BUCKET)
+		{
+			if (pConflictArray[uNextIndex - 1].uServerip == t_uServerip){
+				pConflictArray[uNextIndex - 1].uServeripCount++;
+				return RET_RIGHT;
+			}
+			uFind = uNextIndex;
+			uNextIndex = pConflictArray[uNextIndex - 1].uNextIndex;
+		}
+		for (i = 0; i < SERVERIP_HASH_BUCKET; i++)
+		{
+			if (pConflictArray[i].uServerip == 0){
+				pConflictArray[i].uServerip = t_uServerip;
+				pConflictArray[i].uNextIndex = 0;
+				pConflictArray[i].uServeripCount = 1;
+				pConflictArray[uFind - 1].uNextIndex = i + 1;
+				pHead[0].uServerip++;
+				t_pHashTable->iNodeCount++;
+				t_pHashTable->iConflictCount++;
+				return RET_RIGHT;
+			}
+		}
+		return RET_ERROR;
+	}
+	else{
+		ServerIp *pConflictArray = (ServerIp *)(t_pHashTable->pConflictArray);
+		for (i = 0; i < SERVERIP_HASH_BUCKET; i++)
+		{
+			if (pConflictArray[i].uServerip == 0){
+				pConflictArray[i].uServerip = t_uServerip;
+				pConflictArray[i].uNextIndex = 0;
+				pConflictArray[i].uServeripCount = 1;
+				pHead[HASH_CONFICT_NODE_MUTI - 1].uNextIndex = i + 1;
+				pHead[0].uServerip++;
+				t_pHashTable->iNodeCount++;
+				t_pHashTable->iConflictCount++;
+				return RET_RIGHT;
+			}
+		}
+		return RET_ERROR;
+	}
+}
+```
 
 ####  查找
+```cpp
+uint32_t SearchServerIpHashTable(CommHashTable *t_pHashTable, uint32_t t_uServerip)
+{
+	if (!t_pHashTable)
+		return RET_ERROR;
 
+	ServerIp *pHead = ((ServerIp *)t_pHashTable->pHashArray) + GetServerIpNodePos(t_uServerip);
+	if (NULL == pHead){
+		return RET_ERROR;
+	}
+	if (pHead[0].uServerip == 0)
+		return RET_ERROR;
+	int32_t i = 1;
+	for (i = 1; i < HASH_CONFICT_NODE_MUTI; i++)
+	{
+		if (pHead[i].uServerip == t_uServerip){
+			return RET_RIGHT;
+		}
+	}
+	if (pHead[HASH_CONFICT_NODE_MUTI - 1].uNextIndex){
+		ServerIp *pConflictArray = (ServerIp *)(t_pHashTable->pConflictArray);
+		uint32_t uNextIndex = pHead[HASH_CONFICT_NODE_MUTI - 1].uNextIndex;
+		while (uNextIndex && uNextIndex <= SERVERIP_HASH_BUCKET)
+		{
+			if (pConflictArray[uNextIndex - 1].uServerip == t_uServerip){
+				return RET_RIGHT;
+			}
+			uNextIndex = pConflictArray[uNextIndex - 1].uNextIndex;
+		}
+	}
+	return RET_ERROR;
+}
+
+```
 
 ####  删除
+删除与插入的情况差不多，删除某个节点时，记得要重建当前删除结点的前后节点（后节点若存在）的关系
+
+```cpp
+int32_t DeleteServerIpHashTable(CommHashTable *t_pHashTable, uint32_t t_uServerip)
+{
+	if (!t_pHashTable)
+		return RET_ERROR;
+
+	ServerIp *pHead = ((ServerIp *)t_pHashTable->pHashArray) + GetServerIpNodePos(t_uServerip);
+	if (pHead[0].uServerip == 0)
+		return RET_RIGHT;
+	int32_t i = 1;
+	for (i = 1; i < HASH_CONFICT_NODE_MUTI; i++)
+	{
+		if (pHead[i].uServerip == t_uServerip){
+			pHead[i].uServerip = 0;
+			pHead[0].uServerip--;
+			t_pHashTable->iNodeCount--;
+			return RET_RIGHT;
+		}
+	}
+	if (pHead[HASH_CONFICT_NODE_MUTI - 1].uNextIndex){
+		ServerIp *pConflictArray = (ServerIp *)(t_pHashTable->pConflictArray);
+		uint32_t uNextIndex = pHead[HASH_CONFICT_NODE_MUTI - 1].uNextIndex;
+		uint32_t uFind = uNextIndex;
+		while (uNextIndex && uNextIndex <= SERVERIP_HASH_BUCKET)
+		{
+			if (pConflictArray[uNextIndex - 1].uServerip == t_uServerip)
+				break;
+			uFind = uNextIndex;
+			uNextIndex = pConflictArray[uNextIndex - 1].uNextIndex;
+		}
+		if (uNextIndex && uNextIndex <= SERVERIP_HASH_BUCKET){
+			if (uNextIndex == pHead[HASH_CONFICT_NODE_MUTI - 1].uNextIndex){
+				pHead[HASH_CONFICT_NODE_MUTI - 1].uNextIndex = pConflictArray[uNextIndex - 1].uNextIndex;
+			}
+			else{
+				pConflictArray[uFind - 1].uNextIndex = pConflictArray[uNextIndex - 1].uNextIndex;
+			}
+			pConflictArray[uNextIndex - 1].uNextIndex = 0;
+			pConflictArray[uNextIndex - 1].uServerip = 0;
+			pHead[0].uServerip--;
+			t_pHashTable->iNodeCount--;
+			t_pHashTable->iConflictCount--;
+		}
+	}
+	return RET_RIGHT;
+}
+```
+
+##	0x02	建堆及排序
 
 
-## 0x03 参考
+##	0x03	参考
+-	[bmp_hashtable实现](https://github.com/pandaychen/bmp_hashtable)
+
+转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

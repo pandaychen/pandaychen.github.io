@@ -38,13 +38,22 @@ gRPC 官方博客的文章 [gRPC Load Balancing](https://grpc.io/blog/grpc-load-
 ![coredns.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/loadbalance/k8s-lb-headless-service.png)
 
 ##  0x02  DNS 解析的缺陷
-&emsp;&emsp; 在使用 gRPC+DnsResolver+HeadlessService 实现 Kubernetes 负载均衡方案时，有个明显的缺陷就是，DnsResolver 是定时触发主动去解析获取当前 ServiceName 对应的 Pod 列表的，如果在两次解析的间隔期间，某个 Pod 发生了重启或者漂移（导致 IP 改变），那么这种情况对我们的解析器 DNSResolver 是无法立即感知到的。
+&emsp;&emsp; 在使用 gRPC+DnsResolver+HeadlessService 实现 Kubernetes 负载均衡方案时，有个明显的缺陷就是，**DnsResolver 是定时触发主动去解析获取当前 ServiceName 对应的 Pod 列表的，如果在两次解析的间隔期间，某个 Pod 发生了重启或者漂移（导致 IP 改变），那么这种情况对我们的解析器 DNSResolver 是无法立即感知到的**。
 
 设想一下，有没有一种方法，可以使得我们像使用 Etcd 的 Watch 方法那样，可以监听在某个事件（在 Kubernetes 环境为 Pod）的增删上面呢？翻阅下 Kubernetes 的手册，发现提供查询的 API`/api/v1/watch/namespaces/{namespace}/endpoints/${service}`，这样使得我们可以主动监听某个 Service 下面的 Podlist 变化。
 
 这种方案就是 Watch Endpoint 方式，该方案主要在客户端实现负载均衡，通过 kubernetes API 获取 Service 的 Endpont。**客户端和每个 POD 保持一个长连接**，然后使用 gRPC Client 的负载均衡策略解决问题。开源项目 [kuberesolver](https://github.com/sercand/kuberesolver) 已经实现了这种方式。在下面的篇幅中会简单分析下该项目的代码。
 
 ![kuberesolver.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/loadbalance/k8s-lb-watcher-endpoint.png)
+
+对比下上述两种常用方法的优缺点：
+| LB策略 | 优点 | 缺点 | 
+| :-----:| :----: | :----: | 
+| Headless Service | 使用方便，原生支持 | 当pod ip 发生改变时，client 无法实时检测到，定时断开连接的解决方式不合理 |
+| Watch Endpoint | 原生支持，支持实时感知pod上下线 | 需要特殊配置 RBAC 权限  | 
+
+
+后文给出了基于TKE环境下Watch Endpoint方式的实践。
 
 ##  0x03  代理方案之 Proxy1 - Linkerd
 &emsp;&emsp; Linkerd 是一种基于 CNCF 的 Kubernetes 服务网格，它通过 Sidecar 的方式来实现负载均衡。Linkerd 作为 Service Sidecar 部署在 Pod 中，自动检测 HTTP/2 和 HTTP/1.x 并执行 L7 负载平衡。为服务添加 Linkerd，等价于为每个 Pod 添加了一个很小并且很高效的代理，由这些代理来监控 Kubernetes 的 API，并自动实现 gRPC 的负载均衡。<br>
@@ -173,12 +182,120 @@ spec:
           number: 50051
 ```
 
-##  0x06  总结
+##  0x06  TKE环境下使用watcher方式实践
+本小结介绍下在TKE环境中，使用Watch Endpoint方式来解决负载均衡的问题。核心原理还是在客户端实现[自定义服务发现](https://github.com/sercand/kuberesolver)的逻辑，即kuberesolver；具体就是客户端在服务发现模块中调用 [Kubernetes API](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.20/#-strong-read-operations-endpoints-v1-core-strong-) 监听 Service 对应 Endpoint 变动，通过 Read API 获取 pod ip，然后通过 watch API 得到连接更新信息。
+
+####  kuberesolver
+该库的核心是调用 k8s API 去获取 server 端的 pod 信息，然后基于gRPC提供的Resolver及Balancer接口更新gRPC的连接池；关于此库的分析可见：[Kubernetes 应用改造（六）：使用原生 API 实现 gRPC 负载均衡](https://pandaychen.github.io/2020/10/13/K8S-LOAD-BALANCER-KUBERESOLVER-ANALYSIS/)
+
+####  使用方式
+client 端核心代码如下，从测试结果可以看出，当 pod ip 发生变化时可以正常检测到，并且达到负载均衡，已经得到预期效果。
+```golang
+import (
+  kuberesolver "github.com/sercand/kuberesolver/v3"
+  "google.golang.org/grpc/resolver"
+)
+func ClientRun(){
+  //...
+  kuberesolver.RegisterInCluster()
+  //等价于 resolver.Register(kuberesolver.NewBuilder(nil, "kubernetes"))
+  var (
+    namespace = "YourNamespace"
+    servicename = "YourSVCname"
+    serviceport = 12345
+    endpoint  string 
+  )
+  
+  endpoint = fmt.Sprintf("kubernetes:///%s.%s:%d",servicename,namespace,serviceport)
+
+  conn, err := grpc.Dial("kubernetes:///endpoint",
+    grpc.WithDefaultServiceConfig(`{"loadBalancingPolicy":"round_robin"}`), //新写法
+    grpc.WithInsecure())
+
+  //...
+}
+```
+
+注意上面的`endpoint`构成如下：
+- `kubernetes:///`：固定scheme
+- `servicename`：服务名字
+- `namespace`：namespace
+- `serviceport`：服务端口
+
+####  配置RBAC
+由于Pod调用了kubernetes的watch API，所以需要为POD生成相应的权限；否则客户端调用会报无权限的错误：`enter image description here` 。需要配置 RBAC 赋予 Client 所在 pod 赋予 endpoint 资源的 `get` 和 `watch` 权限，这样子才可以通过 k8s API 获取到 Server 端的信息。TKE的管理端提供了配置RBAC的便捷接口（使用`yaml`创建，如下图）：
+
+1、配置RBAC<br>
+![rbac-tke]()
+需要配置 `ServiceAccount`、`Role`以及`RoleBinding`这三个属性： 
+
+`ServiceAccount`配置：
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  namespace: bifrost
+  name: grpclb-sa
+```
+
+`Role`配置：
+
+```yaml
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  namespace: bifrost
+  name: grpclb-role
+rules:
+- apiGroups: [""]
+  resources: ["endpoints"]
+  verbs: ["get", "watch"]
+```
+
+`RoleBinding`配置（关系）：
+
+```yaml
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: grpclb-rolebinding
+  namespace: bifrost
+subjects:
+- kind: ServiceAccount
+  name: grpclb-sa
+  namespace: bifrost
+roleRef:
+  kind: Role
+  name: grpclb-role
+  apiGroup: rbac.authorization.k8s.io
+```
+
+2、将RBAC配置附加到Client端<br>
+创建上述`3`个实例后，再在 client 端配置 `yaml`，指定刚才创建的 `serviceAccountName`即可：
+```yaml
+apiVersion: apps/v1beta2
+kind: Deployment
+metadata:
+  name: bifrost
+  namespace: bifrost
+spec:
+  containers:
+  - name: xxxxxx
+    image: xxxxxx
+  serviceAccount: grpclb-sa
+```
+
+![lb-final]()
+
+
+##  0x07  总结
 本文分析了 gRPC+Kubernetes 环境的负载均衡的问题，以及对应的解决方案。从当前云原生的发展来看，个人比较看好 Istio。
 
-##  0x07  参考
+##  0x08  参考
 -   [kuberesolver 的实现](https://github.com/sercand/kuberesolver)
 -   [gRPC Load Balancing](https://grpc.io/blog/grpc-load-balancing/)
 -   [Ingress](https://kubedex.com/ingress/)
 -   [A Kubernetes Service Mesh (Part 9): gRPC for Fun and Profit](https://dzone.com/articles/a-service-mesh-for-kubernetes-part-ix-grpc-for-fun)
 -   [必读！Istio Service Mesh 中的流量管理概念解析](https://juejin.im/post/5b7fc952f265da4358368734)
+-   [Kubernetes 应用改造（六）：使用原生 API 实现 gRPC 负载均衡](https://pandaychen.github.io/2020/10/13/K8S-LOAD-BALANCER-KUBERESOLVER-ANALYSIS/)
