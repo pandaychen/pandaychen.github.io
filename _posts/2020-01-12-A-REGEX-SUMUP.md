@@ -81,7 +81,8 @@ print re.search(qm_re6,str23).groups()
 在 string 中查找所有匹配成功的字符串, 返回 `iterator`，每个 item 是一个 Match object
 
 
-##  0x04    不建议使用 `re.compile()`
+##  0x04    Python正则的最佳实践
+-   不建议使用 `re.compile()`
 
 ##  0x05    参考
 -   [Python 正则表达式指南](https://www.cnblogs.com/huxi/archive/2010/07/04/1771073.html)

@@ -422,7 +422,7 @@ func (v *v2PickerWrapper) Pick(info balancer.PickInfo) (balancer.PickResult, err
 ```
 ### pickerWrapper 的 pick 实现
 
-```go
+```golang
 // pick returns the transport that will be used for the RPC.
 // It may block in the following cases:
 // - there's no picker
@@ -537,7 +537,9 @@ func (cc *ClientConn) getTransport(ctx context.Context, failfast bool, method st
 在 `newClientMethod` 的 gRPC 客户端方法中，我们通过 `getTransport` 方法获取了 Transport 层中抽象出来的 ClientTransport 和 ServerTransport，实际上就是获取一个连接给后续 RPC 调用传输使用。到此，gRPC 的客户端就获取了由自定义 LoadBalancer 算法得到的最终的 `TCP` 连接
 
 ##	0x05	总结
-&emsp;&emsp; 本文分析了 gRPC 是如何将自定义的 Picker 实现应用在最终的负载均衡流程，理解 `Picker` 的实现原理有助于我们实现更健壮的 Loadbalancer 逻辑。
+&emsp;&emsp; 本文分析了 gRPC 是如何将自定义的 `Picker` 实现应用在最终的负载均衡流程，理解 `Picker` 的实现原理有助于我们实现更健壮的 Loadbalancer 逻辑。
+
+![grpc-picker](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grpc/grpc-nice-architecture-picker.png)
 
 ##	0x06	参考
 -	[grpc-client 端分析](https://mcll.top/2019/07/29/grpc-client%E7%AB%AF%E5%88%86%E6%9E%901/)

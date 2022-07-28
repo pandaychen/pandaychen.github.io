@@ -76,10 +76,10 @@ tags:
     -   CGI 签名
     -   RBAC 模型
 
-![image](https://s1.ax1x.com/2020/04/25/JybPmD.jpg)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2020/microsvc/micro-service-basic-1.jpg)
 
 ##  0x03    微服务的设计模式
-![image](https://s1.ax1x.com/2020/04/25/J6Vto9.jpg)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2020/microsvc/micro-service-basic-2.jpg)
 
 ##  0x04    我的关注点
 个人目前对微服务架构的关注点有下面几点：
@@ -114,7 +114,7 @@ tags:
 
 ##  0x05    Kubernetes + Service Mesh = 完整的微服务框架
 一图胜千言，Kubernetes 在微服务架构中的重要性
-![image](https://s1.ax1x.com/2020/04/26/J6KYdO.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2020/microsvc/micro-service-basic-3.jpg)
 
 ##  0x06    参考
 -   [微服务的模式语言](https://microservices.io/patterns/cn/index.html)

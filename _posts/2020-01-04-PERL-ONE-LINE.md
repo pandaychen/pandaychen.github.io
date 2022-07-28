@@ -20,7 +20,7 @@ tags:
 >   -e 执行命令，也就是脚本
 >   -p 自动循环 + 输出，也就是 while(<>){命令（脚本）; print;}
 
-![image](https://s2.ax1x.com/2020/01/17/lzsUsJ.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/perl/perl-one-line.png)
 
 ## 0x01	Perl 单行选项
 > `-e` 开关允许我们在命令行中运行脚本
