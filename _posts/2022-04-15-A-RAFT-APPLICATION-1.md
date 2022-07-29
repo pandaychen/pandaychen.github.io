@@ -24,6 +24,7 @@ tags:
 1、启动集群，并成为leader<br>
 ```bash
 [root@VM_120_245_centos ~/blog_backup/stcache/stcache]# ./stcached --http=127.0.0.1:6000 --raft=127.0.0.1:7000 --node=./node0 --bootstrap=true
+
 stCached: 2022/07/29 18:08:53 http server listen:127.0.0.1:6000
 2022-07-29T18:08:53.158+0800 [INFO]  raft: initial configuration: index=0 servers=[]
 2022-07-29T18:08:53.158+0800 [INFO]  raft: entering follower state: follower="Node at 127.0.0.1:7000 [Follower]" leader-address= leader-id=
@@ -108,7 +109,7 @@ ok
 gfe
 ```
 
-9、将节点1重启，加入集群，自动变为follower
+9、将节点`1`重启，再加入集群，自动变为follower
 ![raft-3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/raft/hashcorp-raft-cache/3-new-term-follower.png)
 
 leader状态：
