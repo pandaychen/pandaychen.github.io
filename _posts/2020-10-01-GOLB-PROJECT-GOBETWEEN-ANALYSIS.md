@@ -21,7 +21,7 @@ tags:
 > gobetween is aiming to fill this gap and provide fast, flexible and full-featured load balancing solution for modern microservice architectures.
 
 gobetween 的架构图如下：
-![image](https://camo.githubusercontent.com/252e2764756a51aea3ae4783fccef0a760eecb86/687474703a2f2f692e70696363792e696e666f2f69392f38623932313534343335626533326632316561613366663762336463366431632f313436363234343333322f37343435372f313034333438372f676f672e706e67)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/gateway/gobetween/arch.png)
 
 ## 0x01 特性
 官方提供的特性，如下：
