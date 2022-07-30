@@ -1,7 +1,7 @@
 ---
 layout:     post
-title:      Golang IO shaping
-subtitle:   基于限流器的流量整形实现
+title:      数据结构与算法回顾（六）：Golang IO shaping
+subtitle:   基于限流器的流量整形算法实现
 date:       2022-03-01
 author:     pandaychen
 header-img:
