@@ -2,7 +2,7 @@
 layout:     post
 title:      一个基于 golang 的轻量级 IM 项目分析：gochat
 subtitle:   分析一款实时通信 IM 项目 gochat
-date:       2022-06-30
+date:       2021-06-30
 author:     pandaychen
 catalog:    true
 tags:
