@@ -7,7 +7,7 @@ header-img: img/super-mario.jpg
 author: pandaychen
 catalog: true
 tags:
-  - prometheus
+  - Prometheus
 ---
 
 ##  0x00    前言
