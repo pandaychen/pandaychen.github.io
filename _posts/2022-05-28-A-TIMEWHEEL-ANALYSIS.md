@@ -329,7 +329,26 @@ func (tw *TimingWheel) moveTask(task baseEntry) {
 }
 ```
 
-注意，从`MoveTask`的实现中，着重突出了**延迟操作**，其好处是如果某些任务key频繁改动，不需要频繁进行重新定位操作（在时间轮中重新定位），而重新定位操作需要保证并发安全
+关于`moveTask`的这部分实现，有个问题是为何不在这里直接就移动节点呢？个人观点是基于效率的考虑，注意到`moveTask`方法本质上还是对任务节点的操作，并且任务节点是散落在各个slot的任务链表中的。如果在`moveTask`中去移动，需要遍历找到相应的slot节点，然后遍历链表，找到对应的节点进行操作（因为需要找到该节点对应于链表中的后节点），因此，这里的逻辑仅仅是设置标志（如`item.diff`），对节点的处理放在扫描任务链表的方法`scanAndRunTasks`中实现。
+
+从另一个角度看，`MoveTask`的实现中，着重突出了**延迟操作**，即只在扫描链表的时候才处理更新/删除节点等操作，其好处是如果某些任务key频繁改动，无需频繁进行重新定位操作（在时间轮中重新定位），而重新定位操作需要保证并发安全，引入了复杂度
+
+```golang
+if pos >= timer.pos {
+    timer.item.circle = circle
+	// 记录前后的移动 offset，为了后面过程重新入队（先提前计算好位置）
+	timer.item.diff = pos - timer.pos			//diff的值分两种情况，diff为0,说明不需要移动；非0才需要移动
+} else if circle > 0 {
+		//说明pos（旧） < timer.pos（新）且剩余圈数大于0，即任务触发的时间提前了，但是不会在这一圈触发，需要计算一下diff偏移量和走多少圈
+	// 先把该任务转移到下一层（即circle减一），将 circle 转换为 diff 的一部分
+	circle--
+	//更新circle
+	timer.item.circle = circle
+	// 因为是一个数组，要加上 numSlots [也就是相当于要走到下一层]
+	timer.item.diff = tw.numSlots + pos - timer.pos	//注意这里
+} 
+```
+
 
 ####	增加任务setTask
 任务是通过异步方式增加到时间轮的，主要逻辑如下代码所示：
@@ -375,6 +394,7 @@ func (tw *TimingWheel) removeTask(key interface{}) {
 本文分析了一款典型的简单时间轮的实现，通过给任务节点添加 `circle` 字段来解决一维时间轮无法扩展时间的问题，从而突破长时间的限制。可以借鉴的地方有如下：
 1.	任务的删除、更新操作，都仅仅通过标记的方式延迟进行，避免并发的加锁问题，仅在方法`scanAndRunTasks`中实现
 2.	外部操作接口，如任务的增删改，也是通过异步的方式实现
+3.	在时间轮的scheduler核心方法`TimingWheel.run`中，要注意每个`case`条件下的逻辑运行时间，如果运行时间过长会导致其他的`case`条件不能及时得到运行
 
 ##  0x06  参考
 -   [go-zero 如何应对海量定时 / 延迟任务？](https://segmentfault.com/a/1190000037496480)
