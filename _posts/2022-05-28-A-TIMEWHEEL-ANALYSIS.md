@@ -396,6 +396,8 @@ func (tw *TimingWheel) removeTask(key interface{}) {
 2.	外部操作接口，如任务的增删改，也是通过异步的方式实现
 3.	在时间轮的scheduler核心方法`TimingWheel.run`中，要注意每个`case`条件下的逻辑运行时间，如果运行时间过长会导致其他的`case`条件不能及时得到运行
 
+![go-zero-timewheel](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/2022/timewheel/go-zero-timewheel-1.jpg)
+
 ##  0x06  参考
 -   [go-zero 如何应对海量定时 / 延迟任务？](https://segmentfault.com/a/1190000037496480)
 -	[层级时间轮的 Golang 实现](http://russellluo.com/2018/10/golang-implementation-of-hierarchical-timing-wheels.html)
