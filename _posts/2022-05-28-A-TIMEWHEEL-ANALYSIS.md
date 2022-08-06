@@ -30,7 +30,7 @@ tags:
 从开发角度而言，实现一个时间轮：
 1.	时间轮是一个由固定长度 `length` 的数组（本例子中就是 `[1,12]`）构造而成的环形队列
 2.	时间轮的长度决定了延时任务的刻度，假设上面的刻度为 `1s`（即时间轮 `1s` 前进一格），那么该时间轮只能表达延时任务在 `1s` 至 `12s` 内的任务；时间轮的长度也即时间轮的周期（`12s`）
-3.	注册任务按照 ** 当前刻度 + 延时时长 % 时间轮周期 ** 计算得出，假设当前指针在 `5s` 的位置，此时添加一个延时周期为 `5s` 的任务，那么该任务需要注册到刻度为 `10s` 的格子对应的任务链表中
+3.	注册任务按照 **当前刻度 + 延时时长 % 时间轮周期** 计算得出，假设当前指针在 `5s` 的位置，此时添加一个延时周期为 `5s` 的任务，那么该任务需要注册到刻度为 `10s` 的格子对应的任务链表中
 4.	数组中的每个元素都指向一个双向链表，用于存储对应的延时任务
 5.	时间轮的插入复杂度是 `O(1)`，删除指定节点的复杂度是 `O(n)`，因为需要遍历双向链表以查找到要删除的节点
 6.	当时间轮指针转动到对应的单元格时，顺序执行双向链表中存储的任务
@@ -93,7 +93,7 @@ func (tw *TimingWheel) getPositionAndCircle(d time.Duration) (pos, circle int) {
 }
 ```
 3、`timers`：Map 的作用 <br>
-`timers` 主要用于保存任务（key 为标识）及其在时间轮中的 slot 的 pos 位置，方便查找的时候快速定位
+`timers` 主要用于保存任务（key 为标识）及其在时间轮中的 slot 的 `pos` 位置，方便查找的时候快速定位
 ```golang
 func (tw *TimingWheel) setTimerPosition(pos int, task *timingEntry) {
 	if val, ok := tw.timers.Get(task.key); ok {
@@ -171,8 +171,10 @@ func (tw *TimingWheel) run() {
 		// 异步处理增加任务
 		case task := <-tw.setChannel:
 			tw.setTask(&task)
+		// 异步处理删除任务
 		case key := <-tw.removeChannel:
 			tw.removeTask(key)
+		// 异步处理任务更新操作
 		case task := <-tw.moveChannel:
 			tw.moveTask(task)
 		case fn := <-tw.drainChannel:
@@ -185,15 +187,24 @@ func (tw *TimingWheel) run() {
 }
 ```
 
-####	时间轮转动 onTick
-
+####	时间轮转动 onTick 及扫描任务链表
+每隔`ticker`时间，定时移动时间轮的指针，先保存当前指针的位置，然后从slot中拿出对应的`list.List`，传参list到`scanAndRunTask`方法中执行，如下：
 ```golang
 func (tw *TimingWheel) onTick() {
 	tw.tickedPos = (tw.tickedPos + 1) % tw.numSlots
+	//获取时间轮（槽）对应的任务链表
 	l := tw.slots[tw.tickedPos]
+	//扫描当前的任务链表
 	tw.scanAndRunTasks(l)
 }
+```
 
+`scanAndRunTask`方法的步骤如下：
+1.	遍历整个list，先清理掉被删掉任务（`task.removed`被置位），再将循环圈数`circle`不为`0`的任务的圈数减去`1`，因为时间流转了刚好`1`个周期
+2.	剩下的是`circle`为`0`的有效任务，考虑到有更新操作，若为更新操作（`task.diff`被置位），则将当前任务删除后，根据任务更新的触发时间`task.diff`重新注册到时间轮中
+3.	经由前两步过滤，剩下的任务就是scan要执行的任务，把待执行的任务加入到执行待执行队列`tasks`中，通过`tw.runTasks(tasks)`方法并发执行（扫描完list之后并发执行。注意：会控制并发数）
+
+```golang
 func (tw *TimingWheel) scanAndRunTasks(l *list.List) {
 	var tasks []timingTask
 
@@ -231,12 +242,13 @@ func (tw *TimingWheel) scanAndRunTasks(l *list.List) {
 		e = next
 	}
 
+	//一轮扫描完之后，并发执行tasks
 	tw.runTasks(tasks)
 }
 ```
 
 ##	0x04	代码分析（2）：任务操作
-任务的添加和删除是必须要实现的，更新可以通过先删除再添加的方式实现。
+任务的添加和删除是必须要实现的，更新可以通过先删除再添加的方式实现。不过go-zero的任务更新实现有些许不一样，此外，在 go-zero 中，任务更新的场景，比如基于 TTL 的缓存的设置 [逻辑](https://github.com/zeromicro/go-zero/blob/master/core/collection/cache.go#L114)，一旦有 key 被设置就刷新 TTL
 
 ####	MoveTimer：任务更新
 `MoveTimer` 这个方法主要用于动态更新时间轮已存在的 key 及其过期时间，对应的处理方法是 `moveTask`；
@@ -248,6 +260,7 @@ func (tw *TimingWheel) MoveTimer(key interface{}, delay time.Duration) error {
 	}
 
 	select {
+		//异步处理
 	case tw.moveChannel <- baseEntry{
 		delay: delay,
 		key:   key,
@@ -259,9 +272,12 @@ func (tw *TimingWheel) MoveTimer(key interface{}, delay time.Duration) error {
 }
 ```
 
-在 go-zero 中，任务更新的场景，比如基于 TTL 的缓存的设置 [逻辑](https://github.com/zeromicro/go-zero/blob/master/core/collection/cache.go#L114)，一旦有 key 被设置就刷新 TTL
 
-####	moveTask
+####	更新任务：moveTask
+`moveTask`方法是更新timeWheel中已存在的任务的延迟时间。有两种调用场景：
+1.	添加任务时，如果任务已经存在，那么只需更新方法（在`setTask`中判断如果有这个key就调用`moveTask`）
+2.	通过更新的API接口更新
+
 ```golang
 func (tw *TimingWheel) moveTask(task baseEntry) {
     // timers: 通过任务的 key 获取 pos 位置及 task
@@ -271,7 +287,8 @@ func (tw *TimingWheel) moveTask(task baseEntry) {
     }
 
     timer := val.(*positionEntry)
-      // {delay < interval} => 延迟时间比一个时间格间隔还小，没有更小的刻度，说明任务应该立即执行
+    // {delay < interval} => 延迟时间比一个时间格间隔还小，没有更小的刻度，说明任务应该立即执行
+	// 可能是task设置的延迟时间太小了，那就直接执行
     if task.delay < tw.interval {
         threading.GoSafe(func() {
             tw.execute(timer.item.key, timer.item.value)
@@ -279,35 +296,85 @@ func (tw *TimingWheel) moveTask(task baseEntry) {
         return
     }
     // 如果 > interval，则通过 延迟时间 delay 计算其出时间轮中的 new pos, circle
+	// 需要重新设置触发时间，即根据新的延迟时间计算出新的定位和circle
     pos, circle := tw.getPositionAndCircle(task.delay)
+	//根据pos和circle还有旧数据，修改task的信息，做一些标记，在扫描到这个task的时候再真正修改和重新定位
+	//新/旧任务的pos不一样，需要移动，但是由于并发问题，不会在这里移动
     if pos >= timer.pos {
         timer.item.circle = circle
-        // 记录前后的移动 offset。为了后面过程重新入队
-        timer.item.diff = pos - timer.pos
+        // 记录前后的移动 offset，为了后面过程重新入队（先提前计算好位置）
+        timer.item.diff = pos - timer.pos			//diff的值分两种情况，diff为0,说明不需要移动；非0才需要移动
     } else if circle > 0 {
-        // 转移到下一层，将 circle 转换为 diff 一部分
+		 //说明pos（旧） < timer.pos（新）且剩余圈数大于0，即任务触发的时间提前了，但是不会在这一圈触发，需要计算一下diff偏移量和走多少圈
+        // 先把该任务转移到下一层（即circle减一），将 circle 转换为 diff 的一部分
         circle--
+		//更新circle
         timer.item.circle = circle
         // 因为是一个数组，要加上 numSlots [也就是相当于要走到下一层]
-        timer.item.diff = tw.numSlots + pos - timer.pos
+        timer.item.diff = tw.numSlots + pos - timer.pos	//注意这里
     } else {
         // 如果 offset 提前了，此时 task 也还在第一层
         // 标记删除老的 task，并重新入队，等待被执行
-        timer.item.removed = true
+
+		//pos（旧） < timer.pos（新），且circle==0，说明是在本链表中执行任务，这里删除旧的添加新的（其实是一样）       
+        timer.item.removed = true	//标记当前节点待删除
         newItem := &timingEntry{
             baseEntry: task,
             value:     timer.item.value,
         }
+		//重新加到任务链表的尾部
         tw.slots[pos].PushBack(newItem)
         tw.setTimerPosition(pos, newItem)
     }
 }
 ```
 
+注意，从`MoveTask`的实现中，着重突出了**延迟操作**，其好处是如果某些任务key频繁改动，不需要频繁进行重新定位操作（在时间轮中重新定位），而重新定位操作需要保证并发安全
+
+####	增加任务setTask
+任务是通过异步方式增加到时间轮的，主要逻辑如下代码所示：
+1.	从`timers`即map中查询此任务是否已经存在，若存在，则调用`moveTask`更新任务（主要是执行触发时间）
+2.	若任务不存在，会通过`getPositionAndCircle`方法计算出任务在时间轮中相对于当前的ticked的定位`pos`，以及要转的圈数`circle`，将任务放在时间轮槽对应的任务链表队列上，并且维护`timers`的map索引，方便查询任务定位
+
+```golang
+func (tw *TimingWheel) setTask(task *timingEntry) {
+    if task.delay < tw.interval {
+        task.delay = tw.interval
+    }
+
+    if val, ok := tw.timers.Get(task.key); ok {
+        entry := val.(*positionEntry)
+        entry.item.value = task.value
+        tw.moveTask(task.baseEntry)
+    } else {
+        pos, circle := tw.getPositionAndCircle(task.delay)
+        task.circle = circle
+        tw.slots[pos].PushBack(task)	//向时间轮的list插入任务，注意使用尾插法
+        tw.setTimerPosition(pos, task)	//更新timers map
+    }
+}
+```
+
+####	删除任务removeTask
+删除任务是通过索引找到这个task，然后把task标记为删除，即置位`timer.item.removed`，然后再每一轮扫描到list的`scanAndRunTask`方法中再做清理，即直接跳过该任务：
+```golang
+func (tw *TimingWheel) removeTask(key interface{}) {
+    val, ok := tw.timers.Get(key)
+    if !ok {
+        return
+    }
+
+    timer := val.(*positionEntry)
+    timer.item.removed = true
+    tw.timers.Del(key)
+}
+```
 
 
 ##  0x05  总结
-本文分析了一款典型的简单时间轮的实现，通过给任务节点添加 `circle` 字段来解决一维时间轮无法扩展时间的问题，从而突破长时间的限制。
+本文分析了一款典型的简单时间轮的实现，通过给任务节点添加 `circle` 字段来解决一维时间轮无法扩展时间的问题，从而突破长时间的限制。可以借鉴的地方有如下：
+1.	任务的删除、更新操作，都仅仅通过标记的方式延迟进行，避免并发的加锁问题，仅在方法`scanAndRunTasks`中实现
+2.	外部操作接口，如任务的增删改，也是通过异步的方式实现
 
 ##  0x06  参考
 -   [go-zero 如何应对海量定时 / 延迟任务？](https://segmentfault.com/a/1190000037496480)
