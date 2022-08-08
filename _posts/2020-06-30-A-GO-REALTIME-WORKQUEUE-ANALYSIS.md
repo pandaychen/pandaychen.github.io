@@ -10,6 +10,7 @@ category:   false
 tags:
     - 任务队列
     - 队列
+    - 异步队列
 ---
 
 
@@ -28,14 +29,51 @@ goworker 兼容 Resque，所以可以使用 Rails/PHP 和 Resque 推送你的作
 3.		golang `select` 机制典型的应用
 
 ##      0x01    简单使用
--	通过
+1、测试代码见[此](https://github.com/pandaychen/golang_in_action/blob/master/goworker_proj/goworker/main.go)<br>
+```GOLANG
+func myFunc(queue string, args ...interface{}) error {
+	fmt.Printf("From %s, %v\n", queue, args)
+	return nil
+}
 
--	使用 `RPUSH` 指令向 Redis 写入数据：`RPUSH resque:queue:myqueue '{"class":"Hello","args":["hi","there"]}'`
+func init() {
+	settings := goworker.WorkerSettings{
+		URI:            "redis://localhost:6379/",
+		Connections:    100,
+		Queues:         []string{"myqueue", "delimited", "queues"},
+		UseNumber:      true,
+		ExitOnComplete: false,
+		Concurrency:    2,
+		Namespace:      "resque:",
+		Interval:       5.0,
+	}
+	goworker.SetSettings(settings)
+	goworker.Register("Hello", myFunc)	//注册Hello对应的处理方法为myFunc
+}
 
+func main() {
+	if err := goworker.Work(); err != nil {
+		fmt.Println("Error:", err)
+	}
+}
+```
+
+2、使用 `RPUSH` 指令向 Redis 写入数据：`RPUSH resque:queue:myqueue '{"class":"Hello","args":["hi","there"]}'`<br>
+
+```json
+127.0.0.1:6379> RPUSH resque:queue:myqueue '{"class":"Hello","args":["hi","there"]}'
+(integer) 1
+```
+
+3、查看任务被成功运行<br>
+```text
+[root@VM_120_245_centos ~/goworker]# ./main 
+From myqueue, [hi there]
+```
 
 ##      0x02    整体框架
 goworker 的整体框架大致如下图所示：
-![image](https://wx1.sbimg.cn/2020/06/17/goworkers.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2020/goworker/goworker-data-flow.png)
 
 
 ####	配置参数说明
@@ -303,7 +341,7 @@ func main() {
 
 goworker 中的协程并发模型是 `1:N` 的，即一个生产者 `Poller`，多个消费者 `Worker`，看下面的代码，`jobs` 这个 channel 被多个 `worker` 共享，由于 channel 本身是协程安全的，这种也是非常常见的 golang 并发模式：
 
-![image](https://wx1.sbimg.cn/2020/06/17/goworker1.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2020/goworker/goworker-arch.png)
 
 ```golang
 jobs, err := poller.poll(time.Duration(workerSettings.Interval), quit)
