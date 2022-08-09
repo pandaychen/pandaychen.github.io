@@ -60,7 +60,7 @@ func main() {
 
 2、使用 `RPUSH` 指令向 Redis 写入数据：`RPUSH resque:queue:myqueue '{"class":"Hello","args":["hi","there"]}'`<br>
 
-```json
+```text
 127.0.0.1:6379> RPUSH resque:queue:myqueue '{"class":"Hello","args":["hi","there"]}'
 (integer) 1
 ```
