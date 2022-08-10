@@ -1,6 +1,6 @@
 ---
 layout: post
-title: prometheus 查询 && 应用实践
+title: prometheus 查询 && 应用实践（进阶篇）
 subtitle: 如何更好的使用 prometheus
 date: 2022-05-01
 header-img: img/super-mario.jpg
@@ -42,8 +42,8 @@ Y
   │   . A (1, 3)
   │
   │     . B (2, 1)
-  v
-    <-----------------> X
+  |
+  v------------------> X
 ```
 
 
