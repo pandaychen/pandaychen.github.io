@@ -88,6 +88,10 @@ Prometheus 采集的所有指标都是以时间序列的形式进行存储，每
 -  时间戳：描述当前时间序列的时间（ms）
 -  样本值：当前监控指标的具体数值，比如 `http_request_total` 的值就代表请求数是多少
 
+标签label是使同一个时间序列有了不同维度的识别。例如`http_requests_total{method="GET"}` 表示所有HTTP 请求中的GET 请求。当`method="post"` 时，则为新的一个metric，表示POST请求
+
+时间序列是时间和标签所发构成的多维度内数据，样本为实际的时间序列，每个序列包括一个float64 的值和一个毫秒级的时间戳
+
 ####  指标的格式
 格式如下：
 
@@ -120,7 +124,7 @@ Gauges 理解为（待监控的）瞬时状态，如当前时刻 CPU 的使用�
 
 以时间为横坐标、数值为纵坐标，如下面的内存的使用图，就是典型的采集使用 Gauge 形式的 Metrics：
 
-![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/gauges-2.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/guage-2.png)
 
 #### Counters
 
@@ -262,6 +266,9 @@ histogram_quantile(0.5,go_gc_pauses_seconds_total_bucket)
 ```
 
 ![quantile-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/quantile-1.png)
+
+
+####  关于promql的一些细节
 
 
 ## 0x05  Grafana 可视化
