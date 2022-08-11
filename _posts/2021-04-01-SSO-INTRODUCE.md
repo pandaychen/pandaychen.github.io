@@ -12,17 +12,17 @@ tags:
   - OAuth
   - SAML
   - OpenID
+  - OpenSSH
 ---
 
 ## 0x00 前言
 
-最近工作用到了较多的 SSO（单点登录）知识，这篇文章简单梳理下。主要涉及的到的有如下几块：
-
-- Oauth2
+最近工作用到了较多的 SSO（单点登录）知识，本文简单梳理下。主要涉及的到的有如下几块：
+- OAuth2
 - SAML2
 - OpenID
 - JWT
-- SSH Login with SSO：如何将 SSO 的认证理念嵌入到 `OpenSSH` 的登录身份认证中去
+- OpenSSH Login with SSO：如何将 SSO 的认证理念嵌入到 `OpenSSH` 的登录身份认证中去
 
 #### 授权 && 认证
 
@@ -80,12 +80,10 @@ OAuth2 是一个授权协议，有四种 Flow 流。
 
 OIDC（OpenID Connect）等于 （Identity, Authentication） + OAuth 2.0。OIDC 基于 OAuth2 协议之上构建了一个身份层的认证标准协议。OIDC 使用 OAuth2 的授权服务器来为第三方客户端提供用户的身份认证，并把对应的身份认证信息传递给客户端（如移动 APP，JS 应用等），且完全兼容 OAuth2，也就是说一个 OIDC 的服务，也可以当作一个 OAuth2 的服务来用。更通俗的说，OIDC 融合了 OpenId 的身份标识，OAuth2 的授权和 JWT 包装数据的方式。
 
-![oidc-img]()
-
 ## 0x05 JWT（JSON Web Token）
 JWT 定义了一种简洁自包含的方法用于通信双方之间以 JSON 对象的形式安全的传递信息（[官方定义](https://jwt.io/introduction)），本质是带有数字签名的格式化数据，支持多种签名方法：
 - HMAC算法：常用于用户名/口令认证之后的token生成
-- 非对称加密算法（如RSA/ECDSA等）：推荐，持有私钥的一方是进行签名的，公钥被分发给子系统用来验证签名，常用于APIGATEWAY等场景（避免共享对此秘钥，代价是性能相对于对称加密降低）
+- 非对称加密算法（如RSA/ECDSA等）：推荐，持有私钥的一方是进行签名的，公钥被分发给子系统用来验证签名，常用于APIGATEWAY等场景（避免共享对此秘钥，代价是性能相对于对称加密降低），[相关代码](https://github.com/pandaychen/golang_in_action/blob/master/crypto/auth/jwt_rsa.go)
 
 
 举例来说：服务器认证后生成如下 JSON 对象+数字签名发回用户（为了标识该数据不可篡改，需要对此JSON进行签名）；客户端与服务端通信时依赖此JSON来认定用户身份，如下图：
@@ -120,7 +118,6 @@ HMAC_SHA256(base64UrlEncode(header) + "." + base64UrlEncode(payload), secret)
 
 ![jwt-struct](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/auth/sso/sso-jwt-1.png)
 
-
 ####  Base64URL算法
 JWT 在有些场合可能会放到 URL（比如 `api.example.com/?token=jwt-token`）。为了避免Base64 中的`3`个字符`+`、`/`和`=`对转义的影响，所以要使用Base64URL算法：
 - 省略`=`
@@ -143,6 +140,13 @@ Authorization: Bearer <token>
 3、认证：基于RSA的子系统场景<br>
 ![jwt-rsa-subsystem](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/auth/sso/jwt-auth-for-multiple-subsystem.png)
 
+现网中，JWT-RSA可以应用在微服务网关的认证场景，如下图。该方式避免HMAC需要共享私钥的问题，缺点是非对称秘钥的计算耗时增大。
+
+![jwt-rsa-auth](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/auth/sso/jwt-rsa-gateway.png)
+
+1.  由微服务网关生成RSA公私钥对并安全存储，将每个后端APP独享的公钥分发给各个应用
+2.  用户请求经过微服务网关时，由网关使用对应后端应用的私钥进行JWT签名，将签名追加在HTTP头部，转发请求到后端APP
+3.  后端APP使用公钥验证JWT签名是否合法
 
 ####  JWT的优缺点
 - JWT 默认是不加密，但也是可以加密的。生成原始 Token 以后，可以用密钥再加密一次
@@ -152,20 +156,22 @@ Authorization: Bearer <token>
 - JWT 本身包含了认证信息，一旦泄露，任何人都可以获得该令牌的所有权限。为了减少盗用，JWT 的有效期应该设置得比较短。对于一些比较重要的权限，使用时应该再次对用户进行认证
 - 为了减少盗用，JWT 不应该使用 HTTP 协议明码传输，要使用 HTTPS 协议传输
 
-## 0x06 区别
+## 0x06 各个认证协议的区别
 
-## 0x07 其他一些话题
+
+## 0x07 OpenSSH With SSO
+
+基于 OpenSSH 的 SSO 实现，有两个思路：
+
+1. 从上面对 Auth 协议的分析，如果我们在 SSH 登录前能先获取到 access-token，然后拿着此 token 调用 IDP 接口获取到用户的真实身份即可。
+
+
+## 0x08 其他一些话题
 
 1、能否混用 OAuth 及 SAML？<br>
 2、如何设置多个 OAuth 的 CallBack Url<br>
 
-#### SSH SSO
-
-基于 SSH 的 SSO 实现，有两个思路：
-
-1. 从上面对 Auth 协议的分析，如果我们在 SSH 登录前能先获取到 access-token，然后拿着此 token 调用 IDP 接口获取到用户的真实身份即可。
-
-## 0x08 参考
+## 0x09 参考
 
 - [我眼中的 SAML (Security Assertion Markup Language)](https://www.cnblogs.com/shuidao/p/3463947.html)
 - [[认证 & 授权] 4. OIDC（OpenId Connect）身份认证（核心部分）](https://www.cnblogs.com/linianhui/archive/2017/05/30/openid-connect-core.html)
@@ -183,5 +189,6 @@ Authorization: Bearer <token>
 - [OpenID Connect 协议入门指南](https://www.jianshu.com/p/be7cc032a4e9)
 - [OAuth2.0 协议入门指南](https://www.jianshu.com/p/6392420faf99)
 - [JSON Web Token 入门教程](https://www.ruanyifeng.com/blog/2018/07/json_web_token-tutorial.html)
+- [阿里云：OAuth2](https://help.aliyun.com/document_detail/174227.html)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
