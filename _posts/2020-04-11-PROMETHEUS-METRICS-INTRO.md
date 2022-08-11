@@ -113,8 +113,8 @@ Prometheus 底层存储上其实并没有对指标做类型的区分，都是以
 
 下面分别介绍指标类型，部分配图来源于 [一文带你了解 Prometheus](https://cloud.tencent.com/developer/article/1999843)。
 
-#### Gauges
-Gauges 理解为（待监控的）瞬时状态，如当前时刻 CPU 的使用率、内存的使用量、硬盘的容量以及 GC 次数等等。因为此类型的特点是随着时间的推移不断，值（相对而言）没有规则的变化。在 Kratos 框架中，针对 RPC 每次请求的延迟（latency）就是一个 Gauges，一段时间内的 Gauges 就组合成了一个 [RollingGauges](https://github.com/go-kratos/kratos/blob/master/pkg/stat/metric/rolling_gauge.go#L10)；此外，Gauge 可增可减，与 Counter 不一样，在 Prometheus 上通过 Gauge，**可以不用经过内置函数直观的反映数据的变化情况**
+#### Gauge
+Gauge 理解为（待监控的）瞬时状态，如当前时刻 CPU 的使用率、内存的使用量、硬盘的容量以及 GC 次数等等。因为此类型的特点是随着时间的推移不断，值（相对而言）没有规则的变化。在 Kratos 框架中，针对 RPC 每次请求的延迟（latency）就是一个 Gauge，一段时间内的 Gauge 就组合成了一个 [RollingGauges](https://github.com/go-kratos/kratos/blob/master/pkg/stat/metric/rolling_gauge.go#L10)；此外，Gauge 可增可减，与 Counter 不一样，在 Prometheus 上通过 Gauge，**可以不用经过内置函数直观的反映数据的变化情况**
 ![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/gauges-1.png)
 下图表示堆可分配的空间大小：
 ![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/gauges-3.png)
@@ -124,7 +124,36 @@ Gauges 理解为（待监控的）瞬时状态，如当前时刻 CPU 的使用�
 
 ![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/guage-2.png)
 
-#### Counters
+
+Gauge 的定义如下，对比 Counter 的定义，增加了 `Dec` 和 `Sub` 这样的减少数值的接口，同时提供了 `Set` 和 `SetToCurrentTime` 这样的直接设置数值的接口，可以用来监控goroutine 的数量、CPU 使用率、内存使用率（量）等可增可减的指标：
+
+```golang
+type Gauge interface {
+    Metric
+    Collector
+
+    // Set sets the Gauge to an arbitrary value.
+    Set(float64)
+    // Inc increments the Gauge by 1. Use Add to increment it by arbitrary
+    // values.
+    Inc()
+    // Dec decrements the Gauge by 1. Use Sub to decrement it by arbitrary
+    // values.
+    Dec()
+    // Add adds the given value to the Gauge. (The value can be negative,
+    // resulting in a decrease of the Gauge.)
+    Add(float64)
+    // Sub subtracts the given value from the Gauge. (The value can be
+    // negative, resulting in an increase of the Gauge.)
+    Sub(float64)
+
+    // SetToCurrentTime sets the Gauge to the current Unix time in seconds.
+    SetToCurrentTime()
+}
+```
+
+
+#### Counter
 
 Counter 就是计数器，从数据量 `0` 开始累计计算，只能增加，或者保持不变（增加 `0`），典型对应的场景是：持续增加的访问量采样数据。Counter 一般从 `0` 开始，一直不断的累加，但有可能保持不变（在图中以一条水平线表示）。通过 Counter 指标可以统计 HTTP 请求数量，请求错误数，接口调用次数等单调递增的数据，同时可结合 `increase` 和 `rate` 等函数统计变化速率
 
@@ -137,13 +166,37 @@ Counter 就是计数器，从数据量 `0` 开始累计计算，只能增加，�
 <font color="#dd0000"> 一定要注意的是：不要使用计数器来监控可能减少的值 </font>。例如，不要使用计数器来处理当前正在运行的进程数，而应该用 Gauge。Counter 主要有两个方法：
 
 ```golang
-// 将 counter 值加 1
-Inc()
-// 将指定值加到 counter 值上，如果指定值 < 0 会 panic.
-Add(float64)
+type Counter interface {
+    Metric
+    Collector
+
+    // Inc increments the counter by 1. Use Add to increment it by arbitrary non-negative values
+    // 将 counter 值加 1
+    Inc()
+    // Add adds the given value to the counter. It panics if the value is < 0.
+    // 将指定值加到 counter 值上，如果指定值 < 0 会 panic.
+    Add(float64)
+}
+```
+用户可以调用 `Inc` 接口进行上报数据，也可调用 `Add` 接口增加任意的值（必须为非负数）。Prometheus 将数据拆分为不同监控指标名和不同的维度，上报的值需要绑定到具体的监控指标，代码如下：
+```golang
+httpReqs := prometheus.NewCounterVec(
+    prometheus.CounterOpts{
+        Name: "http_requests_total",
+        Help: "How many HTTP requests processed, partitioned by status code and HTTP method.",
+    },
+    []string{"code", "method"},
+)
+prometheus.MustRegister(httpReqs)
+
+httpReqs.WithLabelValues("404", "POST").Add(10)
 ```
 
+指定的 metric_name 是 `http_requests_total`，分成两个维度（`code` / `method`），在 `(404, POST)` 维度上上报了一个数据值为 `10`
+
 ####  Histograms
+尽管能够通过 gauge 监控可增可减的值，并可以在查询时求出其一段时间内的平均值，但是对于一些典型的场景是请求时延、响应数据量大小等，平均值可能并不能很好地反映问题（此类场景，对于开发者更关注的或许是P90/P95/P99等）。Histogram 可以解决这个问题，它并不是记录一个值的变化情况，而是将被观测到的值划分进某一个区间中，称为桶（Bucket）。
+
 Histograms 意为直方图，Histogram 会在一段时间范围内对数据进行采样（通常是请求持续时间或响应大小等），并将其计入可配置的存储桶（Bucket）中。可以观察到指标在各个不同的区间范围的分布情况，可以观察到请求耗时在各个桶的分布。如下图：
 
 ![histogram](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/histograms-1.png)
@@ -155,11 +208,78 @@ Histograms 意为直方图，Histogram 会在一段时间范围内对数据进�
 
 此外，在直方图中，还可以通过 `histogram_quantile` 函数求出百分位数，比如 `P50`/`P90`/`P99` 等数据
 
+Histogram的定义如下，可以看到 Histogram 只有一个 `Observe` 方法：
+```GOLANG
+type Histogram interface {
+    Metric
+    Collector
+
+    // Observe adds a single observation to the histogram.
+    Observe(float64)
+}
+```
+
+Histogram和Counter/Gauge的上报模型不同，在 Counter 中，一个 Counter 对应了一个时间序列，当创建一个 Counter 然后上报数据，它影响的时间序列是确定的。而 **Histogram 则会帮我们创建多个时间序列，当调用 `Observe` 方法时，被观测到的值会被放进预先划分好的桶中，每一个桶中并不记录被观测的值，而是对其进行计数**。代码示例如下：
+
+```GOLANG
+temps := prometheus.NewHistogram(prometheus.HistogramOpts{
+    Name:    "pond_temperature_celsius",
+    Help:    "The temperature of the frog pond.", // Sorry, we can't measure how badly it smells.
+    Buckets: prometheus.LinearBuckets(20, 5, 5),  // 5 buckets, each 5 centigrade wide.
+})
+
+// Simulate some observations.
+for i := 0; i < 1000; i++ {
+    temps.Observe(30 + math.Floor(120*math.Sin(float64(i)*0.1))/10)
+}
+
+// Just for demonstration, let's check the state of the histogram by
+// (ab)using its Write method (which is usually only used by Prometheus
+// internally).
+metric := &dto.Metric{}
+temps.Write(metric)
+fmt.Println(proto.MarshalTextString(metric))
+```
+
+桶的指定可以直接指定，如` Buckets: []float64{0,2.5,5,7.5,10}`，但是**务必注意，只有设定了合适的桶大小（分布），Histogram的指标才更有意义**，如果桶的设定不合理，那么结果就不一定靠谱。那假设开发者对一个数据没有什么先验知识，那么是否有更准确的方式计算出这个数据呢？Prometheus 给出的方案就是用 Summary。
+
 ####  Summary
 Summary 也是用来做统计分析的，和 Histogram 区别在于，Summary 直接存储的就是百分位数，如下所示：可以直观的观察到样本的中位数，如 `P90` 和 `P99`：
 ![histogram](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/summary-1.png)
 
 再次强调下，Summary 的百分位数是客户端计算好直接让 Prometheus 抓取的，不需要 Prometheus 计算，直方图是通过内置函数 `histogram_quantile` 在 Prometheus 服务端计算出来的
+
+```GOLANG
+type Summary interface {
+    Metric
+    Collector
+
+    // Observe adds a single observation to the summary.
+    Observe(float64)
+}
+```
+在创建一个 Summary 时，并不是像创建 Histogram 那样划分桶，而是直接划分所要计算的分位数区间，如下：
+```golang
+temps := prometheus.NewSummary(prometheus.SummaryOpts{
+    Name:       "pond_temperature_celsius",
+    Help:       "The temperature of the frog pond.",
+    Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
+})
+
+// Simulate some observations.
+for i := 0; i < 1000; i++ {
+    temps.Observe(30 + math.Floor(120*math.Sin(float64(i)*0.1))/10)
+}
+
+// Just for demonstration, let's check the state of the summary by
+// (ab)using its Write method (which is usually only used by Prometheus
+// internally).
+metric := &dto.Metric{}
+temps.Write(metric)
+fmt.Println(proto.MarshalTextString(metric))
+```
+
+通过 Summary ，能够更加准确地获知 `50%` 的观测值，`90%` 的观测值以及 `99%` 的观测值，避免了 Histogram 经验值的问题。但缺点是 Summary 的数据计算是由客户端进行的，会造成一定的性能损耗。
 
 #### Histograms 的应用意义
 
@@ -178,7 +298,7 @@ PromQL 的查询表达式有 `4` 种类型：
 -  字符串：只作为某些内置函数的参数出现
 -  标量：单一的数字值，可以是函数参数，也可以是函数的返回结果
 -  瞬时向量：某一时刻的时序数据
--  区间向量：某一时间区间内的时序数据集合
+-  区间向量：某一时间区间内的时序数据集合（范围向量，Range Vector）
 
 ####  瞬时查询
 直接通过指标名即可进行查询，查询结果是当前指标最新的时间序列，比如查询 GC 累积消耗的时间：
@@ -202,6 +322,12 @@ go_gc_duration_seconds_count{}[5m] offset 1d #查询一天前此刻 5 分钟前�
 
 ![ql-range-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/promql-range-1.png)
 
+注意：需要用内置的函数将Range Vector换为一个瞬时向量后才能被绘制。例如每 `1` 分钟的 HTTP 请求量（查看一分钟范围内的变化量），那么以用 `increase` 函数：
+
+```text
+increase(http_requests_total [1m])
+```
+
 ####  Prometheus 内置函数
 列举几个比较重要的：
 
@@ -224,7 +350,7 @@ $irate 结果 =\frac{时间区间内最后两个样本点的差}{最后两个样
 
 ![diff2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/rate-vs-irate-2.png)
 
-3、聚合函数：Sum/by/without<br>
+3、聚合运算符：Sum/by/without<br>
 这里使用 `demo_api_request_duration_seconds_count` 例子，有如下 label：
 -  `instance`
 -  `job`
@@ -238,7 +364,7 @@ rate(demo_api_request_duration_seconds_count{job="demo", method="GET", status="2
 采样数据如下：
 ![sum-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/sum-1.png)
 
-通过 `sum` 方法可以将所有的 QPS 聚合，即可得到整个服务该接口的 QPS（`sum` 就是将指标值做相加）
+通过 `sum` 运算符可以将所有的 QPS 聚合，即可得到整个服务该接口的 QPS（`sum` 就是将指标值做相加）
 ![sum-2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/sum-2.png)
 
 此外，可以配合 `by` 和 `without` 函数在 `sum` 的时候，基于某些标签分组（类似 `group by`）
@@ -255,6 +381,21 @@ sum(rate(demo_api_request_duration_seconds_count{job="demo", method="GET", statu
 ```
 
 ![sum-4](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/sum-4.png)
+再列举例子：
+```text
+http_requests_total { code=200, method=GET }
+http_requests_total { code=200, method=GET }
+http_requests_total { code=404, method=POST }
+http_requests_total { code=404, method=POST }
+
+sum(increase(http_requests_total [1m]))   #查看每分钟的请求总量，将数据聚合起来
+
+sum by (code) (increase(http_requests_total [1m])) #按照code 筛选
+#上面等价于
+sum (increase(http_requests_total [1m])) by (code)
+#上面等价于
+sum without (method) (increase(http_requests_total [1m]))
+```
 
 4、数据统计函数：histogram_quantile<br>
 通过 `histogram_quantile` 函数做数据统计，用来统计百分位数：第一个参数是百分位，第二个 histogram 指标，这样计算出来的就是中位数，即 `P50`，如下例子：
@@ -267,11 +408,33 @@ histogram_quantile(0.5,go_gc_pauses_seconds_total_bucket)
 
 
 ####  关于promql的一些细节
+Histogram/Summary时间序列要如何进行查询呢？事实上，Prometheus 会根据一定的规则来给这些时间序列命名。假设监控指标 mymetric，设置了 `1`/`2`/`3` bucket ，且采集到了如下数据：
 
+| buckets | observe | write | values |
+| :-----:| :----: | :----: | :----: |
+| 1 | 2 | 2 | 0.2, 0.6 |
+| 2 | 3 | 5 | 1.3, 1.5, 1.5 |
+| 3 | 4 | 9 | 2.4, 2.6, 2.8, 2.9 |
+
+那么，可以得到这样的结果（注意 bucket 的结果向下包含）：
+```text
+mymetric_bucket { le="1" } = 2
+mymetric_bucket { le="2" } = 5
+mymetric_bucket { le="3" } = 9
+mymetric_bucket { le="+Inf" } = 9
+mymetric_count = 9
+mymetric_sum = 15.8
+```
+
+Histogram 并没有存储数据采样点的值，只保留了总和和每一个区间的 counter。可以在 PromQL 中用 `histogram_quantile()` 函数来计算其值的分位数。
 
 ## 0x05  Grafana 可视化
+Grafana 里面的面板也是通过 PromQL 来进行数据查询的
 
-## 0x06 参考
+## 0x06  总结
+本文介绍了Prometheus/Merics的基础概念。Prometheus中存储的数据都为时间序列（time series），它是一串随着时间移动而产生的属于某个metric name和一系列标签（键值对）的数据。时间序列是由metric name和一系列的标签label（键值对）唯一标识的，不同的标签代表了不同的时间序列。
+
+## 0x07 参考
 
 - [一文带你了解 Prometheus](https://cloud.tencent.com/developer/article/1999843)
 - [一文搞懂 Prometheus 的直方图](https://juejin.im/post/5d492d1d5188251dff55b0b5)
@@ -279,5 +442,7 @@ histogram_quantile(0.5,go_gc_pauses_seconds_total_bucket)
 - [Metrics 设计：teleport](https://goteleport.com/teleport/docs/metrics-logs-reference/)
 - [Lock-free Observations for Prometheus Histograms](https://grafana.com/blog/2020/01/08/lock-free-observations-for-prometheus-histograms/)
 - [golang API](https://godoc.org/github.com/prometheus/client_golang/prometheus)
+-  [HISTOGRAMS AND SUMMARIES](https://prometheus.io/docs/practices/histograms/)
+-  [prometheus的内置函数](https://prometheus.io/docs/prometheus/latest/querying/functions/)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
