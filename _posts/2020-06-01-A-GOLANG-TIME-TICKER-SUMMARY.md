@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      基于 Golang 实现的定时器分析与实现（未完成）
+title:      基于 Golang 实现的定时器分析与实现（二）：最小堆 && 时间轮
 subtitle:   Timer and Ticker： events in the future
 date:       2020-06-01
 author:     pandaychen
@@ -10,21 +10,28 @@ tags:
     - Golang
     - 定时器
     - Timer
+    -
 ---
 
 ##  0x00    前言
 定时器（Timer）常用于解决 <font color="#dd0000"> 多长时间后触发处理某些事件 </font> 的问题。在项目中，通常遇到下面两类问题都可以使用定时器来解决：
 1.  延迟消息、事件处理，如订单默认 `N` 时间跨度后自动评价等
-2.  长连接心跳管理，如在 IM 中，当客户端与服务端 `N` 时间跨度内没有 Heartbeat 的话，需要断开此无效连接
+2.  长连接心跳管理，如在 IM 服务器实现中，当客户端与服务端 `N` 时间跨度内没有 Heartbeat 的话，需要断开此无效连接
+3.	各种需要定时调度的实现
 
 ####    实现方案
 
-##  0x01    Golang 中的定时器
+##  0x01    原生库的实现
+本小节部分内容节选自[Go 语言设计与实现：计时器](https://draveness.me/golang/docs/part3-runtime/ch06-concurrency/golang-timer/)。
+
+Go 语言从实现计时器到现在经历过很多个版本的迭代：
+-	Go `1.9` 版本之前，所有的计时器由全局唯一的四叉堆维护
+-	Go `1.10` ~ `1.13`，全局使用 `64` 个四叉堆维护全部的计时器，每个处理器（P）创建的计时器会由对应的四叉堆维护
+-	Go `1.14` 版本之后，每个处理器单独管理计时器并通过网络轮询器触发
 
 
-##  0x02    原生库的实现
 
-##  0x03    最小堆的实现
+##  0x02    最小堆的实现
 最小堆（Minheap）定时器的经典用法是和 [`epoll_wait` 系统调用](https://man7.org/linux/man-pages/man2/epoll_wait.2.html) 的结合，即与参数 `timeout` 结合：
 ![epoll_wait](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/linux/epoll_wait.png)
 `timeout` 表示超时时间（一般的实例都是设置一个固定的值），但是可以通过与最小堆结合，在事件驱动循环中动态计算 `timeout` 的值。具体做法是：通过小根堆保存每个超时事件，将 `timeout` 设置为 top 结点（即堆顶）的时间，就完美的将网络事件 IO 与超时事件结合在一起。<br>
@@ -292,7 +299,7 @@ func (t *Timer) put(td *TimerData) {
 }
 ```
 
-##  0x04    Timewheel 实现
+##  0x03    Timewheel 实现
 在海量并发场景下（百、千万级），基于时间轮（Timewheel）的 Timer 相较于最小堆实现的 Timer，性能更优：
 
 | 实现算法 | 创建复杂度 | 删除复杂度 |
@@ -304,13 +311,12 @@ func (t *Timer) put(td *TimerData) {
 
 -	简单时间轮（Simple Timing Wheel）
 -	层级时间轮（Hierarchical Timing Wheels）：比如 Kafka 的 [实现](https://www.confluent.io/blog/apache-kafka-purgatory-hierarchical-timing-wheels/) 及 Linux 内核中多级时间轮定时器
-
-##  0x05    其他
-
-##  0x06    参考
+[数据结构与算法回顾（三）：时间轮](https://pandaychen.github.io/2022/05/28/A-TIMEWHEEL-ANALYSIS/)一文分析了时间轮的一种实现。
+##  0x04    参考
 -   [Go-Zero 如何应对海量定时延迟任务](https://my.oschina.net/u/4628563/blog/4667586)
 -   [论 golang Timer Reset 方法使用的正确姿势](https://tonybai.com/2016/12/21/how-to-use-timer-reset-in-golang-correctly/)
 -   [定时任务高效触发](https://coolshell.me/articles/cron-job-trigger-high-efficiency.html)
 -	[Go 高级编程：6.3 延时任务系统](https://chai2010.cn/advanced-go-programming-book/ch6-cloud/ch6-03-delay-job.html)
 -	[层级时间轮的 Golang 实现](http://russellluo.com/2018/10/golang-implementation-of-hierarchical-timing-wheels.htmlS)
 -	[Apache Kafka, Purgatory, and Hierarchical Timing Wheels](https://www.confluent.io/blog/apache-kafka-purgatory-hierarchical-timing-wheels/)
+-	[Go 语言设计与实现：计时器](https://draveness.me/golang/docs/part3-runtime/ch06-concurrency/golang-timer/)
