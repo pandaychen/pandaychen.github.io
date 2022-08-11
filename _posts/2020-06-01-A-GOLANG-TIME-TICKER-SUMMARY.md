@@ -19,8 +19,6 @@ tags:
 2.  长连接心跳管理，如在 IM 服务器实现中，当客户端与服务端 `N` 时间跨度内没有 Heartbeat 的话，需要断开此无效连接
 3.	各种需要定时调度的实现
 
-####    实现方案
-
 ##  0x01    原生库的实现
 本小节部分内容节选自[Go 语言设计与实现：计时器](https://draveness.me/golang/docs/part3-runtime/ch06-concurrency/golang-timer/)。
 
@@ -311,7 +309,10 @@ func (t *Timer) put(td *TimerData) {
 
 -	简单时间轮（Simple Timing Wheel）
 -	层级时间轮（Hierarchical Timing Wheels）：比如 Kafka 的 [实现](https://www.confluent.io/blog/apache-kafka-purgatory-hierarchical-timing-wheels/) 及 Linux 内核中多级时间轮定时器
+
 [数据结构与算法回顾（三）：时间轮](https://pandaychen.github.io/2022/05/28/A-TIMEWHEEL-ANALYSIS/)一文分析了时间轮的一种实现。
+
+
 ##  0x04    参考
 -   [Go-Zero 如何应对海量定时延迟任务](https://my.oschina.net/u/4628563/blog/4667586)
 -   [论 golang Timer Reset 方法使用的正确姿势](https://tonybai.com/2016/12/21/how-to-use-timer-reset-in-golang-correctly/)
