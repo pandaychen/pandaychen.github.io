@@ -47,11 +47,11 @@ c2 := male(chan []byte, 1024)           // 有缓冲
 
 ###     无缓冲 Channel
 无缓冲：发送和接收动作是同时发生的。如果没有 goroutine 读取 channel （<- channel），则发送者 (channel <-) 会一直阻塞。
-![image](https://s2.ax1x.com/2020/01/20/1PGlLt.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2020/channel/channel_1.png)
 
 ###     有缓冲 Channel
 缓冲：缓冲 channel 类似一个有容量的队列。当队列满的时候发送者会阻塞；当队列空的时候接收者会阻塞。
-![image](https://s2.ax1x.com/2020/01/20/1PGtJg.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2020/channel/channel_2.png)
 
 ##      细节（容易忽略）
 
@@ -254,9 +254,10 @@ func worker(start chan bool) {
 }
 ```
 
-####     关闭 channel 的优雅做法
-在主动（或被动）关闭 channel 的时候，最好设置 channel 为 nil（nil channel 在 select 中很有用），这是一个好习惯，通过将已经关闭的 channel 置为 nil，下次 select 将会阻塞在该 channel 上，使得 select 继续下面的分支 evaluation。
-```go
+####     重点：关闭 channel 的优雅做法
+在主动（或被动）关闭 channel 的时候，**最好设置 channel 为 nil（nil channel 在 select 中很有用**），这是一个好习惯，通过将已经关闭的 channel 置为 `nil`，下次 select 将会阻塞在该 channel 上，使得 select 继续下面的分支 evaluation
+
+```golang
 package main
 
 import "fmt"
@@ -300,7 +301,7 @@ func main() {
 ```
 
 ####     生产 - 消费者模型
-生产者产生一些数据将其放入 channel；然后消费者按照顺序，一个一个的从 channel 中取出这些数据进行处理。这是最常见的 channel 的使用方式。当 channel 的缓冲用尽（无数据）时，生产者必须等待（阻塞）。
+生产者产生一些数据将其放入 channel；然后消费者按照顺序，一个一个的从 channel 中取出这些数据进行处理。这是最常见的 channel 的使用方式。当 channel 的缓冲用尽（无数据）时，生产者必须等待（阻塞）
 
 ```go
 package main
@@ -375,7 +376,7 @@ func main() {
 
 ##      0x03 channel 的陷阱
 
--       nil channel 会阻塞
+-       `nil` channel 会阻塞
 对一个没有初始化的 channel 进行读（或写）操作都将发生阻塞，如下：
 
 ```go
