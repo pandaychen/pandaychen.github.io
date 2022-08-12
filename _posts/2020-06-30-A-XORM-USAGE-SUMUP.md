@@ -9,6 +9,7 @@ catalog: true
 category:   false
 tags:
     - Xorm
+    - MySQL
 ---
 
 ##  0x00    前言
