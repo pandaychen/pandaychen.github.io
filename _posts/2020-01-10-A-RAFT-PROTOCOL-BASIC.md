@@ -17,8 +17,25 @@ tags:
 
 > Raft implements consensus by first electing a distinguished leader, then giving the leader complete responsibility for managing the replicated log. The leader accepts log entries from clients, replicates them on other servers, and tells servers when it is safe to apply log entries to their state machines. A leader can fail or become disconnected from the other servers, in which case a new leader is elected.
 
+
+共识算法就是保证一个集群的多台机器协同工作，在遇到请求时，数据能够保持一致。即使遇到机器宕机，整个系统仍然能够对外保持服务的可用性。
+
 ####  CAP定理
+
 [CAP 定理基础](https://pandaychen.github.io/2019/10/20/ETCD-BEST-PRACTISE/#0x02-cap-%E5%AE%9A%E7%90%86%E5%9F%BA%E7%A1%80)
+
+CAP ： **一个分布式系统不可能同时满足一致性 （C： Consistency）、可用性（A：Availability）和分区容错性（P：Partition tolerance）这三个基本需求，最多只能同时满足其中的两项**
+
+
+分布式存储架构中，设计共识算法要考虑在一个复制集群中，所有节点按照确认的顺序处理命令，最终结果是在客户端看来，一个复制集群表现的像一个单状态机一样一致。为了保证多个节点顺序一致，需要处理如下问题：
+
+- 非拜占庭错误，包含网络延迟，分区，丢包，重复和乱序
+- 只要多数节点（quorum）正常，集群就能对外提供稳定的服务。错误的节点可以在稍后恢复后重新加入集群服务
+- 不依赖系统时钟，实现修改的顺序一致性
+- 性能，多数节点达成一致即可，不能因为少量的慢节点拖累整个集群的性能
+- 脑裂问题
+
+![distribute](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/raft/distribute-storage-architecture.png)
 
 ####  Raft 要解决什么样的问题
 由于分布式系统引入了多个节点，节点规模越大，宕机、网络时延、网络分区就会成为常态，任何一个问题都可能导致节点之间的数据不一致，Raft 是用来解决分布式场景下的一致性问题的共识算法。
@@ -34,12 +51,13 @@ tags:
 
 ####  Raft的核心逻辑
 
-Raft 的核心逻辑是：先选举出 Leader，Leader 完全负责 Replicated-Log 的管理。Leader 负责接受所有客户端更新请求，然后复制到 Follower 节点，并在安全的时候执行这些请求。若 Leader 故障，Followes 会重新选举出新的 Leader。Raft 是满足 CAP 定理中的 C 和 P 特性，属于强一致性的分布式协议。
+Raft 的核心逻辑是：先选举出 Leader，Leader 完全负责 Replicated-Log 的管理。Leader 负责接受所有客户端更新请求，然后复制到 Follower 节点，并在安全的时候执行这些请求。若 Leader 故障，Followes 会重新选举出新的 Leader。Raft 是满足 CAP 定理中的 C 和 P 特性，属于强一致性的分布式协议。通俗而言，**Raft的核心就是leader发出日志同步请求，follower接收并同步日志，最终保证整个集群的日志一致性**。
 
-Raft 的两个核心问题：
+Raft 的三个核心问题：
 
-1.  Leader Election：领导人选举
-2.  Log Replication：日志复制（备份）
+1.  Leader Election：领导人选举（选主），主节点宕机后必须选择一个节点成为新的主节点
+2.  Log Replication：日志复制（备份），主节点必须接受客户端指令日志，并强制复制到其他节点
+3.  Safty：安全性，复制集群状态机必须一致。相同索引的日志指令一致，顺序一致
 
 Raft 的优点如下：
 
