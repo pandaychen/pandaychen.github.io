@@ -9,6 +9,7 @@ catalog: true
 category:   false
 tags:
     - Prometheus
+    - gRPC
 ---
 
 ##  0x00    前言
@@ -16,38 +17,23 @@ tags:
 -   prometheus
 -   open-falcon
 
-这篇文章，介绍下如何将 gRPC 和 Prometheus 结合。Prometheus 的架构中常用的是 Pull 模式，当然 Push 也可以。这其实就是服务端（服务注册）和客户端（主动上报数据）的区别。
-在 Pull 模式中, 通过 HTTP 协议去采集指标，只要应用系统能够提供 HTTP 接口（一般使用 promhttp 创建 HttpServer）就可以接入监控系统，相比于私有协议或二进制协议来说更为简单。
+这篇文章，介绍下如何将 gRPC 和 Prometheus 结合。Prometheus 的架构中常用的是 Pull 模式，当然 Push 也可以。这其实就是服务端（服务注册）和客户端（主动上报数据）的区别。在 Pull 模式中, 通过 HTTP 协议去采集指标，只要应用系统能够提供 HTTP 接口（一般使用 promhttp 创建 HttpServer）就可以接入监控系统，相比于私有协议或二进制协议来说更为简单。
+
+相关基础知识介绍：[理解 Prometheus 的基本数据类型及应用（基础篇）](https://pandaychen.github.io/2020/04/11/PROMETHEUS-METRICS-INTRO/)
 
 
 ##  0x01    Prometheus Metrics
-TODO: 改为表格或图
-####    基础 Metrics 类型
-&emsp;&emsp; Prometheus 常用 4 种 Metric 类型，前四种为：Counter，Gauge，Summary 和 Histogram，每种类型都有对应的 Vector 版本：GaugeVec, CounterVec, SummaryVec, HistogramVec，vector 版本细化了 prometheus 数据模型，增加了 label 维度。
-只有基础 metric 类型实现了 Metric 接口，metric 和它们的 vector 版本都实现了 collector 接口。collector 负责一系列 metrics 的采集，但是为了方便，metric 也可以 “收集自己”。注意：Gauge, Counter, Summary, Histogram, 和 Untyped 自身就是接口，而 GaugeVec, CounterVec, SummaryVec, HistogramVec, 和 UntypedVec 则不是接口。
-为了创建 metric 和它们的 vector 版本，需要选择合适的 opts 结构体，如 GaugeOpts, CounterOpts, SummaryOpts, HistogramOpts, 或 UntypedOpts.
 
-####    Custom Collectors and constant Metrics
-实现自己的 metric，一般只需要实现自己的 collector 即可。如果已经有了现成的 metric（prometheus 上下文之外创建的），则无需使用 Metric 类型接口，只需要在采集期间将现有的 metric 映射到 prometheus metric 即可，此时可以使用 NewConstMetric, NewConstHistogram, and NewConstSummary (以及对应的 Must… 版本) 来创建 metric 实例，以上操作在 collect 方法中实现。describe 方法用于返回独立的 Desc 实例，NewDesc 用于创建这些 metric 实例。（NewDesc 用于创建 prometheus 识别的 metric）
-如果只需要调用一个函数来收集一个 float 值作为 metric，那么推荐使用 GaugeFunc, CounterFunc, 或 UntypedFunc
-
-####    Advanced Uses of the Registry
-MustRegister 是注册 collector 最通用的方式。如果需要捕获注册时产生的错误，可以使用 Register 函数，该函数会返回错误。
-如果注册的 collector 与已经注册的 metric 不兼容或不一致时就会返回错误。registry 用于使收集的 metric 与 prometheus 数据模型保持一致。不一致的错误会在注册时而非采集时检测到。前者会在系统的启动时检测到，而后者只会在采集时发生（可能不会在首次采集时发生），这也是为什么 collector 和 metric 必须向 Registry describe 它们的原因。
-以上提到的 registry 都被称为默认 registry，可以在全局变量 DefaultRegisterer 中找到。使用 NewRegistry 可以创建 custom registry，或者可以自己实现 Registerer 或 Gatherer 接口。custom registry 的 Register 和 Unregister 运作方式类似，默认 registry 则使用全局函数 Register 和 Unregister。
-custom registry 的使用方式还有很多：可以使用 NewPedanticRegistry 来注册特殊的属性；可以避免由 DefaultRegisterer 限制的全局状态属性；也可以同时使用多个 registry 来暴露不同的 metrics。
-DefaultRegisterer 注册了 Go runtime metrics （通过 NewGoCollector）和用于 process metrics 的 collector（通过 NewProcessCollector）。通过 custom registry 可以自己决定注册的 collector
-
-#####   HTTP Exposition
-Registry 实现了 Gather 接口。调用 Gather 接口可以通过某种方式暴露采集的 metric。通常 metric endpoint 使用 http 来暴露 metric。通过 http 暴露 metric 的工具为 promhttp 子包。
+####    Metrics 类型
+Prometheus 常用 4 种 Metric 类型，前四种为：Counter，Gauge，Summary 和 Histogram，每种类型都有对应的 Vector 版本：GaugeVec, CounterVec, SummaryVec, HistogramVec。Vector 版本细化了 prometheus 数据模型，增加了 `label` 维度。现网项目中Vector形式更为常用。
 
 
 ##  0x02    Prometheus 包的用法
-&emsp;&emsp; Prometheus 包提供了用于实现监控代码的 Metric 原型和用于注册 Metric 的 Registry。Promhttp 允许通过 HTTP 来暴露注册的 Metric 或将注册的 Metric 推送到 Pushgateway。
+Prometheus 包提供了用于实现监控代码的 Metric 原型和用于注册 Metric 的 Registry。Promhttp 允许通过 HTTP 来暴露注册的 Metric 或将注册的 Metric 推送到 Pushgateway。
 
 在 Prometheus 中，一般 Metric 对象采集的使用步骤如下：
 1.    初始化一个 Metric 对象
-2.    Register 注册对象
+2.    Register 注册对象，常用`MustRegister`方法注册
 3.    向对象中添加值
 
 
@@ -240,11 +226,108 @@ temps.Write(metric)
 fmt.Println(proto.MarshalTextString(metric)
 ```
 
-##  0x07 gRPC 调用
-这小节，以 pull 方式为例，看下如何在 gRPC 中通过 prometheus 实现监控。基本的框架如下：
-![image](https://wx1.sbimg.cn/2020/05/11/grpc2prometheus.png)
+##  0x07 gRPC 与 Prometheus 结合
+这小节，以 PULL 方式为例，看下如何在 gRPC 中通过 prometheus 实现监控。基本的框架如下：
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2020/prometheus/grpc2prometheus.png)
 
-##  0x08    参考
+
+##  0x08    gRPC的metrics设计（思考）
+
+####    指标
+为了实时了解和监控gRPC服务的运行状况，需要重点关注如下指标:
+-   RPC接口请求耗时：`server_elapsed_ms`
+-   服务器错误：`server_errors`
+-   请求字节数：`server_bytes_transferred_in`
+-   回包字节数：`server_bytes_transferred_out`
+-   服务器状态码：`server_code`
+
+接下来，就是把上面的指标按照Prometheus的metrics表现出来：
+-   Counter：代表一种样本数据单调递增的指标，即只增不减，通常用来统计如服务的请求数，错误数等
+-   Gauge：代表一种样本数据可以任意变化的指标，即可增可减，通常用来统计如服务的CPU使用值，内存占用值等
+-   Histogram和Summary：用于表示一段时间内的数据采样和点分位图统计结果，通常用来统计请求耗时或响应大小等
+
+####    label设计
+-   组织（realm）
+-   地域（region）
+-   可用区域（available-zone）
+-   发布环境（dev/beta/prod）
+-   应用名称（appname）
+-   主机名称（hostname）
+-   方法（method）
+-   返回码（retcode）
+-   版本（app-version）
+
+指标结合label所形成的多维度时间序列是各个维度监控/metrics的基础。
+
+##  0x09    gRPC的metrics采集
+本小节梳理下，如何利用gRPC拦截器简化Metrics的采集过程。考虑Metrics统计和Metrics采集两个逻辑的实现，参考项目[go-grpc-prometheus](https://github.com/grpc-ecosystem/go-grpc-prometheus)
+
+####    Metrics统计
+Metrics的来源可能有如下两种。基于interceptor，可以在每一次请求前后都增加对应统计或处理：
+1.  服务自身的metrics
+2.  服务作为Metrics转换器，接收客户端上报的Metrics并转发（类似PUSH-GATEWAY的功能）
+
+
+####    Metrics采集（PULL or PUSH）
+服务完成metrics数据收集（转换）后，需要把数据上报到Prometheus服务器中：
+
+1、主动拉取：服务侧提供接口暴露Metrics数据<br>
+
+```golang
+func StartPrometheus(port, path string) *http.Server {
+    //......
+	if len(path) < 1 || !strings.HasPrefix(path, "/") {
+		// Invalid, use default
+		path = DefaultPath
+	}
+
+	// Register
+	prometheus.Register(Collector1)
+    prometheus.Register(Collector2)
+    prometheus.Register(Collector3)
+
+	httpMux := http.NewServeMux()
+	httpMux.Handle(path, promhttp.Handler())
+
+	server := &http.Server{
+		Addr: "0.0.0.0:" + port,
+		Handler: httpMux,
+	}
+
+	go func() {
+		server.ListenAndServe()
+	}()
+
+	return server
+}
+```
+
+此外，通过声明Prometheus配置文件中的`scrape_configs`选项，指定Prometheus在运行时需要拉取指标的目标：
+```yaml
+# A scrape configuration containing exactly one endpoint to scrape.
+scrape_configs:
+  # 配置服务地址
+  - job_name: 'test-application-metrics'
+    scrape_interval: 2s
+    static_configs:
+      - targets: ['localhost:12345']
+```
+
+2、被动接收（PUSH模式）<br>
+
+prometheus的配置如下，配置成pushgateway的地址用于Prometheus拉取：
+```yaml
+# A scrape configuration containing exactly one endpoint to scrape.
+scrape_configs:
+  - job_name: 'pushgateway'
+    scrape_interval: 10s
+    honor_labels: true
+    static_configs:
+      - targets: ['pushgateway:9091']
+```
+
+
+##  0x0A    参考
 -   [Go gRPC Interceptors for Prometheus monitoring](https://github.com/grpc-ecosystem/go-grpc-prometheus)
 -   [容器监控实践—Prometheus 基本架构](https://segmentfault.com/a/1190000018372347)
 -   [GoDoc - package prometheus](https://godoc.org/github.com/prometheus/client_golang/prometheus)
