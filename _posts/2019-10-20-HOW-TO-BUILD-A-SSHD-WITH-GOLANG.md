@@ -24,7 +24,7 @@ tags:
 
 ##  0x01    SSH 架构
 SSH 的基础架构图如下，进行项目开发之前，首先需要对 SSH 协议（分层）有个直观的认识：
-![image](https://s2.ax1x.com/2019/11/05/KzgajS.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2019/1029-ssh.png)
 
 -   TCP 层: 建立传输层链接, 然后进行 SSH 协议处理
 -   Handshake 层: SSH 协议里面的传输层, 该层主要提供加密传输

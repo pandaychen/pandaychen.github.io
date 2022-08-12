@@ -61,7 +61,7 @@ Network Partition 是必然的，网络非常可能出现问题（断线、超�
 
 #### 经典的 CAP 图
 
-![image](https://s2.ax1x.com/2019/11/08/MZr0WF.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2019/1020-cap.png)
 
 ## 0x03 Etcd 原理
 
