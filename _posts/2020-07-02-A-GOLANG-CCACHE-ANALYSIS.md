@@ -66,6 +66,8 @@ func (c *Cache) bucket(key string) *bucket {
 }
 ```
 
+![m-bucket-lock](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2020/ccache/ccache-multiple-bucket.png)
+
 ####	累计访问多次才做LRU提权（提高LRU操作的效率）
 具体做法是：每当触发`Set`或`Get`方法时，当前被操作的`Item`的指针会异步被发送至`worker`工作协程处理（`c.promotables <- item`）；处理时，会判断累计访问多次才做LRU提权操作（`c.list.MoveToFront(item.element)`）
 
@@ -115,11 +117,13 @@ func (i *Item) shouldPromote(getsPerPromote int32) bool {
 
 上述设计的好处是，可以显著降低对LRU list的写操作的频率，降低锁冲突的概率；不过缺点是该策略会使list的顺序不完全等同于访问时间序。考虑到多读的场景，该策略对命中率的损失应该是可以容忍的
 
+![prompt](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2020/ccache/ccache-prompt.png)
+
 ####	独立goroutine更新LRU链，避免加锁（提权/删除）
 ccache在`Get`和`Set`操作时，需要更新记录访问时间序的list，`Delete`操作需要删除掉list的相应节点。ccache通过单独goroutine对list做更新，在调用`Get`/`Set`/`Delete`方法时，提交更新任务到队列（前两者共用同一个channel）中，工作goroutine不停从队列中取任务做更新
 
 
-![async]()
+![async](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2020/ccache/async-lru-update.png)
 
 上述设计好处是，list不存在多线程访问，不需加锁（原生的`list.List`非线程安全），操作完对应的分段hashtable直接返回，异步更新list，操作相对更快。
 
@@ -134,7 +138,7 @@ type Item struct {
 	key        string
 	group      string
 	promotions int32
-	refCount   int32
+	refCount   int32		//？何用
 	expires    int64		//原子性的操作：过期时间
 	size       int64
 	value      interface{}	//value存储
@@ -286,15 +290,169 @@ func (c *Cache) gc() int {
 }
 ```
 
-##	0x03	LRU 的实现
+##	0x03	Set/Get/Del实现
+
+1、`Set`操作<br>
+底层调用的`set`方法，值得注意的是当key已经存在时，先通过`newItem`方法生成新的`Item`，然后删除旧的`Item`，同时更新对应的LRU链：
+```golang
+func (c *Cache) set(key string, value interface{}, duration time.Duration, track bool) *Item {
+	//存储在bucket层
+	item, existing := c.bucket(key).set(key, value, duration, track)
+	if existing != nil {
+		//如果存在，更新新的value，同时删除旧的
+		c.deletables <- existing
+	}
+	c.promotables <- item		//异步计算更新LRU
+	return item
+}
+
+
+func (b *bucket) set(key string, value interface{}, duration time.Duration, track bool) (*Item, *Item) {
+	expires := time.Now().Add(duration).UnixNano()
+	item := newItem(key, value, expires, track)
+	b.Lock()
+	existing := b.lookup[key]
+	b.lookup[key] = item
+	b.Unlock()
+	return item, existing
+}
+```
+
+![set](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2020/ccache/ccache-set.png)
+
+2、`Get`操作<br>
+获取key对应的value，如果value过期了，则不需要进行LRU提权处理，用户侧需要调用`TTL`方法判断`Item`是否过期，一般的方式是过期时调用`ccache.Delete`方法删除key：
+```golang
+// Get an item from the cache. Returns nil if the item wasn't found.
+// This can return an expired item. Use item.Expired() to see if the item
+// is expired and item.TTL() to see how long until the item expires (which
+// will be negative for an already expired item).
+func (c *Cache) Get(key string) *Item {
+	item := c.bucket(key).get(key)
+	if item == nil {
+		return nil
+	}
+	if !item.Expired() {
+		select {
+		case c.promotables <- item:
+		default:
+		}
+	}
+	return item
+}
+```
+
+![get](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2020/ccache/ccache-get.png)
+
+3、`Del`操作<br>
+删除bucket操作是同步的，删除LRU链是异步的：
+```golang
+// Remove the item from the cache, return true if the item was present, false otherwise.
+func (c *Cache) Delete(key string) bool {
+	item := c.bucket(key).delete(key)
+	if item != nil {
+		c.deletables <- item	//删除LRU链
+		return true
+	}
+	return false
+}
+
+//在worker线程中删除
+func (c *Cache) doDelete(item *Item) {
+	if item.element == nil {
+		item.promotions = -2
+	} else {
+		c.size -= item.size
+		if c.onDelete != nil {
+			c.onDelete(item)
+		}
+		c.list.Remove(item.element)
+	}
+}
+```
+
+##	0x04	LRU 的实现
 前面已经大致介绍了LRU的操作，LRU机制，当缓存满后，先淘汰最久未访问的内容。在Golang中通常采用hashtable和list数据结构来实现，hashtable支持通过key快速检索到对应的value，list用来记录元素的访问时间序，支持淘汰最久未访问的内容，实现是插入/读取时，将被访问的节点移动到LRU链的最前面（一般被优先淘汰的是list尾部，提权一般放在list头部）
+
+![LRU](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2020/ccache/ccache-lru.png)
 
 ####	需要考虑的点
 由于Golang原生的hashtable和list都不是线程安全的，按照上述LRU策略，无论`Set`还是`Get`操作都需要加锁，操作LRU的list也需要加锁，于是ccache的实现就突显了少加锁/不加锁的核心优化点
 
 ####	代码实现
+1、主结构<br>
+```GOLANG
+type Cache struct {
+	//...
+	list        *list.List	//LRU链
+	deletables  chan *Item	
+	promotables chan *Item	//异步提权
+	//...
+}
+```
+
+2、LRU更新<br>
+LRU的操作集中在`worker`方法中，加上一小节的代码注释。调用了`doPromote`方法进行LRU提权操作：
+```golang
+func (c *Cache) doPromote(item *Item) bool {
+	//already deleted
+	if item.promotions == -2 {
+		return false
+	}
+	if item.element != nil { //not a new item
+		if item.shouldPromote(c.getsPerPromote) {
+			//已存在的节点，移动至链表最前
+			c.list.MoveToFront(item.element)
+			item.promotions = 0
+		}
+		return false
+	}
+
+	//新节点，插入到头部
+	c.size += item.size
+	item.element = c.list.PushFront(item)
+	return true
+}
+```
+
+3、LRU淘汰元素<br>
+LRU淘汰元素的方法在`gc`中，`itemsToPrune`为淘汰元素的个数：
+```GOLANG
+func (c *Cache) gc() int {
+	dropped := 0
+	//从LRU链尾部开始淘汰
+	element := c.list.Back()
+
+	itemsToPrune := int64(c.itemsToPrune)
+	if min := c.size - c.maxSize; min > itemsToPrune {
+		itemsToPrune = min	//计算本次gc中被淘汰的元素个数
+	}
+
+	for i := int64(0); i < itemsToPrune; i++ {
+		if element == nil {
+			return dropped
+		}
+		prev := element.Prev()
+		item := element.Value.(*Item)
+		//淘汰元素，删除bucket且删除LRU链
+		if c.tracking == false || atomic.LoadInt32(&item.refCount) == 0 {
+			c.bucket(item.key).delete(item.key)
+			c.size -= item.size
+			c.list.Remove(element)
+			if c.onDelete != nil {
+				c.onDelete(item)
+			}
+			dropped += 1
+			item.promotions = -2	//打标记
+		}
+		element = prev
+	}
+	return dropped
+}
+```
 
 
-##  0x04	参考
+
+##  0x05	参考
 -   [ccache Doc](https://github.com/karlseguin/ccache/blob/master/readme.md)
 -   [go 语言高性能缓存组件 ccache 分析](https://juejin.im/post/5cb3e226e51d456e853f8119)
