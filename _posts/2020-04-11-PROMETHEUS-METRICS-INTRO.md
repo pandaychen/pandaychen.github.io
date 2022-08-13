@@ -53,6 +53,27 @@ Prometheus 的从被监控服务的注册到指标抓取到指标查询的流程
 -  静态注册：配置文件配置采集指标的 IP + 端口，配合 Prometheus 提供的 `reload` API 以及 `--web.enable-lifecycle` 参数实现热更新
 -  动态注册：配置文件配置 endpoint 地址，类似于服务发现（支持 Consul/DNS / 文件 / K8S 等多种服务发现机制）
 
+通过声明Prometheus配置文件中的`scrape_configs`选项，指定Prometheus在运行时要拉取指标的目标，目标实例需要实现一个可以被Prometheus进行轮询的endpoint，而要实现如此接口，可以用来给Prometheus提供监控样本数据的独立程序一般被称作为Exporter，比如用来拉取操作系统指标的Node Exporter，它会从os收集硬件指标，提供Prometheus来拉取。配置示例如下：
+
+```yaml
+# A scrape configuration containing exactly one endpoint to scrape.
+scrape_configs:
+  # nodeexporter
+  - job_name: 'nodeexporter'
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['nodeexporter:9100']
+  - job_name: 'cadvisor'
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['cadvisor:8080']
+  # 配置服务地址
+  - job_name: 'test-application-metrics'
+    scrape_interval: 2s
+    static_configs:
+      - targets: ['localhost:12345']
+```
+
 如，静态注册，启动指令 `prometheus --config.file=/usr/local/etc/prometheus.yml --web.enable-lifecycle`：
 ```yaml
 scrape_configs:
@@ -72,10 +93,13 @@ scrape_configs:
           - node_exporter
 ```
 
+
+
 2、指标抓取和存储 <br>
 Prometheus 对指标的抓取采取主动 PULL 方式，即周期性的请求被监控服务暴露的 metrics 接口或者是 PushGateway，从而获取到 Metrics 指标，默认时间是 `15s` 抓取一次；抓取到的指标会被以时间序列的形式保存在内存中，并且定时刷到磁盘上（默认 `2h`）
 
 ####  0x02  基础：Metrics
+在 Prometheus 内部，所有采样样本都是以时间序列的形式保存在时序数据库中，本小节详细介绍下`4`种指标类型已经使用场景。
 
 #### 数据模型
 Prometheus 采集的所有指标都是以时间序列的形式进行存储，每一个时间序列有三部分组成：
@@ -153,7 +177,7 @@ type Gauge interface {
 ```
 
 
-#### Counter
+#### Counter：计数器（只增）
 
 Counter 就是计数器，从数据量 `0` 开始累计计算，只能增加，或者保持不变（增加 `0`），典型对应的场景是：持续增加的访问量采样数据。Counter 一般从 `0` 开始，一直不断的累加，但有可能保持不变（在图中以一条水平线表示）。通过 Counter 指标可以统计 HTTP 请求数量，请求错误数，接口调用次数等单调递增的数据，同时可结合 `increase` 和 `rate` 等函数统计变化速率
 
@@ -188,7 +212,7 @@ httpReqs := prometheus.NewCounterVec(
     []string{"code", "method"},
 )
 prometheus.MustRegister(httpReqs)
-
+//以打标签的方式上报
 httpReqs.WithLabelValues("404", "POST").Add(10)
 ```
 

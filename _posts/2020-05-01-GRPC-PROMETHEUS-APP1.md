@@ -65,7 +65,7 @@ func (r *Registry) MustRegister(cs ...Collector) {
 ```
 
 ##  0x03    Counter && CouterVec
-&emsp;&emsp; 计数器（Counter）是表示单个单调递增计数器的累积量，其值只能增加或在重启时重置为零。 例如，可以使用计数器来表示服务的总请求数，已完成的任务或错误总数。 但是注意不要使用计数器来监控可能减少的值。CounterVec 是一组 Counter，这些计数器具有相同的描述，但它们的变量标签具有不同的值。 如果要计算按各种维度划分的相同内容（例如，响应代码和方法分区的 HTTP 请求数），则使用此方法。使用 NewCounterVec 创建实例。
+计数器（Counter）是表示单个单调递增计数器的累积量，其值只能增加或在重启时重置为零。 例如，可以使用计数器来表示服务的总请求数，已完成的任务或错误总数。 但是注意不要使用计数器来监控可能减少的值。CounterVec 是一组 Counter，这些计数器具有相同的描述，但它们的变量标签具有不同的值。 如果要计算按各种维度划分的相同内容（例如，响应代码和方法分区的 HTTP 请求数），则使用此方法。使用 NewCounterVec 创建实例。
 Counter 主要两个方法，`Inc` 和 `Add`,
 ```golang
 Inc()   // 将 counter 值加 1
@@ -130,7 +130,7 @@ httpReqs.Delete(prometheus.Labels{"method": "GET", "code": "200"})
 ```
 
 ##  0x04    Gauge && GaugeVec
-&emsp;&emsp; Gauge 可以用来存放一个可以任意变大变小的数值，通常用于测量值，例如 CPU-core 使用率或内存使用情况，或者运行的 goroutine 数量；如果需要一次性统计 N 个 cpu-core 的使用率，这个时候就适合使用 GaugeVec 来完成
+Gauge 可以用来存放一个可以任意变大变小的数值，通常用于测量值，例如 CPU-core 使用率或内存使用情况，或者运行的 goroutine 数量；如果需要一次性统计 N 个 cpu-core 的使用率，这个时候就适合使用 GaugeVec 来完成
 
 Gauge 主要有以下四个方法：
 ```golang
@@ -183,7 +183,7 @@ cpulistUsage.WithLabelValues("cpu4").Set(cpu4_usage)
 ```
 
 ##  0x05    Histogram
-&emsp;&emsp; Histogram 主要用于表示一段时间范围内对数据进行采样，（通常是请求持续时间或响应大小），并能够对其指定区间以及总数进行统计，通常我们用它计算分位数的直方图。
+Histogram 主要用于表示一段时间范围内对数据进行采样，（通常是请求持续时间或响应大小），并能够对其指定区间以及总数进行统计，通常我们用它计算分位数的直方图。
 ```golang
 temps := prometheus.NewHistogram(prometheus.HistogramOpts{
     Name:    "pond_temperature_celsius",
@@ -314,6 +314,32 @@ scrape_configs:
 ```
 
 2、被动接收（PUSH模式）<br>
+主动拉取模式不一定适用所有场景，比如因防护墙限制无法提供采集服务，又或者定期对目标节点进行抓数据采集，可能存在任务节点还没来得及被拉取就运行完退出，导致数据丢失。为此，笔者封装了基于Prometheus提供了Pushgateway用于接收来自服务的主动上报接口，示例代码如下：
+
+```golang
+publisher := py_prom.NewPushGatewayPublisher(5*time.Second,prom_address)
+
+publisher.Start()
+
+guages := py_prom.ListGuage()
+for i := range guages {
+	publisher.AddCollector(guages[i])
+}
+counters := py_prom.ListCounter()
+for i := range counters {
+	publisher.AddCollector(counters[i])
+}
+
+histograms := py_prom.ListHistogram()
+for i := range histograms {
+	publisher.AddCollector(histograms[i])
+}
+
+summay := py_prom.ListSummary()
+for i := range summay {
+	publisher.AddCollector(summay[i])
+}
+```
 
 prometheus的配置如下，配置成pushgateway的地址用于Prometheus拉取：
 ```yaml

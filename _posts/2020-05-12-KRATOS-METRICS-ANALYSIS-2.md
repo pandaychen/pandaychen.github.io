@@ -9,6 +9,7 @@ catalog: true
 category:   false
 tags:
     - Kratos
+    - Prometheus
 ---
 
 ##  0x00    前言
@@ -72,7 +73,7 @@ func (r *RollingPolicy) Add(val float64) {
 }
 ```
 
-![image](https://wx1.sbimg.cn/2020/05/08/rollingcounter.png)
+![rollingcounter](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kratos/breaker/rollingcounter.png)
 
 接开头，在 [WRR-LB](https://github.com/go-kratos/kratos/blob/master/pkg/net/rpc/warden/balancer/wrr/wrr.go#L158) 中，初始化的代码如下：
 ```golang
@@ -156,7 +157,8 @@ func (r *RollingPolicy) Append(val float64) {
 	r.add(r.window.Append, val)
 }
 ```
-![image](https://wx1.sbimg.cn/2020/05/08/rollinggauge.png)
+
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kratos/breaker/rollinggauge.png)
 
 此外，在前一节提到的 `subConn` 结构中，计算 RPC 调用平均时延就使用了 `RollingGauge` 结构，使用方式和 `RollingCounter` 差不多：
 ```golang
