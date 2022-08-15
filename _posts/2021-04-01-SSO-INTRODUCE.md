@@ -76,9 +76,30 @@ OAuth2 是一个授权协议，有四种 Flow 流。
 ####  SAML2的协议实例
 ![google-saml2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/auth/sso/saml2-google-flow-detail.png)
 
+
+![saml-ali](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/auth/sso_2022/aliyun-saml-flow.png)
+
+SP 首先需要配置好 IDP 提供的 SAML 属性关键信息，如id、key等，SAML 协议主要有三个角色：
+- SP（Service Provider）：向用户提供服务的web 端应用
+- IDP（Identity Provide）：向SP提供用户身份信息
+- User用户：通过登录IDP获取身份断言，并向SP返回身份断言来使用SP提供的服务
+
+1.  用户请求访问 Web 应用系统
+2.  Web 应用系统生成一个 SAML 身份验证请求
+3.  Web 应用系统将重定向网址发送到用户的浏览器。重定向网址包含应向SSO 服务提交的编码 SAML 身份验证请求
+4.  IDP 对 SAML 请求进行解码
+5.  IDP对用户进行身份验证。认证成功后，IDP生成一个 SAML 响应，其中包含经过验证的用户的用户名。然后将SAML 响应编码并返回到用户的浏览器
+6.  浏览器将 SAML 响应转发到 Web 应用系统 ACS URL
+7.  Web 应用系统使用 IDP 的公钥验证 SAML 响应。如果成功验证该响应，ACS 则会将用户重定向到目标网址
+8.  用户将重定向到目标网址并登录到 Web 应用系统
+
+在 SAML 协议中，IDP 和 SP 不需要直接进行通讯，只要用户浏览器可以访问到 IDP 和 SP 即可。也就是说 SAML 协议在混合云环境下也可以正常进行使用，只要用户浏览器可以访问到公有云的 IDP 和内网的应用就可以使用 SAML 协议集成应用的单点登录。
+
 ## 0x04 OpenID 与 OIDC
 
 OIDC（OpenID Connect）等于 （Identity, Authentication） + OAuth 2.0。OIDC 基于 OAuth2 协议之上构建了一个身份层的认证标准协议。OIDC 使用 OAuth2 的授权服务器来为第三方客户端提供用户的身份认证，并把对应的身份认证信息传递给客户端（如移动 APP，JS 应用等），且完全兼容 OAuth2，也就是说一个 OIDC 的服务，也可以当作一个 OAuth2 的服务来用。更通俗的说，OIDC 融合了 OpenId 的身份标识，OAuth2 的授权和 JWT 包装数据的方式。
+
+![oidc-basic](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/auth/sso_2022/oidc-basic.png)
 
 ## 0x05 JWT（JSON Web Token）
 JWT 定义了一种简洁自包含的方法用于通信双方之间以 JSON 对象的形式安全的传递信息（[官方定义](https://jwt.io/introduction)），本质是带有数字签名的格式化数据，支持多种签名方法：
@@ -158,6 +179,8 @@ Authorization: Bearer <token>
 
 ## 0x06 各个认证协议的区别
 
+####  OIDC VS OAuth2
+![oidcVSauth](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/auth/sso_2022/oidc-vs-oauth.png)
 
 ## 0x07 OpenSSH With SSO
 
@@ -190,5 +213,7 @@ Authorization: Bearer <token>
 - [OAuth2.0 协议入门指南](https://www.jianshu.com/p/6392420faf99)
 - [JSON Web Token 入门教程](https://www.ruanyifeng.com/blog/2018/07/json_web_token-tutorial.html)
 - [阿里云：OAuth2](https://help.aliyun.com/document_detail/174227.html)
+- [阿里云：SAML](https://help.aliyun.com/document_detail/174224.html?spm=a2c4g.11186623.0.preDoc.52fe4c17U6Qifv)
+- [阿里云：OIDC](https://help.aliyun.com/document_detail/174228.html)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
