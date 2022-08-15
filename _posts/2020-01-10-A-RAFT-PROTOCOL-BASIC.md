@@ -55,9 +55,15 @@ Raft 的核心逻辑是：先选举出 Leader，Leader 完全负责 Replicated-L
 
 Raft 的三个核心问题：
 
-1.  Leader Election：领导人选举（选主），主节点宕机后必须选择一个节点成为新的主节点
-2.  Log Replication：日志复制（备份），主节点必须接受客户端指令日志，并强制复制到其他节点
-3.  Safty：安全性，复制集群状态机必须一致。相同索引的日志指令一致，顺序一致
+1.  Leader Election：领导人选举（选主），主节点宕机后必须选择一个节点成为新的主节点（有且仅有一个Leader节点，如果Leader宕机，通过选举机制选出新的Leader）
+2.  Log Replication：日志复制（备份），主节点必须接受客户端指令日志，并强制复制到其他节点（Leader从客户端接收数据更新/删除请求，然后日志复制到follower节点，从而保证集群数据的一致性）
+3.  Safty：安全性，复制集群状态机必须一致。相同索引的日志指令一致，顺序一致（通过安全性原则来处理一些特殊case，保证Raft算法的完备性）
+
+所以，Raft算法核心流程可以归纳为：
+
+- 首先选出`Leader`，`Leader`节点负责接收外部的数据更新/删除请求
+- 然后日志复制到其他`Follower`节点，同时通过安全性的准则来保证整个日志复制的一致性
+- 如果遇到`Leader`故障，`Followers`会重新发起选举出新的`Leader`
 
 Raft 的优点如下：
 
@@ -98,6 +104,17 @@ Raft 节点间通过 RPC 请求来互相通信，主要有以下两类 RPC 请�
 2.  Append-Entries RPC：由 `Leader` 节点向其他节点复制日志数据以及同步心跳数据
 
 #### 任期 Term
+- Raft算法把时间轴划分为不同任期Term
+- 每个Term开始于选举阶段，一般由选举阶段和领导阶段组成。
+- 每个任期Term都有自己的编号TermId，该编号全局唯一且连续单调递增
+
+每个任期开始都会进行领导选举（Leader Election）。如果**选举成功**，则进入维持任务Term阶段，此时`Leader`负责接收客户端请求并，负责复制日志。`Leader`和所有`Follower`都保持通信，如果`Follower`发现通信超时（网络问题、或者`Leader`宕机），会触发TermId递增并发起新的选举。如果选举成功，则进入新的任期。如果选举失败（**Hint：选举失败触发的条件是什么？**），TermId递增，然后重新发起选举直到成功。
+
+如下图，Term `N`选举成功，Term `N+1`和Term `N+2`选举失败，Term `N+3`重新选举成功
+
+![term](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/raft/core-km/raft-term.png)
+
+![term]()
 
 #### 选举定时器
 
@@ -106,9 +123,13 @@ Raft 节点间通过 RPC 请求来互相通信，主要有以下两类 RPC 请�
 1.  选举超时时间（Election Timeout）：意思是 `Follower` 要等待成为 `Candidate` 的时间（要成为 `Candidate` 后才可以投票选举），通常 Election Timeout 定时器为 `150ms~300ms`，这个时间结束之后 `Follower` 变成 `Candidate` 开始选举过程。首先是自己对自己投票（`+1`），然后向其他节点请求投票（选票），如果接收节点在收到投票请求时还没有参与过投票，那么它会响应本次请求，并把票投给这个请求投票的 `Candidate`，然后重置自身的 Election Timeout 定时器，一旦一个 `Candidate` 拥有所有节点中的大多数投票，则此节点变成一个 `Leader`
 2.  心跳超时时间（Heartbeat Timeout）：当一个节点从 `Candidate` 变为 `Leader` 时，此节点开始向其他 `Follower` 发送 Append Entries，这些消息发送的频率是通过 Heartbeat Timeout 配置，`Follower` 会响应每条的 Append Entry，整个选举会一直进行直到 `Follower` 停止接受 heartbeat 并且变成 `Candidate` 开始下一轮选举（即假设此时 `Leader` 故障或者丢失了，`Follower` 检测到心跳超时（在此期间没有收到 `Leader` 发送的 Append Entry）后，再等待自身选举超时后发起新一轮选举）
 
+简言之：
+- 随机超时时间： `Follower`节点每次收到`Leader`的心跳请求后，会设置一个随机的，区间位于`[150ms, 300ms)`的超时时间。如果超过超时时间，还没有收到`Leader`的下一条请求，则认为`Leader`过期/故障了
+- `Leader`心跳（`+1s`）： `Leader`在当选期间，会以一定时间间隔向其他节点发送心跳请求，以维护自己的`Leader`地位
+
 ## 0x02 Leader Election
 
-当 `Leader` 节点由于异常（宕机、网络故障等）无法继续提供服务时，可以认为它结束了本轮任期（`TERM=N`），需要开始新一轮的选举（Election），而新的 `Leader` 当然要从 `Follower` 中产生，开始新一轮的任期（`TERM=N+1`）。（从 `Follower` 节点的角度来看，当它接收不到 `Leader` 节点的心跳即心跳超时时间触发时，可认为 Leader 已经丢失，便进入新一轮的选举流程）
+当 `Leader` 节点由于异常（宕机、网络故障等）无法继续提供服务时，可以认为它结束了本轮任期（`TERM=N`），需要开始新一轮的选举（Election），而新的 `Leader` 当然要从 `Follower` 中产生，开始新一轮的任期（`TERM=N+1`）。（从 `Follower` 节点的角度来看，当它接收不到 `Leader` 节点的心跳即心跳超时时间触发时，可认为 `Leader` 已经丢失，便进入新一轮的选举流程）  
 
 选举的过程如下图所示：
 ![raft-election](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/raft/raft-term.png)
@@ -134,10 +155,128 @@ Raft 节点间通过 RPC 请求来互相通信，主要有以下两类 RPC 请�
 - `Follower` 认为 `Leader` 不可用的超时时间（Election Timeout，即选举超时时间）是随机值，防止了所有的 `Follower` 都在同一时刻发现 `Leader` 不可用的情况，从而让先发现的 `Follower` 顺利成为 `Candidate`，继而完成剩下的选举过程并当选
 - 即使出现多个 `Candidate` 同时竞选的情况，再发送拉票请求时，也有一段随机的延迟，来确保各个 `Candidate` 不是同时发送拉票请求
 
-## 0x03 Log Replication
+![vote](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/raft/core-km/raft-vote-for-leader.png)
 
-## 0x04 参考
+## 0x03 Leader Election（节点视角）
 
+集群中每个节点只能处于`Leader`、`Follower`和`Candidate`三种状态的一种，从节点视角看选举流程如下：
+
+1.  `Follower`（从节点）
+- 节点默认是`Follower`
+- 如果刚刚开始或和`Leader`通信超时时（原因下述），`Follower`会发起选举，变成`Candidate`，然后去竞选`Leader`
+- 如果收到其他`Candidate`的竞选投票请求，按照先来先得&&每个任期只能投票一次的投票原则投票
+
+2.  `Candidate`（候选者）
+- `Follower`发起选举后就变为`Candidate`，会向其他节点拉选票。`Candidate`的票会投给自己，所以不会向其他节点投票
+- 如果获得超过半数的投票，`Candidate`变成`Leader`，然后马上和其他节点通信，表明自己的`Leader`的地位
+- 如果选举超时，重新发起选举
+- 如果遇到更高任期Term的`Leader`的通信请求，转化为`Follower`
+
+3.  `Leader`（主节点）
+- 节点成为`Leader`节点后，此时可以接受客户端的数据请求，负责日志同步
+- 如果遇到更高任期Term的`Candidate`的通信请求，这说明`Candidate`正在竞选`Leader`，此时之前任期的`Leader`转化为`Follower`，且完成投票；
+- 如果遇到更高任期Term的`Leader`的通信请求，这说明已经选举成功新的`Leader`，此时之前任期的`Leader`转化为`Follower`
+
+![vote-node-view](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/raft/core-km/raft-vote-node-view.jpg)
+
+那么，什么时候选举重新发生呢？
+1.  `Leader`离线，故障
+2.  `Follower`发现通信超时（收不到`Leader`的应答包）
+
+在选举完成后，`Leader`和所有`Follower`都保持通信，如果`Follower`发现通信超时，任期ID（TermId）递增并发起新的选举。如果选举成功，则进入新的任期。如果选举失败，TermId递增，然后重新发起选举直到成功。
+
+####  触发重新选举
+
+上面说了，`Leader`在任期内会周期性向其他`Follower`节点发送心跳来维持地位，`Follower`如果发现心跳超时，就认为`Leader`节点宕机或不存在。随机等待一定时间后，`Follower`会发起选举，变成`Candidate`，然后去竞选`Leader`。重新选举结果有三种情况：
+
+1.  获取超过半数投票，赢得选举
+  - 当`Candidate`获得超过半数（**如何判定超过了半数？**）的投票时，代表自己赢得了选举，且转化为`Leader`。此时，它会马上向其他节点发送请求，从而确认自己的`Leader`地位，从而阻止新一轮的选举
+  - 投票原则：当多个`Candidate`竞选`Leader`时
+    - 一个任期内，`Follower`只会投票一次票，且投票先来显得
+    - `Candidate`存储的日志至少要和`Follower`一样新（安全性准则），否则拒绝投票
+
+2.  投票未超过半数，选举失败
+  - 当`Candidate`没有获得超过半数的投票时，说明多个`Candidate`竞争投票导致过于分散，或者出现了丢包现象。此时，认为当期任期选举失败，任期TermId+1，然后发起新一轮选举；
+  - 上述机制可能出现多个`Candidate`竞争投票，导致每个`Candidate`一直得不到超过半数的票，最终导致无限选举投票循环；
+  - 投票分散问题解决： Raft会给每个`Candidate`在固定时间内随机确认一个超时时间（一般为`150-300ms`）。这么做可以尽量避免新的一次选举出现多个`Candidate`竞争投票的现象
+
+3.  收到其他`Leader`通信请求
+  - 如果`Candidate`收到其他声称自己是`Leader`的请求的时候，通过任期TermId来判断是否处理；
+  - 如果请求的任期TermId不小于`Candidate`当前任期TermId，那么`Candidate`会承认该`Leader`的合法地位并转化为`Follower`；
+  - 否则，拒绝这次请求，并继续保持`Candidate`
+
+####  脑裂问题
+脑裂问题（Brain Split），即任一任期Term内有超过一个`Leader`被选出（Raft要求在一个集群中任何时刻只能有一个`Leader`），这是非常严重的问题，会导致数据的覆盖丢失。
+
+出现的场景，如下面的Raft集群，某个时刻出现网络分区，集群被隔开成两个网络分区，在不同的网络分区里会因为无法接收到原来的`Leader`发出的心跳而超时选主，这样就会造成多`Leader`现象。
+
+![brain-split]()
+
+在网络分区`1`和`2`中，出现了两个`Leader`：A和D，假设此时要更新分区`2`的值,因为分区`2`无法得到集群中的大多数节点的ACK，会导致复制失败。而网络分区`1`会成功,因为分区`1`中的节点更多,`Leader` A能得到大多数回应。
+
+当网络恢复的时候，集群网络恢复，不再是双分区，Raft会有如下操作：
+1.  任期安全性约束：`Leader` D 发现自己的Term小于`Leader` A，会自动下台（Step Down）成为`Follower`，`Leader` A保持不变依旧是集群中的主`Leader`角色（因为`Leader` A是重新选举出的，TermId至少会加`1`）
+2.  分区中的所有节点会回滚自己的数据日志,并匹配新`Leader`的日志Log，然后实现同步提交更新自身的值。通知旧`Leader` 节点D也会主动匹配主`Leader`节点A的最新值，并加入到`Follower`中
+3.  最终集群达到整体一致，集群存在唯一`Leader`（节点A）
+
+小结下，领导选举流程通过若干的投票原则，保证一次选举有且仅可能最多选出一个`Leader`，从而解决了脑裂问题
+
+## 0x04 Log Replication：日志同步
+
+日志同步的概念：服务器接收客户的数据更新/删除请求，这些请求会落地为命令日志。只要输入状态机的日志命令相同，状态机的执行结果就相同。Raft中是`Leader`发出日志同步请求，follower接收并同步日志，最终保证整个集群的日志一致性。
+
+![log-replication](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/raft/core-km/raft-master-worker.jpg)
+
+在了解日志同步前，先了解复制状态机的概念。**复制状态机（Replicated state machines）是指不同节点从相同的初始状态出发，执行相同顺序的输入指令集后，会得到相同的结束状态。**
+
+分布式一致性算法的实现是基于复制状态机的。在Raft算法中，节点初始化后具有相同初始状态。为了提供相同的输入指令集这个条件，Raft将一个客户端请求（command）封装到一个Log Entry中。`Leader`负责将这些Log Entries 复制到所有的`Follower`节点，然后节点按照相同的顺序应用commands，从而达到最终的一致状态。
+
+当`Leader`收到客户端的写请求，到将执行结果返回给客户端的这个过程，从`Leader`视角来看经历了以下步骤：
+
+1.  本地追加日志信息
+2.  并行发出 AppendEntries RPC请求
+3.  等待大多数`Follower`的回应。收到超过半数节点的成功提交回应，代表该日志被成功复制到了大多数节点中（committed）
+4.  在状态机上执行entry command。 既将该日志应用到状态机，真正影响到节点状态（applied）
+5.  回应Client 执行结果
+6.  确认`Follower`也执行了这条command。如果`Follower`崩溃、运行缓慢或者网络丢包，`Leader`将无限期地重试AppendEntries RPC，直到所有`Followers`应用了所有日志条目
+
+####  Logs
+Logs由顺序排列的Log Entry组成 ，每个Log Entry包含command和产生该Log Entry时的Leader Term。从上图可知，五个节点的日志并不完全一致，Raft算法为了保证高可用，并不是强一致性，而是最终一致性，`Leader`会不断尝试给`Follower`发Log Entries，直到所有节点的Log Entries都相同。
+
+在前面的流程中，`Leader`只需要日志被复制到大多数节点即可向客户端返回，而一旦向客户端返回成功消息，那么系统就必须保证log在任何异常的情况下都不会发生回滚。
+
+##  0x05  安全性及约束
+
+####  选举安全性
+选举安全性，即任一任期内最多一个`Leader`被选出。在一个集群中任何时刻只能有一个`Leader`。如果Raft分布式系统中同时有多个`Leader`的问题，被称之为脑裂（brain split）现象，这是会导致数据的覆盖丢失（非常严重）。在Raft协议中，通过两点保证了这个属性：
+
+- 一个节点某一任期内最多只能投一票；而节点B的Term必须比A的新，A才能给B投票
+- 只有获得多数投票的节点才会成为`Leader`
+
+####  日志append only
+- `Leader`在某一Term的任一位置只会创建一个Log Entry，且Log Entry是Append-only
+- 一致性检查，`Leader`在AppendEntries请求中会包含最新Log Entry的前一个log的term和index，如果`Follower`在对应的term index找不到日志，那么就会告知`Leader`日志不一致，然后开始同步自己的日志。同步时，找到日志分叉点，然后将`Leader`后续的日志复制到本地
+
+####  日志匹配特性
+- 如果两个节点上的某个Log Entry的Log Index相同且term相同，那么在该index之前的所有log entry应该都是相同的
+- Raft的日志机制提供两个保证，统称为Log Matching Property：
+  - 不同机器的日志中如果有两个entry有相同的偏移和term号，那么它们存储相同的指令
+  - 如果不同机器上的日志中有两个相同偏移和term号的日志，那么日志中这个entry之前的所有entry保持一致
+
+####  Leader完备性
+Leader完备性，意义为被选举人必须比自己知道的更多（比较term 、log index）
+如果一个Log Entry在某个任期被提交（committed），那么这条日志一定会出现在所有更高term的`Leader`的日志里面。选举人必须比自己知道的更多（比较term，log index）如果日志中含有不同的任期，则选最新的任期的节点；如果最新任期一致，则选最长的日志的那个节点。
+
+####  状态机安全性
+状态机安全性由日志的一致来保证。在算法中，一个日志被复制到多数节点才算committed，如果一个log entry在某个任期被提交（committed），那么这条日志一定会出现在所有更高term的`Leader`的日志里面。
+
+##  0x06 演示
+可以通过Raft算法[动画演示](http://thesecretlivesofdata.com/raft/)或[官方博客](https://raft.github.io/)，对Raft算法的选举和日志复制过程有直观清晰的认知：
+
+![flash](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/raft/core-km/raft-flash-1.png)
+
+## 0x07 参考
+- [raft step by step入门演示](http://thesecretlivesofdata.com/raft/)
 - [1620 秒入门 Raft](https://zhuanlan.zhihu.com/p/27910576)
 - [分布式一致性与共识算法](https://www.infoq.cn/article/urx2mw3funeb7bdstqxk)
 - [Raft 协议详解](https://zhuanlan.zhihu.com/p/27207160)
@@ -148,3 +287,4 @@ Raft 节点间通过 RPC 请求来互相通信，主要有以下两类 RPC 请�
 - [About C implementation of the Raft Consensus protocol, BSD licensed](https://github.com/willemt/raft)
 - [烧脑系列：手撕 hashicorp/raft 算法，超长文](https://mp.weixin.qq.com/s?__biz=MzAxMTA4Njc0OQ==&mid=2651442047&idx=4&sn=08af250a96ad311bc3edfe13636c73fa&chksm=80bb158db7cc9c9bee41780ef3b947eff1b91b0b0fb72037218977f58a07d3b11941ba1445e4&scene=178#rd)
 - [Etcd Raft库的工程化实现](https://www.codedump.info/post/20210515-raft/)
+- [浅谈分布式一致性算法raft](https://www.cnblogs.com/wyq178/p/13899534.html)
