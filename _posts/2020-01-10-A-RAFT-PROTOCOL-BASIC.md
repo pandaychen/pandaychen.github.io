@@ -55,8 +55,8 @@ Raft 的核心逻辑是：先选举出 Leader，Leader 完全负责 Replicated-L
 
 Raft 的三个核心问题：
 
-1.  Leader Election：领导人选举（选主），主节点宕机后必须选择一个节点成为新的主节点（有且仅有一个Leader节点，如果Leader宕机，通过选举机制选出新的Leader）
-2.  Log Replication：日志复制（备份），主节点必须接受客户端指令日志，并强制复制到其他节点（Leader从客户端接收数据更新/删除请求，然后日志复制到follower节点，从而保证集群数据的一致性）
+1.  Leader Election：领导人选举（选主），主节点宕机后必须选择一个节点成为新的主节点（有且仅有一个`Leader`节点，如果`Leader`宕机，通过选举机制选出新的`Leader`）
+2.  Log Replication：日志复制（备份），主节点必须接受客户端指令日志，并强制复制到其他节点（`Leader`从客户端接收数据更新/删除请求，然后日志复制到`Follower`节点，从而保证集群数据的一致性）
 3.  Safty：安全性，复制集群状态机必须一致。相同索引的日志指令一致，顺序一致（通过安全性原则来处理一些特殊case，保证Raft算法的完备性）
 
 所以，Raft算法核心流程可以归纳为：
@@ -67,9 +67,9 @@ Raft 的三个核心问题：
 
 Raft 的优点如下：
 
-1.  高可用：Raft 协议中，$N$ 个节点，系统容忍 $\frac{N}{2}$ 个节点的故障，通常 $N==5$。选举和日志同步都只需要大多数的节点 $\frac{N}{2}+1$ 正常互联即可，即使 Leader 故障，在选举 Term 超时到期后，集群自动选举新 Leader（不可用时间非常小）
+1.  高可用：Raft 协议中，$N$ 个节点，系统容忍 $\frac{N}{2}$ 个节点的故障，通常 $N==5$。选举和日志同步都只需要大多数的节点 $\frac{N}{2}+1$ 正常互联即可，即使 `Leader` 故障，在选举 Term 超时到期后，集群自动选举新 `Leader`（不可用时间非常小）
 
-2.  强一致：虽然 Raft 协议中所有节点的数据非实时一致，但 Raft 算法保证 Leader 节点的数据最全，同时所有修改请求（写入 / 更新 / 删除）都由 Leader 处理，<font color="#dd0000"> 从用户角度看是指永远可以读到最新的写成功的数据，而从服务内部来看指的是所有的存活节点的 State Machine 中的数据都保持一致 </font>
+2.  强一致：虽然 Raft 协议中所有节点的数据非实时一致，但 Raft 算法保证 `Leader` 节点的数据最全，同时所有修改请求（写入 / 更新 / 删除）都由 `Leader` 处理，<font color="#dd0000"> 从用户角度看是指永远可以读到最新的写成功的数据，而从服务内部来看指的是所有的存活节点的 State Machine 中的数据都保持一致 </font>
 3.  高可靠：Raft 算法保证了 Committed 的日志不会被修改，S0tate Matchine 只应用 Committed 的日志，所以当客户端收到请求成功即代表数据不再改变。Committed 日志在大多数节点上冗余存储，少于一半的磁盘故障数据不会丢失
 
 4.  高性能：与必须将数据写到所有节点才能返回客户端成功的算法对比，Raft 算法只需要大多数节点成功即可，少量节点处理缓慢不会延缓整体系统运行
@@ -210,7 +210,8 @@ Raft 节点间通过 RPC 请求来互相通信，主要有以下两类 RPC 请�
 
 出现的场景，如下面的Raft集群，某个时刻出现网络分区，集群被隔开成两个网络分区，在不同的网络分区里会因为无法接收到原来的`Leader`发出的心跳而超时选主，这样就会造成多`Leader`现象。
 
-![brain-split]()
+![brain-split](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/raft/core-km/brain-split.png)
+
 
 在网络分区`1`和`2`中，出现了两个`Leader`：A和D，假设此时要更新分区`2`的值,因为分区`2`无法得到集群中的大多数节点的ACK，会导致复制失败。而网络分区`1`会成功,因为分区`1`中的节点更多,`Leader` A能得到大多数回应。
 
@@ -221,9 +222,21 @@ Raft 节点间通过 RPC 请求来互相通信，主要有以下两类 RPC 请�
 
 小结下，领导选举流程通过若干的投票原则，保证一次选举有且仅可能最多选出一个`Leader`，从而解决了脑裂问题
 
-## 0x04 Log Replication：日志同步
 
-日志同步的概念：服务器接收客户的数据更新/删除请求，这些请求会落地为命令日志。只要输入状态机的日志命令相同，状态机的执行结果就相同。Raft中是`Leader`发出日志同步请求，follower接收并同步日志，最终保证整个集群的日志一致性。
+##  0x04  宕机（选举完成后）
+
+####  `Leader`宕机
+1.  每当`Leader`对所有的`Follower`发出Append Entries的时候，`Follower`会有一个随机的超时时间，如果超时TTL内收到了`Leader`的请求就会重置超时TTL；如果超时后`Follower`仍然没有收到 `Leader`的心跳，`Follower`会认为 `Leader` 可能已经离线，此时第一个超时的`Follower`会发起投票，这个时候它依然会向宕机的原`Leader`发出Reuest Vote（原`Leader`不会回复）。当收到集群超过一半的节点的RequestVote reply后,此时的`Follower`会成为`Leader`
+
+2.  若稍后宕机的`Leader`恢复正常之后，重新加入到Raft集群，初始化的角色是`Follower`（非leader）
+
+####  `Follower`宕机
+`Follower`宕机对整个集群影响不大（可用个数内），影响是`Leader`发出的Append Entries无法被收到，但是`Leader`还会继续一直发送，直到`Follower`恢复正常。Raft协议会保证发送AppendEntries request的rpc消息是幂等的：即如果`Follower`已经接受到了消息，但是`Leader`又让它再次接受相同的消息，`Follower`会直接忽略
+
+## 0x05 Log Replication：日志同步
+Raft集群建立完成后，`Leader`接收所有客户端请求，然后转化为log复制命令，发送通知其他节点完成日志复制请求。每个日志复制请求包括状态机命令 & 任期号，同时还有前一个日志的任期号和日志索引。状态机命令表示客户端请求的数据操作指令，任期号表示`Leader`的当前任期。
+
+日志同步的概念：服务器接收客户的数据更新/删除请求，这些请求会落地为命令日志。只要输入状态机的日志命令相同，状态机的执行结果就相同。Raft中是`Leader`发出日志同步请求，`Follower`接收并同步日志，最终保证整个集群的日志一致性。
 
 ![log-replication](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/raft/core-km/raft-master-worker.jpg)
 
@@ -233,49 +246,157 @@ Raft 节点间通过 RPC 请求来互相通信，主要有以下两类 RPC 请�
 
 当`Leader`收到客户端的写请求，到将执行结果返回给客户端的这个过程，从`Leader`视角来看经历了以下步骤：
 
-1.  本地追加日志信息
-2.  并行发出 AppendEntries RPC请求
-3.  等待大多数`Follower`的回应。收到超过半数节点的成功提交回应，代表该日志被成功复制到了大多数节点中（committed）
-4.  在状态机上执行entry command。 既将该日志应用到状态机，真正影响到节点状态（applied）
+1.  本地追加日志信息，`Leader` 节点接收到的数据处于未提交状态（uncommitted）
+2.  并行发出 AppendEntries RPC请求（`Leader` 节点会并发地向所有`Follower`节点复制数据并等待接收响应ACK）
+3.  等待大多数`Follower`的回应，收到超过半数节点的成功提交回应，代表该日志被成功复制到了大多数节点中（committed）；一旦向 Client 发出数据接收 Ack 响应后，表明此时数据状态进入已提交状态，`Leader` 节点再向 `Follower` 节点发通知告知该数据状态已提交
+4.  在状态机上执行entry command。 既将该日志应用到状态机，真正影响到节点状态（applied）；`Follower`开始commit自己的数据,此时Raft集群达到主节点和从节点的一致
 5.  回应Client 执行结果
 6.  确认`Follower`也执行了这条command。如果`Follower`崩溃、运行缓慢或者网络丢包，`Leader`将无限期地重试AppendEntries RPC，直到所有`Followers`应用了所有日志条目
 
+从`Follower`视角来看经历了如下步骤，`Follower`收到日志复制请求的处理流程
+
+1.  `Follower`会使用前一个日志的任期号和日志索引来对比自己收到的数据
+  - 如果相同，接收复制请求，回复ok
+  - 否则回拒绝复制当前日志，回复error
+2.  `Leader`收到拒绝复制的回复后，继续发送节点日志复制请求，不过这次会带上更前面的一个日志任期号和索引
+3.  **如此循环往复，直到找到一个共同的任期号&日志索引**。此时`Follower`从这个索引值开始复制，最终和`Leader`节点日志保持一致
+4.  日志复制过程中，`Leader`会无限重试直到成功。如果超过半数的节点复制日志成功，就可以任务当前数据请求达成了共识，即日志可以commit提交了
+
+日志复制（Log Replication）有两个特点：
+
+- 如果在不同日志中的两个条目有着相同日志索引index和任期号termid，则所存储的命令是相同的，这点是由`Leader`来保证的
+- 如果在不同日志中的两个条目有着相同日志索引index和任期号termid，则它们之间所有条目完全一样，这点是由日志复制的规则来保证的
+
 ####  Logs
 Logs由顺序排列的Log Entry组成 ，每个Log Entry包含command和产生该Log Entry时的Leader Term。从上图可知，五个节点的日志并不完全一致，Raft算法为了保证高可用，并不是强一致性，而是最终一致性，`Leader`会不断尝试给`Follower`发Log Entries，直到所有节点的Log Entries都相同。
+- Index：日志索引，保证唯一性
+- TermId：任期Id，标识当前操作在哪个任期内
+- Action：标识任期内的数据操作
 
 在前面的流程中，`Leader`只需要日志被复制到大多数节点即可向客户端返回，而一旦向客户端返回成功消息，那么系统就必须保证log在任何异常的情况下都不会发生回滚。
 
-##  0x05  安全性及约束
+####  日志复制的例子
 
-####  选举安全性
-选举安全性，即任一任期内最多一个`Leader`被选出。在一个集群中任何时刻只能有一个`Leader`。如果Raft分布式系统中同时有多个`Leader`的问题，被称之为脑裂（brain split）现象，这是会导致数据的覆盖丢失（非常严重）。在Raft协议中，通过两点保证了这个属性：
+![log-replication]()
 
-- 一个节点某一任期内最多只能投一票；而节点B的Term必须比A的新，A才能给B投票
-- 只有获得多数投票的节点才会成为`Leader`
+从图中看，LogIndex `1-4`的日志已经完成同步，LogIndex `5`正在同步，LogIndex `6`还未开始同步，下一小节会基于官方文档完整的描述日志复制的过程
 
-####  日志append only
+####  日志不一致
+日志不一致问题：在正常情况下，`Leader`和`Follower`的日志复制能够保证整个集群的一致性，但是遇到`Leader`宕机时，`Leader`和`Follower`日志可能出现了不一致，一般而言此时`Follower`相比`Leader`缺少部分日志。
+
+为了解决数据不一致性，Raft算法规定`Follower`强制复制`Leader`节点的日志，即`Follower`不一致日志都会被`Leader`的日志覆盖，最终`Follower`和`Leader`保持一致。
+
+这个强制复制指的是即从前向后寻找`Follower`和`Leader`第一个公共LogIndex的位置，然后从这个位置开始，`Follower`强制复制`Leader`的日志。这里的复制动作受到下面的Raft安全性规则约束（一切以数据最终一致性为前提）
+
+####  logs 复制时异常问题及解决
+在进行一致性复制的过程中,假如出现了异常情况，raft都是如何处理的呢？
+1.  写入数据（请求）到达 `Leader` 节点前，该阶段 `Leader` 挂掉不影响一致性（触发重新选举，重新选举出`Leader`）
+2.  写入请求到达 `Leader` 节点，但未复制到 `Follower` 节点。该阶段 `Leader` 挂掉，数据属于未提交状态，Client 不会收到最终的 Ack 会认为超时失败、可安全发起重试
+3.  写入请求到达 `Leader` 节点，成功复制到 `Follower` 所有节点，但 `Follower` 还未向 `Leader` 响应接收。若该阶段 `Leader` 挂掉，虽然数据在 `Follower` 节点处于未提交状态（uncommitted），但是数据是保持一致的。重新选出 `Leader` 后可完成数据提交
+4.  写入数据到达 `Leader` 节点，成功复制到 `Follower` 的部分节点，但这部分 `Follower` 节点还未向 `Leader` 响应接收。这个阶段 `Leader` 挂掉，数据在 `Follower` 节点处于 未提交状态（uncommitted）且不一致。由于Raft 协议要求投票只能投给拥有 最新数据 的节点。所以拥有最新数据的节点会被选为 Leader，然后再 强制同步数据 到其他 Follower，保证 数据不会丢失并 最终一致。
+5.  写入数据到达 `Leader` 节点，成功复制到 `Follower` 所有或多数节点，数据在 `Leader` 处于已提交状态，但在 `Follower` 处于未提交状态。若该阶段 `Leader` 挂掉，重新选出新的 `Leader` 后的处理流程和阶段 `3` 一样
+6.  写入数据到达 `Leader` 节点，成功复制到 `Follower` 所有或多数节点，数据在所有节点都处于已提交状态，但还未响应 Client。这个阶段 `Leader` 挂掉，集群内部数据其实已经是 一致的，Client 重复重试基于幂等策略对一致性无影响
+
+##  0x05  官方文档：logs复制的细节
+[5.3 日志复制](https://knowledge-sharing.gitbooks.io/raft/content/chapter5/5-3.html)
+
+TODO
+
+##  0x06  状态机
+
+##  0x07  安全性及约束
+为何要引入安全性Safty？因为当前的 Leader election 领导选举 和 Log replication 日志复制并不能保证Raft算法的安全性，在一些特殊情况下，可能导致数据不一致，所以需要引入下面安全性规则对场景进行约束，保证Raft协议的CP特性。
+
+
+####  选举安全性（Election Safety）
+
+选举安全性主要是为了规避脑裂问题。要求任一任期内最多一个`Leader`被选出。在一个集群中任何时刻只能有一个`Leader`。如果Raft分布式系统中同时有多个`Leader`的问题，被称之为脑裂（brain split）现象，这是会导致数据的覆盖丢失（非常严重）。在Raft协议中，通过`3`点（**严格的投票规则**）保证了这个属性：
+
+- 一个`Follower`节点某一任期内最多只能投一票；且遵循先来先得的原则；而节点B的Term必须比A的新，A才能给B投票
+- 只有获得超过半数的投票的节点才（有机会）会成为`Leader`
+- `Candidate`存储的日志至少要和`Follower`一样新，`Follower`才可以给`Candidate`投票
+
+####  日志append only（Leader Append-Only）
+本约束要求日志只能由`Leader`添加和修改，所有的数据请求都要交给`Leader`节点处理，要求如下：
+
+- `Leader`只能日志追加日志，不能覆盖日志
 - `Leader`在某一Term的任一位置只会创建一个Log Entry，且Log Entry是Append-only
+- 只有`Leader`的日志项才能被提交，`Follower`不能接收写请求和提交日志
+- 只有已经提交的日志项，才能被应用到状态机中
+- 选举时限制新`Leader`日志包含所有已提交日志项（这点是为了防止出现）
 - 一致性检查，`Leader`在AppendEntries请求中会包含最新Log Entry的前一个log的term和index，如果`Follower`在对应的term index找不到日志，那么就会告知`Leader`日志不一致，然后开始同步自己的日志。同步时，找到日志分叉点，然后将`Leader`后续的日志复制到本地
 
-####  日志匹配特性
+####  日志匹配特性（Log Matching）
+本约束主要是为了**保证日志的唯一性**，要求：
 - 如果两个节点上的某个Log Entry的Log Index相同且term相同，那么在该index之前的所有log entry应该都是相同的
 - Raft的日志机制提供两个保证，统称为Log Matching Property：
   - 不同机器的日志中如果有两个entry有相同的偏移和term号，那么它们存储相同的指令
   - 如果不同机器上的日志中有两个相同偏移和term号的日志，那么日志中这个entry之前的所有entry保持一致
 
-####  Leader完备性
+####  `Leader`完备性（Leader Completeness）
+本约束主要要求`Leader`必须具备最新提交日志的属性。Raft规定：只有拥有最新提交日志的`Follower`节点才有资格成为`Leader`节点。具体做法：`Candidate`竞选投票时会携带最新提交日志，`Follower`会用自己的日志和`Candidate`做比较：
+
+- 如果`Follower`的日志比`Candidate`还新，那么拒绝这次投票
+- 否则根据前面小节梳理的选举投票规则处理，这样就可以保证只有最新提交节点成为`Leader`
+
+由于日志提交需要超过半数的节点同意，所以针对日志同步落后的`Follower`（还未同步完全部日志，导致落后于其他节点）在竞选`Leader`的时候，肯定拿不到超过半数的票，也只有那些完成同步的才有可能获取超过半数的票的`Follower`成为`Leader`。
+
+那么，如何判断日志是新 OR 旧？判断方式是比较日志项的`TermId`和`Index`值：
+
+- 如果`TermId`不同，选择`TermId`值最大的
+- 如果`TermId`相同，选择`Index`值最大的
+
+问题：为何Raft要保证`Leader`完备性的规则？
+
+![leader_completeness]()
+
+1.  假如集群中`Follower4`在LogIndex3 故障宕机，经过一段时间，任期Term3的`Leader`接收并提交了很多日志（假设LogIndex1-5已提交，LogIndex6正在复制中）
+2.  此时`Follower4`恢复正常，在没有和`Leader`完成同步日志的情况下，如果`Leader`突然宕机，此时开始领导选举。再假设在Term4 `Follower4`当选`Leader`。根据日志复制的规则，其他`Follower`强制复制`Leader`的日志，那么已经提交却没完成同步的日志将会被强制覆盖掉，这会导致已提交日志被覆盖
+3.  所以，通过本约束限制上一步中`Follower4`，让它不可以成为`Leader`
+
+![leader_completeness_2.jpg]()
+
+
 Leader完备性，意义为被选举人必须比自己知道的更多（比较term 、log index）
 如果一个Log Entry在某个任期被提交（committed），那么这条日志一定会出现在所有更高term的`Leader`的日志里面。选举人必须比自己知道的更多（比较term，log index）如果日志中含有不同的任期，则选最新的任期的节点；如果最新任期一致，则选最长的日志的那个节点。
 
-####  状态机安全性
-状态机安全性由日志的一致来保证。在算法中，一个日志被复制到多数节点才算committed，如果一个log entry在某个任期被提交（committed），那么这条日志一定会出现在所有更高term的`Leader`的日志里面。
+####  状态机安全性（State Machine Safety）
+本约束确保当前任期日志提交的安全性，保证日志的一致性。在算法中，一个日志被复制到多数节点才算committed，**如果一个log entry在某个任期被提交（committed），那么这条日志一定会出现在所有更高term的`Leader`的日志里面**。
 
-##  0x06 演示
+考虑到当前的日志复制规则：
+
+- 当前`Follower`节点强制复制`Leader`节点
+- 若以前Term日志复制超过半数节点，在面对当前任期日志的节点比较中，很明显当前任期节点更新，有资格成为`Leader`
+
+上述两条就可能出现已有任期日志被覆盖的情况，这意味着已复制超过半数的以前任期日志被强制覆盖了，和前面提到的日志安全性矛盾。所以，Raft对日志提交有额外安全机制：**`Leader`只能提交当前任期Term的日志，旧任期Term（以前的数据）只能通过当前任期Term的数据提交来间接完成提交**。即日志提交有两个条件需要满足：
+
+- 当前任期
+- 复制结点超过半数
+
+
+问题：为何Raft要保证状态机安全性原则？
+
+![state_machine _safety.jpg]()
+
+
+1.  任期Term2：`Follower1`是`Leader`，此时LogIndex3已经复制到`Follower2`，且正在给`Follower3`复制，此时`Follower`突然宕机（`Follower3`复制失败，logIndex3并未被提交）
+2.  任期Term3：假设`Leader`（`Follower1`）宕机，触发重新`Leader`选举。`Follower5`发起投票，可以得到自己、`Follower3`、`Follower4`的票（`3/5`），最终成为`Leader`；这是有可能发生的，因为前一步消息并未被多数节点确认
+3.  在任期Term3内，新`Leader`（节点`5`）提交接收客户请求并提交LogIndex`3-5`，但是暂时未复制到其他节点，然后`Leader`宕机，此时又会触发重新选举
+4.  任期Term4：`Leader`选举，`Follower1`发起选举，可以得到自己、`Follower2`、`Follower3`、`Follower4`的票（`4/5`），最终成为`Leader`。这也是有可能发生的
+5.  此时`Follower1`将LogIndex3复制到`Follower3`，此时LogIndex3复制超过半数，接着在本地提交了LogIndex4，然后宕机
+6.  任期Term4：`Leader`重选举：`Follower5`发起选举，可以得到自己、`Follower2`、`Follower3`、`Follower4`的票（`4/5`），最终成为`Leader`。注意，为何这里`Leader5`可以被选举为`Leader`呢？因为节点`5`此刻的TermId比其他几个节点（节点`2/3/4`）都大
+6.  此时其他节点需要强制复制`Follower5`的日志，那么`Follower1`、`Follower2`、`Follower3`的日志被强制覆盖掉。即虽然LogIndex3被复制到了超过半数节点，但也有可能被覆盖掉
+7.  因此，Raft必须限制此种情况的出现，即Raft协议在日志项提交上增加了限制：**只有当前任期且复制超过半数的日志才可以提交。即只有LogIndex4提交后，LogIndex3才会被提交**
+
+那么，旧Term任期的数据是如何提交呢？
+
+
+##  0x08 演示
 可以通过Raft算法[动画演示](http://thesecretlivesofdata.com/raft/)或[官方博客](https://raft.github.io/)，对Raft算法的选举和日志复制过程有直观清晰的认知：
 
 ![flash](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/raft/core-km/raft-flash-1.png)
 
-## 0x07 参考
+## 0x09 参考
 - [raft step by step入门演示](http://thesecretlivesofdata.com/raft/)
 - [1620 秒入门 Raft](https://zhuanlan.zhihu.com/p/27910576)
 - [分布式一致性与共识算法](https://www.infoq.cn/article/urx2mw3funeb7bdstqxk)
@@ -288,3 +409,7 @@ Leader完备性，意义为被选举人必须比自己知道的更多（比较te
 - [烧脑系列：手撕 hashicorp/raft 算法，超长文](https://mp.weixin.qq.com/s?__biz=MzAxMTA4Njc0OQ==&mid=2651442047&idx=4&sn=08af250a96ad311bc3edfe13636c73fa&chksm=80bb158db7cc9c9bee41780ef3b947eff1b91b0b0fb72037218977f58a07d3b11941ba1445e4&scene=178#rd)
 - [Etcd Raft库的工程化实现](https://www.codedump.info/post/20210515-raft/)
 - [浅谈分布式一致性算法raft](https://www.cnblogs.com/wyq178/p/13899534.html)
+- [raft算法中，5.4.2节一疑问？](https://www.zhihu.com/question/68287713)
+- [为什么Raft不能“直接”提交之前任期的日志?](http://www.ilovecpp.com/2022/03/01/raft-prevlog-commit/)
+- [5.4.2：提交之前任期的日志条目](https://knowledge-sharing.gitbooks.io/raft/content/chapter5/5-4/5-4-2.html)
+- [5.3：日志复制](https://knowledge-sharing.gitbooks.io/raft/content/chapter5/5-3.html)
