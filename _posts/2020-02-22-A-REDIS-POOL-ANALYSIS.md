@@ -9,10 +9,11 @@ catalog: true
 category:   false
 tags:
     - Redis
+    - 连接池
 ---
 
 ##  0x00    介绍
-&emsp;&emsp; 连接池技术，一般是客户端侧高效管理和复用连接，避免重复创建（带来的性能损耗，特别是 `TLS`）和销毁连接的一种技术手段。在项目中灵活使用连接池，对降低服务器负载十分有帮助；此外，在司内的 DB 托管场景，如遇后台升配、代理扩容等场景，如果服务内置了连接池，一般不需要重启（因为连接池会自动尝试重建）。如 go-xorm 的 [连接池](https://github.com/go-xorm/manual-zh-CN/blob/master/chapter-01/1.engine.md)、go-redis 的 [连接池](https://github.com/go-redis/redis/tree/master/internal/pool)，本文就来分析下 go-redis 中的连接池实现。
+连接池技术，一般是客户端侧高效管理和复用连接，避免重复创建（带来的性能损耗，特别是 `TLS`）和销毁连接的一种技术手段。在项目中灵活使用连接池，对降低服务器负载十分有帮助；此外，在司内的 DB 托管场景，如遇后台升配、代理扩容等场景，如果服务内置了连接池，一般不需要重启（因为连接池会自动尝试重建）。如 go-xorm 的 [连接池](https://github.com/go-xorm/manual-zh-CN/blob/master/chapter-01/1.engine.md)、go-redis 的 [连接池](https://github.com/go-redis/redis/tree/master/internal/pool)，本文就来分析下 go-redis 中的连接池实现。
 
 总览下连接池的核心 [代码结构](https://github.com/go-redis/redis/blob/master/internal/pool/pool.go)，go-redis 的连接池实现分为如下几个部分：
 1.	连接池初始化、管理连接
@@ -31,6 +32,9 @@ tags:
 
 
 ##  0x01    Pool 相关的结构体
+
+####    连接池配置选项
+
 连接池 [选项](https://github.com/go-redis/redis/blob/master/internal/pool/pool.go#L51) 定义：
 ```golang
 type Options struct {
@@ -63,18 +67,21 @@ func InitRedisClient() *redis.Client{
 }
 ```
 
+####    连接Conn
+
 [单个连接](https://github.com/go-redis/redis/blob/master/internal/pool/conn.go) 的结构体定义，核心是 `net.Conn` 封装及根据 Redis 协议实现相应的读写操作：
 ```go
 type Conn struct {
+    // 包装net.conn
     netConn net.Conn  // tcp 连接
 
     rd *proto.Reader // 根据 Redis 通信协议实现的 Reader
     wr *proto.Writer // 根据 Redis 通信协议实现的 Writer
 
-    Inited    bool // 是否完成初始化
+    Inited    bool // 是否完成初始化（该连接是否初始化，比如如果需要执行命令之前需要执行的auth,select db 等的标识，代表已经auth,select过）
     pooled    bool // 是否放进连接池
-    createdAt time.Time // 创建时间
-    usedAt    int64 // 使用时间
+    createdAt time.Time // 创建时间（超过maxconnage的链接需要淘汰）
+    usedAt    int64 // 使用时间（该链接执行命令的时候所记录的时间，就是上次用过这个链接的时间点）
 }
 ```
 
@@ -120,7 +127,8 @@ type Stats struct {
 
 ##  0x02    Pool 接口
 首先，封装 Pool 的接口实现方法 `Pooler`，如下：
-```go
+```golang
+//连接池的接口
 type Pooler interface {
     NewConn(context.Context) (*Conn, error) // 创建连接
     CloseConn(*Conn) error // 关闭连接
@@ -136,6 +144,13 @@ type Pooler interface {
     Close() error // 关闭连接池
 }
 ```
+
+对外接口包含4个主要模块：
+
+-   建立连接和关闭连接
+-   从池中取`Conn`的管理
+-   监控统计
+-   整个`Pooler`池的关闭
 
 ##  0x03    连接池管理功能
 
@@ -325,7 +340,8 @@ func (p *ConnPool) tryDial() {
 ```
 
 ####    2、从连接池取出连接
-从连接池中获取一个连接的过程如下：
+在每次真正执行操作之前，client 都会调用 `ConnPool` 的 `Get` 方法，在此`Get` 方法中实现了连接的创建和获取。可以看到，**每次取出连接都是以出栈的方式取出切片里的最后一个空闲连接**。从连接池中获取一个连接的过程如下：
+
 1、首先，检查连接池是否被关闭，如果被关闭直接返回 `ErrClosed` 错误 <br>
 
 2、尝试在轮转队列 `queue` 中占据一个位置（即尝试申请一个令牌），如果抢占的等待时间超过连接池的超时时间，会返回 `ErrPoolTimeout` 错误，见下面的 `waitTurn` 方法 <br>
@@ -374,12 +390,14 @@ func (p *ConnPool) waitTurn(ctx context.Context) error {
 
 3、通过 `popIdle` 方法，尝试从连接池的空闲连接队列 `p.idleConns` 中获取一个已有连接，如果该连接已过期，则关闭并丢弃该连接，继续重复相同尝试操作，直至获取到一个连接或连接队列为空为止 <br>
 ```golang
+// 取出连接
 func (p *ConnPool) popIdle() *Conn {
     if len(p.idleConns) == 0 {
         return nil
     }
 
     idx := len(p.idleConns) - 1
+    // 栈的数据结构，取最后一个连接
     cn := p.idleConns[idx]
     p.idleConns = p.idleConns[:idx]
     p.idleConnsLen--
@@ -586,8 +604,82 @@ func (p *ConnPool) ReapStaleConns() (int, error) {
     atomic.AddUint32(&p.stats.StaleConns, uint32(n))
     return n, nil
 }
+```
 
-//
+#### 6、检查连接是否已经过期
+```golang
+func (p *ConnPool) isStaleConn(cn *Conn) bool {
+	if p.opt.IdleTimeout == 0 && p.opt.MaxConnAge == 0 {
+        // 未配置超时选项
+		return false
+	}
+
+	now := time.Now()
+	if p.opt.IdleTimeout > 0 && now.Sub(cn.UsedAt()) >= p.opt.IdleTimeout {
+		return true
+	}
+	if p.opt.MaxConnAge > 0 && now.Sub(cn.createdAt) >= p.opt.MaxConnAge {
+		return true
+	}
+
+	return false
+}
+```
+
+####    7、如何剔除失败连接和过期连接
+go-redis 在每次执行命令失败以后，会判断当前失败类型，如果不是 redis server 的报错，也不是设置网络设置的timeout 报错，那么则会将该连接从连接池中 remove 掉，如果有设置重试次数，那么就会继续重试命令，又因为每次执行命令时会从连接池中获取连接，而没有又会新建，这样就实现了失败重连和自动剔除机制。
+```golang
+func (c *baseClient) releaseConn(ctx context.Context, cn *pool.Conn, err error) {
+   if c.opt.Limiter != nil {
+      c.opt.Limiter.ReportResult(err)
+   }
+   if isBadConn(err, false, c.opt.Addr) {
+       // 连接失败则移除
+      c.connPool.Remove(ctx, cn, err)
+   } else {
+      c.connPool.Put(ctx, cn)
+   }
+}
+
+// 判断是否属于无效连接
+func isBadConn(err error, allowTimeout bool, addr string) bool {
+   switch err {
+   case nil:
+      return false
+   case context.Canceled, context.DeadlineExceeded:
+      return true
+   }
+
+   if isRedisError(err) {
+      switch {
+      case isReadOnlyError(err):
+         // Close connections in read only state in case domain addr is used
+         // and domain resolves to a different Redis Server. See #790.
+         return true
+      case isMovedSameConnAddr(err, addr):
+         // Close connections when we are asked to move to the same addr
+         // of the connection. Force a DNS resolution when all connections
+         // of the pool are recycled
+         return true
+      default:
+         return false
+      }
+   }
+
+   if allowTimeout {
+      if netErr, ok := err.(net.Error); ok &amp;&amp; netErr.Timeout() {
+         return !netErr.Temporary()
+      }
+   }
+
+   return true
+}
+```
+
+####    8、如何清理过期连接
+清理过期连接的实现比较简单，每次从`idleConns`的切片头部取出一个来判断是否过期，如果过期的话，更新`idleConns`，并且关闭过期链接（连接过期时间可以通过参数设置）
+```golang
+// 清理过期连接
 func (p *ConnPool) reapStaleConn() *Conn {
     if len(p.idleConns) == 0 {
         return nil
@@ -610,25 +702,6 @@ func (p *ConnPool) reapStaleConn() *Conn {
 }
 ```
 
-#### 6、检查连接是否已经过期
-```go
-func (p *ConnPool) isStaleConn(cn *Conn) bool {
-	if p.opt.IdleTimeout == 0 && p.opt.MaxConnAge == 0 {
-        // 未配置超时选项
-		return false
-	}
-
-	now := time.Now()
-	if p.opt.IdleTimeout > 0 && now.Sub(cn.UsedAt()) >= p.opt.IdleTimeout {
-		return true
-	}
-	if p.opt.MaxConnAge > 0 && now.Sub(cn.createdAt) >= p.opt.MaxConnAge {
-		return true
-	}
-
-	return false
-}
-```
 
 ##	0x05 一些细节
 
@@ -636,7 +709,7 @@ func (p *ConnPool) isStaleConn(cn *Conn) bool {
 个人认为，Keepalive 的机制的连接池的设计中是一定需要的，这样一方面可以在应用层对长连接进行保活，另一方面，在服务器出问题（主动断开的情况），客户端也能够及时感知到并可以通知使用方。从连接池里面取出的连接都是可用的连接了。看似简单的代码，却完美的解决了连接池里面超时连接的问题。同时，就算遇到 Redis 服务器重启等情况，也能保证连接自动重连。不过 go-redis 库中并未实现 Keepalive 的功能。
 
 ####    2、处理指定的连接
-实质上是遍历连接池中的所有连接，并调用传入的 fn 过滤函数作用在每个连接上，过滤出符合业务要求的连接。
+实质上是遍历连接池中的所有连接，并调用传入的 `fn` 过滤函数作用在每个连接上，过滤出符合业务要求的连接。
 ```go
 func (p *ConnPool) Filter(fn func(*Conn) bool) error {
     var firstErr error
@@ -714,7 +787,86 @@ var timers = sync.Pool{
 }
 ```
 
-##	0x06    参考
+##  0x06    上层调用
+
+####    如何初始化一个连接池
+go-redis 初始化时采用的 Lazy-Init 的方式，对于当创建一个 Client 后，并不会直接创建连接，而只是初始化相关的 option 属性，并返回一个没有任何连接的 Client
+```golang
+func NewClient(opt *Options) *Client {
+       opt.init()
+       c := Client{
+              baseClient: baseClient{
+                     opt:      opt,
+                     connPool: newConnPool(opt),
+              },
+       }
+       c.baseClient.init()
+       c.init()
+
+       return c
+}
+```
+
+####    Options.Dialer方法的意义
+
+
+##  0x07    思考
+分析完上述代码，思考下go-redis的连接池的获取/回收机制会不会存在问题呢？看起来是有的，参见如下:
+-   [LIFO connection pool does not give every connection equal chance of being chosen](https://github.com/go-redis/redis/issues/1819)
+-   [Allow FIFO pool in redis client](https://github.com/go-redis/redis/pull/1820)
+
+场景是连接池后端连接多个IP时，但是从连接池获取连接的过程中出现了请求负载不均衡的问题。问题的本质在于，当前版本v7的实现是基于LIFO（后进先出）机制，**即每次从空闲连接的切片中都是取出最后一个连接，客户端用完连接后，又会放回到最后一个，这种先入后出的栈的数据结构，导致只要某个连接不过期，永远都是从栈顶取元素，这就会导致不均衡的问题。**
+
+####    优化
+目前，在v8[版本](https://github.com/go-redis/redis/releases/tag/v8.11.1)中已经引入了FIFO机制来优化该场景；具体是在options参数中增加了先入先出的取连接方式
+
+```golang
+type Options struct {
+   Dialer  func(context.Context) (net.Conn, error)
+   OnClose func(*Conn) error
+   // 增加了先入先出的队列结构
+   PoolFIFO           bool
+   PoolSize           int
+   MinIdleConns       int
+   MaxConnAge         time.Duration
+   PoolTimeout        time.Duration
+   IdleTimeout        time.Duration
+   IdleCheckFrequency time.Duration
+}
+```
+
+获取连接操作优化机制如下代码所示。**从连接池取连接的操作就变成了轮询的方式，较好的解决了连接不均衡的问题**。
+```golang
+func (p *ConnPool) popIdle() (*Conn, error) {
+   if p.closed() {
+      return nil, ErrClosed
+   }
+   n := len(p.idleConns)
+   if n == 0 {
+      return nil, nil
+   }
+
+   var cn *Conn
+   if p.opt.PoolFIFO {
+      // 若开启了该参数，则从队列头取连接
+      cn = p.idleConns[0]
+      copy(p.idleConns, p.idleConns[1:])
+      p.idleConns = p.idleConns[:n-1]   //注意这段代码，有点意思
+   } else {
+      // 默认从队列尾部取连接
+      idx := n - 1
+      cn = p.idleConns[idx]
+      p.idleConns = p.idleConns[:idx]
+   }
+   p.idleConnsLen--
+   p.checkMinIdleConns()
+   return cn, nil
+}
+```
+
+##  0x08    总结
+
+##	0x09   参考
 -	[Redis Clients](http://redis.io/clients#go)
 -   [Go Redis 连接池实现](https://jackckr.github.io/golang/go-redis%E8%BF%9E%E6%8E%A5%E6%B1%A0%E5%AE%9E%E7%8E%B0/)
 -	[openresty 连接池](https://wiki.jikexueyuan.com/project/openresty/web/conn_pool.html)
