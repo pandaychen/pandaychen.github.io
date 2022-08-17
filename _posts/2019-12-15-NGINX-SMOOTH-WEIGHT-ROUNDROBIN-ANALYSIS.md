@@ -127,16 +127,11 @@ upstream backserver {
 ```
 
 5、session_sticky<br>
-依赖第三方模块 `nginx-sticky-module`，通过 cookie 黏贴的方式将来自同一个客户端（浏览器）的请求发送到同一个后端服务器上处理
+依赖第三方模块 `nginx-sticky-module`，通过 cookie 黏贴的方式将来自同一个客户端（浏览器）的请求发送到同一个后端服务器上处理；这个模块并不合适不支持 Cookie 或手动禁用了 cookie 的浏览器，此时默认 sticky 就会切换成 RR。它不能与 ip_hash 同时使用
 
-这个模块并不合适不支持 Cookie 或手动禁用了 cookie 的浏览器，此时默认 sticky 就会切换成 RR。它不能与 ip_hash 同时使用
-
-`sticky [name=route] [domain=.foo.bar] [path=/] [expires=1h] [hash=index|md5|sha1] [no_fallback];`
-
-
-
-`ngx_http_upstream_session_sticky_module` 也是类似的功能
-
+```text
+sticky [name=route] [domain=.foo.bar] [path=/] [expires=1h] [hash=index|md5|sha1] [no_fallback];
+```
 
 ####    Nginx 与 Kubernetes 的结合
 
@@ -183,7 +178,7 @@ Nginx 通过 [`proxy_next_upstream`](http://nginx.org/en/docs/http/ngx_http_prox
 
 
 
-#####  proxy_next_upstream 的坑
+####  proxy_next_upstream 的坑
 
 ```text
 upstream example_upstream{
@@ -204,7 +199,7 @@ Smooth Weighted Round-Robin（SWRR）是 nginx 默认的加权负载均衡算法
 
 Nginx 使用的平滑权重轮询算法介绍以及原理分析。
 
-####    轮询调度
+####    轮询调度的基础概念
 轮询调度非常简单，就是每次选择下一个节点进行调度。比如 `{a, b, c}` 三个节点，第一次选择 a，
 第二次选择 b，第三次选择 c，接下来又从头开始。
 
@@ -212,7 +207,7 @@ Nginx 使用的平滑权重轮询算法介绍以及原理分析。
 使用一样的调度次数，这样对于 16 核的机器的负载就会很低。这时，就引出了基于权重的轮询算法。
 
 基于权重的轮询调度是在基本的轮询调度上，给每个节点加上权重，这样对于权重大的节点，
-其被调度的次数会更多。比如 a, b, c 三台机器的负载能力分别是 4:2:1，则可以给它们分配的权限为 4, 2, 1。
+其被调度的次数会更多。比如 a, b, c 三台机器的负载能力分别是 `4:2:1`，则可以给它们分配的权限为 4, 2, 1。
 这样轮询完一次后，a 被调用 4 次，b 被调用 2 次，c 被调用 1 次。
 
 对于普通的基于权重的轮询算法，可能会产生以下的调度顺序 `{a, a, a, a, b, b, c}`。
@@ -296,7 +291,7 @@ func nextSmoothWeighted(items []*smoothWeighted) (best *smoothWeighted) {
 
 
 ##  0x05  Nginx 对 gRPC 负载均衡的支持
-Nginx 从 1.13.10 版本 [Introducing gRPC Support with NGINX 1.13.10](http://manguijie.top/2018/09/grpc-name-resolve-loadbalance) 宣布支持 gRPC 负载均衡。
+Nginx 从 `1.13.10` 版本 [Introducing gRPC Support with NGINX 1.13.10](http://manguijie.top/2018/09/grpc-name-resolve-loadbalance) 宣布支持 gRPC 负载均衡。
 nginx 配置中增加 `grpc_pass`，使用方式与 `proxy_pass` 基本一致，如下：
 ```bash
 worker_processes  1;
@@ -342,7 +337,10 @@ http {
 ```
 
 ##  0x06    回顾 && 总结
-1、问题1：Nginx 的 upstream 机制支持自动剔除故障的后端吗？答案是作用有限；Nginx 的收费版本 [`Nginx-Plus`](https://www.nginx.com/products/nginx/) 提供了自动探测的能力
+问题1：Nginx 的 upstream 机制支持自动剔除故障的后端吗？答案是作用有限；Nginx 的收费版本 [`Nginx-Plus`](https://www.nginx.com/products/nginx/) 提供了自动探测的能力<br>
+
+####    项目中的配置参考
+
 
 ##	0x07	参考
 -	[nginx 平滑的基于权重轮询算法分析](https://tenfy.cn/2018/11/12/smooth-weighted-round-robin/)
