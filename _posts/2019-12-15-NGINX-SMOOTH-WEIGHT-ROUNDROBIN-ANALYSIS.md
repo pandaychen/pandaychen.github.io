@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      Nginx 负载均衡及算法分析
-subtitle:
+subtitle:   Nginx使用与总结
 date:       2019-12-15
 author:     pandaychen
 header-img: img/encryption.jpg
@@ -11,8 +11,8 @@ tags:
     - 负载均衡
 ---
 
-##  0x00    引入问题
-提一个问题：Nginx 的 `upstream` 机制支持自动剔除故障的后端吗？这个问题我们后面解答。
+##  0x00    前言
+本文总结下笔者在使用Nginx的一些经验总结（主要用于反向代理）
 
 ##	0x01	Nginx 中的负载均衡介绍
 
@@ -21,7 +21,7 @@ tags:
 ![vhosts](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/nginx/nginx-vhosts.png)
 
 #### 介绍
-Nginx 提供了 [`upstream`](http://tengine.taobao.org/book/chapter_05.html) 机制，来实现访问后端时的负载均衡。模块的具体使用说明（翻译版本）在此: [`ngx_http_upstream_module`](https://tengine.taobao.org/nginx_docs/cn/docs/http/ngx_http_upstream_module.html)
+Nginx 提供了 [upstream](http://tengine.taobao.org/book/chapter_05.html) 机制，来实现访问后端时的负载均衡。模块的具体使用说明（翻译版本）在此: [`ngx_http_upstream_module`](https://tengine.taobao.org/nginx_docs/cn/docs/http/ngx_http_upstream_module.html)
 
 #### 负载均衡模式
 * weight roundrobin（内置）- 带权重的轮询
@@ -375,7 +375,7 @@ http {
 ```
 
 ##  0x05    回顾 && 总结
-&emsp;&emsp; 下面来回答下本篇一开始提出的问题：
+1、问题1：Nginx 的 upstream 机制支持自动剔除故障的后端吗？
 
 
 此外，Nginx 的收费版本 [`Nginx-Plus`](https://www.nginx.com/products/nginx/) 提供了自动探测的能力
