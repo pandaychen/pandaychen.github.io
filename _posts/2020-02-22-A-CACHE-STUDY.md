@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      Cache 使用与优化
+title:      微服务中的缓存（一）：Cache 使用与优化
 subtitle:   如何设计高效且合理的缓存使用策略
 date:       2020-02-22
 author:     pandaychen
@@ -13,7 +13,7 @@ tags:
 ---
 
 ##  0x00    前言
-Cache 使用第一法则是：任何 Cache 都需要有自动过期（失效）的机制。
+Cache 使用第一法则是：**任何 Cache 都需要有自动过期（失效）的机制**。
 
 ##  0x01    Cache 属性
 
