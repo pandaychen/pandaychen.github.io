@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      微服务中的缓存一致性（三）
+title:      微服务中的缓存（三）：再思考缓存一致性
 subtitle:   一道美团的面试题：Redis与MySQL双写一致性如何保证？
 date:       2022-01-01
 author:     pandaychen
