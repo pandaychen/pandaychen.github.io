@@ -30,6 +30,9 @@ tags:
 -   支持统计连接池的状态
 -   不支持单个连接的健康检查，需要用户自行在业务层实现
 
+####    go-redis连接池的基本流程
+
+![flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/redis/connection-pool-basic-flow.png)
 
 ##  0x01    Pool 相关的结构体
 
@@ -907,7 +910,7 @@ if opt.Dialer == nil {
 3.  当后端ip节点出现故障或者被剔除时（注册中心也会相应的剔除该节点），连接池自身的剔除机制能够保持其一致性
 
 改造的架构图如下：
-![pool-architecture]()
+![pool-architecture](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/redis/redis-model-userdefine-method.png)
 
 ##  0x07    思考：go-redis连接池的回收是否足够优雅？
 分析完上述代码，思考下go-redis的连接池的获取/回收机制会不会存在问题呢？看起来是有的，参见如下issue:
@@ -935,7 +938,7 @@ func (p *ConnPool) popIdle() *Conn {
 }
 ```
 
-![pop-idle-1]()
+![pop-idle-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/redis/redis-pool-lifo.png)
 
 ####    优化
 目前，在v8[版本](https://github.com/go-redis/redis/releases/tag/v8.11.1)中已经引入了FIFO机制来优化该场景；具体是在options参数中增加了先入先出的取连接方式，关注下`Options.PoolFIFO`这个字段：
@@ -988,7 +991,7 @@ func (p *ConnPool) popIdle() (*Conn, error) {
 ```
 
 优化后的取连接方法如下图：
-![pop-idle-2]()
+![pop-idle-2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/redis/redis-pool-optimistic.png)
 
 ##  0x08    总结
 
