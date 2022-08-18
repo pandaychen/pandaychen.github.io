@@ -36,7 +36,7 @@ tags:
 
 本小节，介绍常用的限流算法。无论是何种算法，都可以抽象成下面这张图，当请求发生时，请求方必须拿到请求的令牌，才可以访问到相应的应用。基于令牌的算法实现方式，常见的有这几种限流算法：
 
-![image](https://s1.ax1x.com/2020/04/09/G42Bp4.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/microservice/limiter/basic-1.png)
 
 1、**计数器算法（Counter）** <br>
 此算法一般会限制一秒钟的能够通过的请求数（counter），比如限流 qps 为 `100`，那么从第一个请求进来开始计时，在接下去的 `1s` 内，每来一个请求，就把计数加 `1`，如果累加的数字达到了 `100`，那么后续的请求就会被全部拒绝。等到 `1s` 结束后，把计数恢复成 `0`，重新开始计数。这个计数器必须是原子的，在 golang 中可以使用 [atomic](https://golang.org/pkg/sync/atomic/) 包来实现。<br><br>
@@ -51,7 +51,7 @@ tags:
 3、**令牌桶算法（Token bucket）**<br>
 令牌桶算法是对漏桶算法的一种改进，漏桶算法能够限制请求调用的速率，而令牌桶算法能够在限制调用的平均速率的同时还允许一定程度的突发调用。如下图，可以通过控制令牌的生产速度来完成对突发 case 的优化。
 <br>
-![image](https://s1.ax1x.com/2020/04/09/G4gEZV.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/microservice/limiter/basic-2.png)
 
 算法中，令牌桶用来存放固定数量的令牌。算法中存在一种机制，以一定的速率往桶中放令牌。每次请求调用需要先获取令牌，只有拿到令牌，才有机会继续执行，否则选择选择等待可用的令牌、或者直接拒绝。
 <br>
@@ -178,7 +178,7 @@ Sentinel 在系统自适应保护的做法是，用 load1 作为启动自适应�
 -   入口 QPS：当单台机器上所有入口流量的 QPS 达到阈值即触发系统保护
 
 ####    原理
-![TCP-BBR-pipe](https://user-images.githubusercontent.com/9434884/50813887-bff10300-1352-11e9-9201-437afea60a5a.png)
+![TCP-BBR-pipe](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/limiter/bbr-channel.png)
 
 
 我们把系统处理请求的过程想象为一个水管，到来的请求是往这个水管灌水，当系统处理顺畅的时候，请求不需要排队，直接从水管中穿过，这个请求的RT是最短的；反之，当请求堆积的时候，那么处理请求的时间则会变为：**排队时间 + 最短处理时间**
