@@ -177,8 +177,32 @@ Nginx 通过 [`proxy_next_upstream`](http://nginx.org/en/docs/http/ngx_http_prox
 配置示例：
 
 
-
 ####  proxy_next_upstream 的坑
+回溯上文的描述，采用在`proxy_next_upstream`用于指定在什么情况下Nginx会将请求转移到其他服务器上。其默认值是`proxy_next_upstream error timeout`，**即发生网络错误以及超时，才会重试其他服务器**。默认情况下服务返回`500`状态码是不会重试的，如果想在响应`500`状态码时也进行重试。例如现网针对这个服务的访问，出现了500或者超时的情况，会自动重试到下一个服务器去，有如下配置：
+
+设想若`192.168.0.1`服务器返回了超时或者`500`，那么访问 `/example/` 时应该会自动重试到下一台服务器`192.168.0.2`，但是事与愿违：
+
+```text
+upstream example_upstream{
+  server 192.168.0.1 max_fails=1 fail_timeout=30s;
+  server 192.168.0.2 max_fails=1 fail_timeout=30s backup;   
+}
+location /example/ {
+   proxy_pass http://example_upstream/;
+   proxy_set_header Host: test.example.com;
+   proxy_set_head X-real-ip $remote_addr;
+   proxy_next_upstream error timeout http_500;
+}
+```
+
+[文档](http://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_next_upstream)有如下选项`non_idempotent`的描述，意思为：如果请求使用非幂等方法（`POST`、`LOCK`、`PATCH`），请求失败后不会再到其他服务器进行重试。加上`non_idempotent`选项后，即使是非幂等请求类型（例如`POST`请求），发生错误后也会重试
+
+```text
+non_idempotent
+normally, requests with a non-idempotent method (POST, LOCK, PATCH) are not passed to the next server if a request has been sent to an upstream server (1.9.13); enabling this option explicitly allows retrying such requests;
+```
+
+如果让`POST`请求也会失败重试，需要配置`non_idempotent`，如下：
 
 ```text
 upstream example_upstream{
@@ -192,6 +216,7 @@ location /example/ {
    proxy_next_upstream error timeout http_500 non_idemponent;
 }
 ```
+不过生产环境建议谨慎考虑添加`non_idempotent`选项，由于`POST`类操作非幂等操作，发生`500`错误可能服务器上的业务已经执行了，而重试会导致非幂等方法重复执行，从而导致业务问题
 
 ##  0x03    Nginx 对 Round-Robin 算法的优化
 Smooth Weighted Round-Robin（SWRR）是 nginx 默认的加权负载均衡算法，它的重要特点是平滑，避免低权重的节点长时间处于空闲状态，因此被称为平滑加权轮询。
@@ -203,12 +228,12 @@ Nginx 使用的平滑权重轮询算法介绍以及原理分析。
 轮询调度非常简单，就是每次选择下一个节点进行调度。比如 `{a, b, c}` 三个节点，第一次选择 a，
 第二次选择 b，第三次选择 c，接下来又从头开始。
 
-这样的算法有一个问题，在负载均衡中，每台机器的性能是不一样的，对于 16 核的机器跟 4 核的机器，
-使用一样的调度次数，这样对于 16 核的机器的负载就会很低。这时，就引出了基于权重的轮询算法。
+这样的算法有一个问题，在负载均衡中，每台机器的性能是不一样的，对于 `16` 核的机器跟 `4` 核的机器，
+使用一样的调度次数，这样对于 `16` 核的机器的负载就会很低。这时，就引出了基于权重的轮询算法。
 
 基于权重的轮询调度是在基本的轮询调度上，给每个节点加上权重，这样对于权重大的节点，
-其被调度的次数会更多。比如 a, b, c 三台机器的负载能力分别是 `4:2:1`，则可以给它们分配的权限为 4, 2, 1。
-这样轮询完一次后，a 被调用 4 次，b 被调用 2 次，c 被调用 1 次。
+其被调度的次数会更多。比如 a, b, c 三台机器的负载能力分别是 `4:2:1`，则可以给它们分配的权限为 `4`, `2`, `1`。
+这样轮询完一次后，a 被调用 `4` 次，b 被调用 `2` 次，c 被调用 `1` 次。
 
 对于普通的基于权重的轮询算法，可能会产生以下的调度顺序 `{a, a, a, a, b, b, c}`。
 
