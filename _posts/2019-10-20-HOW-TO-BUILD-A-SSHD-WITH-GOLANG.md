@@ -587,6 +587,36 @@ Port 22
 ProxyCommand bash -c "/bin/sometools proxy %r@%h"
 ```
 
+
+####    SSH 客户端的多路复用机制
+OpenSSH（5.6版本上）有一项特性叫作SSH 多路复用（SSH multiplexing），也称长连接保持（ControlPersist）。当使用SSH多路复用连接同一个服务器的SSH会话（一般是：登录用户#ip#port）时将会共享同一条TCP连接，这样消耗在TCP建立连接的时间就只会发生在第一次连接的时候（后续的直接复用ssh channel）
+
+修改SSH客户端配置文件`~/.ssh/config`，增加下述配置
+```text
+Host *
+    Compression yes
+    ServerAliveInterval 30
+    ServerAliveCountMax 360
+    ControlMaster auto
+    ControlPath ~/.ssh/socket/%h-%p-%r  
+    ControlPersist yes
+    #ControlPersist 4h  
+```
+
+配置说明如下：
+-   `Host`：指定生效的 Host 范围
+-   `ControlMaster`：设置为 `auto` 时，SSH 将尝试使用主连接，若对应的主连接不存在，将创建新连接作为主连接
+-   `ControlPath`：设置存储复用的主连接的 UNIX 套接字文件，`%h`代表远程主机名、`%p`代表远程端口号、`%r`代表登录用户
+-   `ControlPersist`：表示在创建首个连接（即主连接）的会话退出后，该连接是否仍然在后台保留，继续供其他复用该连接的会话使用
+
+按照上述配置，SSH每连上一个Server都会自动在`~/.ssh/socket/`下创建一个Socket文件，**下次用相同用户名、端口、主机名进行连接就会自动复用**
+
+SSH多路复用的原理如下：
+1.  首次SSH连接到服务器时，OpenSSH将启动主连接
+2.  OpenSSH创建一个UNIX 套接字（即Control socket）维持与远程服务器的连接
+3.  当下一次SSH连接到服务器时（相同用户#IP#Port），OpenSSH将会使用已建立的控制套接字与服务器通信，而不再是重新建立新的TCP连接
+4.  主连接保持的时间根据用户的配置决定，超时后SSH客户端将会关闭这个连接
+
 ##	0x04	其他应用
 基于 golang-SSH 库还有很多有趣的应用，这里列举几个：<br>
 -   [SSH Tron](https://github.com/zachlatta/sshtron)：此包实现了一个在线多人贪吃蛇服务
