@@ -74,6 +74,21 @@ Raft 的优点如下：
 
 4.  高性能：与必须将数据写到所有节点才能返回客户端成功的算法对比，Raft 算法只需要大多数节点成功即可，少量节点处理缓慢不会延缓整体系统运行
 
+####  复制状态机
+复制状态机用于解决分布式系统中的各种容错问题，通常通过复制日志实现，每个服务器存储一个包含一系列命令的日志，其状态机按顺序执行日志中的命令。每个状态机处理日志的顺序相同，因此也能够得到相同的输出序列。
+
+一致性算法的工作就是保证复制日志的一致性。每台服务器上的一致性模块接收来自客户端的命令，并将它们添加到其日志中。它与其他服务器上的一致性模块通信，以确保每个日志最终以相同的顺序包含相同的命令，即使有一些服务器失败。一旦命令被正确复制，每个服务器上的状态机按日志顺序处理它们，并将输出返回给客户端。这样就形成了高可用的复制状态机。
+
+![replication-state](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/raft/raft-replication-state-machine.png)
+
+
+####  通信方式
+Raft使用RPC进行通信，主要有三种类型RPC：
+
+1.  请求投票（RequestVote）RPC， 由 `Candidate` 在选举期间发起
+2.  追加条目（AppendEntries）RPC， 由 `Leader` 发起，用来复制日志和提供一种心跳机制
+3.  重试RPC，当服务器没有及时的收到 RPC 的响应时，会进行重试
+
 ## 0x01 Raft 协议的状态机
 
 #### Raft 状态机节点
@@ -108,13 +123,16 @@ Raft 节点间通过 RPC 请求来互相通信，主要有以下两类 RPC 请�
 - 每个Term开始于选举阶段，一般由选举阶段和领导阶段组成。
 - 每个任期Term都有自己的编号TermId，该编号全局唯一且连续单调递增
 
-每个任期开始都会进行领导选举（Leader Election）。如果**选举成功**，则进入维持任务Term阶段，此时`Leader`负责接收客户端请求并，负责复制日志。`Leader`和所有`Follower`都保持通信，如果`Follower`发现通信超时（网络问题、或者`Leader`宕机），会触发TermId递增并发起新的选举。如果选举成功，则进入新的任期。如果选举失败（**Hint：选举失败触发的条件是什么？**），TermId递增，然后重新发起选举直到成功。
+每个任期开始都会进行领导选举（Leader Election）。如果**选举成功**，则进入维持任务Term阶段，此时`Leader`负责接收客户端请求并，负责复制日志。`Leader`和所有`Follower`都保持通信，如果`Follower`发现通信超时（网络问题、或者`Leader`宕机），会触发TermId递增并发起新的选举。如果选举成功，则进入新的任期。如果选举失败（**Hint：选举失败触发的条件是什么？**），没选出`Leader`，则当前任期很快结束，TermId递增，然后重新发起选举直到成功。
 
 如下图，Term `N`选举成功，Term `N+1`和Term `N+2`选举失败，Term `N+3`重新选举成功
 
 ![term](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/raft/core-km/raft-term.png)
 
-![term]()
+![term](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/raft/raft-term.png)
+
+####  任期的意义：逻辑时钟
+在Raft协议中，任期充当逻辑时钟，服务器节点可以通过任期发现一些过期的信息，比如过时的 `Leader`。任期单调递增，**服务器之间通信的时候会交换当前任期号；如果一个服务器的当前任期号比其他的小，该服务器会将自己的任期号更新为较大的那个值**。如果一个 `Candidate` 或 `Leader` 发现自己的任期号过期了，它会立即回到 `Follower` 状态。如果一个节点接收到一个包含过期的任期号的请求，它会直接拒绝这个请求
 
 #### 选举定时器
 
@@ -149,11 +167,11 @@ Raft 节点间通过 RPC 请求来互相通信，主要有以下两类 RPC 请�
 2、case2：其他 Node 赢得选举 <br>
 在等待投票结果的过程中，如果 `Candidate` 收到其他节点发送的心跳信息（即 AppendEntries RPC），<font color="#dd0000"> 并检查此心跳信息中的任期不比自己小（这一点很重要）</font>，则自己变为 `Follower`，听从新上任的 `Leader` 的指挥
 
-3、本轮选举未产生结果 <br>
-极端情况下，如当有多个 `Candidate` 同时竞选时，由于每个人先为自己投一票，导致没有任何一个人的选票数量过半。当这种情况出现时，每位 `Candidate` 都开始准备下一任竞选：将 `TERM+=1`，同时再次发送拉票请求。为了防止出现长时间选不出新 `Leader` 的情况，Raft 采用了两个方法来尽可能规避：
+3、本轮选举未产生结果（一段时间之后没有任何获胜者） <br>
+极端情况下，如当有多个 `Candidate` 同时竞选时，由于每个人先为自己投一票，导致没有任何一个人的选票数量过半。当这种情况出现时，每位 `Candidate` 都开始准备下一任竞选：将 `TERM+=1`，同时再次发送拉票请求。为了防止出现长时间选不出新 `Leader` 的情况，Raft 采用了两个方法来尽可能规避该情况发生（防止第`3`种情况无限重复，使得没有`Leader`被选举出来）：
 
-- `Follower` 认为 `Leader` 不可用的超时时间（Election Timeout，即选举超时时间）是随机值，防止了所有的 `Follower` 都在同一时刻发现 `Leader` 不可用的情况，从而让先发现的 `Follower` 顺利成为 `Candidate`，继而完成剩下的选举过程并当选
-- 即使出现多个 `Candidate` 同时竞选的情况，再发送拉票请求时，也有一段随机的延迟，来确保各个 `Candidate` 不是同时发送拉票请求
+- `Follower` 认为 `Leader` 不可用的超时时间（Election Timeout，即选举超时时间）是随机值，防止了所有的 `Follower` 都在同一时刻发现 `Leader` 不可用的情况，从而让先发现的 `Follower` 顺利成为 `Candidate`，继而完成剩下的选举过程并当选（使用随机化选举超时时间，从一个固定的区间如`150-300ms`随机选择，避免同时出现多个`Candidate`）
+- 即使出现多个 `Candidate` 同时竞选的情况，再发送拉票请求时，也有一段随机的延迟，来确保各个 `Candidate` 不是同时发送拉票请求（`Candidate`等待超时的时间随机：`Candidate` 在开始一次选举的时候会重置一个随机的选举超时时间，然后一直等待直到选举超时，这样减小了在新的选举中再次发生选票瓜分情况的可能性）
 
 ![vote](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/raft/core-km/raft-vote-for-leader.png)
 
@@ -233,8 +251,26 @@ Raft 节点间通过 RPC 请求来互相通信，主要有以下两类 RPC 请�
 ####  `Follower`宕机
 `Follower`宕机对整个集群影响不大（可用个数内），影响是`Leader`发出的Append Entries无法被收到，但是`Leader`还会继续一直发送，直到`Follower`恢复正常。Raft协议会保证发送AppendEntries request的rpc消息是幂等的：即如果`Follower`已经接受到了消息，但是`Leader`又让它再次接受相同的消息，`Follower`会直接忽略
 
-## 0x05 Log Replication：日志同步
+## 0x05 Log Replication：日志同步（复制）
 Raft集群建立完成后，`Leader`接收所有客户端请求，然后转化为log复制命令，发送通知其他节点完成日志复制请求。每个日志复制请求包括状态机命令 & 任期号，同时还有前一个日志的任期号和日志索引。状态机命令表示客户端请求的数据操作指令，任期号表示`Leader`的当前任期。
+
+####  基础概念
+
+日志定义：客户端的每一个请求都包含一条将被复制状态机执行的指令。`Leader` 把该指令作为一个新的条目追加到日志中去，然后并行的发起 AppendEntries RPC，同步到其他副本
+
+安全复制：当有超过一半的副本复制好了该条目，便认为已经安全的复制，`Leader`接着会将条目应用到其状态机中，并将结果返回给客户端。若遇到网络故障或丢失包，`Leader` 会不断地重试 AppendEntries RPC（即使已经回复了客户端）直到所有的 `Follower` 最终都存储了所有的日志条目
+
+日志索引：每个日志条目存储一条状态机指令和 `Leader` 收到该指令时的任期号，同时每个日志条目都有一个整数索引值来表明它在日志中的位置
+
+日志提交：一旦创建该日志条目的 `Leader` 将它复制到过半的服务器上，该日志条目就会被提交，Raft 算法保证所有已提交的日志条目都是持久化的并且最终会被所有可用的状态机执行。不仅如此，`Leader` 日志中该日志条目之前的所有日志条目也都是已经提交的条目。`Leader`会保存当前已提交最大的日志索引，未来的所有 AppendEntries RPC 都会包含该索引，这样其他的服务器才能最终知道哪些日志条目需要被提交。`Follower` 一旦知道某个日志条目已经被提交就会将该日志条目按顺序应用到自己的本地状态机中
+
+日志由有序编号的日志条目组成。每个日志条目包含它被创建时的任期号（每个方块中的数字），并且包含用于状态机执行的命令。如果一个条目能够被状态机安全执行，就被认为可以提交了，如下图：
+![figure](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/raft/Figure-6-Logs.png)
+
+Leader 决定什么时候将日志条目应用到状态机是安全的；这种条目被称为是已提交的（Committed）。Raft 保证可已提交的日志条目是持久化的，并且最终会被所有可用的状态机执行。一旦被 `Leader` 创建的条目已经复制到了大多数的服务器上，这个条目就称为已提交的（上图中的`7`号条目）。`Leader` 日志中之前的条目都是已提交的，包括由之前的 `Leader` 创建的条目。
+
+**Leader 跟踪记录它所知道的已提交的条目的最大索引值，并且这个索引值会包含在之后的 AppendEntries RPC 中（包括心跳中），为的是让其他服务器都知道这个条目已经提交。一旦一个 Follower 知道了一个日志条目已经是已提交的，它会将该条目应用至本地的状态机（按照日志顺序）**
+
 
 日志同步的概念：服务器接收客户的数据更新/删除请求，这些请求会落地为命令日志。只要输入状态机的日志命令相同，状态机的执行结果就相同。Raft中是`Leader`发出日志同步请求，`Follower`接收并同步日志，最终保证整个集群的日志一致性。
 
@@ -297,10 +333,24 @@ Logs由顺序排列的Log Entry组成 ，每个Log Entry包含command和产生�
 5.  写入数据到达 `Leader` 节点，成功复制到 `Follower` 所有或多数节点，数据在 `Leader` 处于已提交状态，但在 `Follower` 处于未提交状态。若该阶段 `Leader` 挂掉，重新选出新的 `Leader` 后的处理流程和阶段 `3` 一样
 6.  写入数据到达 `Leader` 节点，成功复制到 `Follower` 所有或多数节点，数据在所有节点都处于已提交状态，但还未响应 Client。这个阶段 `Leader` 挂掉，集群内部数据其实已经是 一致的，Client 重复重试基于幂等策略对一致性无影响
 
-##  0x05  官方文档：logs复制的细节
-[5.3 日志复制](https://knowledge-sharing.gitbooks.io/raft/content/chapter5/5-3.html)
+##  0x05  官方文档：再看logs复制的细节
+本小节摘抄于原文：[5.3 日志复制](https://knowledge-sharing.gitbooks.io/raft/content/chapter5/5-3.html)
 
-TODO
+####  复制故障说明
+正常操作期间，`Leader` 和 `Follower` 的日志保持一致，方格数字表示任期。所以 AppendEntries RPC 的一致性检查从来不会失败。但也有可能出现下图的故障：
+
+![loss](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/raft/Figure-7-Log-states.png)
+
+当一个 `Leader` 成功当选时（最上面那行），`Follower` 的状态机可能是（a-f）中的任何情况。`Follower` 可能会缺少一些日志条目（如a、b），可能会有一些未被提交的日志条目（如c、d），或者两种情况都存在（e、f）。例如，场景 f 可能这样发生，f 对应的服务器在任期 `2` 的时候被选举为 `Leader` ，追加了一些日志条目到自己的日志中，一条都还没提交（commit）就宕机了；该服务器很快重启，在任期 `3` 重新被选为 `Leader`，又追加了一些日志条目到自己的日志中；在这些任期 `2` 和任期 `3` 中的日志都还没被提交之前，该服务器又宕机了，并且在接下来的几个任期里一直处于宕机状态。那么，新任`Leader`该如何同步日志呢？
+
+在Raft中，`Leader` 通过强制 `Follower` 复制它的日志来解决不一致的问题。这意味着 `Follower` 中跟 `Leader` 冲突的日志条目会被 `Leader` 的日志条目覆盖。
+
+- Case1：要使得 `Follower` 的日志跟自己一致，`Leader` 必须找到两者达成一致的最大的日志条目（索引最大），删除 `Follower` 日志中从那个点之后的所有日志条目，并且将自己从那个点之后的所有日志条目发送给 `follower`
+- Case2：选举时，`Leader` 针对每一个 `Follower` 都维护了一个 `nextIndex`，表示 `Leader` 要发送给 `Follower` 的下一个日志条目的索引。当选出一个新 `Leader` 时，该 `Leader` 将所有 `nextIndex` 的值都初始化为自己最后一个日志条目的 index 加`1`（上图中的 `11`）。如果 `Follower` 的日志和 `Leader` 的不一致，那么下一次 AppendEntries RPC 中的一致性检查就会失败。在被 `Follower` 拒绝之后，`Leader` 就会减小 `nextIndex` 值并重试 AppendEntries RPC 。最终 nextIndex 会在某个位置使得 `Leader` 和 `Follower` 的日志达成一致。此时，AppendEntries RPC 就会成功，将 `Follower` 中跟 `Leader` 冲突的日志条目全部删除然后追加 `Leader` 中的日志条目（如果有需要追加的日志条目的话）。一旦 AppendEntries RPC 成功，`Follower` 的日志就和 `Leader` 一致，并且在该任期接下来的时间里保持一致
+
+优化：如果想要的话，Raft协议可以被优化来减少被拒绝的 AppendEntries RPC 的个数。例如，当拒绝一个 AppendEntries RPC 的请求的时候，`Follower` 可以包含冲突条目的任期号和自己存储的那个任期的第一个 index。借助这些信息，`Leader` 可以跳过那个任期内所有冲突的日志条目来减小 `nextIndex`；这样就变成每个有冲突日志条目的任期需要一个 AppendEntries RPC 而不是每个条目一次。
+
+####  举例：强行覆盖Leader日志的测试用例
 
 ##  0x06  状态机
 
