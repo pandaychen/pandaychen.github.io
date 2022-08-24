@@ -203,7 +203,7 @@ scheduler模块主要负责对延迟任务和重试任务的[处理](https://git
 参考另外一篇[文章](https://pandaychen.github.io/2022/01/01/A-KAFKA-USAGE-SUMUP-2/#%E6%B6%88%E8%B4%B9%E8%80%85%E8%AF%AD%E4%B9%89)，可以简单的嵌套一下场景：
 
 -	schedule 模块从 ZSET 中检索可执行任务，然后先调用 `ZREM`，再调用 `LPUSH` 将任务放入 queueName 中，如果在 `ZREM` 之后，`LPUSH` 之前挂掉，则任务丢失且无感知，这里是 at most once模型
--	manager 模块将任务下发后，worker 处理完毕，在 ack 之前进程挂掉，下次再次启动 manager 会进行任务重发。即ack之前的异常退出都被视作任务处理失败，触发重入，这里是 at least once模型
+-	manager 模块将任务下发后，worker 处理完毕，在 ack 之前进程挂掉，下次再次启动 manager 会进行任务重发。即ack之前的异常退出都被视作任务处理失败，触发重入，这里是 at least once模型（PS：在这种情况下，开发者需要自行实现消费者的幂等性）
 
 ##	0x05	总结
 本项目基于 golang 实现了通用的任务系统（相对于 machinery 较为轻量级），将具体业务逻辑剥离，保留了整个最核心的任务拆分、任务调度、任务作业等功能，局限是仅支持 Redis 作为 Broker，此外，go-workers提供的方法均为包类型，直接调用即可。
