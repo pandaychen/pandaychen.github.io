@@ -139,14 +139,227 @@ type Msg struct {
 }
 ```
 
+2、[任务](https://github.com/jrallison/go-workers/blob/master/enqueue.go#L15)（入队）<br>
+```GOLANG
+type EnqueueData struct {
+	Queue      string      `json:"queue,omitempty"`
+	Class      string      `json:"class"`
+	Args       interface{} `json:"args"`
+	Jid        string      `json:"jid"`
+	EnqueuedAt float64     `json:"enqueued_at"`
+	EnqueueOptions
+}
+```
+
 ##	0x03	实现细节
 本小节着重分析下工作流转的核心过程，即manager/fetcher/worker/scheduler等模块的实现。
 
-####	manager 模块
+
+####	1、绑定关系（队列+处理方法）
+示例中使用`workers.Process`方法注册，对每个注册的`queue`都开启独立的goroutine处理，调用`manager`的`Start`方法：
+```golang
+func Process(queue string, job jobFunc, concurrency int, mids ...Action) {
+	access.Lock()
+	defer access.Unlock()
+
+	managers[queue] = newManager(queue, job, concurrency, mids...)
+}
+
+
+//全局Run方法，开启整个流程！
+func Run() {
+	Start()
+	go handleSignals()
+	waitForExit()
+}
+
+
+//对每个注册的queue都开启独立的goroutine处理，调用manager的Start方法
+func startManagers() {
+	for _, manager := range managers {
+		manager.start()
+	}
+}
+```
+
+####  2、任务生产：enqueue
+核心[方法](https://github.com/jrallison/go-workers/blob/master/enqueue.go#L52)是`EnqueueWithOptions`，即调用`RPUSH`[指令](https://www.redis.com.cn/commands/rpush.html)将任务入队，本方法用于外部接口调用；
+```golang
+func EnqueueWithOptions(queue, class string, args interface{}, opts EnqueueOptions) (string, error) {
+	now := nowToSecondsWithNanoPrecision()
+	data := EnqueueData{
+		Queue:          queue,
+		Class:          class,
+		Args:           args,
+		Jid:            generateJid(),
+		EnqueuedAt:     now,
+		EnqueueOptions: opts,		//入队参数
+	}
+
+	bytes, err := json.Marshal(data)
+	if err != nil {
+		return "", err
+	}
+
+	if now < opts.At {
+		err := enqueueAt(data.At, bytes)
+		return data.Jid, err
+	}
+
+	conn := Config.Pool.Get()
+	defer conn.Close()
+
+	_, err = conn.Do("sadd", Config.Namespace+"queues", queue)	//保存topic，不重复
+	if err != nil {
+		return "", err
+	}
+	queue = Config.Namespace + "queue:" + queue
+	_, err = conn.Do("rpush", queue, bytes)		//使用RPUSH推送到redis
+	if err != nil {
+		return "", err
+	}
+
+	return data.Jid, nil
+}
+```
+
+其中，任务额外参数包括重试次数，开关等：
+```GOLANG
+type EnqueueOptions struct {
+	RetryCount int     `json:"retry_count,omitempty"`
+	Retry      bool    `json:"retry,omitempty"`
+	At         float64 `json:"at,omitempty"`
+}
+```
+
+
+
+
+####	3、manager 模块：
 [manager模块](https://github.com/jrallison/go-workers/blob/master/manager.go)的核心逻辑如下：
 -	每个queueName都会单独创建一个manager管理协程，负责任务获取（PULL）/调度/分发到worker/完成时acknowledge等处理
 -	manager 模块启动时，需要检查是否有残留任务需要处理（即未被ack的任务，如任务处理时异常退出，导致任务未执行完毕，此类任务需重新执行）
 -	manager会通过独立goroutine，不停的通过`fetcher.Fetch`[方法](https://github.com/jrallison/go-workers/blob/master/fetcher.go#L56)，将待执行任务从queueName LIST（原始工作任务队列）移动到inprogress LIST（正在执行队列），同时通过channel将任务[异步发送给worker模块](https://github.com/jrallison/go-workers/blob/master/fetcher.go#L107)
+
+1、`manager`结构<br>
+一个`manager`对应于一个`queue`，即某个指定的任务队列，包含`1`个fetcher，若干个`worker`；`manager`中各个子模块之间均是通过channel通信的
+
+```golang
+type manager struct {
+	queue       string
+	fetch       Fetcher	//取任务
+	job         jobFunc
+	concurrency int		//worker的并发度
+	workers     []*worker	//worker池
+	workersM    *sync.Mutex
+	confirm     chan *Msg
+	stop        chan bool
+	exit        chan bool
+	mids        *Middlewares
+	*sync.WaitGroup
+}
+```
+
+从前文描述，`manager`包含了`fetcher`和`worker`两个功能，其主要功能如下：
+```golang
+func (m *manager) start() {
+	m.Add(1)
+	m.loadWorkers()		//按并发度启动workers
+	go m.manage()		//Fetch任务并根据结果进行响应处理
+}
+
+//按照配置的并发度，启动worker
+func (m *manager) loadWorkers() {
+	m.workersM.Lock()
+	for i := 0; i < m.concurrency; i++ {
+		m.workers[i] = newWorker(m)
+		m.workers[i].start()
+	}
+	m.workersM.Unlock()
+}
+```
+
+`fetcher`的功能主要有下面两个：
+1.	独立调用`fetch.Fetch()`[方法](https://github.com/jrallison/go-workers/blob/master/fetcher.go#L56)，该方法的功能，每次启动前仅调用一次`processOldMessages`，从inprocessing队列中获取上一次未被ACK的任务，进行备份处理；然后不停的基于`<-f.Ready();f.tryFetchMessage()`等待获取任务
+2.	
+
+```GOLANG
+func (m *manager) manage() {
+	Logger.Println("processing queue", m.queueName(), "with", m.concurrency, "workers.")
+
+	go m.fetch.Fetch()
+
+	for {
+		select {
+		case message := <-m.confirm:
+			m.fetch.Acknowledge(message)
+		case <-m.stop:
+			m.exit <- true
+			break
+		}
+	}
+}
+
+func (f *fetch) Fetch() {
+	f.processOldMessages()
+
+	go func() {
+		for {
+			// f.Close() has been called
+			if f.Closed() {
+				break
+			}
+			<-f.Ready()		//
+			f.tryFetchMessage()	//获取任务
+		}
+	}()
+
+	for {
+		select {
+		case <-f.stop:
+			// Stop the redis-polling goroutine
+			close(f.closed)
+			// Signal to Close() that the fetcher has stopped
+			close(f.exit)
+			break
+		}
+	}
+}
+```
+
+注意，**`tryFetchMessage`方法会不停的将任务task从原始任务队列转移到`inprogressQueue`，通过Redis的`brpoplpush`指令；同时将task放入异步channel：`fetch.messages`，发送给worker实时处理；worker处理的成功结果会通过channel：`confirm`，[异步发送](https://github.com/jrallison/go-workers/blob/master/worker.go#L32)给manager模块，manager模块收到后，通过`Acknowledge`方法删除掉`inprogressQueue`的对应任务（本质是调用Redis的`lrem`指令），代码[在此](https://github.com/jrallison/go-workers/blob/master/manager.go)；如此就完成了一个任务处理完成到ACK的过程**；
+
+```golang
+func (f *fetch) tryFetchMessage() {
+	conn := Config.Pool.Get()
+	defer conn.Close()
+
+	message, err := redis.String(conn.Do("brpoplpush", f.queue, f.inprogressQueue(), 1))
+
+	if err != nil {
+		// If redis returns null, the queue is empty. Just ignore the error.
+		if err.Error() != "redigo: nil returned" {
+			Logger.Println("ERR: ", err)
+			time.Sleep(1 * time.Second)
+		}
+	} else {
+		f.sendMessage(message)
+	}
+}
+
+func (f *fetch) Acknowledge(message *Msg) {
+	conn := Config.Pool.Get()
+	defer conn.Close()
+	conn.Do("lrem", f.inprogressQueue(), -1, message.OriginalJson())
+}
+
+```
+
+
+1、manager的Run方法<br>
+```golang
+
+```
 
 1、如何 [ack 任务](https://github.com/jrallison/go-workers/blob/master/fetcher.go#L110)，收到 worker 的处理成功的信息后异步，删除 LIST 中的对应数据
 ```golang
