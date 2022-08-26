@@ -10,6 +10,7 @@ category: false
 tags:
   - Golang
   - 基数树
+  - Radix
 ---
 
 ## 0x00 前言
@@ -73,12 +74,12 @@ GET("/contact/", func8)
 借助于 Radix 树，我们可以 实现对于长整型数据类型的路由，可以根据一个长整型（比如一个长 ID）快速查找到其对应的 Value 指针
 
 ####    Radix 树 VS Trie 树
-![]()
+![radix-vs-trie](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/datastructure/radix-tree/trie2radixTree.png)
 
 ####    搜索
 下图展示了在基数树中进行字符串查找的示例，通过基数树可以提高字符顺序匹配的效率，对于 URL 之类的字符使用基数树来进行归类、匹配非常适合。
 
-![search](https://zh.m.wikipedia.org/zh-hans/%E5%9F%BA%E6%95%B0%E6%A0%91)
+![search](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/datastructure/radix_tree.png)
 
 ####   Radix 树的实现
 以项目 [go-radix](https://github.com/armon/go-radix/) 为例，先窥探下 radix 树的结构：
@@ -130,7 +131,10 @@ type leafNode struct {
 
 用下图可以表示 go-radix 的结构关系：
 
-![]()
+![node-relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/datastructure/radix-tree/radix-tree-node-struct.png)
+
+`node`的结构如下图：
+![node](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/datastructure/radix-tree/radix-node-relation.png)
 
 
 ####    节点间的关系
@@ -296,7 +300,12 @@ func (t *Tree) Insert(s string, v interface{}) (interface{}, bool) {
 }
 ```
 
-## 0x03 httprouter 分析
+## 0x03 重点：HTTPROUTER 分析
+
+1.	路由是是如何注册？如何保存的？-- 对应于radix树的构造
+2.	当请求到来之后，路由是如何匹配，如何查找的？-- 对应于radix树的查询
+
+
 再回归下radix树的要点，对于radix树的每个节点，如果该节点是唯一的子树的话，就和父节点合并。
 
 
