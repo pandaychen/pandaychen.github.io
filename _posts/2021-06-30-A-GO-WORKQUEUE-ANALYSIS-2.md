@@ -279,9 +279,32 @@ func (m *manager) loadWorkers() {
 }
 ```
 
+上述代码中的启动worker，是将`manager`的`manager.fetch.messages`这个channel，传递给各个`worker`，用于任务异步发送的通道（各个`worker`通过`manager.ready`告知`manager`当前可以接收任务，是个简单的限制并发度的策略）：
+```golang
+func (w *worker) start() {
+	go w.work(w.manager.fetch.Messages())
+}
+
+func (f *fetch) Messages() chan *Msg {
+	return f.messages
+}
+
+func (f *fetch) sendMessage(message string) {
+	msg, err := NewMsg(message)
+
+	if err != nil {
+		Logger.Println("ERR: Couldn't create message from", message, ":", err)
+		return
+	}
+
+	f.Messages() <- msg
+}
+```
+
+
 `fetcher`的功能主要有下面两个：
 1.	独立调用`fetch.Fetch()`[方法](https://github.com/jrallison/go-workers/blob/master/fetcher.go#L56)，该方法的功能，每次启动前仅调用一次`processOldMessages`，从inprocessing队列中获取上一次未被ACK的任务，进行备份处理；然后不停的基于`<-f.Ready();f.tryFetchMessage()`等待获取任务
-2.	
+2.	监听`worker`模块任务**成功**执行结果（`<-m.confirm`），ack掉该任务
 
 ```GOLANG
 func (m *manager) manage() {
@@ -356,12 +379,7 @@ func (f *fetch) Acknowledge(message *Msg) {
 ```
 
 
-1、manager的Run方法<br>
-```golang
-
-```
-
-1、如何 [ack 任务](https://github.com/jrallison/go-workers/blob/master/fetcher.go#L110)，收到 worker 的处理成功的信息后异步，删除 LIST 中的对应数据
+2、如何 [ack 任务](https://github.com/jrallison/go-workers/blob/master/fetcher.go#L110)，收到 worker 的处理成功的信息后异步，删除 LIST 中的对应数据<br>
 ```golang
 func (f *fetch) Acknowledge(message *Msg) {
 	conn := Config.Pool.Get()
@@ -370,7 +388,28 @@ func (f *fetch) Acknowledge(message *Msg) {
 }
 ```
 
-####	worker 模块
+3、manager的quit方法<br>
+```golang
+func (m *manager) quit() {
+	Logger.Println("quitting queue", m.queueName(), "(waiting for", m.processing(), "/", len(m.workers), "workers).")
+	m.prepare()
+
+	m.workersM.Lock()
+	for _, worker := range m.workers {
+		worker.quit()
+	}
+	m.workersM.Unlock()
+
+	m.stop <- true
+	<-m.exit
+
+	m.reset()
+
+	m.Done()
+}
+```
+
+####	4、worker 模块
 worker模块的核心逻辑如下：
 1.	从与manager共享的任务channel中[获取任务并执行](https://github.com/jrallison/go-workers/blob/master/worker.go#L28)
 2.	通过middleware中间件形式将处理状态返回，见下面的`process`方法
@@ -379,12 +418,54 @@ worker模块的核心逻辑如下：
 
 下面列举下worker核心的方法：
 
-1、执行任务的 [逻辑](https://github.com/jrallison/go-workers/blob/master/worker.go#L57)<br>
+1、[获取任务](https://github.com/jrallison/go-workers/blob/master/worker.go#L52)<br>
+各个`worker`通过`messages`这个channel抢夺任务，执行任务完成通过`w.manager.fetch.Ready() <- true`告知`manager`自己已经空闲，可以继续处理工作；不过这种任务是属于抢夺式的，并不是基于某种策略的分发模式，容易造成某个协程饿死的情况
+
+```golang
+
+func (w *worker) work(messages chan *Msg) {
+	for {
+		select {
+		case message := <-messages:
+			atomic.StoreInt64(&w.startedAt, time.Now().UTC().Unix())
+			w.currentMsg = message
+
+			//worker调用process处理任务，成功的结果异步发送到ack队列中待确认
+			if w.process(message) {
+				w.manager.confirm <- message
+			}
+
+			atomic.StoreInt64(&w.startedAt, 0)
+			w.currentMsg = nil
+
+			// Attempt to tell fetcher we're finished.
+			// Can be used when the fetcher has slept due
+			// to detecting an empty queue to requery the
+			// queue immediately if we finish work.
+			select {
+			//告知manager，当前worker已经处理完成，可以继续接收任务
+			case w.manager.fetch.FinishedWork() <- true:
+			default:
+			}
+		case w.manager.fetch.Ready() <- true:
+			// Signaled to fetcher that we're
+			// ready to accept a message
+		case <-w.stop:
+			w.exit <- true
+			return
+		}
+	}
+}
+```
+
+2、执行任务的 [逻辑](https://github.com/jrallison/go-workers/blob/master/worker.go#L57)<br>
+包含了中间件的处理方式`w.manager.mids.call`
 ```golang
 func (w *worker) process(message *Msg) (acknowledge bool) {
 	acknowledge = true
 
 	defer func() {
+		//防止异常崩溃
 		recover()
 	}()
 
@@ -395,17 +476,108 @@ func (w *worker) process(message *Msg) (acknowledge bool) {
 }
 ```
 
-####	schedule 模块
-scheduler模块主要负责对延迟任务和重试任务的[处理](https://github.com/jrallison/go-workers/blob/master/manager.go#L86)，这里巧妙的利用了延时任务和重试任务本质上其实是相同的（都是等待一段时间后出发的特点）
+####	5、schedule 模块
+scheduler模块主要负责对延迟任务和重试任务的[处理](https://github.com/jrallison/go-workers/blob/master/manager.go#L86)，这里**巧妙的利用了延时任务和重试任务本质上其实是相同的（都是等待一段时间后出发的特点）**
 -	延迟任务：ZSET 中 `score` 为任务执行时间戳，利用 `zrangebyscore`指令，`score` 为 `-inf -> now`，获取到期的可执行任务，然后将任务从 ZSET 中删除，并放入对应 queueName 队列
 -	重试任务：同上
+
+注意，`poll`的循环中，每次仅从ZSET中取`1`个任务，从ZSET中删除后通过`LPUSH`指令写入普通队列（然后再写入`inprocessingQueue`队列）
+```golang
+func (s *scheduled) poll() {
+	conn := Config.Pool.Get()
+
+	//获取延时
+	now := nowToSecondsWithNanoPrecision()
+
+	for _, key := range s.keys {
+		key = Config.Namespace + key
+		for {
+			//仅取一个任务
+			messages, _ := redis.Strings(conn.Do("zrangebyscore", key, "-inf", now, "limit", 0, 1))
+
+			if len(messages) == 0 {
+				//本轮退出
+				break
+			}
+
+			message, _ := NewMsg(messages[0])
+
+			if removed, _ := redis.Bool(conn.Do("zrem", key, messages[0])); removed {
+				queue, _ := message.Get("queue").String()
+				queue = strings.TrimPrefix(queue, Config.Namespace)
+				message.Set("enqueued_at", nowToSecondsWithNanoPrecision())
+
+				//到期的任务，放入普通队列
+				conn.Do("lpush", Config.Namespace+"queue:"+queue, message.ToJson())
+			}
+		}
+	}
+
+	conn.Close()
+}
+```
+
 
 ####	fetcher 模块
 [fetcher模块](https://github.com/jrallison/go-workers/blob/master/fetcher.go)主要封装了大部分操作Redis LIST任务队列的方法，**从设计上说，使得逻辑层与数据层分离，仅通过 fetcher 模块与 redis 交互，其他模块仅需要调用fetcher提供的方法即可**：
 -	`Acknowledge`方法：ack 后删除任务
--	`processOldMessages`方法：获取inprocessing队列中未被ack的方法
+-	`processOldMessages`方法：获取`inprocessingQueue`队列中未被ack的方法
 -	`Fetch`方法：从Redis相关队列获取任务
 
+```golang
+func (f *fetch) Fetch() {
+	f.processOldMessages()
+
+	go func() {
+		for {
+			// f.Close() has been called
+			if f.Closed() {
+				break
+			}
+			<-f.Ready()
+			f.tryFetchMessage()
+		}
+	}()
+
+	for {
+		select {
+		case <-f.stop:
+			// Stop the redis-polling goroutine
+			close(f.closed)
+			// Signal to Close() that the fetcher has stopped
+			close(f.exit)
+			break
+		}
+	}
+}
+
+func (f *fetch) tryFetchMessage() {
+	conn := Config.Pool.Get()
+	defer conn.Close()
+
+	message, err := redis.String(conn.Do("brpoplpush", f.queue, f.inprogressQueue(), 1))
+
+	if err != nil {
+		// If redis returns null, the queue is empty. Just ignore the error.
+		if err.Error() != "redigo: nil returned" {
+			Logger.Println("ERR: ", err)
+			time.Sleep(1 * time.Second)
+		}
+	} else {
+		//发送任务到worker
+		f.sendMessage(message)
+	}
+}
+```
+
+`Acknowledge`方法，从`inprocessingQueue`删除对应的任务，注意这里`LREM`的用法是从表尾开始向表头搜索，移除与 `VALUE` 相等的元素，数量为 `COUNT` 的绝对值（因为被优先处理的任务一般都在LIST的尾部）
+```GOLANG
+func (f *fetch) Acknowledge(message *Msg) {
+	conn := Config.Pool.Get()
+	defer conn.Close()
+	conn.Do("lrem", f.inprogressQueue(), -1, message.OriginalJson())
+}
+```
 
 
 ####	hooks实现
