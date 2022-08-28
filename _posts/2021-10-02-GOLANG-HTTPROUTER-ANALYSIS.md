@@ -83,6 +83,20 @@ GET("/contact/", func8)
 ####    Radix 树 VS Trie 树
 ![radix-vs-trie](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/datastructure/radix-tree/trie2radixTree.png)
 
+
+####	gin的前缀树
+```golang
+engine.GET("/admin/model/get", api.GetTemplate)
+engine.GET("/admin/model/query", api.QueryTemplate)
+engine.POST("/admin/model/set", api.SetTemplate)
+engine.POST("/admin/model/upload", api.UploadTemplate)
+engine.POST("/admin/model/uploadv2", api.GetTemplateWithSignature)
+engine.POST("/admin/model/update", api.UpdateTemplate)
+```
+形成了两棵前缀树，左边是GET方法的树，右边是POST方法树。
+
+![IMG](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/http-gin/gin-radix-tree.png)
+
 ####    搜索
 下图展示了在基数树中进行字符串查找的示例，通过基数树可以提高字符顺序匹配的效率，对于 URL 之类的字符使用基数树来进行归类、匹配非常适合。
 
@@ -596,11 +610,22 @@ type node struct {
 -	`catchAll`：有`*`匹配的节点
 -	`param`：参数节点，比如上图中的 `:post` 节点
 
-一开始树为空，注册路由的过程就是建树的过程
+一开始树为空，注册路由的过程就是建树的过程；注意`children  []*node`成员，存储满足前缀的子节点指针，可以延申。其中子节点越多，或者说绑定handle方法越多的根节点，`priority`优先级越高，作者有意识的对每次注册完成进行优先级排序。
+
+>This helps in two ways:
+>Nodes which are part of the most routing paths are evaluated first. This helps to make as much routes as possible to be reachable as fast as possible.
+
+>It is some sort of cost compensation. The longest reachable path (highest cost) can always be evaluated first. The following scheme visualizes the tree structure. Nodes are evaluated from top to bottom and from left to right.
+
+优先级高的节点有利于handle的快速定位，相信比较好理解，现实中人流量密集处往往就是十字路口，类似交通枢纽。基于前缀树的匹配，让寻址从密集处开始，有助于提高效率。
+
 
 #### Tree
 
 ## 0x04 路由注册
+
+路由注册的核心是，最终那些前缀一致的路径会被绑定到Radix树的同一个分支方向上，直接提高了索引的效率。
+
 路由注册的底层都是调用`Handle`方法，看下其实现，最后是调用`addRoute`方法添加路由：
 ```golang
 // 通过给定的路径和方法，注册一个新的 handle 请求，对于 GET, POST, PUT, PATCH 和 DELETE
@@ -646,6 +671,8 @@ node的`addRoute`方法分为两步：
 1.	第一步是根据path和已有的前缀树的匹配，找到剩余的path需要插入的孩子节点的位置
 2.	第二步是插入到该节点。当一颗树是空树时，增加第一条path的过程便退化为只有第二步
 
+注意到`addRoute`是`node`的方法中有个`walk`标签，猜想是不停的需要调整树到子树中的节点数据已达到最终目标
+
 ```golang
 // addRoute 将传入的 handle 添加到路径中
 func (n *node) addRoute(path string, handle Handle) {
@@ -656,7 +683,7 @@ func (n *node) addRoute(path string, handle Handle) {
     // 计算传入的路径参数的数量，即路径中包含:/*特殊字符的总数
     numParams := countParams(path)
 
-    // 如果树不是空的
+    // 如果树不是空的（当前节点已经存在注册链路）
     // 判断的条件是当前节点的 path 的字符串长度和子节点的数量全部都大于 0
     // 就是说如果当前节点是一个空的节点，或者当前的节点是一个叶子节点，就直接
     // 进入 else 在当前节点下面添加子节点
@@ -669,7 +696,7 @@ func (n *node) addRoute(path string, handle Handle) {
                 n.maxParams = numParams
             }
 
-            // 查找最长的共同的前缀
+            // 查找最长的共同的前缀（判断待注册url是否与已有url有重合，提取重合的最长下标）
             // 公共前缀不包含 ":" 或 "*"
             i := 0
 
@@ -744,7 +771,7 @@ func (n *node) addRoute(path string, handle Handle) {
                     // 不会这个节点进行处理，直接将它的子节点赋值给当前节点
                     // 比如： :post/ ，只要是参数节点，必有子节点，哪怕是
                     // blog/:post 这种，也有一个 / 的子节点
-                    n = n.children[0]
+                    n = n.children[0] //
 
                     // 又插入了一个节点，权限再次 + 1
                     n.priority++
@@ -918,6 +945,74 @@ func (n *node) addRoute(path string, handle Handle) {
         n.nType = root
     }
 }
+```
+
+简单的注册例子：
+```golang
+
+func Hello(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+    fmt.Fprintf(w, "hello, %s!\n", ps.ByName("name"))
+}
+
+router.Handle("GET", "/user/ab/", func(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+	//test
+})
+
+router.Handle("GET", "/user/abcd/", func(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+	//test
+})
+
+router.GET("/user/abce/", Hello)
+
+router.Handle(http.MethodGet, "/user/query/:name", func(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+    routed = true
+    want := httprouter.Params{httprouter.Param{"name", "testvalue"}}
+    if !reflect.DeepEqual(ps, want) {
+    	t.Fatalf("wrong wildcard values: want %v, got %v", want, ps)
+    }
+})
+```
+
+该用例的创建过程如下：
+1、首次插入url：`/user/ab/`，匹配长度大于于当前节点已有的url，则创建子节点，若当前节点是`/user/ab/`，对应的注册方法是`handler1`<br>
+```text
+[root]path=/user/ab/,indices=,wildChild=false,nType=1,priority=1
+```
+
+2、插入一个新url：`/user/abcd/`，对应的方法是`handler2`，需要创建`/user/ab`的子节点`/` 和 `cd/`
+```text
+[root]path=/user/ab,indices=/c,wildChild=false,nType=1,priority=2
+        [child]path=/,indices=,wildChild=false,nType=0,priority=1
+        [child]path=cd/,indices=,wildChild=false,nType=0,priority=1
+```
+
+3、插入一个新url：`/user/abce/`，对应方法是`handler3`，树如下<br>
+```text
+[root]path=/user/ab,indices=c/,wildChild=false,nType=1,priority=3
+        [child]path=c,indices=de,wildChild=false,nType=0,priority=2
+        [child]path=d/,indices=,wildChild=false,nType=0,priority=1
+-----------------
+        [child]path=e/,indices=,wildChild=false,nType=0,priority=1
+-----------------
+-----------------
+        [child]path=/,indices=,wildChild=false,nType=0,priority=1
+```
+
+4、插入新url：`/user/query/:name`<br>
+```text
+[root]path=/user/,indices=aq,wildChild=false,nType=1,priority=4
+        [child]path=ab,indices=c/,wildChild=false,nType=0,priority=3
+        [child]path=c,indices=de,wildChild=false,nType=0,priority=2
+        [child]path=d/,indices=,wildChild=false,nType=0,priority=1
+-----------------
+        [child]path=e/,indices=,wildChild=false,nType=0,priority=1
+-----------------
+-----------------
+        [child]path=/,indices=,wildChild=false,nType=0,priority=1
+-----------------
+-----------------
+        [child]path=query/,indices=,wildChild=true,nType=0,priority=1
+        [child]path=:name,indices=,wildChild=false,nType=2,priority=1
 ```
 
 
@@ -1371,3 +1466,4 @@ var _ http.Handler = New()
 - [Wikipedia - 基数树](https://zh.m.wikipedia.org/zh-hans/%E5%9F%BA%E6%95%B0%E6%A0%91)
 - [httprouter 源码分析](https://learnku.com/articles/27591)
 - [gin框架之路由前缀树初始化分析](https://mp.weixin.qq.com/s/lLgeKMzT4Q938Ij0r75t8Q)
+- [Radix Tree](https://biscuitos.github.io/blog/RADIX-TREE/)
