@@ -86,6 +86,25 @@ func main() {
 //[5 7 9] [5 7 9 11] [5 7 9 12]
 ```
 
+####    例子5
+`x`与`y`均指向同一块存储区域，修改`y`的指向的值<br>
+```go
+func main() {
+        x := []int{2, 3, 5, 7, 11}
+        y := x[1:3]
+        fmt.Println(x, y)
+        y[0] = 10
+        y[1] = 11
+        fmt.Println(x, y)
+}
+//[2 3 5 7 11] [3 5]
+//[2 10 11 7 11] [10 11]
+```
+![slice-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/slice/slice-1.png)
+
+####    例子6
+
+
 ##	0x03	Slice 技巧
 
 本文翻译自SliceTricks。我会追加一些我的理解。官方给出的例子代码很漂亮，建议大家多看看，尤其是利用多个切片共享底层数组的功能就地操作很有意思。
@@ -144,3 +163,4 @@ func main() {
 -	[对 Go 的 Slice 进行 Append 的一个坑](http://sharecore.net/post/%E5%AF%B9go%E7%9A%84slice%E8%BF%9B%E8%A1%8Cappend%E7%9A%84%E4%B8%80%E4%B8%AA%E5%9D%91/)
 -	[Slice 小技巧](https://blog.cyeam.com/golang/2018/06/18/slicetricks)
 -	[Go 语言的 slice 为啥有这样的奇怪问题呢？ - 达达的回答 - 知乎](https://www.zhihu.com/question/27161493/answer/35485751)
+-       [理解 Go 中的 Slice](https://sanyuesha.com/2018/07/31/go-slice/)

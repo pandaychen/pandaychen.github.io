@@ -41,7 +41,7 @@ conn, err := grpc.Dial(
 `gRPC` 支持 `DNS` 作为默认 `Naming` 系统，同时也提供了实现 `Naming` 系统乃至 `LoadBalance` 功能的用户侧接口。所以，第三方注册中心，如 `Etcd`、`Consul`、`Zookeeper` 都可以作为非常优秀的 `gRPC` 负载均衡实现。
 `gRPC Name Resolution` 常用如下格式，scheme 表示要使用的 `Naming` 方式。目前常用的 schemes 有（`DNS` 是内置的方案）：
 
-```javascript
+```text
 scheme://authority/endpoint_name
 
 dns (例: dns://8.8.8.8/www.qq.com)

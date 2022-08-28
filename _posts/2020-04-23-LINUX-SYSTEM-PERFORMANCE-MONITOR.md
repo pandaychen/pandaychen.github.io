@@ -33,7 +33,7 @@ for index, ci := range cpuInfos {
 ```
 
 输出如下（测试机仅有 1 核）：
-```javascript
+```json
 {
 	"cpu": 0,
 	"vendorId": "GenuineIntel",
@@ -112,7 +112,7 @@ func getMemInfo() {
 
 测试机输出如下：
 
-```javascript
+```json
 {
 	"total": 1040912384,
 	"available": 182886400,
@@ -183,7 +183,7 @@ func CgroupCPU() {
 ```
 
 执行结果：
-```javascript
+```json
 {
 	"cpu": "c1dfd58d5ef72250392f1b03898e8f4d40110ba73913d945ce475e8657e7d53e",
 	"user": 0.0,

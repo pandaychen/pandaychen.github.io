@@ -243,7 +243,7 @@ func (r *Resolver) updateproc() {
 从测试来看，每一次后端 Backend 节点有变化（增加或减少），都会触发 gRPC 返回当前全部存活的 Backend 列表。另外，`resolver.Address{}` 的 [定义](https://godoc.org/google.golang.org/grpc/resolver#Address) 中，提供了 `Metadata`，让用户可以保存更多需要的字段信息。在这里保存的 `Metadata` 数据，在 `gRPC.balancer` 的相关接口会返回给用户。<br>
 
 在 Warden 的 `Metadata` 中，`Weight` 为权重，`Color` 为蓝绿标识，用于发布时使用（试想这样一种场景，刚部署的服务器，希望按照一定的策略或比率将在线流量导入），权重主要在负载均衡的算法中使用，这个在另外的文章进行分析。
-```javascript
+```json
 {
     "Weight": "uint64(weight)",
     "Color": "ins.Metadata[naming.MetaColor]"

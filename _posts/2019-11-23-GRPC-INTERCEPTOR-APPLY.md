@@ -214,7 +214,7 @@ func main() {
 }
 ```
 上面这个例子输出的结果如下，和我们预期一致（先进后出）：
-```javascript
+```text
 foo
 bar
 context.Background.WithCancel.WithValue(type peer.peerKey, val <not Stringer>).WithValue(type metadata.mdIncomingKey, val <not Stringer>).WithValue(type grpc.streamKey, val <not Stringer>).WithValue(type string, val foo_value).WithValue(type string, val bar_value)
@@ -270,7 +270,7 @@ func ChainUnaryServer(interceptors ...grpc.UnaryServerInterceptor) grpc.UnarySer
 
 ##	0x03  拦截器链的执行顺序
 拦截器的执行顺序与请求处理和响应处理的顺序相反，
-```javescript
+```javascript
 const promiseClient = new MyServicePromiseClient(
     host, creds, {'unaryInterceptors': [interceptor1, interceptor2, interceptor3]});
 

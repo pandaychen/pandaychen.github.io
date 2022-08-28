@@ -8,6 +8,7 @@ author:     pandaychen
 catalog:    true
 tags:
     - Kratos
+    - Prometheus
 ---
 
 

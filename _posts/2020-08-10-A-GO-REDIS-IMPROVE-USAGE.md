@@ -8,6 +8,7 @@ author:     pandaychen
 catalog:    true
 tags:
     - Redis
+    - Prometheus
 ---
 
 ##  0x00    前言

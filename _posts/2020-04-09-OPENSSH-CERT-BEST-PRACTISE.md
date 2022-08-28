@@ -52,7 +52,7 @@ $$ 证书（Certificate） = 公钥（PublicKey） + 元数据 (公钥指纹 / �
 ####    用户认证
 基于 CA 签发的用户证书主要用于 SSH 登录，如下面这个用户证书，我们可以基于 `key ID` 或者 `Critical Options` 这个字段做些额外的工作。
 
-```javascript
+```text
  Type: ssh-ed25519-cert-v01@openssh.com user certificate
         Public key: ED25519-CERT SHA256:wdzTWhCrVeJrxRIC1KU5nJr8FbxxCUJt1IVeG7HYjmc
         Signing CA: ED25519 SHA256:OEhTm77qM7ZDwb5oltxt78FIpKraXCzxoaboi/KpNbM
@@ -79,7 +79,7 @@ $$ 证书（Certificate） = 公钥（PublicKey） + 元数据 (公钥指纹 / �
 
 ####    主机认证
 主机证书主要用于替换服务器的 Hostkey 认证，用于服务端告诉客户端，我是经由 CA 签发（认证）的合法服务器：
-```javascript
+```text
 ssh_host_ecdsa_key-cert.pub:
         Type: ecdsa-sha2-nistp256-cert-v01@openssh.com host certificate
         Public key: ECDSA-CERT 51:7e:99:5d:dc:05:9e:21:85:d1:e1:10:d3:a3:77:8a
