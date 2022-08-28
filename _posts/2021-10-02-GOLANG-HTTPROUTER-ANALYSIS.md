@@ -624,7 +624,7 @@ type node struct {
 
 ## 0x04 路由注册
 
-路由注册的核心是，最终那些前缀一致的路径会被绑定到Radix树的同一个分支方向上，直接提高了索引的效率。
+路由注册的核心是，最终那些前缀一致的路径会被绑定到Radix树的同一个分支方向上，直接提高了索引的效率，即把各个handler注册到一棵url前缀树上面，根据url前缀相同的匹配度进行分支，以提高路由效率。
 
 路由注册的底层都是调用`Handle`方法，看下其实现，最后是调用`addRoute`方法添加路由：
 ```golang
@@ -671,7 +671,7 @@ node的`addRoute`方法分为两步：
 1.	第一步是根据path和已有的前缀树的匹配，找到剩余的path需要插入的孩子节点的位置
 2.	第二步是插入到该节点。当一颗树是空树时，增加第一条path的过程便退化为只有第二步
 
-注意到`addRoute`是`node`的方法中有个`walk`标签，猜想是不停的需要调整树到子树中的节点数据已达到最终目标
+注意到`addRoute`是`node`的方法中有个`walk`标签，猜想是不停的需要调整树到子树中的节点数据以达到最终目标
 
 ```golang
 // addRoute 将传入的 handle 添加到路径中
@@ -973,7 +973,8 @@ router.Handle(http.MethodGet, "/user/query/:name", func(w http.ResponseWriter, r
 })
 ```
 
-该用例的创建过程如下：
+该用例的创建过程如下：<br>
+
 1、首次插入url：`/user/ab/`，匹配长度大于于当前节点已有的url，则创建子节点，若当前节点是`/user/ab/`，对应的注册方法是`handler1`<br>
 ```text
 [root]path=/user/ab/,indices=,wildChild=false,nType=1,priority=1
@@ -1439,13 +1440,85 @@ walk: // outer loop for walking the tree
 ```
 
 ## 0x06 查找算法
+查找算法基本流程如下图：
+![search](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/http-gin/search-index-flow.png)
+
+##	0x07	基础示例
+来源于[6.2. router 请求路由](https://books.studygolang.com/advanced-go-programming-book/ch6-web/ch6-02-router.html)
+
+####	GET
+
+```text
+GET /marketplace_listing/plans/
+GET /marketplace_listing/plans/:id/accounts
+GET /search
+GET /status
+GET /support
+补充路由：
+GET /marketplace_listing/plans/ohyes
+```
+
+1、过程1：插入 `GET /marketplace_listing/plans`<br>
+因为第一个路由没有参数（wildCard），path 都被存储到根节点上了，只有一个节点
+
+![get-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/datastructure/radix-tree/ch6-02-radix-get-1.png)
+
+2、过程2（新的路由可以直接作为原路由的子节点进行插入）<br>
+插入`GET /marketplace_listing/plans/:id/accounts`，新路径与之前的路径有共同的前缀，且可以直接在之前叶子节点后进行插入；由于 `:id` 这个节点只有一个字符串的普通子节点，所以 `indices` 还依然不需要处理
+
+![get-2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/datastructure/radix-tree/ch6-02-radix-get-2.png)
+
+3、过程3（分裂）：插入 `GET /search`，导致树的边分裂<br>
+原路径和新的路径在初始的 `/` 位置会发生分裂，这样需把原有的 root 节点内容下移，再将新路由 `search` 同样作为子节点挂在 root 节点之下。这时候因为子节点出现多个，需要在 root 节点的 `indices` 提供子节点索引（即`ms` 表示子节点的首字母分别为 m-marketplace 和 s-search）
+
+![get-3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/datastructure/radix-tree/ch6-02-radix-get-3.png)
+
+4、过程4（分裂）：插入`GET /status` 和 `GET /support`，导致在 search 节点上再次发生分裂<br>
+
+![get-4](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/datastructure/radix-tree/ch6-02-radix-get-4.png)
+
+####	PUT
+```text
+PUT /user/installations/:installation_id/repositories/:repository_id
+```
+
+对应的radix树为：
+![radix](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/datastructure/radix-tree/ch6-02-radix-put1.png)
+
+##	0x08	特殊示例
+本小节摘自[gin框架之路由前缀树初始化分析](https://mp.weixin.qq.com/s/lLgeKMzT4Q938Ij0r75t8Q)，分析几种比较特殊的情况。前两种情况针对了初始路由信息为空的情况（了解`insertChild`的过程），第三个case主要用于分析寻找路由的过程。
+
+####	case1：单条包含两个冒号通配path的一颗前缀树
+路由信息： `/user/:name/:age`，`name`和`age`是通配符的名字，radix树构造过程如下：
+
+-	查找到当前path `/user/:name/:age`的wildCard为`:name`，开始的位置是第`7`个字符
+-	判断wildCard是冒号通配符类型且起始位置大于`0`，那么path之前的部分`/user/`设置为当前节点（上面树中的第一层节点）的path，然后更新要处理的path为后半部分，即`:name/:age`
+-	设置当前node wildChild为`true`
+-	新建孩子节点，path为wilCard`:name`，并且挂接到第一层节点，并将当前节点指向第`2`层的节点
+-	判断path是否处理结束，如果处理结束，则可以退出
+-	如果path还没有处理结束，更新path为除去wildCard剩余部分`/:age`，并新建孩子节点，挂接到当前的节点（当前还指向第`2`层）并且设置当前节点为第`3`层结点
+-	更新后的path为`/:age`，当前的节点为第`3`层节点，继续从第一步开始处理。再次循环一遍，两个冒号通配符处理完成
+
+![CASE1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/http-gin/gin-case1.png)
+
+####	case2：单条包含星号通配path的一颗前缀树
+路由信息：`/user/:name/*age` ，包含一个冒号通配符和一个星号通配符，radix树构造过程如下：
+
+-	查找当前path的wildCard，当前node指向第一层的node，wildCard的查找结果为`:name`，位置在第`9`个
+-	按照上面的处理步骤，处理完wildCard，path更新为`/*age`，当前node指向第`3`层，进行下一次循环处理
+-	再次查找wildCard结果为`*age`位置是第二个符号，进入`insertChild`插入星号通配符的逻辑
+-	查看通配符之前的是否是下划线，不是的话报错，将当前的节点path设置为下划线之前的path，这个时候当前节点path为空
+-	生成子节点，即图中的第`4`层节点，设置节点类型为`catchAll`，并挂接到当前节点，设置单前节点的`indices`为`/`，当前节点指向第`4`层节点
+-	新建第`5`层节点，节点path设置为剩下的path（此处星号通配符之后不再处理），并挂接到当前当前节点
+
+![CASE2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/http-gin/gin-case2.png)
+
+####	case3：多种path的寻找过程
+路由信息：第一条`/user/info`，第二条`/user/info/:name`，第三条`/user/info/:name/*age`
 
 
-##	0x07	举例
+![CASE3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/http-gin/gin-case3.png)
 
-
-
-####	
 
 ##	0x08	其他一些细节
 
@@ -1455,6 +1528,17 @@ walk: // outer loop for walking the tree
 var _ http.Handler = New()
 ```
 上面代码通过 `New()` 函数初始化一个 `Router` ，并且指定 `Router` 实现了 http.Handler 接口 ，如果 `New()` 没有实现 `http.Handler` 接口，在编译的时候就会报错了。这里只是为了验证一下， `New()` 函数的返回值并不需要，所以就把它赋值给 `_`；常用于编译检查
+
+2、参数查询<br>
+封装在`http.request`中的上下文是个`valueCtx`，框架提供了一个从上下文获取Params键值对的方法：
+```golang
+func ParamsFromContext(ctx context.Context) Params {
+	p, _ := ctx.Value(ParamsKey).(Params)
+	return p
+}
+```
+
+3、子节点的冲突问题<br>
 
 
 ## 0x09 参考
