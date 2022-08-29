@@ -397,9 +397,42 @@ main.main()
 exit status 2
 ```
 
+##      0x04    工作经验：并发请求下的channel典型用法
+在开发中，遇到需要并发调用请求（各请求间无关联）的场景，如客户端并发请求服务接口等，通常我们可以使用下面这种基于channel的简单并发请求框架：
+-       不关心调用顺序
+-       不关系结果顺序
+-       各个goroutine必须要实现超时机制，避免调用方阻塞
+
+```golang
+func main() {
+        var max = 10
+        var oriList = []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+        token := make(chan struct{}, max)
+        results := make(chan int, len(oriList))
+        var wg sync.WaitGroup
+        wg.Add(len(oriList))
+
+        for _, val := range oriList {
+                token <- struct{}{}
+                go func(v int) {
+                        //do some client business calls
+                        results <- v
+                        <-token
+                        wg.Done()
+                }(val)
+        }
+        wg.Wait()
+        close(results)
+
+        for v := range results {
+                fmt.Println(v)
+        }
+}
+```
 
 
-##  0x04        参考
+
+##  0x05        参考
 -       [聊一聊 Go 中 channel 的行为](https://www.infoq.cn/article/wZ1kKQLlsY1N7gigvpHo)
 -       [Concurrency in Go 中文笔记](https://www.kancloud.cn/mutouzhang/go/596835)
 -       [go 并发编程范式](https://www.jianshu.com/p/3e1837860575)
