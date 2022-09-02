@@ -74,14 +74,14 @@ openssl enc -aes-128-cbc -k "mySecretPassword" -in plaintext.txt -out enc1.salte
 
 两次加密的结果不同：
 
-```javascript
+```text
 xxd enc2.salted.bin
 00000000: 5361 6c74 6564 5f5f 9cfe 2d62 a2d4 70b8  Salted__..-b..p.
 00000010: aee4 afb5 85c9 76a2 cb04 7e1d 27d9 94d4  ......v...~.'...
 00000020: a1b3 c4d6 39b8 f5a8 c300 81b5 b6ed 4cca  ....9.........L.
 ```
 
-```javascript
+```text
 xxd enc1.salted.bin
 00000000: 5361 6c74 6564 5f5f e73c ee5b 701b bba8  Salted__.<.[p...
 00000010: fa25 c54e befa 26dc ddb1 3a2d 2bd7 a95b  .%.N..&...:-+..[
