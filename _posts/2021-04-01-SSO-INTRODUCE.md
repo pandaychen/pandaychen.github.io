@@ -97,7 +97,7 @@ SP 首先需要配置好 IDP 提供的 SAML 属性关键信息，如id、key等�
 
 ## 0x04 OpenID 与 OIDC
 
-OIDC（OpenID Connect）等于 （Identity, Authentication） + OAuth 2.0。OIDC 基于 OAuth2 协议之上构建了一个身份层的认证标准协议。OIDC 使用 OAuth2 的授权服务器来为第三方客户端提供用户的身份认证，并把对应的身份认证信息传递给客户端（如移动 APP，JS 应用等），且完全兼容 OAuth2，也就是说一个 OIDC 的服务，也可以当作一个 OAuth2 的服务来用。更通俗的说，OIDC 融合了 OpenId 的身份标识，OAuth2 的授权和 JWT 包装数据的方式。
+OIDC（OpenID Connect）等于 （Identity Authentication） + OAuth 2.0。OIDC 基于 OAuth2 协议之上构建了一个身份层的认证标准协议。OIDC 使用 OAuth2 的授权服务器来为第三方客户端提供用户的身份认证，并把对应的身份认证信息传递给客户端（如移动 APP，JS 应用等），且完全兼容 OAuth2，也就是说一个 OIDC 的服务，也可以当作一个 OAuth2 的服务来用。更通俗的说，OIDC 融合了 OpenId 的身份标识，OAuth2 的授权和 JWT 包装数据的方式。
 
 ![oidc-basic](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/auth/sso_2022/oidc-basic.png)
 
@@ -148,7 +148,7 @@ JWT 在有些场合可能会放到 URL（比如 `api.example.com/?token=jwt-toke
 ####  JWT的使用方式
 客户端收到服务器返回的 JWT，可以储存在 Cookie 里面，也可以储存在 localStorage；客户端需要携带JWT进行通信，通常放在 HTTP 请求的头信息`Authorization`字段里面（也可以放在 `Cookie` ，但是这样不能跨域）；还有另外一种场景，若跨域的时候，可以把JWT 放在 POST 请求的数据体里面
 
-```javascript
+```text
 Authorization: Bearer <token>
 ```
 

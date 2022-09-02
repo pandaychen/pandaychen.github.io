@@ -52,13 +52,13 @@ tags:
 
 浏览器访问如下 URL：
 
-```bash
+```text
 http://127.0.0.1:8081/gatekeeper/test_http/cgi1?app_id=test_app&sign=62fda0f2212eaffd90dbf04136768c5f
 ```
 
 返回
 
-```javascript
+```text
 Hello World1
 ```
 
