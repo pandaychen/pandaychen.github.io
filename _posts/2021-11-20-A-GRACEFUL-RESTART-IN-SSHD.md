@@ -90,7 +90,7 @@ func Dup(oldfd int) (fd int, err error) {
 }
 ```
 
-![fork-dup]()
+![fork-dup](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/system/restart/fork-dup-1.png)
 
 ####    如何平滑重启？
 重启时处理已建立连接上请求？有N种选择：
@@ -116,6 +116,9 @@ func Dup(oldfd int) (fd int, err error) {
 2.  子进程监听父进程的 socket，这个时候旧子进程和新子进程都可以接收请求
 3.  新子进程启动成功之后，旧子进程停止接收新的连接，等待旧连接处理完成（或超时）
 4.  旧子进程退出，升级完成
+5.	overseer 增加了一个主进程管理平滑重启。子进程处理连接，能够保持主进程 `pid` 不变
+
+![overseer](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/system/restart/overseer.png)
 
 
 ##  0x03    endless分析
@@ -141,7 +144,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 3.  子进程启动成功之后发送 SIGTERM 信号给父进程，父进程停止接收新的连接，等待旧连接处理完成（或超时）
 4.  父进程退出，升级完成
 
-![principle]()
+![principle](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/system/restart/endless-principle.png)
 
 ####    核心结构
 ```GOLANG
@@ -310,6 +313,8 @@ func (srv *endlessServer) handleSignals() {
 }
 ```
 
+![signals](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/system/restart/endless-signals.png)
+
 ####    接收SIGHUP信号后fork流程（核心！）
 在上面进入到`case syscall.SIGHUP` 调用 fork 方法，首先会根据 server 来获取不同的 listen fd 然后封装到 `files` 列表中，然后在调用 `cmd` 的时候将文件描述符传入到 `ExtraFiles` 参数中，这样子进程就可以无缝托管到父进程监听的端口：
 ```GO
@@ -420,7 +425,7 @@ func (srv *endlessServer) hammerTime(d time.Duration) {
 ####    getListener 获取端口监听（核心！）
 针对父子进程的处理是不一样的，分析下子进程重建listener的流程（下面代码有一个魔数`3`）：
 
-`os.NewFile` 的参数为何从`3`开始？因为子进程在继承父进程的 fd 的时候预留0-STDIN，1-STDOUT，2-STDERR，所以父进程给的第一个fd在子进程里顺序排就是从`3`开始，又因为 fork 的时候`cmd.ExtraFiles` 参数传入的是一个 files，如果有多个 server 那么会依次从`3`开始递增。
+`os.NewFile` 的参数为何从`3`开始？因为子进程在继承父进程的 fd 的时候预留`0-STDIN`，`1-STDOUT`，`2-STDERR`，所以父进程给的第一个fd在子进程里顺序排就是从`3`开始，又因为 fork 的时候`cmd.ExtraFiles` 参数传入的是一个 `files`，如果有多个 server 那么会依次从`3`开始递增。
 
 ```GOLANG
 func (srv *endlessServer) getListener(laddr string) (l net.Listener, err error) {
@@ -453,9 +458,8 @@ func (srv *endlessServer) getListener(laddr string) (l net.Listener, err error) 
 }
 ```
 
-
-如下图，前三个 fd 是预留给 标准输入、输出和错误的，fd 3 是根据传入 ExtraFiles 的数组列表依次递增的。
-![dup-2]()
+如下图展示了fd的映射，`3` 是根据传入 `ExtraFiles` 的数组列表依次递增：
+![dup-2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/system/restart/fork-dup-2.png)
 
 ####    父进程何时退出？
 本质上还是通过`sync.WaitGroup`机制来保证该功能：
@@ -527,11 +531,32 @@ func (srv *endlessServer) Serve() (err error) {
 [Restarting a Go Program Without Downtime](https://goteleport.com/blog/golang-ssh-bastion-graceful-restarts/)一文也给了详细的实现原理，代码示例[在此](https://github.com/pandaychen/golang_in_action/blob/master/system/graceful_restart/teleport_example.go)
 
 示例代码给了`SIGUSR2`以及`SIGQUIT`的分别用法：
+1、`SIGUSR2`<br>
+使用reuseport特性，当使用`kill -SIGUSR2`重启时，父子进程都可以收到请求（监听在同一端口），此时需要手动把父进程关闭
+![SIGUSR2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/system/ssh-graceful-restart1.png)
 
-![SIGSUR2]()
+2、`SIGQUIT`<br>
+使用`SIGQUIT`时，父进程等待指定时间后，退出（通过`context.WithTimeout`）
+```golang
+// Fork a child process.
+p, err := forkChild(addr, ln)
+if err != nil {
+	fmt.Printf("Unable to fork child: %v.\n", err)
+	continue
+}
+fmt.Printf("Forked child %v.\n", p.Pid)
 
-![SIGQUIT]()
+// Create a context that will expire in 5 seconds and use this as a timeout to Shutdown.
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
 
+// Return any errors during shutdown.
+return server.Shutdown(ctx)
+```
+
+![SIGQUIT](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/system/ssh-graceful-restart2.png)
+
+不过，上面两种方式都不够优雅。
 
 ##  0x05    其他库的机制介绍
 
