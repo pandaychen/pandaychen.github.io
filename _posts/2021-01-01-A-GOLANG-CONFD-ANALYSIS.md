@@ -16,7 +16,7 @@ tags:
 
 现网有类似下面的 Nginx 配置，如何对 `upstream` 指向的后端服务节点做动态的上下线切换（即时剔除无效节点）？一个可行的解决方案就是使用 Confd+Etcd。
 
-```javascript
+```text
 upstream backend_cluster {
     server 172.19.161.1:9081;
     server 172.19.161.2:9081;
