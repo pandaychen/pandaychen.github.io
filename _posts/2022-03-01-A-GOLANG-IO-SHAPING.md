@@ -48,6 +48,24 @@ tags:
 
 或者有另外一种思路，直接使用时间区间的大小作为 token 的数量，每个 token 对应一个流量（如 `256Kb`），假设 `1s` 可允许 `10` 个 token，那么 `100ms` 仅能获取 `1` 个 token，`50ms` 只能获取 `0.5` 个 token
 
-##  参考
+##  0x04    代码分析
+
+
+
+####    测试
+测试传输文件大小为`6.3M`，限制传输速度为`512KB/s`，测试结果符合设计：
+```text
+[root@VM_120_245_centos ~/io]# time ./limit_io
+
+real    0m12.861s
+user    0m0.044s
+sys     0m0.004s
+
+[root@VM_120_245_centos ~/io]# md5sum test_file destFile 
+a002ec21223b0c402a8310b5ec778190  test_file
+a002ec21223b0c402a8310b5ec778190  destFile
+```
+
+##  0x05    参考
 -   [从 io.Reader 中读数据](https://colobu.com/2019/02/18/read-data-from-net-Conn/)
 -	[流量整形](https://support.huawei.com/enterprise/zh/doc/EDOC1100143291/4395b710)
