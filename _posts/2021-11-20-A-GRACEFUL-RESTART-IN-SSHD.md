@@ -92,6 +92,13 @@ func Dup(oldfd int) (fd int, err error) {
 
 ![fork-dup](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/system/restart/fork-dup-1.png)
 
+####	REUSEPORT == 平滑重启？
+reuseport是为了充分利用多核，提升连接建立的效率。先说结论：新旧进程使用reuseport机制监听同一地址是无法做到无损的平滑重启
+
+reuseport特性可以让多个进程/线程监听同一个ip:port，每监听一次就会新建一个新的listen socket，每个socket都有自己的半连接和全连接队列。内核将不同用户的握手请求随机分配到不同的socket的半连接队列，完成了完整的握手流程后再进入半连接所在套接字对应的全连接队列中，等待accept
+
+启用reuseport下触发热重启时，在子进程里创建一个新的socket。由于父进程的套接字有自己的半连接和全连接队列，新子进程的套接字也有自己的半连接和全连接队列。父进程停止accept，只处理已经accept的历史连接再退出服务，那么父进程的全连接队列中未被accept的连接就丢失了，也就实现不了无损平滑重启了。如果父进程不停止accept，那么kernel还是会源源不断把部分请求分配给父进程的套接字，这样父进程不退出，也就不能实现服务的更新
+
 ####    如何平滑重启？
 重启时处理已建立连接上请求？有N种选择：
 -   shutdown read，不再接受新的请求，对端继续写数据的时候会感知到失败
@@ -531,6 +538,7 @@ func (srv *endlessServer) Serve() (err error) {
 [Restarting a Go Program Without Downtime](https://goteleport.com/blog/golang-ssh-bastion-graceful-restarts/)一文也给了详细的实现原理，代码示例[在此](https://github.com/pandaychen/golang_in_action/blob/master/system/graceful_restart/teleport_example.go)
 
 示例代码给了`SIGUSR2`以及`SIGQUIT`的分别用法：
+
 1、`SIGUSR2`<br>
 使用reuseport特性，当使用`kill -SIGUSR2`重启时，父子进程都可以收到请求（监听在同一端口），此时需要手动把父进程关闭
 ![SIGUSR2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/system/ssh-graceful-restart1.png)
