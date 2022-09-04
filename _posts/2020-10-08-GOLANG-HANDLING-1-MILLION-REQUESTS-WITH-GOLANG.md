@@ -27,7 +27,7 @@ for _, payload := range content.Payloads {
 ##  0x01    整体架构
 项目整体是一个生产（job） - 消费者（worker）模型，采用 `channel` 来控制 worker 的并发，即预先生成一定数量的 worker，每个 worker 内置一个 `jobChannel`，当 worker 空闲或处理任务完成时，就将 `jobChannel` 注册给 `WorkerPool`，告诉 `WorkerPool`，自己已经空闲，可以继续处理任务。在本模型中，worker 的数量（即 goroutine 数量）是固定的，避免了 goroutine 过多导致的资源竞争及消耗。抽象的系统模型如下图所示：
 
-![img](https://wx2.sbimg.cn/2020/09/09/9R3SA.png)
+![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/groutine-pool/goroutine-pool1.png)
 
 ##  0x02    代码分析
 
