@@ -52,12 +52,25 @@ type StreamOptions struct {
 关于`SteamOption`中各个成员的作用，可以参见[V1](https://github.com/kubernetes/client-go/blob/master/tools/remotecommand/v1.go)的实现；简言之，就是外部对接容器内部暴露的输入/输出。
 
 ####	TerminalSizeQueue结构
-TerminalSizeQueue is capable of returning terminal resize events as they occur.
+TerminalSizeQueue is capable of returning terminal resize events as they occur：`TerminalSizeQueue`结构的作用是向容器进行时传递客户端侧的窗口变化的通知事件（事件包含当前的终端的Weight与Height值）：即当客户终端的size发生了改变时，需要通知容器进行时调整显示的size，否则会出现内外窗口显示不一致的问题
+
 ```golang
 type TerminalSizeQueue interface {
 	// Next returns the new terminal size after the terminal has been resized. It returns nil when
 	// monitoring has been stopped.
 	Next() *TerminalSize
+}
+```
+
+[TerminalSize](https://github.com/kubernetes/client-go/blob/v0.24.4/tools/remotecommand/resize.go#L29)结构如下：
+```golang
+// TerminalSize and TerminalSizeQueue was a part of k8s.io/kubernetes/pkg/util/term
+// and were moved in order to decouple client from other term dependencies
+
+// TerminalSize represents the width and height of a terminal.
+type TerminalSize struct {
+	Width  uint16
+	Height uint16
 }
 ```
 
@@ -128,3 +141,4 @@ func CreateK8SStream(option PyStreamOption) {
 
 ##  0x02	参考
 -	[remotecommand包](https://github.com/kubernetes/client-go/blob/master/tools/remotecommand)
+-	[kubectl的resize窗口实现](https://github.com/kubernetes/kubectl/blob/master/pkg/util/term/resize.go)

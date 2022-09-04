@@ -289,6 +289,8 @@ func handleChannel(newChannel ssh.NewChannel) {
 }
 ```
 
+注意上面代码中对`pty-req`以及`window-change`的处理都包含了`SetWinsize`这个方法，前者用于初始化登录设置，后者用于登录后发生窗口改变的监听，二者缺一不可。
+
 ####    建立 SSH Channel
 `ssh.NewChannel` 提供了 `Accept` 方法, 该方法 [原型如下](https://godoc.org/golang.org/x/crypto/ssh#NewChannel)：
 ```golang
