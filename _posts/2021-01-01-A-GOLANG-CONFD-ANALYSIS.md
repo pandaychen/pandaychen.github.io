@@ -397,6 +397,8 @@ func main(){
 -	`GetValues`：获取指定的value
 -	`WatchPrefix`：监听指定的prefix
 
+`StoreClient`是对后端存储类型的抽象，不同的后端存储类型`GetValues`和`WatchPrefix`方法具体实现是不同的
+
 ```golang
 
 // The StoreClient interface is implemented by objects that can retrieve
@@ -662,7 +664,7 @@ func process(ts []*TemplateResource) error {
 
 -	调用`setFileMode`方法，设置文件的权限，如果未指定mode参数则默认为`0644`，否则根据配置设置的mode来设置文件权限
 -	调用`setVars`方法，将后端存储中最新的值拿出来暂存到内存中供后续进程使用
--	调用`createStageFile`方法，通过src的template文件和最新内存中的变量数据生成StageFile，该文件在`sync`方法中和目标文件进行比较，看是否有修改
+-	调用`createStageFile`方法，通过src的template文件和最新内存中的变量数据生成`StageFile`，该文件在`sync`方法中和目标文件进行比较，看是否有修改
 -	调用`t.sync()`方法，该方法是执行了confd核心功能，即**将配置文件通过模板的方式自动生成，并执行检查check命令和reload命令**
 
 ```GOLANG
@@ -690,10 +692,179 @@ func (t *TemplateResource) process() error {
 
 
 4、`sync`方法<br>
-本方法是confd最核心功能：
--	通过比较源文件和目标文件的差别，如果不同则重新生成新的配置
+本[方法](https://github.com/kelseyhightower/confd/blob/master/resource/template/resource.go#L238)是confd最核心功能：
+-	通过比较源文件和目标文件的差别，如果不同则重新生成新的配置（Overwriting）
 -	当设置了`check_cmd`和`reload_cmd`的时候，会执行`check_cmd`的检查命令
 -	如果没有问题则执行`reload_cmd`的命令
+
+```GOLANG
+func (t *TemplateResource) sync() error {
+	//获取上一步生成的临时文件
+	staged := t.StageFile.Name()
+	if t.keepStageFile {
+		log.Info("Keeping staged file: " + staged)
+	} else {
+		defer os.Remove(staged)
+	}
+
+	log.Debug("Comparing candidate config to " + t.Dest)
+
+	//比较文件是否相等
+	//https://github.com/kelseyhightower/confd/blob/master/util/util.go#L53
+	ok, err := util.IsConfigChanged(staged, t.Dest)
+	if err != nil {
+		log.Error(err.Error())
+	}
+	if t.noop {
+		log.Warning("Noop mode enabled. " + t.Dest + " will not be modified")
+		return nil
+	}
+	if ok {
+		//文件发生改变，触发更新
+		log.Info("Target config " + t.Dest + " out of sync")
+		//若配置了checkCmd指令，则执行check
+		if !t.syncOnly && t.CheckCmd != "" {
+			if err := t.check(); err != nil {
+				return errors.New("Config check failed: " + err.Error())
+			}
+		}
+		log.Debug("Overwriting target config " + t.Dest)
+		//直接改文件名？暴力
+		err := os.Rename(staged, t.Dest)
+		if err != nil {
+			if strings.Contains(err.Error(), "device or resource busy") {
+				//如果出现了"device or resource busy"错误，则尝试重新写入文件
+				log.Debug("Rename failed - target is likely a mount. Trying to write instead")
+				// try to open the file and write to it
+				var contents []byte
+				var rerr error
+				contents, rerr = ioutil.ReadFile(staged)
+				if rerr != nil {
+					return rerr
+				}
+				err := ioutil.WriteFile(t.Dest, contents, t.FileMode)
+				// make sure owner and group match the temp file, in case the file was created with WriteFile
+				os.Chown(t.Dest, t.Uid, t.Gid)
+				if err != nil {
+					return err
+				}
+			} else {
+				return err
+			}
+		}
+		//如果配置了reloadCmd，则运行reloadCMD
+		if !t.syncOnly && t.ReloadCmd != "" {
+			if err := t.reload(); err != nil {
+				return err
+			}
+		}
+		log.Info("Target config " + t.Dest + " has been updated")
+	} else {
+		log.Debug("Target config " + t.Dest + " in sync")
+	}
+	return nil
+}
+```
+
+下面列举下此流程中的几个被调用的方法实现
+
+4.1、IsConfigChanged 方法<br>
+[`IsConfigChanged`方法](https://github.com/kelseyhightower/confd/blob/master/util/util.go#L53)，该方法用来比较源文件和目标文件是否相等，其中比较内容包括：Uid/Gid/Mode/Md5，其中任意值不同则认为两个文件不同。
+
+```GOLANG
+// IsConfigChanged reports whether src and dest config files are equal.
+// Two config files are equal when they have the same file contents and
+// Unix permissions. The owner, group, and mode must match.
+// It return false in other cases.
+func IsConfigChanged(src, dest string) (bool, error) {
+	if !IsFileExist(dest) {
+		return true, nil
+	}
+	d, err := FileStat(dest)
+	if err != nil {
+		return true, err
+	}
+	s, err := FileStat(src)
+	if err != nil {
+		return true, err
+	}
+	if d.Uid != s.Uid {
+		log.Info(fmt.Sprintf("%s has UID %d should be %d", dest, d.Uid, s.Uid))
+	}
+	if d.Gid != s.Gid {
+		log.Info(fmt.Sprintf("%s has GID %d should be %d", dest, d.Gid, s.Gid))
+	}
+	if d.Mode != s.Mode {
+		log.Info(fmt.Sprintf("%s has mode %s should be %s", dest, os.FileMode(d.Mode), os.FileMode(s.Mode)))
+	}
+	if d.Md5 != s.Md5 {
+		log.Info(fmt.Sprintf("%s has md5sum %s should be %s", dest, d.Md5, s.Md5))
+	}
+	if d.Uid != s.Uid || d.Gid != s.Gid || d.Mode != s.Mode || d.Md5 != s.Md5 {
+		return true, nil
+	}
+	return false, nil
+}
+```
+
+4.2、check方法<br>
+`check`方法检查暂存的配置文件（`stageFile`），此文件由最新的后端存储中的数据生成，直接调用配置的指令运行检查，根据是否执行成功来返回报错。
+此外，当`t.check()`命令返回错误时，则直接`return`错误，不再执行重新生成配置文件和`reload等后续操作
+
+`check`指令会通过模板解析方式解析出`checkcmd`中的`{{.src}}`部分，并用`stageFile`来替代。即`check`的命令是拉取最新后端存储的数据形成临时配置文件（`stageFile`），并通过指定的`checkcmd`来检查最新的临时配置文件是否合法，如果合法则替换会新的配置文件，否则返回错误
+
+```GOLANG
+// check executes the check command to validate the staged config file. The
+// command is modified so that any references to src template are substituted
+// with a string representing the full path of the staged file. This allows the
+// check to be run on the staged file before overwriting the destination config
+// file.
+// It returns nil if the check command returns 0 and there are no other errors.
+func (t *TemplateResource) check() error {
+	var cmdBuffer bytes.Buffer
+	data := make(map[string]string)
+	data["src"] = t.StageFile.Name()
+	tmpl, err := template.New("checkcmd").Parse(t.CheckCmd)
+	if err != nil {
+		return err
+	}
+	if err := tmpl.Execute(&cmdBuffer, data); err != nil {
+		return err
+	}
+	return runCommand(cmdBuffer.String())
+}
+```
+
+4.3、reload方法<br>
+```GOLANG
+// reload executes the reload command.
+// It returns nil if the reload command returns 0.
+func (t *TemplateResource) reload() error {
+	return runCommand(t.ReloadCmd)
+}
+```
+
+4.4、runCommand方法<br>
+```GOLANG
+func runCommand(cmd string) error {
+    log.Debug("Running " + cmd)
+    var c *exec.Cmd
+    if runtime.GOOS == "windows" {
+        c = exec.Command("cmd", "/C", cmd)
+    } else {
+        c = exec.Command("/bin/sh", "-c", cmd)
+    }
+
+    output, err := c.CombinedOutput()
+    if err != nil {
+        log.Error(fmt.Sprintf("%q", string(output)))
+        return err
+    }
+    log.Debug(fmt.Sprintf("%q", string(output)))
+    return nil
+}
+```
+
 
 
 ## 0x05：核心代码分析：Confd 的客户端封装
@@ -940,9 +1111,99 @@ func (c *Client) GetValues(keys []string) (map[string]string, error) {
 }
 ```
 
-## 0x05 基于 Redis 的实现
+#### 基于 Redis 的实现
+
+1、`redisClient.WatchPrefix`的实现<br>
+`redisClient.WatchPrefix`是当用户设置了watch参数的时候，并且存储后端为redis，则会调用到redis的watch机制，代码如下：
+
+redis的watch主要通过pub-sub（消费者订阅者）的机制，即`WatchPrefix`会根据传入的`prefix`启动一个`sub`的监听机制
+
+```GOLANG
+func (c *Client) WatchPrefix(prefix string, keys []string, waitIndex uint64, stopChan chan bool) (uint64, error) {
+
+    if waitIndex == 0 {
+        return 1, nil
+    }
+
+    if len(c.pscChan) > 0 {
+        var respChan watchResponse
+        for len(c.pscChan) > 0 {
+            respChan = <-c.pscChan
+        }
+        return respChan.waitIndex, respChan.err
+    }
+
+    go func() {
+        if c.psc.Conn == nil {
+            rClient, db, err := tryConnect(c.machines, c.password, false);
+
+            if err != nil {
+                c.psc = redis.PubSubConn{Conn: nil}
+                c.pscChan <- watchResponse{0, err}
+                return
+            }
+
+            c.psc = redis.PubSubConn{Conn: rClient}        
+
+            go func() {
+                defer func() {
+                    c.psc.Close()
+                    c.psc = redis.PubSubConn{Conn: nil}
+                }()
+                for {
+                    switch n := c.psc.Receive().(type) {
+                        case redis.PMessage:
+                            log.Debug(fmt.Sprintf("Redis Message: %s %s\n", n.Channel, n.Data))
+                            data := string(n.Data)
+                            commands := [12]string{"del", "append", "rename_from", "rename_to", "expire", "set", "incrby", "incrbyfloat", "hset", "hincrby", "hincrbyfloat", "hdel"}
+                            for _, command := range commands {
+                                if command == data {
+                                    c.pscChan <- watchResponse{1, nil}
+                                    break
+                                }
+                            }
+                        case redis.Subscription:
+                            log.Debug(fmt.Sprintf("Redis Subscription: %s %s %d\n", n.Kind, n.Channel, n.Count))
+                            if n.Count == 0 {
+                                c.pscChan <- watchResponse{0, nil}
+                                return
+                            }
+                        case error:
+                            log.Debug(fmt.Sprintf("Redis error: %v\n", n))
+                            c.pscChan <- watchResponse{0, n}
+                            return
+                    }
+                }
+            }()
+
+            c.psc.PSubscribe("__keyspace@" + strconv.Itoa(db) + "__:" + c.transform(prefix) + "*")
+        }
+    }()
+
+    select {
+    case <-stopChan:
+        c.psc.PUnsubscribe()
+        return waitIndex, nil
+    case r := <- c.pscChan:
+        return r.waitIndex, r.err
+    }
+}
+```
+
+####	基于consul实现
+
+
+####	基于vault实现
 
 ## 0x06 总结
+本文介绍了confd的用法、分析了其实现源码；再回顾一下，confd的作用是通过将配置存放到存储后端，来自动触发更新配置的功能，支持多种后端存储。
+
+不同的存储后端的watch机制实现大相径庭，如Etcd只需要更新key即可触发watch，而redis除了更新key还需要执行publish的操作。
+
+confd提供了checkcmd和reloadcmd来实现对配置准确性的检查，降低出错的概率；通过配置check_cmd来校验配置文件是否正确，如果配置文件非法则不会执行自动更新配置和reload的操作
+
+
+缺点是，需要有额外的手段来确保控制存入存储后端的数据始终是合法的。
 
 ## 0x07 参考
 - 	[Quick Start Guide](https://github.com/kelseyhightower/confd/blob/master/docs/quick-start-guide.md)
