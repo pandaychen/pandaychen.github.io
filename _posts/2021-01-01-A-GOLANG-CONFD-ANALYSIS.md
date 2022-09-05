@@ -10,11 +10,16 @@ category: false
 tags:
   - Confd
   - Golang
+  - 热更新
 ---
 
 ## 0x00 前言
 
-现网有类似下面的 Nginx 配置，如何对 `upstream` 指向的后端服务节点做动态的上下线切换（即时剔除无效节点）？一个可行的解决方案就是使用 Confd+Etcd。
+现网有类似下面的 Nginx 配置，如何对 `upstream` 指向的后端服务节点做修改，手动的方式：
+1.	修改`upstream`配置，增加/删除某些后端
+2.	使用`nginx -s reload`指令，重启服务
+
+那么，如何对nginx配置做动态的上下线切换（即时剔除无效节点）呢？一个可行的解决方案就是使用 Confd+Etcd。
 
 ```text
 upstream backend_cluster {
@@ -37,10 +42,26 @@ server {
 }
 ```
 
-最近准备给 Nginx 代理的配置文件提供动态更新 reload 的功能，采用 Etcd+Confd 实现，本文简单分析下 [Confd](https://github.com/kelseyhightower/confd) 的实现。<br>
-Confd 是一个轻量级的配置管理工具，可以通过查询后端存储系统来实现第三方应用的（动态）配置管理，如 Nginx、HAproxy、Docker 配置等。Confd 能够查询和监听后端系统的数据变更，结合配置模版引擎动态更新本地配置文件，保持和后端系统的数据一致，并且能够执行命令或者脚本实现系统的 reload 或者 restart 等操作。
+笔者最近准备给 Nginx 代理的配置文件提供动态更新 `reload` 的功能，采用 Etcd+Confd 实现，本文简单分析下 [Confd](https://github.com/kelseyhightower/confd) 的原理实现。<br>
 
-## 0x01 COnfd 的运行原理
+####	Confd介绍
+
+Confd 是一个轻量级的配置管理工具，可以通过查询后端存储系统来实现第三方应用的（动态）配置管理，如 Nginx、HAproxy、Docker 配置等。Confd 能够查询和监听后端系统的数据变更，结合配置模版引擎动态更新本地配置文件，保持和后端系统的数据一致，并且能够执行命令或者脚本实现系统的 `reload` 或者 `restart` 等操作。
+
+本文分析的版本是`v0.16.0`，参见官方[手册](https://github.com/kelseyhightower/confd/blob/master/docs/quick-start-guide.md)
+
+confd支持多种的配置存储后端，本文分析etcd、redis、consul以及vault的客户端实现
+-	etcd
+-	consul
+-	dynamodb
+-	redis
+-	vault
+-	zookeeper
+-	aws ssm parameter store
+-	environment variables
+-	file
+
+## 0x01 Confd 的运行原理
 
 一般配置中心的运行模式如下，这种方式需要在服务端代码中加入定期 PULL or Watch 配置文件发生改变，改变需要重新加载本进程配置，侵入性较强：
 ![config-center]()
@@ -50,33 +71,240 @@ Confd 是一个轻量级的配置管理工具，可以通过查询后端存储�
 ![confd]()
 
 ## 0x02 Confd 的使用
-
-1、配置文件 `confd.toml`，主要记录了使用的存储后端、`confdir` 等，参数 `watch` 表示实时监听 etcdV3 的变化，如有变化则更新 Confd 管理的配置（推荐使用）<br>
-
+1、安装confd，confd启动的配置文件 `confd.toml`，主要记录了使用的存储后端、`confdir` 等，参数 `watch` 表示实时监听 etcdV3 的变化，如有变化则更新 Confd 管理的配置（推荐使用）<br>
 ```toml
-backend = "etcdv3"
-confdir = "/etc/confd"
+backend = "etcdv3"	#etcd为V2版本
+confdir = "/etc/confd"	#confdir，配置文件模板的存储路径
 log-level = "debug"
 interval = 5
 nodes = [
   "http://127.0.0.1:2379",
 ]
 scheme = "http"
-watch = true
+watch = true	#watch参数表示实时监听后端存储的变化，如有变化则更新confd管理的配
 ```
 
-#### confdir 的目录配置
+redis的后端配置，参考[Confd的使用](https://www.huweihuang.com/linux-notes/tools/confd-usage.html)
 
-包含配置与模板两个目录：
+2、配置confdir 的目录以及模板文件<br>
+创建confd的配置路径，包含配置与模板两个目录：
+```bash
+mkdir -p /etc/confd/{conf.d,templates}
+```
 
 - `./conf.d/`：Confd 的配置文件，包含配置的生成逻辑
 - `./templates`：配置模板 Template，即基于不同应用组件的配置，遵循 Golang text templates 的模板文件，详见 [文档](https://github.com/kelseyhightower/confd/blob/master/docs/templates.md)
 
-例如：
+2.1、配置Template Resources文件<br>
+模板源配置文件是`TOML`格式，包含配置的生成逻辑，例如模板源，后端存储对应的keys，命令执行等。默认目录在`/etc/confd/conf.d`；详细字段说明[见此](https://github.com/kelseyhightower/confd/blob/master/docs/template-resources.md)，例如配置了nginx模板文件`/etc/confd/conf.d/myapp-nginx.toml`
+
+```toml
+[template]
+prefix = "/myapp"
+src = "nginx.tmpl"
+dest = "/tmp/myapp.conf"
+owner = "nginx"
+mode = "0644"
+keys = [
+  "/subdomain",
+  "/upstream",
+]
+check_cmd = "/usr/sbin/nginx -t -c {{.src}}"
+reload_cmd = "/usr/sbin/service nginx reload"
+```
+
+初始化template文件`/etc/confd/conf.d/yourapp-nginx.toml`，如下：
+
+```text
+[template]
+prefix = "/yourapp"
+src = "nginx.tmpl"
+dest = "/tmp/yourapp.conf"
+owner = "nginx"
+mode = "0644"
+keys = [
+  "/subdomain",
+  "/upstream",
+]
+check_cmd = "/usr/sbin/nginx -t -c {{.src}}"
+reload_cmd = "/usr/sbin/service nginx reload"
+```
+
+2.2、配置Template文件<br>
+Template定义了单一应用配置的模板，默认存储在`/etc/confd/templates`目录，模板文件符合Golang的`text/template`格式；模板文件常用函数有`base`，`get`，`gets`，`lsdir`，`json`等。如`/etc/confd/templates/nginx.tmpl`；注意，**实际中nginx配置是根据Template模板生成的**
+
+```text
+events {
+    worker_connections 1024;
+}
+
+http{
+	upstream {{getv "/subdomain"}} {
+	{{range getvs "/upstream/*"}}
+		server {{.}};
+	{{end}}
+	}
+
+	server {
+		server_name  {{getv "/subdomain"}}.example.com;
+		location / {
+			proxy_pass        http://{{getv "/subdomain"}};
+			proxy_redirect    off;
+			proxy_set_header  Host             $host;
+			proxy_set_header  X-Real-IP        $remote_addr;
+			proxy_set_header  X-Forwarded-For  $proxy_add_x_forwarded_for;
+	}
+	}
+}
+```
+
+
+
+3、向存储中间件写入初始化数据<br>
+如果初始化不写入数据，直接运行confd会报错，这里以etcdv2为例：
+```bash
+etcdctl set /myapp/subdomain myapp
+etcdctl set /myapp/upstream/app2 "1.1.1.1:80"
+etcdctl set /myapp/upstream/app1 "2.2.2.2:80"
+etcdctl set /yourapp/subdomain yourapp
+etcdctl set /yourapp/upstream/app2 "1.1.1.1:8080"
+etcdctl set /yourapp/upstream/app1 "2.2.2.2:8080"
+```
+
+4、启动confd<br>
+```BASH
+/usr/local/bin/confd -config-file ./config.toml &
+```
+
+5、查看生成的配置文件<br>
+```text
+[root@VM_120_245_centos ~/confd]# cat /tmp/myapp.conf 
+events {
+    worker_connections 1024;
+}
+
+http{
+upstream myapp {
+    server 1.1.1.1:80;
+    server 2.2.2.2:80;
+}
+
+server {
+    server_name  myapp.example.com;
+    location / {
+        proxy_pass        http://myapp;
+        proxy_redirect    off;
+        proxy_set_header  Host             $host;
+        proxy_set_header  X-Real-IP        $remote_addr;
+        proxy_set_header  X-Forwarded-For  $proxy_add_x_forwarded_for;
+   }
+}
+}
+
+[root@VM_120_245_centos ~/confd]# cat /tmp/yourapp.conf 
+events {
+    worker_connections 1024;
+}
+
+http{
+upstream yourapp {
+    server 1.1.1.1:8080;
+    server 2.2.2.2:8080;
+}
+
+server {
+    server_name  yourapp.example.com;
+    location / {
+        proxy_pass        http://yourapp;
+        proxy_redirect    off;
+        proxy_set_header  Host             $host;
+        proxy_set_header  X-Real-IP        $remote_addr;
+        proxy_set_header  X-Forwarded-For  $proxy_add_x_forwarded_for;
+   }
+}
+}
+```
+
+5、再添加多一条upstream信息<br>
+```text
+etcdctl set /myapp/upstream/app3 "3.3.3.3:80"
+```
+
+6、查看myapp对应的配置文件，成功的达到目标<br>
+```text
+[root@VM_120_245_centos ~/confd]# cat /tmp/myapp.conf 
+events {
+    worker_connections 1024;
+}
+
+http{
+upstream myapp {
+    server 1.1.1.1:80;
+    server 2.2.2.2:80;
+    server 3.3.3.3:80;
+}
+
+server {
+    server_name  myapp.example.com;
+    location / {
+        proxy_pass        http://myapp;
+        proxy_redirect    off;
+        proxy_set_header  Host             $host;
+        proxy_set_header  X-Real-IP        $remote_addr;
+        proxy_set_header  X-Forwarded-For  $proxy_add_x_forwarded_for;
+   }
+}
+}
+```
+
+7、删除一个后端<br>
+```text
+etcdctl rm /myapp/upstream/app2
+```
+
+8、查看最终的文件<br>
+```text
+[root@VM_120_245_centos ~/confd]# cat /tmp/myapp.conf 
+events {
+    worker_connections 1024;
+}
+
+http{
+upstream myapp {
+    server 2.2.2.2:80;
+    server 3.3.3.3:80;
+}
+
+server {
+    server_name  myapp.example.com;
+    location / {
+        proxy_pass        http://myapp;
+        proxy_redirect    off;
+        proxy_set_header  Host             $host;
+        proxy_set_header  X-Real-IP        $remote_addr;
+        proxy_set_header  X-Forwarded-For  $proxy_add_x_forwarded_for;
+   }
+}
+}
+```
+
+9、`/etc/confd`文件目录如下<br>
+```text
+[root@VM_120_245_centos /etc/confd]# tree -a
+.
+├── conf.d
+│   ├── myapp-nginx.toml
+│   └── yourapp-nginx.toml
+└── templates
+    └── nginx.tmpl
+```
+
 
 #### 同步生成 Nginx 配置
 
-在实际线上应用中，可以考虑使用 [supervisord](http://supervisord.org/)+ Confd 的部署方式。
+在实际线上应用中，可以考虑使用 [supervisord](http://supervisord.org/)与 Confd 的部署方式。
+
+
 
 ## 0x03 Confd 逻辑分析
 
@@ -131,15 +359,22 @@ type TemplateResource struct {
 }
 ```
 
-#### main 逻辑
+##	0x04	核心代码分析：主入口
+
+#### main 入口逻辑
 
 启动部分的 [代码](https://github.com/kelseyhightower/confd/blob/master/confd.go#L16) 完成了几件事情：
 
-1.  初始化配置文件的存储后端的 Client
-2.  初始化配置模板
+1.	[初始化配置文件](https://github.com/kelseyhightower/confd/blob/master/config.go)：默认启用etcd（V2），同时对各个后端进行检查
+2.  初始化配置文件对应的存储后端的 Client
+3.  初始化配置模板
 
 ```golang
 func main(){
+	//...
+	if err := initConfig(); err != nil {
+		log.Fatal(err.Error())
+	}
     //...
     storeClient, err := backends.New(config.BackendsConfig)
 	if err != nil {
@@ -156,15 +391,94 @@ func main(){
 }
 ```
 
+第二步，根据配置文件中的存储后端类型构造一个存储后端的client（`backends.New`），初始化代码[见此](https://github.com/kelseyhightower/confd/blob/master/backends/client.go#L29)，客户端的封装模式非常标准的策略模式，值得借鉴：
+
+每个`StoreClient`需要实现下面`2`个方法：
+-	`GetValues`：获取指定的value
+-	`WatchPrefix`：监听指定的prefix
+
+```golang
+
+// The StoreClient interface is implemented by objects that can retrieve
+// key/value pairs from a backend store.
+type StoreClient interface {
+	GetValues(keys []string) (map[string]string, error)
+	WatchPrefix(prefix string, keys []string, waitIndex uint64, stopChan chan bool) (uint64, error)
+}
+
+// New is used to create a storage client based on our configuration.
+func New(config Config) (StoreClient, error) {
+
+	if config.Backend == "" {
+		config.Backend = "etcd"
+	}
+	backendNodes := config.BackendNodes
+
+	if config.Backend == "file" {
+		log.Info("Backend source(s) set to " + strings.Join(config.YAMLFile, ", "))
+	} else {
+		log.Info("Backend source(s) set to " + strings.Join(backendNodes, ", "))
+	}
+
+	switch config.Backend {
+	case "consul":
+		return consul.New(config.BackendNodes, config.Scheme,
+			config.ClientCert, config.ClientKey,
+			config.ClientCaKeys,
+			config.BasicAuth,
+			config.Username,
+			config.Password,
+		)
+	case "etcd":
+		// Create the etcd client upfront and use it for the life of the process.
+		// The etcdClient is an http.Client and designed to be reused.
+		return etcd.NewEtcdClient(backendNodes, config.ClientCert, config.ClientKey, config.ClientCaKeys, config.ClientInsecure, config.BasicAuth, config.Username, config.Password)
+	case "etcdv3":
+		return etcdv3.NewEtcdClient(backendNodes, config.ClientCert, config.ClientKey, config.ClientCaKeys, config.BasicAuth, config.Username, config.Password)
+	case "zookeeper":
+		return zookeeper.NewZookeeperClient(backendNodes)
+	case "rancher":
+		return rancher.NewRancherClient(backendNodes)
+	case "redis":
+		return redis.NewRedisClient(backendNodes, config.ClientKey, config.Separator)
+	case "env":
+		return env.NewEnvClient()
+	case "file":
+		return file.NewFileClient(config.YAMLFile, config.Filter)
+	case "vault":
+		vaultConfig := map[string]string{
+			"app-id":    config.AppID,
+			"user-id":   config.UserID,
+			"role-id":   config.RoleID,
+			"secret-id": config.SecretID,
+			"username":  config.Username,
+			"password":  config.Password,
+			"token":     config.AuthToken,
+			"cert":      config.ClientCert,
+			"key":       config.ClientKey,
+			"caCert":    config.ClientCaKeys,
+			"path":      config.Path,
+		}
+		return vault.New(backendNodes[0], config.AuthType, vaultConfig)
+	case "dynamodb":
+		table := config.Table
+		log.Info("DynamoDB table set to " + table)
+		return dynamodb.NewDynamoDBClient(table)
+	case "ssm":
+		return ssm.New()
+	}
+	return nil, errors.New("Invalid backend")
+}
+```
+
 接着就是标准的启动停止（处理信号），针对远程配置的监控，分为两种方式：
 
-1. `template.WatchProcessor`：以 watch 方式监控
+1. `template.WatchProcessor`：以 watch 方式动态监控
 2. `template.IntervalProcessor`：定时轮询
 
 ```golang
 func main(){
     //...
-
     stopChan := make(chan bool)
 	doneChan := make(chan bool)
 	errChan := make(chan error, 10)
@@ -197,9 +511,24 @@ func main(){
 }
 ```
 
-#### WatchProcessor
+####	核心结构：Process
+`Process`的定义如下，实体化的结构有：
+-	`intervalProcessor`：默认的实现体，即没有添加watch参数
+-	`watchProcessor`：添加watch参数的实现体
 
+```golang
+type Processor interface {
+    Process()
+}
+```
+
+1、WatchProcessor：通过watch机制触发核心逻辑<br>
+
+
+1.1、`WatchProcessor`定义及`Process`方法<br>
 我们先分析下 `WatchProcessor` 的实现，其中 [getTemplateResources 方法](https://github.com/kelseyhightower/confd/blob/master/resource/template/processor.go#L111) 是获取 Confd 模板目录下的所有模板文件，`watchProcessor.Process` 方法针对每个模板文件都建立一个单独的 Watcher：
+
+`watchProcessor`及核心方法`watchProcessor.Process`定义如下，`Process`的功能是对于confd配置的每个Template Resources文件，都开启一个独立的goroutine处理：
 
 ```golang
 type watchProcessor struct {
@@ -210,6 +539,7 @@ type watchProcessor struct {
 	wg       sync.WaitGroup	// 用于并发控制
 }
 
+//定义
 func WatchProcessor(config Config, stopChan, doneChan chan bool, errChan chan error) Processor {
 	var wg sync.WaitGroup
 	return &watchProcessor{config, stopChan, doneChan, errChan, wg}
@@ -217,7 +547,7 @@ func WatchProcessor(config Config, stopChan, doneChan chan bool, errChan chan er
 
 func (p *watchProcessor) Process() {
 	defer close(p.doneChan)
-	// 从模板配置中获取模板文件（ts 为 TemplateResource 结构数组）
+	// 从模板配置中获取模板文件（ts 为 TemplateResource 结构数组）；可能有多个模板文件
 	ts, err := getTemplateResources(p.config)
 	if err != nil {
 		log.Fatal(err.Error())
@@ -232,6 +562,10 @@ func (p *watchProcessor) Process() {
 	p.wg.Wait()
 }
 ```
+
+再看下`monitorPrefix`方法。
+
+1.2、`monitorPrefix`方法<br>
 
 `monitorPrefix` 方法用于监听每个模板文件的改变（当监听到远程配置中心发生改变时，从远程拉取一次配置并更新本地），注意下面这个 `t.lastIndex` 的意义。先看下 EtcdV3 的 [实现](https://github.com/kelseyhightower/confd/blob/master/backends/etcdv3/client.go#L225)，该方法是一个 `forever-loop`：
 
@@ -253,7 +587,7 @@ func (p *watchProcessor) monitorPrefix(t *TemplateResource) {
 	keys := util.AppendPrefix(t.Prefix, t.Keys)
 	for {
 		// 调用不同类型的客户端 WatchPrefix 方法
-		// 返回
+		// 返回（阻塞，有变更才返回）
 		index, err := t.storeClient.WatchPrefix(t.Prefix, keys, t.lastIndex, p.stopChan)
 		if err != nil {
 			p.errChan <- err
@@ -261,6 +595,7 @@ func (p *watchProcessor) monitorPrefix(t *TemplateResource) {
 			time.Sleep(time.Second * 2)
 			continue
 		}
+		//保存index
 		t.lastIndex = index
 		if err := t.process(); err != nil {
 			p.errChan <- err
@@ -269,7 +604,99 @@ func (p *watchProcessor) monitorPrefix(t *TemplateResource) {
 }
 ```
 
-#### Confd 的客户端封装
+2、`intervalProcessor`方法：轮询检查<br>
+
+2.1、`intervalProcessor`定义及`Process`方法<br>
+
+```GOLANG
+type intervalProcessor struct {
+    config   Config
+    stopChan chan bool
+    doneChan chan bool
+    errChan  chan error
+    interval int
+}
+
+func IntervalProcessor(config Config, stopChan, doneChan chan bool, errChan chan error, interval int) Processor {
+    return &intervalProcessor{config, stopChan, doneChan, errChan, interval}
+}
+```
+
+`intervalProcessor.Process`方法的实现如下，通过定时器触发对Template Resources文件的处理（调用`process`方法）：
+```GO
+func (p *intervalProcessor) Process() {
+    defer close(p.doneChan)
+    for {
+        ts, err := getTemplateResources(p.config)
+        if err != nil {
+            log.Fatal(err.Error())
+            break
+        }
+        process(ts)
+        select {
+        case <-p.stopChan:
+            break
+        case <-time.After(time.Duration(p.interval) * time.Second):
+            continue
+        }
+    }
+}
+
+func process(ts []*TemplateResource) error {
+    var lastErr error
+    for _, t := range ts {
+		//调用每个TemplateResource的process方法
+        if err := t.process(); err != nil {
+            log.Error(err.Error())
+            lastErr = err
+        }
+    }
+    return lastErr
+}
+```
+
+无论是否加watch参数，即`intervalProcessor`和`watchProcessor`最终都会调用到`TemplateResource.process`方法，如下：
+
+3、`TemplateResource.process`方法<br>
+`TemplateResourc.eprocess`方法的核心逻辑如下：
+
+-	调用`setFileMode`方法，设置文件的权限，如果未指定mode参数则默认为`0644`，否则根据配置设置的mode来设置文件权限
+-	调用`setVars`方法，将后端存储中最新的值拿出来暂存到内存中供后续进程使用
+-	调用`createStageFile`方法，通过src的template文件和最新内存中的变量数据生成StageFile，该文件在`sync`方法中和目标文件进行比较，看是否有修改
+-	调用`t.sync()`方法，该方法是执行了confd核心功能，即**将配置文件通过模板的方式自动生成，并执行检查check命令和reload命令**
+
+```GOLANG
+// process is a convenience function that wraps calls to the three main tasks
+// required to keep local configuration files in sync. First we gather vars
+// from the store, then we stage a candidate configuration file, and finally sync
+// things up.
+// It returns an error if any.
+func (t *TemplateResource) process() error {
+    if err := t.setFileMode(); err != nil {
+        return err
+    }
+    if err := t.setVars(); err != nil {
+        return err
+    }
+    if err := t.createStageFile(); err != nil {
+        return err
+    }
+    if err := t.sync(); err != nil {
+        return err
+    }
+    return nil
+}
+```
+
+
+4、`sync`方法<br>
+本方法是confd最核心功能：
+-	通过比较源文件和目标文件的差别，如果不同则重新生成新的配置
+-	当设置了`check_cmd`和`reload_cmd`的时候，会执行`check_cmd`的检查命令
+-	如果没有问题则执行`reload_cmd`的命令
+
+
+## 0x05：核心代码分析：Confd 的客户端封装
 
 #### Confd 的客户端实现：EtcdV3 的客户端
 
@@ -513,10 +940,10 @@ func (c *Client) GetValues(keys []string) (map[string]string, error) {
 }
 ```
 
-## 0x04 基于 Redis 的实现
+## 0x05 基于 Redis 的实现
 
-## 0x05 总结
+## 0x06 总结
 
-## 0x06 参考
-
-- [Quick Start Guide](https://github.com/kelseyhightower/confd/blob/master/docs/quick-start-guide.md)
+## 0x07 参考
+- 	[Quick Start Guide](https://github.com/kelseyhightower/confd/blob/master/docs/quick-start-guide.md)
+-	[confd的安装与使用](https://www.huweihuang.com/linux-notes/tools/confd-usage.html)
