@@ -133,7 +133,7 @@ reload_cmd = "/usr/sbin/service nginx reload"
 2.2、配置Template文件<br>
 Template定义了单一应用配置的模板，默认存储在`/etc/confd/templates`目录，模板文件符合Golang的`text/template`格式；模板文件常用函数有`base`，`get`，`gets`，`lsdir`，`json`等。如`/etc/confd/templates/nginx.tmpl`；注意，**实际中nginx配置是根据Template模板生成的**
 
-```text
+```json
 events {
     worker_connections 1024;
 }
@@ -475,8 +475,8 @@ func New(config Config) (StoreClient, error) {
 
 接着就是标准的启动停止（处理信号），针对远程配置的监控，分为两种方式：
 
-1. `template.WatchProcessor`：以 watch 方式动态监控
-2. `template.IntervalProcessor`：定时轮询
+1. `template.WatchProcessor`：以 watch 方式动态监控；会定时检查本地配置和远端配置的差异，如果有更新就同步
+2. `template.IntervalProcessor`：定时轮询；从etcd来看，会阻塞在watcher上，等待被通知远端监控的数据发生改变了才触发本地配置与远端最新配置的检测，有更新才同步（注：为了通用性考虑，这里并没有采用增量式，watcher仅仅起到通知的功能，最终还是要去fetch一次远端配置来触发本地更新）
 
 ```golang
 func main(){
@@ -663,7 +663,7 @@ func process(ts []*TemplateResource) error {
 `TemplateResourc.eprocess`方法的核心逻辑如下：
 
 -	调用`setFileMode`方法，设置文件的权限，如果未指定mode参数则默认为`0644`，否则根据配置设置的mode来设置文件权限
--	调用`setVars`方法，将后端存储中最新的值拿出来暂存到内存中供后续进程使用
+-	调用`setVars`方法，将后端存储中最新的值拿出来暂存到内存中供后续进程使用（依赖于各个backend实现的`GetValues`方法，获取template文件`keys`对应的values值）
 -	调用`createStageFile`方法，通过src的template文件和最新内存中的变量数据生成`StageFile`，该文件在`sync`方法中和目标文件进行比较，看是否有修改
 -	调用`t.sync()`方法，该方法是执行了confd核心功能，即**将配置文件通过模板的方式自动生成，并执行检查check命令和reload命令**
 
@@ -865,7 +865,34 @@ func runCommand(cmd string) error {
 }
 ```
 
+4.5、`setVars`方法<br>
+本方法是使用`storeClient`提供的`GetValues`方法，从远端获取完整的配置，以etcd和开头的配置为例，`GetValues`的参数是下面两个：
+```text
+[/yourapp/subdomain /yourapp/upstream]	#prefix为：/yourapp  keys为：[/subdomain /upstream]
+[/myapp/subdomain /myapp/upstream]	#prefix为：/myapp keys为：[/subdomain /upstream]
+```
 
+```golang
+// setVars sets the Vars for template resource.
+func (t *TemplateResource) setVars() error {
+	var err error
+	log.Debug("Retrieving keys from store")
+	log.Debug("Key prefix set to " + t.Prefix)
+
+	result, err := t.storeClient.GetValues(util.AppendPrefix(t.Prefix, t.Keys))
+	if err != nil {
+		return err
+	}
+	log.Debug("Got the following map from store: %v", result)
+
+	t.store.Purge()
+
+	for k, v := range result {
+		t.store.Set(path.Join("/", strings.TrimPrefix(k, t.Prefix)), v)
+	}
+	return nil
+}
+```
 
 ## 0x05：核心代码分析：Confd 的客户端封装
 
