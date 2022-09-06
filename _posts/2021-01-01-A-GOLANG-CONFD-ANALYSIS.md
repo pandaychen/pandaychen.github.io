@@ -1196,7 +1196,7 @@ func (c *Client) WatchPrefix(prefix string, keys []string, waitIndex uint64, sto
 ####	基于vault实现
 
 ## 0x06 总结
-本文介绍了confd的用法、分析了其实现源码；再回顾一下，confd的作用是通过将配置存放到存储后端，来自动触发更新配置的功能，支持多种后端存储。
+本文介绍了confd的用法、分析了其实现源码；再回顾一下，confd的作用是通过将配置存放到存储后端，来自动触发更新配置的功能，支持多种后端存储。confd的实现思路非常清晰，代码风格也很值得借鉴
 
 不同的存储后端的watch机制实现大相径庭，如Etcd只需要更新key即可触发watch，而redis除了更新key还需要执行publish的操作。
 
