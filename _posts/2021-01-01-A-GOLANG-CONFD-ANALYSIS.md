@@ -81,8 +81,15 @@ nodes = [
   "http://127.0.0.1:2379",
 ]
 scheme = "http"
-watch = true	#watch参数表示实时监听后端存储的变化，如有变化则更新confd管理的配
+watch = true	#watch参数表示实时监听后端存储的变化，如有变化则更新confd管理的配置
 ```
+
+重点的配置：
+-	`backend`：存储后端的类型
+-	`nodes`：后端节点的地址
+-	`prefix`：存储的前缀，在获取变量时需要perfix+key才能找到存储在后端的变量
+-	`confdir`：告诉需要被更新的template的存放位置
+-	`watch`：触发类型（轮询or通知）
 
 redis的后端配置，参考[Confd的使用](https://www.huweihuang.com/linux-notes/tools/confd-usage.html)
 
@@ -97,6 +104,13 @@ mkdir -p /etc/confd/{conf.d,templates}
 
 2.1、配置Template Resources文件<br>
 模板源配置文件是`TOML`格式，包含配置的生成逻辑，例如模板源，后端存储对应的keys，命令执行等。默认目录在`/etc/confd/conf.d`；详细字段说明[见此](https://github.com/kelseyhightower/confd/blob/master/docs/template-resources.md)，例如配置了nginx模板文件`/etc/confd/conf.d/myapp-nginx.toml`
+
+重点配置：
+-	`prefix`：后端存储变量的前缀
+-	`src`：template文件，即配置文件的模板文件（用占位符表达配置文件的内容，最后用拉取的kv替换占位符，生成应用程序使用的配置文件）
+-	`dest`：替换完成后的配置文件存放的路径，即应用程序读取配置的路径
+-	`check_cmd`：除了文件更新，confd支持一些shell命令的执行
+-	`reload_cmd`：可以借助系统的reload命令重启
 
 ```toml
 [template]
@@ -565,7 +579,7 @@ func (p *watchProcessor) Process() {
 }
 ```
 
-再看下`monitorPrefix`方法。
+再看下`monitorPrefix`方法。特别注意：**confd在初始化时，各个客户端都实现了强制拉取一次远端的数据，然后再阻塞在各个watcher上**，生成初始化配置，这点在分析客户端实现的时候再说明
 
 1.2、`monitorPrefix`方法<br>
 
@@ -1138,6 +1152,58 @@ func (c *Client) GetValues(keys []string) (map[string]string, error) {
 }
 ```
 
+####	基于etcdv2实现
+`WatchPrefix`[方法](https://github.com/kelseyhightower/confd/blob/master/backends/etcd/client.go#L124)：
+```golang
+func (c *Client) WatchPrefix(prefix string, keys []string, waitIndex uint64, stopChan chan bool) (uint64, error) {
+	// return something > 0 to trigger a key retrieval from the store
+	if waitIndex == 0 {
+		//注意，初始化confd需要强制拉取etcd一次，这里直接返回1（初始化时waitIndex必然为0）
+		return 1, nil
+	}
+
+	// Setting AfterIndex to 0 (default) means that the Watcher
+	// should start watching for events starting at the current
+	// index, whatever that may be.
+	watcher := c.client.Watcher(prefix, &client.WatcherOptions{AfterIndex: uint64(0), Recursive: true})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancelRoutine := make(chan bool)
+	defer close(cancelRoutine)
+
+	go func() {
+		select {
+		case <-stopChan:
+			cancel()
+		case <-cancelRoutine:
+			return
+		}
+	}()
+
+	for {
+		resp, err := watcher.Next(ctx)
+		if err != nil {
+			switch e := err.(type) {
+			case *client.Error:
+				if e.Code == 401 {
+					return 0, nil
+				}
+			}
+			return waitIndex, err
+		}
+
+		// Only return if we have a key prefix we care about.
+		// This is not an exact match on the key so there is a chance
+		// we will still pickup on false positives. The net win here
+		// is reducing the scope of keys that can trigger updates.
+		for _, k := range keys {
+			if strings.HasPrefix(resp.Node.Key, k) {
+				return resp.Node.ModifiedIndex, err
+			}
+		}
+	}
+}
+```
+
 #### 基于 Redis 的实现
 
 1、`redisClient.WatchPrefix`的实现<br>
@@ -1232,6 +1298,19 @@ confd提供了checkcmd和reloadcmd来实现对配置准确性的检查，降低�
 
 缺点是，需要有额外的手段来确保控制存入存储后端的数据始终是合法的。
 
+####	confd的可以优化的点
+
+一般在项目应用中，将confd作为配置中心的组件，实现有两种方式：
+1.	基于变量为粒度来维护配置，在代码中用`xxxx_application.yml.tmpl`之类的配置文件描述应用的配置文件，占位符表述的值会被存储到像consul、etcd等kv存储中，并提供可CRUD维护配置变量的管理端。每次发布会拉去最新的key值进行替换占位符得到应用程序使用的配置文件`xxxx_application.yml.tmpl`
+
+2.	以整个配置文件为粒度来维护配置，开发需要将配置文件的整个内容发布到配置中心，kv存储存储的是配置文件整个内容作为一个value，更新配置文件可以用value完成更新
+
+
+####	confd应用场景
+1.	nginx动态生成upstream实现服务发现
+2.	prometheus动态生成prometheus.yml实现自动报警
+
 ## 0x07 参考
 - 	[Quick Start Guide](https://github.com/kelseyhightower/confd/blob/master/docs/quick-start-guide.md)
 -	[confd的安装与使用](https://www.huweihuang.com/linux-notes/tools/confd-usage.html)
+-	[confd模板语法](https://blog.kelu.org/tech/2021/10/20/confd-templates.html)
