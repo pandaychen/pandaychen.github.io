@@ -172,8 +172,6 @@ http{
 }
 ```
 
-
-
 3、向存储中间件写入初始化数据<br>
 如果初始化不写入数据，直接运行confd会报错，这里以etcdv2为例：
 ```bash
@@ -317,8 +315,6 @@ server {
 #### 同步生成 Nginx 配置
 
 在实际线上应用中，可以考虑使用 [supervisord](http://supervisord.org/)与 Confd 的部署方式。
-
-
 
 ## 0x03 Confd 逻辑分析
 
@@ -924,13 +920,13 @@ type Client struct {
 }
 ```
 
-而 `Watch` 结构则记录，当前关联的 `key` 在 Etcd 中存储最新的 `revision` 值，由于 Etcd 本身是个 MVCC 存储，所以我们保存了 `revision`（这里的 `revision` 是最新的 revision）：
+而 `Watch` 结构则记录，当前关联的 `key` 在 Etcd 中存储最新的 `revision` 值，由于 Etcd 本身是个 MVCC 存储，所以我们保存了 `revision`（这里的 `revision` 是最新的 revision），程序启动时，初始化为`0`（这个`0`值确保了confd初始化的时候，强制触发一次etcdv3的拉取操作，后述）：
 
 ```golang
 // A watch only tells the latest revision
 type Watch struct {
 	// Last seen revision
-	revision int64
+	revision int64		//初始化为0
 	// A channel to wait, will be closed after revision changes
 	cond chan struct{}
 	// Use RWMutex to protect cond variable
@@ -938,9 +934,8 @@ type Watch struct {
 }
 ```
 
-#### WatchPrefix 方法
-
-分析下在上一小节 `watchProcessor.monitorPrefix` 中调用的 `WatchPrefix` 方法：
+#### etcdV3的WatchPrefix 方法
+分析下在上一小节 `watchProcessor.monitorPrefix` 中调用的 `storeClient.WatchPrefix` 方法：
 
 ```golang
 func (c *Client) WatchPrefix(prefix string, keys []string, waitIndex uint64, stopChan chan bool) (uint64, error) {
@@ -1062,9 +1057,11 @@ func (w *Watch) update(newRevision int64){
 
 // Wait until revision is greater than lastRevision
 func (w *Watch) WaitNext(ctx context.Context, lastRevision int64, notify chan<-int64) {
+	//初始化时，lastRevision的值为0
 	for {
 		w.rwl.RLock()
 		if w.revision > lastRevision {
+			//初始化时，这里保证了，需要强制触发一次拉取etcdv3后端的流程
 			w.rwl.RUnlock()
 			break
 		}
@@ -1295,13 +1292,12 @@ func (c *Client) WatchPrefix(prefix string, keys []string, waitIndex uint64, sto
 
 confd提供了checkcmd和reloadcmd来实现对配置准确性的检查，降低出错的概率；通过配置check_cmd来校验配置文件是否正确，如果配置文件非法则不会执行自动更新配置和reload的操作
 
-
 缺点是，需要有额外的手段来确保控制存入存储后端的数据始终是合法的。
 
 ####	confd的可以优化的点
 
 一般在项目应用中，将confd作为配置中心的组件，实现有两种方式：
-1.	基于变量为粒度来维护配置，在代码中用`xxxx_application.yml.tmpl`之类的配置文件描述应用的配置文件，占位符表述的值会被存储到像consul、etcd等kv存储中，并提供可CRUD维护配置变量的管理端。每次发布会拉去最新的key值进行替换占位符得到应用程序使用的配置文件`xxxx_application.yml.tmpl`
+1.	基于变量为粒度来维护配置，在代码中用`xxxx_application.yml.tmpl`之类的配置文件描述应用的配置文件，占位符表述的值会被存储到像consul、etcd等kv存储中，并提供可CRUD维护配置变量的管理端。每次发布会拉取最新的key值进行替换占位符得到应用程序使用的配置文件`xxxx_application.yml.tmpl`
 
 2.	以整个配置文件为粒度来维护配置，开发需要将配置文件的整个内容发布到配置中心，kv存储存储的是配置文件整个内容作为一个value，更新配置文件可以用value完成更新
 
