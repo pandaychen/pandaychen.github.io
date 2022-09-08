@@ -26,8 +26,8 @@ Consul 中使用 Raft 算法解决一致性问题，使用 Gossip 协议来管�
 
 ####    实现原理
 其核心在于两点：
-1.  集群内节点间信息的高效同步机制，其保障了拓扑变动以及控制信号的及时传递（使用 gossip 协议在集群内传播信息）
-2.  Server 集群内日志存储的强一致性（使用 raft 协议来保障日志的一致性）
+1.  集群内节点间信息的高效同步机制，其保障了拓扑变动以及控制信号的及时传递（使用 gossip 协议在集群内传播信息，如广播故障、成员关系等）
+2.  Server 集群内日志存储的强一致性（使用 raft 协议来保障日志的一致性，选主还有事务相关等）
 
 
 ##  0x02    服务注册与发现
@@ -92,6 +92,28 @@ func (c *ConsulRegistry) RegisterWithHealthCheckGRPC() error {
 }
 ```
 
+服务注册的结构定义如下：
+```golang
+// AgentServiceRegistration is used to register a new service
+type AgentServiceRegistration struct {
+		Kind              ServiceKind       `json:",omitempty"`
+		ID                string            `json:",omitempty"`
+		Name              string            `json:",omitempty"`
+		Tags              []string          `json:",omitempty"`
+		Port              int               `json:",omitempty"`
+		Address           string            `json:",omitempty"`
+		EnableTagOverride bool              `json:",omitempty"`
+		Meta              map[string]string `json:",omitempty"`
+		Weights           *AgentWeights     `json:",omitempty"`
+		Check             *AgentServiceCheck
+		Checks            AgentServiceChecks
+		// DEPRECATED (ProxyDestination) - remove this field
+		ProxyDestination string                          `json:",omitempty"`
+		Proxy            *AgentServiceConnectProxyConfig `json:",omitempty"`
+		Connect          *AgentServiceConnect            `json:",omitempty"`
+}
+```
+
 2、服务发现 <br>
 参见 [consul resolver](https://github.com/pandaychen/grpclb2consul/blob/master/consul_discovery/resolver.go) 的实现，主要注意下监控方法 `WatcherHandler` 的实现[细节](https://github.com/pandaychen/grpclb2consul/blob/master/consul_discovery/watcher.go#L69)
 
@@ -99,8 +121,74 @@ consul提供的watcher方式有：
 
 
 3、健康检查 <br>
-值得一提的是，consul 检查服务器的健康状态，consul 用 `google.golang.org/grpc/health/grpc_health_v1.HealthServer` 接口，实现了对 gRPC 健康检查的支持。所以需要实现该接口以便于consul 利用此接口作健康检查
+值得一提的是，consul 检查服务器的健康状态，consul 用 `google.golang.org/grpc/health/grpc_health_v1.HealthServer` 接口，实现了对 gRPC 健康检查的支持。所以需要实现该接口以便于consul 利用此接口作健康检查，如[代码](https://github.com/pandaychen/grpclb2consul/blob/master/consul_discovery/register.go#L157)
 
+```golang
+healthcheck := &consulapi.AgentServiceCheck{
+	Interval: "3s",
+	GRPC:     fmt.Sprintf("%s:%d/%s", c.GeneNodeData.Ip, c.GeneNodeData.Port, "svcname"), // grpc 支持，执行健康检查的地址，service 会传到 Health.Check 函数中
+	DeregisterCriticalServiceAfter: "1m", // 注销时间，相当于过期时间
+}
+
+crs := &consulapi.AgentServiceRegistration{
+	ID:      c.GeneNodeData.UniqID, //uniq-id
+	Name:    c.GeneNodeData.ServiceName,
+	Address: c.GeneNodeData.Ip,   // 服务 IP
+	Port:    c.GeneNodeData.Port, // 服务端口
+	Tags:    tags,                // tags，可以为空([]string{})
+	Check:   healthcheck}
+err := c.ConsulAgent.Agent().ServiceRegister(crs) //单例模式
+```
+
+按照如上设置，consul Agent每隔`3s`会使用gRPC的标准健康检查接口发起一次健康[检查请求](https://github.com/pandaychen/grpclb2consul/blob/master/healthcheck/method.go#L42)，访问的endpoint是`fmt.Sprintf("%s:%d/%s", c.GeneNodeData.Ip, c.GeneNodeData.Port, "svcname")`，如下：
+```golang
+func (h *HealthyCheck) Check(ctx context.Context, in *pb.HealthCheckRequest) (*pb.HealthCheckResponse, error) {
+	//more check method/logic could be add
+	return &pb.HealthCheckResponse{Status: pb.HealthCheckResponse_SERVING}, nil
+	//return &pb.HealthCheckResponse{Status: pb.HealthCheckResponse_NOT_SERVING }, nil
+}
+```
+
+####	DeregisterCriticalServiceAfter参数的坑
+`DeregisterCriticalServiceAfter`[选项](https://www.consul.io/api-docs/agent/check#deregistercriticalserviceafter)：用来设置当服务健康检查异常时超过多久时间服务，就开始注销本服务，consul会周期性发起健康检查，并且根据结果自动移除不可用的服务。不过，在测试时发现，此值设置为较小的值（如`10s`）并不生效。查询官网文档发现下面这段：
+>	DeregisterCriticalServiceAfter (string: "") - Specifies that checks associated with a service should deregister after this time. This is specified as a time duration with suffix like "10m". If a check is in the critical state for more than this configured value, then its associated service (and all of its associated checks) will automatically be deregistered. The minimum timeout is 1 minute, and the process that reaps critical services runs every 30 seconds, so it may take slightly longer than the configured timeout to trigger the deregistration. This should generally be configured with a timeout that's much, much longer than any expected recoverable outage for the given service.
+
+查询了下原项目代码[实现](https://github.com/hashicorp/consul/blob/main/agent/agent.go#L2994)，的确如文档描述，超时的最小限制是`1min`
+
+####	consul agent的gRPC健康检查
+如上代码所示，启用了gRPC健康检查之后，consul agent会根据开发传入的配置对服务进行探测，基于gRPC的健康监测`Check`接口，consul的实现[如下](https://github.com/hashicorp/consul/blob/main/agent/checks/grpc.go#L52)：
+```golang
+// Check if the target of this GrpcHealthProbe is healthy
+// If nil is returned, target is healthy, otherwise target is not healthy
+func (probe *GrpcHealthProbe) Check(target string) error {
+	serverAndService := strings.SplitN(target, "/", 2)
+	serverWithScheme := fmt.Sprintf("%s:///%s", resolver.GetDefaultScheme(), serverAndService[0])
+
+	ctx, cancel := context.WithTimeout(context.Background(), probe.timeout)
+	defer cancel()
+
+	connection, err := grpc.DialContext(ctx, serverWithScheme, probe.dialOptions...)
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+
+	client := hv1.NewHealthClient(connection)
+	response, err := client.Check(ctx, probe.request)
+	if err != nil {
+		return err
+	}
+	if response.Status != hv1.HealthCheckResponse_SERVING {
+		//非HealthCheckResponse_SERVING错误直接返回失败
+		return fmt.Errorf("gRPC %s serving status: %s", target, response.Status)
+	}
+
+	return nil
+}
+```
+
+####	Tags用法
+参考[Brief overview of using consul tags](https://echorand.me/posts/consul-tags/)
 
 ####   Watch 机制：阻塞查询
 同 Etcd 的 Watch 一样，Consul 也提供了 Watch 机制，基于 HTTP Long Polling 机制来实现。
@@ -129,13 +217,19 @@ consul 与 kubernetes 完成了深度整合，契合了服务 docker 化趋势�
 -   写负载：注册及解注册速率
 -   读负载：`Catalog`/`Health`/`PreparedQuery` 请求量，执行耗时
 
+##	0x06	一些细节问题&&总结
+1、consul重复服务实例<br>
+该问题是同一个服务实例（IP+Port）在Consul中注册并出现了多次，一般有两种原因：
+-	每次注册时，使用了不同的实例ID（ServiceID)，比如随机数不同，旧的服务实例没有下线，又注册了新的服务实例
+-	两次注册时，注册到不同的Server节点，即使同一实例名称，也可以注册到不同的Service节点
 
-##  0x06    参考
+
+##  0x07    参考
 -   [记一次 Consul 故障分析与优化](https://www.infoq.cn/article/qv02j2ezmjbow8ckcopg)
 -   [golang consul-grpc 服务注册与发现](http://www.hatlonely.com/2018/06/23/golang-consul-grpc-%E6%9C%8D%E5%8A%A1%E6%B3%A8%E5%86%8C%E4%B8%8E%E5%8F%91%E7%8E%B0/index.html)
 -   [A command-line tool to perform health-checks for gRPC applications in Kubernetes etc.](https://github.com/grpc-ecosystem/grpc-health-probe)
 -   [Announcing HashiCorp Consul + Kubernetes](https://www.hashicorp.com/blog/consul-plus-kubernetes)
--   [consul 原理解析](http://ljchen.net/2019/01/04/consul 原理解析 /)
+-   [consul 原理解析](http://ljchen.net/2019/01/04/consul原理解析/)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
 
