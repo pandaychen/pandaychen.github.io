@@ -64,5 +64,6 @@ tags:
 -   [go-zero缓存设计之持久层缓存](https://www.bookstack.cn/read/go-zero-1.3-zh/redis-cache.md)
 -   [DB缓存机制](https://www.bookstack.cn/read/go-zero-1.3-zh/sql-cache.md)
 -   [防止缓存击穿之进程内共享调用](https://www.bookstack.cn/read/go-zero-1.3-zh/sharedcalls.md)
+-   [主从DB与cache一致性](https://mp.weixin.qq.com/s?__biz=MjM5ODYxMDA5OQ==&mid=404308725&idx=1&sn=1a25ce76dd1956014ceb8a011855268e&scene=21#wechat_redirect)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

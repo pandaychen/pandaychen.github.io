@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      GoIM 源码分析（五）：一些细节
+title:      GoIM 源码分析（四）：一些细节
 subtitle:   GOIM
 date:       2020-08-01
 author:     pandaychen
@@ -33,9 +33,11 @@ type Channel struct {
         mutex    sync.RWMutex
         //...
 }
+```
 
 ####    Ring的结构
 
+```golang
 // Ring ring proto buffer.
 type Ring struct {
 	// read
@@ -50,6 +52,7 @@ type Ring struct {
 }
 ```
 
+`Ring`的操作：<br>
 ```golang
 //初始化对象数组长度为2的n次方
 func (r *Ring) init(num uint64) {

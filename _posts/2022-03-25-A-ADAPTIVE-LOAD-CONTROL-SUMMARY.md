@@ -1,6 +1,6 @@
 ---
 layout: post
-title: 微服务项目中的自适应技术（adaptive）分析与应用（TODO）
+title: 微服务项目中的自适应（Adaptive）技术分析与应用
 subtitle: 分析 go-zero 框架中自适应技术的运用
 date: 2022-03-25
 header-img: img/super-mario.jpg
