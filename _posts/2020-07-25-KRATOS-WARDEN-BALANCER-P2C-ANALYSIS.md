@@ -113,7 +113,7 @@ const (
 
 `p2c.subConn`，封装了 `balancer.SubConn`，代表了 Client 到 Server 的一条长连接，封装了核心属性（计算权重需要）：
 其中重要的字段说明如下（牢记一个 subConn 代表了客户端到某个服务端 Node 的唯一属性）：
--	`meta`：在服务发现（Etcd）中设置的 Node 的去那种值
+-	`meta`：在服务发现（Etcd）中设置的 Node 的初始值
 -	`lag`：请求延迟（用于与下次实现加权计算）
 -	`success`：使用加权算法拿到的客户端 RPC 调用成功率
 -	`inflight`：当前正在处理的请求数
@@ -183,7 +183,7 @@ func (sc *subConn) cost() uint64 {
 ```
 
 ####	指标的计算详解-inflight
-![inflight](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/kratos/loadbalance/GRPC-LB-P2C-1.png)
+![inflight](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kratos/loadbalance/GRPC-LB-P2C-1.png)
 
 
 
