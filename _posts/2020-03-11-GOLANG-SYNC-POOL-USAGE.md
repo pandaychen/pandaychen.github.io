@@ -14,7 +14,7 @@ tags:
 ##  0x00	前言
 当多个 goroutine 都需要创建同⼀个对象的时候，如果 goroutine 数过多，导致对象的创建数⽬剧增，进⽽导致 GC 压⼒增大。形成 **并发⼤ --> 占⽤内存⼤ -->GC 缓慢 --> 处理并发能⼒降低 --> 并发更⼤** 这样的恶性循环。 在这个时候，需要有⼀个对象池，每个 goroutine 不再⾃⼰单独创建对象，⽽是从对象池中获取出⼀个对象。`sync.Pool` 本质上就是池化的机制，用来减少 GC 和 malloc 的时间。它可以用来**保存一组可独立访问的临时对象**。注意这里的临时这两个字，它说明 pool 中的对象可能会被 gc 回收。
 
-先引入一个普通的场景，http 解包，在高并发下，`data []byte` 每次都大概率从 heap 上分配新内存，，而 `data` 在请求完毕后就成为了垃圾数据等待 gc；即在并发量、请求体都很大的情况下，内存就会迅速被占满，这种情况就非常适合使用 `sync.Pool` 进行优化
+先引入一个普通的场景，http 解响应包，在高并发下，`data []byte` 每次都大概率从 heap 上分配新内存，而 `data` 在请求完毕后就成为了垃圾数据等待 gc；即在并发量、请求体都很大的情况下，内存就会迅速被占满，这种情况就非常适合使用 `sync.Pool` 进行优化
 
 ```go
 func handler(writer http.ResponseWriter, req *http.Request) {
@@ -129,6 +129,19 @@ func main(){
 	p.WriteString("aaaaa")
 	fmt.Println(p.String())
 }
+```
+
+####	[]byte多级字节池
+[多级字节池](https://github.com/pandaychen/goes-wrapper/blob/master/pypool/buffer_pool.go)的实现，预先生成不同size的`sync.Pool`：
+```golang
+var (
+	bufPool32k     sync.Pool
+	bufPool16k     sync.Pool
+	bufPool8k      sync.Pool
+	bufPool2k      sync.Pool
+	bufPool1k      sync.Pool
+	bufPoolDefault sync.Pool
+)
 ```
 
 ####	JSON 编码为 bytes.Buffer
