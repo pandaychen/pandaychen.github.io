@@ -38,6 +38,7 @@ tags:
 #### 使用介绍
 
 从官方提供的使用例子，先了解下 Oxy 的基础功能：
+
 1、Simple [reverse proxy](https://github.com/vulcand/oxy/blob/master/forward/fwd.go)，简单的反向代理，将 `8080` 的 HTTP 请求发送给 `http://localhost:63450` <br>
 
 ```golang
@@ -127,7 +128,7 @@ s := &http.Server{
 s.ListenAndServe()
 ```
 
-## 0x01 Forward 子组件
+## 0x01 Forward 子组件：反向代理模块分析
 
 用 Forward 组件实现反向代理的一种调用方式如下：
 
@@ -150,7 +151,22 @@ func API_handler(w http.ResponseWriter, req *http.Request) {
 
 ```
 
-[Forward 组件](https://github.com/vulcand/oxy/tree/master/forward)封装了 HTTP 和 websocket 两种转发的实现，核心结构是[httpForwarder](https://github.com/vulcand/oxy/blob/6b5fc980479afc1e3c3ecf1fe4319fefc16e523f/forward/fwd.go)，有点类似于`httputil.ReverseProxy`的功能：
+[Forward 组件](https://github.com/vulcand/oxy/tree/master/forward)封装了 HTTP 和 websocket 两种转发的实现，核心结构是[httpForwarder](https://github.com/vulcand/oxy/blob/6b5fc980479afc1e3c3ecf1fe4319fefc16e523f/forward/fwd.go)，对http请求进行处理后，最终还是调用[`httputil.ReverseProxy`](https://github.com/vulcand/oxy/blob/master/forward/fwd.go)进行反向代理的功能：
+
+```golang
+revproxy := httputil.ReverseProxy{
+        Director: func(req *http.Request) {
+                f.modifyRequest(req, inReq.URL)
+        },
+        Transport:      f.roundTripper,
+        FlushInterval:  f.flushInterval,
+        ModifyResponse: f.modifyResponse,
+        BufferPool:     f.bufferPool,
+        ErrorHandler:   ctx.errHandler.ServeHTTP,
+}
+```
+
+####    核心结构
 
 ```golang
 // httpForwarder is a handler that can reverse proxy
@@ -170,6 +186,8 @@ type httpForwarder struct {
 	websocketConnectionClosedHook func(req *http.Request, conn net.Conn)
 }
 ```
+
+
 
 ## 0x02 参考
 
