@@ -536,5 +536,6 @@ func worker(stopCh <-chan struct{}) {
 -       [Concurrency in Go 中文笔记](https://www.kancloud.cn/mutouzhang/go/596835)
 -       [go 并发编程范式](https://www.jianshu.com/p/3e1837860575)
 -       [Golang并发模型：合理退出并发协程](https://segmentfault.com/a/1190000017251049)
+-       [Golang Channel用法简编](https://tonybai.com/2014/09/29/a-channel-compendium-for-golang/)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
