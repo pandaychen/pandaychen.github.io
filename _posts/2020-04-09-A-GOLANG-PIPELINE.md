@@ -26,13 +26,17 @@ tags:
 7.	Bounded parallelism
 
 
+关于 goroutine 的并发及控制场景，要解决两个问题：
+1.  goroutine 的生成及 goroutine 间的通信效率
+2.  goroutine 的回收及退出（原文给出的 goroutine 通知退出方式个人感觉并不是很优雅）
+
 ##  0x01    什么是 Pipeline
 Pipeline（流水线）是由多个阶段组成的，相邻的两个阶段由 channel 进行连接；每个阶段是由一组在同一个函数中启动的 goroutine 组成。在每个阶段，这些 goroutine 会执行下面三个操作：
 1.  通过 Inbound Channels 从上游接收数据
 2.  对接收到的数据执行一些操作，通常会生成新的数据
 3.  将新生成的数据通过 Outbound Channels 发送给下游
-除了第一个和最后一个阶段，每个阶段都可以有任意个 Inbound 和 Outbound Channel，有点 Map-Reduce 的味道。本质上还是生产者 - 消费者的模型。
 
+除了第一个和最后一个阶段，每个阶段都可以有任意个 Inbound 和 Outbound Channel，有点 Map-Reduce 的味道。本质上还是生产者 - 消费者的模型。
 
 
 ##  0x02    case1：计算平方数
