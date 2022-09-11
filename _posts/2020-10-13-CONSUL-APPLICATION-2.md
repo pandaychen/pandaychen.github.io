@@ -232,5 +232,3 @@ consul 与 kubernetes 完成了深度整合，契合了服务 docker 化趋势�
 -   [consul 原理解析](http://ljchen.net/2019/01/04/consul原理解析/)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
-
-
