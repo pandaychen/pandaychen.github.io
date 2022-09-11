@@ -319,19 +319,261 @@ func (pq *PriorityQueue) update(item *Item, value string, priority int) {
 2.	注意package的方法，和结构体的方法，虽然同名，但是功能完全不一样
 3.	`heap.Fix`、`heap.Remove`方法的使用场景
 
-##	0x02	ring
-ring 实现了环形链表的功能。
+##	0x02	list包
+`container/list`包，[https://go.dev/src/container/list/list.go]有两个暴露对外部的结构：
+-	`List`：List 实现了一个双向链表
+-	`Element`：Element 代表了链表中元素的结构
 
-##	0x03	list
+注意，List是可以做到开箱即用的，看下面List对外的方法，参数均为`interface{}` 类型；
+
+```golang
+// List represents a doubly linked list.
+// The zero value for List is an empty list ready to use.
+type List struct {
+	//链表的根元素
+	root Element // sentinel list element, only &root, root.prev, and root.next are used
+
+	//链表的长度
+	len  int     // current list length excluding (this) sentinel element
+}
+
+// Element is an element of a linked list.
+type Element struct {
+	// Next and previous pointers in the doubly-linked list of elements.
+	// To simplify the implementation, internally a list l is implemented
+	// as a ring, such that &l.root is both the next element of the last
+	// list element (l.Back()) and the previous element of the first list
+	// element (l.Front()).
+	next, prev *Element	// 前/后元素指针
+
+	// The list to which this element belongs.
+	list *List	//元素所在的链表
+
+	// The value stored with this element.
+	Value any		//这个any是interface{}，用来存储元素值
+}
+```
+
+####	list的使用
+```golang
+func main() {
+	//创建List
+	var l = list.New()
+	e0 := l.PushBack(1)
+	e1 := l.PushFront(3)
+	e2 := l.PushBack(7)
+
+	l.InsertBefore(3, e0)
+	l.InsertAfter(196, e1)
+	l.InsertAfter(829, e2)
+
+	for e := l.Front(); e != nil; e = e.Next() {
+		fmt.Printf("%#v\n", e.Value.(int))
+	}
+}
+```
+
+####	Element的方法
+
+```golang
+func (e *Element) Next() *Element // 返回该元素的下一个元素，如果没有下一个元素则返回 nil
+func (e *Element) Prev() *Element // 返回该元素的前一个元素，如果没有前一个元素则返回 nil
+```
+
+####	List的方法
+
+```golang
+func New() *List                                                    // 构造一个初始化的list
+func (l *List) Back() *Element                                      // 获取list l的最后一个元素
+func (l *List) Front() *Element                                     // 获取list l的最后一个元素
+func (l *List) Init() *List                                         // list l 初始化或者清除 list l
+func (l *List) InsertAfter(v interface{}, mark *Element) *Element   // 在 list l 中元素 mark 之后插入一个值为 v 的元素，并返回该元素，如果 mark 不是list中元素，则 list 不改变
+func (l *List) InsertBefore(v interface{}, mark *Element) *Element  // 在 list l 中元素 mark 之前插入一个值为 v 的元素，并返回该元素，如果 mark 不是list中元素，则 list 不改变
+func (l *List) Len() int                                            // 获取 list l 的长度
+func (l *List) MoveAfter(e, mark *Element)                          // 将元素 e 移动到元素 mark 之后，如果元素e 或者 mark 不属于 list l，或者 e==mark，则 list l 不改变
+func (l *List) MoveBefore(e, mark *Element)                         // 将元素 e 移动到元素 mark 之前，如果元素e 或者 mark 不属于 list l，或者 e==mark，则 list l 不改变
+func (l *List) MoveToBack(e *Element)                               // 将元素 e 移动到 list l 的末尾，如果 e 不属于list l，则list不改变             
+func (l *List) MoveToFront(e *Element)                              // 将元素 e 移动到 list l 的首部，如果 e 不属于list l，则list不改变             
+func (l *List) PushBack(v interface{}) *Element                     // 在 list l 的末尾插入值为 v 的元素，并返回该元素              
+func (l *List) PushBackList(other *List)                            // 在 list l 的尾部插入另外一个 list，其中l 和 other 可以相等               
+func (l *List) PushFront(v interface{}) *Element                    // 在 list l 的首部插入值为 v 的元素，并返回该元素              
+func (l *List) PushFrontList(other *List)                           // 在 list l 的首部插入另外一个 list，其中 l 和 other 可以相等              
+func (l *List) Remove(e *Element) interface{}                       // 如果元素 e 属于list l，将其从 list 中删除，并返回元素 e 的值
+```
+
+####	List的问题（注意）
+1.	不要使用自己构造的Element结构，作为参数传入List的方法
+2.	`Remove`[方法](https://cs.opensource.google/go/go/+/refs/tags/go1.19.1:src/container/list/list.go;drc=54182ff54a687272dd7632c3a963e036ce03cb7c;l=108)是传入指定位置的元素（list的`Remove`实现），复杂度是`O(1)`，需要开发者保存对应的element的指针（地址）
+3.	若在goroutine并发环境下使用`container/list`链表，那么需要加锁
+4.	List并未提供`Pop`类方法，需要自行组合实现，不过需要加锁
+5.	List如何正确删除所有元素？
+6.	List包中大部分对于`e *Element`进行操作的元素都可能会导致程序崩溃，其根本原因是`e`是一个`Element`类型的指针，当然其也可能为`nil`，但是golang中list包中函数没有对其进行是否为`nil`的检查，变默认其非`nil`进行操作，所以这种情况下，便可能出现程序崩溃
+
+1、`Remove`的实现<br>
+```GOLANG
+// Remove removes e from l if e is an element of list l.
+// It returns the element value e.Value.
+// The element must not be nil.
+func (l *List) Remove(e *Element) any {
+	if e.list == l {
+		// if e.list == l, l must have been initialized when e was inserted
+		// in l or l == nil (e is a zero Element) and l.remove will crash
+		l.remove(e)
+	}
+	return e.Value
+}
+
+// remove removes e from its list, decrements l.len
+func (l *List) remove(e *Element) {
+	e.prev.next = e.next
+	e.next.prev = e.prev
+	e.next = nil // avoid memory leaks
+	e.prev = nil // avoid memory leaks
+	e.list = nil
+	l.len--
+}
+```
+
+
+####	List的典型应用场景
+-	时间轮的[任务链表定义](https://pandaychen.github.io/2022/05/28/A-TIMEWHEEL-ANALYSIS/#0x02-go-zero-%E7%9A%84%E6%97%B6%E9%97%B4%E8%BD%AE)
+-	Cache中实现LRU机制的[链式结构](https://pandaychen.github.io/2022/06/02/A-GOLANG-LRUCACHE-ANALYSIS-2/#keylru-%E7%9A%84%E5%AE%9E%E7%8E%B0)
+
+
+##	0x03	ring包
+`container/ring` 实现了环形链表的功能，其典型应用场景是构造定长环形队列，比如用来保存固定size的元素，如最近`N`条日志等。Ring的结构如下：
+
+```golang
+type Ring struct {
+    next *Ring
+	prev  *Ring
+    Value       interface{}
+}
+```
+
+####	ring的典型用法
+```golang
+func main() {
+	// 创建一个环, 包含 3 个元素
+	r := ring.New(3)
+	fmt.Printf("ring: %+v\n", *r)
+
+	// 初始化
+	for i := 1; i <= 3; i++ {
+		r.Value = i
+		r = r.Next()
+	}
+	fmt.Printf("init ring: %+v\n", *r)
+
+	// sum
+	s := 0
+	r.Do(func(i interface{}) {
+        fmt.Println(i)
+		s += i.(int)
+	})
+	fmt.Printf("sum ring: %d\n", s)
+}
+```
+
+####	Ring可调用的方法
+```golang
+func New(n int) *Ring               // 用于创建一个新的 Ring, 接收一个整形参数，用于初始化 Ring 的长度  
+func (r *Ring) Len() int            // 环长度
+
+func (r *Ring) Next() *Ring         // 返回当前元素的下个元素
+func (r *Ring) Prev() *Ring         // 返回当前元素的上个元素
+func (r *Ring) Move(n int) *Ring    // 指针从当前元素开始向后移动或者向前(n 可以为负数)
+
+// Link & Unlink 组合起来可以对多个链表进行管理
+func (r *Ring) Link(s *Ring) *Ring  // 将两个 ring 连接到一起 (r 不能为空)
+func (r *Ring) Unlink(n int) *Ring  // 从当前元素开始，删除 n 个元素
+
+func (r *Ring) Do(f func(interface{}))  // Do 会依次将每个节点的 Value 当作参数调用这个函数 f, 实际上这是策略方法的引用，通过传递不同的函数以在同一个 ring 上实现多种不同的操作。
+```
+
+####	Ring数据结构的应用场景
+1.	构造定长环回队列，如保存固定长度的数据等
+2.	用作固定长度的对象缓冲区（参见goim的数据结构分析）
+
+
+####	Ring VS List
+Ring 和 List 的区别如下：
+-	Ring 类型的数据结构仅由它自身即可代表，而 List 类型则需要由它以及 Element 类型联合表示
+-	一个 Ring 类型的值严格来讲，只代表了其所属的循环链表中的一个元素，而一个 List 类型的值则代表了一个完整的链表
+-	在创建并初始化一个 Ring 时，可以指定它包含的元素数量，但是对于一个 List 值来说却不需要。循环链表一旦被创建，其长度是不可变的
+-	通过 `var r ring.Ring` 声明的 `r` 将会是一个长度为 `1` 的循环链表，而 List 类型的零值则是一个长度为 `0` 的链表。)（List 中的根元素不会持有实际元素的值）
+-	Ring 的 `Len` 方法的算法复杂度是 `O(N)`，而 List 的 `Len` 算法复杂度是 `O(1)`
+
+####	ring的典型应用场景
 
 
 ##	0x04	番外：go-zero提供的数据结构
-1、queue<br>
+
+####	queue（FIFO）
 [Queue](https://github.com/zeromicro/go-zero/blob/master/core/collection/fifo.go)是go-zero提供的先进先出的安全队列
 
-2、set<br>
-[Set](https://github.com/zeromicro/go-zero/blob/master/core/collection/set.go)提供了集合的实现
+1、[结构](https://github.com/zeromicro/go-zero/blob/master/core/collection/fifo.go#L6)<br>
+```GOLANG
+// A Queue is a FIFO queue.
+type Queue struct {
+	lock     sync.Mutex
+	elements []interface{}	//存储
+	size     int
+	head     int
+	tail     int
+	count    int
+}
+```
 
+2、操作方法：`Put`和`Take`<br>
+```GOLANG
+// Put puts element into q at the last position.
+func (q *Queue) Put(element interface{}) {
+	q.lock.Lock()
+	defer q.lock.Unlock()
+
+	if q.head == q.tail && q.count > 0 {
+		nodes := make([]interface{}, len(q.elements)+q.size)
+		copy(nodes, q.elements[q.head:])
+		copy(nodes[len(q.elements)-q.head:], q.elements[:q.head])
+		q.head = 0
+		q.tail = len(q.elements)
+		q.elements = nodes
+	}
+
+	q.elements[q.tail] = element
+	q.tail = (q.tail + 1) % len(q.elements)
+	q.count++
+}
+
+// Take takes the first element out of q if not empty.
+func (q *Queue) Take() (interface{}, bool) {
+	q.lock.Lock()
+	defer q.lock.Unlock()
+
+	if q.count == 0 {
+		return nil, false
+	}
+
+	element := q.elements[q.head]
+	q.head = (q.head + 1) % len(q.elements)
+	q.count--
+
+	return element, true
+}
+```
+
+
+####	set：集合
+[Set](https://github.com/zeromicro/go-zero/blob/master/core/collection/set.go)提供了集合的实现
+`Set`结构主要是map为基准，核心在于实现存储key值`interface{}`的通用性，此外还需要实现交集、并集、补集、差集等实现
+```GO
+// Set is not thread-safe, for concurrent use, make sure to use it with synchronization.
+type Set struct {
+	data map[interface{}]lang.PlaceholderType
+	tp   int
+}
+```
 
 
 ## 0x05  参考
