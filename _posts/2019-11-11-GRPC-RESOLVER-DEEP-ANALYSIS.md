@@ -14,7 +14,7 @@ tags:
 gRPC 负载均衡是针对每次请求，而不是连接，这样可以保证服务端负载的均衡性，所有 gRPC 负载均衡算法实现都在客户端。本系列文章对 gRPC 的负载均衡框架做深入的分析。
 
 gRPC客户端的全景视图：
-![image](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/grpc/grpc-module-relation.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grpc/grpc-module-relation.png)
 
 ##  0x01	gRPC 的解析器 Resolver
 Resolver，直观上就联想到域名解析配置 `/etc/resolv.conf`，配置域名解析规则，和 DNS 服务器交互，获取解析结果。<br>
@@ -200,9 +200,9 @@ conn, gerr := grpc.Dial("my-service", grpc.WithBalancer(b), grpc.WithBlock(), ..
 ####	调用链视图
 `grpc.RoundRobin`-->`Dial/DialContext`-->`newCCResolverWrapper`--> 调用 `resolver.Build()`---> 调用 `Build()` 实现的 `Watcher()`---> 完成并返回状态
 整个过程如下图所示（balancer与resovler）：
-![image](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/grpc/third/grpc-client-balancer.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grpc/third/grpc-client-balancer.png)
 
-![image](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/grpc/third/grpc-client-resolver.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grpc/third/grpc-client-resolver.png)
 
 
 
