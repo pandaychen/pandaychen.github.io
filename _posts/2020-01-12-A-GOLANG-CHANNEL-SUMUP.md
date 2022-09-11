@@ -249,7 +249,6 @@ func worker(start chan bool) {
                 case othercase:
                         // Do other things
                 }
-
         }
 }
 ```
@@ -430,11 +429,112 @@ func main() {
 }
 ```
 
+##      0x05    协程的优雅退出
+本小节介绍下goroutine的优雅主动退出机制（不能通过某种手段强制关闭，只能等待goroutine主动退出）
+
+####    for-range退出
+`for-range chan`常用于来遍历channel，`range`可以感知channel的关闭，当channel被发送数据的协程关闭时，`range`就会结束，接着退出`for`循环。并发中的使用场景是：goroutine只从`in`这个channel读取数据，然后进行处理，当`in`被`close`时，goroutine可自动退出
+
+```GOLANG
+go func(in <-chan int) {
+    // Using for-range to exit goroutine
+    // range has the ability to detect the close/end of a channel
+    for x := range in {
+        fmt.Printf("Process %d\n", x)
+    }
+    return 
+}(inCh)
+```
+
+####    使用`,ok`退出
+`for-select chan`常用于实现调度器（类似于多路复用多个channel的能力），但`select`机制没有感知channel的关闭，这引出了`2`个问题：
+
+1、继续在关闭的channel上读，会读到通道传输数据类型的零值，如果是指针类型，读到`nil`，继续处理还会产生`nil`<br>
+2、继续在关闭的channel上写，将会触发`panic`<br>
+
+问题`2`可以这样解决，channel只由发送方关闭，接收方不可关闭，即某个写channel只由使用该`select`的goroutine关闭，`select`中就不存在继续在关闭的channel上写数据的问题
+
+问题`1`可以使用`ok`机制来检测channel的关闭：
+1、如果某个channel关闭后，需要退出goroutine，直接`return`即可。如下代码中，该goroutine需要从`in`读数据，还需要定时做其他事情（由于有`2`件事做，所有不能使用`for-range`，要使用`for-select`，当`in`关闭时，`ok`为`false`，直接`return`退出goroutine即可
+
+```go
+go func() {
+    // in for-select using ok to exit goroutine
+    for {
+        select {
+        case x, ok := <-in:
+            //检测in是否被关闭了
+            if !ok {
+                return
+            }
+            fmt.Printf("Process %d\n", x)
+            processedCnt++
+        case <-t.C:
+            fmt.Printf("Working, processedCnt = %d\n", processedCnt)
+        }
+    }
+}()
+```
 
 
-##  0x05        参考
+2、如果某个channel关闭了，不再处理该channel，而是需要继续处理其他`case`，退出是等待所有的可读channel关闭。这里就**需要使用`select`的一个特性：`select`不会在`nil`的channel上进行等待。把只读channel设置为`nil`即可解决**
+
+```GO
+go func() {
+    // in for-select using ok to exit goroutine
+    for {
+        select {
+        case x, ok := <-in1:
+            if !ok {
+                //被关闭了，人为设置为nil
+                in1 = nil
+            }
+            // Process
+        case y, ok := <-in2:
+            if !ok {
+                in2 = nil
+            }
+            // Process
+        case <-t.C:
+            fmt.Printf("Working, processedCnt = %d\n", processedCnt)
+        }
+
+        // If both in channel are closed, goroutine exit
+        if in1 == nil && in2 == nil {
+            return
+        }
+    }
+}()
+```
+
+####    使用退出channel退出
+第三种场景：启动了一个工作协程处理数据，如何通知它退出？这里比较推荐的方法是使用一个专门的channel，发送退出的信号，可以解决这类问题。以第二个场景为例，goroutine入参包含一个停止channel `stopCh`，当`stopCh`被关闭，`case <-stopCh`会执行，直接返回即可
+
+当启动了`100`个或更多的worker时，只要`main`执行关闭`stopCh`，这样每一个worker都会都到"退出信号"，进而关闭（如果`main`向`stopCh`发送`100`个数据，这样就非常低效）
+
+```GOLANG
+func worker(stopCh <-chan struct{}) {
+    go func() {
+        defer fmt.Println("worker exit")
+        // Using stop channel explicit exit
+        for {
+            select {
+            case <-stopCh:
+                fmt.Println("Recv stop signal")
+                return
+            case <-t.C:
+                fmt.Println("Working...")
+            }
+        }
+    }()
+    return
+}
+```
+
+##  0x06        参考
 -       [聊一聊 Go 中 channel 的行为](https://www.infoq.cn/article/wZ1kKQLlsY1N7gigvpHo)
 -       [Concurrency in Go 中文笔记](https://www.kancloud.cn/mutouzhang/go/596835)
 -       [go 并发编程范式](https://www.jianshu.com/p/3e1837860575)
+-       [Golang并发模型：合理退出并发协程](https://segmentfault.com/a/1190000017251049)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
