@@ -13,6 +13,9 @@ tags:
 ##	0x00	前言
 gRPC 负载均衡是针对每次请求，而不是连接，这样可以保证服务端负载的均衡性，所有 gRPC 负载均衡算法实现都在客户端。本系列文章对 gRPC 的负载均衡框架做深入的分析。
 
+gRPC客户端的全景视图：
+![image](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/grpc/grpc-module-relation.png)
+
 ##  0x01	gRPC 的解析器 Resolver
 Resolver，直观上就联想到域名解析配置 `/etc/resolv.conf`，配置域名解析规则，和 DNS 服务器交互，获取解析结果。<br>
 本篇文章详细分析下 [gRPC-Resolver](https://godoc.org/google.golang.org/grpc/resolver) 的实现，上一篇文章 [基于 gRPC 的服务发现与负载均衡（基础篇）](https://pandaychen.github.io/2019/07/11/GRPC-SERVICE-DISCOVERY/) 介绍了 gRPC 负载均衡的基础概念及基本组件。<br>
@@ -196,8 +199,12 @@ conn, gerr := grpc.Dial("my-service", grpc.WithBalancer(b), grpc.WithBlock(), ..
 
 ####	调用链视图
 `grpc.RoundRobin`-->`Dial/DialContext`-->`newCCResolverWrapper`--> 调用 `resolver.Build()`---> 调用 `Build()` 实现的 `Watcher()`---> 完成并返回状态
-整个过程如下图所示：
-![image]()
+整个过程如下图所示（balancer与resovler）：
+![image](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/grpc/third/grpc-client-balancer.png)
+
+![image](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/grpc/third/grpc-client-resolver.png)
+
+
 
 接下来，简单看下调用链上的这几个方法：
 
@@ -374,5 +381,6 @@ func newCCResolverWrapper(cc *ClientConn) (*ccResolverWrapper, error) {
 -	[package resolver文档](https://godoc.org/google.golang.org/grpc/resolver)
 -	[package grpc文档](https://godoc.org/google.golang.org/grpc)
 -	[package roundrobin文档](https://godoc.org/google.golang.org/grpc/balancer/roundrobin)
+-	[golang grpc 客户端负载均衡、重试、健康检查](https://yangxikun.com/golang/2019/10/19/golang-grpc-client-side-lb.html)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
