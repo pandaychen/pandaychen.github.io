@@ -71,7 +71,7 @@ Nginx 1.13.10 版本支持了 HTTP/2 的负载均衡，[Introducing gRPC Support
 
 Nginx gRPC 负载均衡的一般配置如下：gRPC 代理要用 `grpc_pass` 指令，协议要用 `grpc://`，同时 `upstream` 机制对 gRPC 也是同样适用的。
 
-```bash
+```text
 worker_processes  4;     # cpu core
 
 error_log  logs/error.log;
@@ -222,11 +222,16 @@ func ClientRun(){
 - `namespace`：namespace
 - `serviceport`：服务端口
 
+####  配置headless Service
+![headless-svc](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grpc/tke/headless-1.png)
+
 ####  配置RBAC
 由于Pod调用了kubernetes的watch API，所以需要为POD生成相应的权限；否则客户端调用会报无权限的错误：`enter image description here` 。需要配置 RBAC 赋予 Client 所在 pod 赋予 endpoint 资源的 `get` 和 `watch` 权限，这样子才可以通过 k8s API 获取到 Server 端的信息。TKE的管理端提供了配置RBAC的便捷接口（使用`yaml`创建，如下图）：
 
+![CALL-ERROR](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grpc/tke/call-error-0.png)
+
 1、配置RBAC<br>
-![rbac-tke]()
+![rbac-tke](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grpc/tke/config-role-2.png)
 需要配置 `ServiceAccount`、`Role`以及`RoleBinding`这三个属性： 
 
 `ServiceAccount`配置：
@@ -285,8 +290,6 @@ spec:
     image: xxxxxx
   serviceAccount: grpclb-sa
 ```
-
-![lb-final]()
 
 
 ##  0x07  总结

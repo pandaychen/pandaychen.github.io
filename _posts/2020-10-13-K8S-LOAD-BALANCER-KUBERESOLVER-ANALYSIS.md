@@ -681,10 +681,13 @@ func (sw *streamWatcher) Decode() (Event, error) {
 }
 ```
 
-##	0x08	总结
+##	0x08	实践
+参考[TKE环境下使用watcher方式实践](https://pandaychen.github.io/2020/06/01/K8S-LOADBALANCE-WITH-KUBERESOLVER/#0x06--tke%E7%8E%AF%E5%A2%83%E4%B8%8B%E4%BD%BF%E7%94%A8watcher%E6%96%B9%E5%BC%8F%E5%AE%9E%E8%B7%B5)
+
+##	0x09	总结
 本文分析了使用 Kubernetes API 的方式来实现 gRPC 负载均衡的一种思路，项目中我们也是这么使用来实现 Kubernetes Service 的负载均衡的。
 
-##	0x09	参考
+##	0x0A	参考
 -   [理解 K8S 的设计精髓之 list-watch](http://wsfdl.com/kubernetes/2019/01/10/list_watch_in_k8s.html)
 -   [kubernetes 代码阅读 - apiserver 之 list-watch 篇](https://developer.aliyun.com/article/680204)
 -	[Kubernetes API Watcher Design](https://docs.openstack.org/kuryr/0.2.0/devref/k8s_api_watcher_design.html)
