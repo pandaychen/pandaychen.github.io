@@ -8,6 +8,7 @@ author: pandaychen
 catalog: true
 tags:
   - Crontab
+  - 分布式
 ---
 
 ##  0x00    开篇

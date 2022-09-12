@@ -17,6 +17,8 @@ tags:
 
 由于工作协程goroutine的数量是固定的，所以tunny的并发数也是固定的
 
+tunny是一个很经典的多并发goroutine的实现模型，源码很值得阅读
+
 ## 0x01 tunny 协程池使用
 要点；
 -	全局池，初始化处理方法
@@ -74,7 +76,7 @@ type Pool struct {
 	queuedJobs int64
 
 	ctor    func() Worker
-	workers []*workerWrapper
+	workers []*workerWrapper	//存储worker的地方，len()表示有多少个worker
 	reqChan chan workRequest	//有点像令牌
 
 	workerMut sync.Mutex
@@ -82,6 +84,11 @@ type Pool struct {
 ```
 
 2、Worker<br>
+工作的抽象，需要实现下面几个方法，tunny提供了`closureWorker`和`callbackWorker`两个minimal的Worker实现：
+
+-	closureWorker：参数`payload`为参数，调用`w.processor(payload)`处理；对应初始化方法为`NewFunc`
+-	callbackWorker：参数`payload`为func类型，调用`f, ok := payload.(func());f()`处理；对应初始化方法为`NewCallback`
+
 ```GO
 type Worker interface {
 	// Process will synchronously perform a job and return the result.
@@ -102,6 +109,24 @@ type Worker interface {
 ```
 
 3、workerWrapper<br>
+```GOLANG
+// workerWrapper takes a Worker implementation and wraps it within a goroutine
+// and channel arrangement. The workerWrapper is responsible for managing the
+// lifetime of both the Worker and the goroutine.
+type workerWrapper struct {
+	worker        Worker
+	interruptChan chan struct{}
+
+	// reqChan is NOT owned by this type, it is used to send requests for work.
+	reqChan chan<- workRequest
+
+	// closeChan can be closed in order to cleanly shutdown this worker.
+	closeChan chan struct{}
+
+	// closedChan is closed by the run() goroutine when it exits.
+	closedChan chan struct{}
+}
+```
 
 4、workRequest<br>
 `workRequest`可以视为一个请求处理单元
@@ -109,7 +134,7 @@ type Worker interface {
 
 ##	0x02	分析
 tunny的核心原理如下图，涵盖了tunny从资源池中获取goroutine并进行处理的逻辑：
-![tunny-principle]()
+![tunny-principle](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/pool/tunny/tunny-model-1.png)
 
 先梳理下tunny的要点，后续再详细分析：
 
@@ -119,9 +144,45 @@ tunny的核心原理如下图，涵盖了tunny从资源池中获取goroutine并�
 4.	调用方会从pool的`reqChan`中获取一个`workRequest`请求处理单元，并在`workRequest.jobChan`中传参，这样`workerWrapper.run()`中就会继续进行`work.process`执行；处理结束之后将结果通过`workRequest.retChan`返回给调用方，然后继续通过`reqChan <- workRequest`阻塞等待下一个调用方的处理
 5.	`workerWrapper.run()`中的work是一个需要用户实现的接口，必须实现`Process(interface{}) interface{}`，即业务逻辑方法！
 
+##	0x03	Pool创建
+tunny提供了三种创建Pool的方法：
+```GOLANG
+// New creates a new Pool of workers that starts with n workers. You must
+// provide a constructor function that creates new Worker types and when you
+// change the size of the pool the constructor will be called to create each new
+// Worker.
+func New(n int, ctor func() Worker) *Pool {
+	p := &Pool{
+		ctor:    ctor,
+		reqChan: make(chan workRequest),
+	}
+	p.SetSize(n)
+
+	return p
+}
+
+// NewFunc creates a new Pool of workers where each worker will process using
+// the provided func.
+func NewFunc(n int, f func(interface{}) interface{}) *Pool {
+	return New(n, func() Worker {
+		return &closureWorker{
+			processor: f,
+		}
+	})
+}
+
+// NewCallback creates a new Pool of workers where workers cast the job payload
+// into a func() and runs it, or returns ErrNotFunc if the cast failed.
+func NewCallback(n int) *Pool {
+	return New(n, func() Worker {
+		return &callbackWorker{}
+	})
+}
+```
+
 
 ##  0x03  生产者
-tunny提供了`3`种方法：[ProcessX](https://github.com/Jeffail/tunny/blob/master/tunny.go#L153)，用来插入任务列表
+**tunny的调用入口，是从下面三个方法开始的（开发者不需要关注worker是如何运行的，本质上worker的运行是在PrcessX内部完成的，开发者仅需要关注ProcessX的返回就好了）**，tunny提供了`3`种方法：[ProcessX](https://github.com/Jeffail/tunny/blob/master/tunny.go#L153)，用来插入任务列表
 
 -	`p.Process()`：会一直阻塞直到任务完成，即使当前没有空闲 worker 也会阻塞
 -	`p.ProcessTimed()`：带超时的`Process()`，支持传入一个超时时间，如果超过这个时间还没有空闲 worker，或者任务还没有处理完成，就会终止，并返回错误
@@ -245,11 +306,46 @@ func (p *Pool) ProcessCtx(ctx context.Context, payload interface{}) (interface{}
 }
 ```
 
+####	Process分析
+以`Process`方法为例，生产者的几个步骤：
+1.	首先阻塞在逻辑`request, open := <-p.reqChan`上，**当前空闲的worker**会把自己的`jobChan`、`retChan`放入到`p.reqChan`中，这样解除阻塞
+2.	生产者把用户数据`payload`放到Worker的`jobChan`中
+3.	阻塞在`payload, open = <-request.retChan`上，等待Worker执行[完成](https://github.com/Jeffail/tunny/blob/master/worker.go)并获取结果，获取结果后解除阻塞
+4.	`Process`运行完成
+
+```GOLANG
+func (p *Pool) Process(payload interface{}) interface{} {
+	atomic.AddInt64(&p.queuedJobs, 1)
+
+	request, open := <-p.reqChan
+	if !open {
+		panic(ErrPoolNotRunning)
+	}
+
+	request.jobChan <- payload
+
+	//等待worker处理payload
+
+	payload, open = <-request.retChan
+	if !open {
+		panic(ErrWorkerClosed)
+	}
+
+	atomic.AddInt64(&p.queuedJobs, -1)
+	return payload
+}
+```
+
 ##  0x04  任务传输
+如上所述，tunny的实现思路也是把Worker自身的channel暴露给Pool
+1.	任务数据channel（Pool把要处理的数据或者func传递给Worker）
+2.	结果channel，Worker把结果异步传输给Pool
 
 
 ##  0x05  消费者：任务执行
-worker的代码[实现](https://github.com/Jeffail/tunny/blob/master/worker.go)
+worker的代码[实现](https://github.com/Jeffail/tunny/blob/master/worker.go)如下，worker的实现比较简单，就是两步：
+1.	当空闲时，就把自己的`jobChan`，`retChan`告知Pool（当前可以处理任务）
+2.	处理完成后，结果发送到`retChan`，继续处理下一个任务
 
 ```GOLANG
 func (w *workerWrapper) run() {
@@ -287,7 +383,79 @@ func (w *workerWrapper) run() {
 }
 ```
 
-##  0x06  结果通知
+##  0x06  动态调整大小
+tunny支持使用`SetSize`方法动态改变Worker大小，tunny对Worker的存储依然使用slice完成，动态调整的思路是：
+1.	扩容：如果当前协程池大小`lWorkers`小于目标size`n`，则扩容`p.workers = append(p.workers, newWorkerWrapper(p.reqChan, p.ctor()))`
+2.	缩容：反之，则停止待缩容的Worker：`p.workers[i].stop()`
+
+这里缩容的部分有个小插曲，主要是slice不需要使用时，需要使其`slice[i]=nil`触发gc回收，否则会有内存泄漏的风险。关于内存泄漏的问题，可以参考[此文](https://darjun.github.io/2021/06/12/pr/tunny/)
+
+```golang
+// SetSize changes the total number of workers in the Pool. This can be called
+// by any goroutine at any time unless the Pool has been stopped, in which case
+// a panic will occur.
+func (p *Pool) SetSize(n int) {
+	p.workerMut.Lock()
+	defer p.workerMut.Unlock()
+
+	//当前pool大小
+	lWorkers := len(p.workers)
+	if lWorkers == n {
+		return
+	}
+
+	// Add extra workers if N > len(workers)
+	for i := lWorkers; i < n; i++ {
+		p.workers = append(p.workers, newWorkerWrapper(p.reqChan, p.ctor()))
+	}
+
+	// Asynchronously stop all workers > N
+	for i := n; i < lWorkers; i++ {
+		p.workers[i].stop()
+	}
+
+	// Synchronously wait for all workers > N to stop
+	for i := n; i < lWorkers; i++ {
+		p.workers[i].join()
+		p.workers[i] = nil
+	}
+
+	// Remove stopped workers from slice
+	p.workers = p.workers[:n]
+}
+```
+
+这里关于缩容的操作，依次调用了`stop`和`join`两个方法（类似Linux的线程pthread思路实现很直观，值得借鉴）：
+1.	`stop`：向Worker发送退出信号，调用`workerWrapper.stop()`会关闭`closeChan`通道，会触发`workerWrapper.run()`中的`for`循环跳出，进而执行`defer`中的`close(retChan)`和`close(closedChan)`，[代码](https://github.com/Jeffail/tunny/blob/master/worker.go#L84)
+2.	`join`：阻塞等待每个Worker成功退出
+
+这里需要关闭`retChan` channel是为了防止`ProcessX`方法在等待`retChan`数据，`closedChan`channel关闭后，`workerWrapper.join()`方法就返回了，这里的动态扩缩容都是实时生效的
+
+```GOLANG
+{
+// Asynchronously stop all workers > N
+	for i := n; i < lWorkers; i++ {
+		p.workers[i].stop()
+	}
+
+	// Synchronously wait for all workers > N to stop
+	for i := n; i < lWorkers; i++ {
+		p.workers[i].join()
+		p.workers[i] = nil
+	}
+
+	// Remove stopped workers from slice
+	p.workers = p.workers[:n]
+}
+
+func (w *workerWrapper) stop() {
+	close(w.closeChan)
+}
+
+func (w *workerWrapper) join() {
+	<-w.closedChan
+}
+```
 
 ##  0x07  一些细节
 
@@ -300,3 +468,4 @@ tunny的思路与ants有较大的区别：
 ## 0x09 参考
 - [Go 每日一库之 tunny](https://darjun.github.io/2021/06/10/godailylib/tunny/)
 - [分析一个简单的goroutine资源池](https://www.cnblogs.com/charlieroro/p/15735779.html)
+-	[为 tunny 提交的一次 PR](https://darjun.github.io/2021/06/12/pr/tunny/)

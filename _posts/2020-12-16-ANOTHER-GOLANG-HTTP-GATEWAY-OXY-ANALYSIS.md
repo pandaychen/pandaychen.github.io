@@ -129,8 +129,7 @@ s.ListenAndServe()
 ```
 
 ## 0x01 Forward 子组件：反向代理模块分析
-
-用 Forward 组件实现反向代理的一种调用方式如下：
+本文代码基于[v1.4.1](https://github.com/vulcand/oxy/releases/tag/v1.4.1)，Forward 转发组件是HTTP转发功能的基础组件，其他模块如lb、buffer等都基于此基础进行构建。用 Forward 组件实现反向代理的一种调用方式如下：
 
 ```golang
 FwdObj *forward.Forwarder
@@ -167,12 +166,24 @@ revproxy := httputil.ReverseProxy{
 ```
 
 ####    核心结构
+oxy在最终调用`http.ReverseProxy`构建转发器之前做了大量封装，主要体现在`Forwarder`结构中
+
+```GOLANG
+// Forwarder wraps two traffic forwarding implementations: HTTP and websockets.
+// It decides based on the specified request which implementation to use.
+type Forwarder struct {
+	*httpForwarder
+	*handlerContext
+	stateListener URLForwardingStateListener          //
+	stream        bool
+}
+```
 
 ```golang
 // httpForwarder is a handler that can reverse proxy
 // HTTP traffic
 type httpForwarder struct {
-	roundTripper   http.RoundTripper        //用于转发请求的RoundTripper
+	roundTripper   http.RoundTripper        //用于转发请求的RoundTripper（必需包含），默认http.DefaultTransport
 	rewriter       ReqRewriter              //用于改写转发请求
 	passHost       bool                     //
 	flushInterval  time.Duration
@@ -185,8 +196,150 @@ type httpForwarder struct {
 	bufferPool                    httputil.BufferPool
 	websocketConnectionClosedHook func(req *http.Request, conn net.Conn)
 }
+
+// handlerContext defines a handler context for error reporting and logging.
+type handlerContext struct {
+	errHandler utils.ErrorHandler
+}
+
+// UrlForwardingStateListener alias on URLForwardingStateListener.
+// Deprecated: use URLForwardingStateListener instead.
+type UrlForwardingStateListener = URLForwardingStateListener
+
+// URLForwardingStateListener URL forwarding state listener.
+type URLForwardingStateListener func(*url.URL, int)
 ```
 
+####    `ServeHTTP`实现
+Forwarder的[ServeHTTP](https://github.com/vulcand/oxy/blob/master/forward/fwd.go#L247)方法实现如下：
+
+```GOLANG
+// ServeHTTP decides which forwarder to use based on the specified
+// request and delegates to the proper implementation.
+func (f *Forwarder) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if f.log.GetLevel() >= log.DebugLevel {
+		logEntry := f.log.WithField("Request", utils.DumpHTTPRequest(req))
+		logEntry.Debug("vulcand/oxy/forward: begin ServeHttp on request")
+		defer logEntry.Debug("vulcand/oxy/forward: completed ServeHttp on request")
+	}
+
+	if f.stateListener != nil {
+		f.stateListener(req.URL, StateConnected)
+		defer f.stateListener(req.URL, StateDisconnected)
+	}
+        //判断是否支持websocket
+	if IsWebsocketRequest(req) {
+		f.httpForwarder.serveWebSocket(w, req, f.handlerContext)
+	} else {
+		f.httpForwarder.serveHTTP(w, req, f.handlerContext)
+	}
+}
+```
+
+`IsWebsocketRequest`根据http Header中的关键字判断当前是不是websocket请求：
+```golang
+// IsWebsocketRequest determines if the specified HTTP request is a websocket handshake request.
+func IsWebsocketRequest(req *http.Request) bool {
+	containsHeader := func(name, value string) bool {
+		items := strings.Split(req.Header.Get(name), ",")
+		for _, item := range items {
+			if value == strings.ToLower(strings.TrimSpace(item)) {
+				return true
+			}
+		}
+		return false
+	}
+	return containsHeader(Connection, "upgrade") && containsHeader(Upgrade, "websocket")
+}
+```
+
+`httpForwarder.serveHTTP`方法：
+```golang
+// serveHTTP forwards HTTP traffic using the configured transport.
+func (f *httpForwarder) serveHTTP(w http.ResponseWriter, inReq *http.Request, ctx *handlerContext) {
+	if f.log.GetLevel() >= log.DebugLevel {
+		logEntry := f.log.WithField("Request", utils.DumpHTTPRequest(inReq))
+		logEntry.Debug("vulcand/oxy/forward/http: begin ServeHttp on request")
+		defer logEntry.Debug("vulcand/oxy/forward/http: completed ServeHttp on request")
+	}
+
+	start := clock.Now().UTC()
+
+        //先复制一份http.Request
+	outReq := new(http.Request)
+	*outReq = *inReq // includes shallow copies of maps, but we handle this in Director
+
+	revproxy := httputil.ReverseProxy{
+		Director: func(req *http.Request) {
+			f.modifyRequest(req, inReq.URL)
+		},
+		Transport:      f.roundTripper,
+		FlushInterval:  f.flushInterval,
+		ModifyResponse: f.modifyResponse,
+		BufferPool:     f.bufferPool,
+		ErrorHandler:   ctx.errHandler.ServeHTTP,
+	}
+
+	if f.log.GetLevel() >= log.DebugLevel {
+		pw := utils.NewProxyWriter(w)
+		revproxy.ServeHTTP(pw, outReq)
+
+		if inReq.TLS != nil {
+			f.log.Debugf("vulcand/oxy/forward/http: Round trip: %v, code: %v, Length: %v, duration: %v tls:version: %x, tls:resume:%t, tls:csuite:%x, tls:server:%v",
+				inReq.URL, pw.StatusCode(), pw.GetLength(), clock.Now().UTC().Sub(start),
+				inReq.TLS.Version,
+				inReq.TLS.DidResume,
+				inReq.TLS.CipherSuite,
+				inReq.TLS.ServerName)
+		} else {
+			f.log.Debugf("vulcand/oxy/forward/http: Round trip: %v, code: %v, Length: %v, duration: %v",
+				inReq.URL, pw.StatusCode(), pw.GetLength(), clock.Now().UTC().Sub(start))
+		}
+	} else {
+		revproxy.ServeHTTP(w, outReq)
+	}
+
+	for key := range w.Header() {
+		if strings.HasPrefix(key, http.TrailerPrefix) {
+			if fl, ok := w.(http.Flusher); ok {
+				fl.Flush()
+			}
+			break
+		}
+	}
+}
+```
+
+####    modifyRequest方法
+`httputil.ReverseProxy`中的`Director`，采用`modifyRequest`方法：
+```GOLANG
+// Modify the request to handle the target URL.
+func (f *httpForwarder) modifyRequest(outReq *http.Request, target *url.URL) {
+	outReq.URL = utils.CopyURL(outReq.URL)
+	outReq.URL.Scheme = target.Scheme
+	outReq.URL.Host = target.Host
+
+	u := f.getURLFromRequest(outReq)
+
+	outReq.URL.Path = u.Path
+	outReq.URL.RawPath = u.RawPath
+	outReq.URL.RawQuery = u.RawQuery
+	outReq.RequestURI = "" // Outgoing request should not have RequestURI
+
+	outReq.Proto = "HTTP/1.1"
+	outReq.ProtoMajor = 1
+	outReq.ProtoMinor = 1
+
+	if f.rewriter != nil {
+		f.rewriter.Rewrite(outReq)
+	}
+
+	// Do not pass client Host header unless optsetter PassHostHeader is set.
+	if !f.passHost {
+		outReq.Host = target.Host
+	}
+}
+```
 
 
 ## 0x02 参考
