@@ -50,17 +50,31 @@ tags:
 
 ## 0x01 使用
 
-浏览器访问如下 URL：
+配置如下：
+应用module配置：
+![app](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/gateway/gatekeeper/gk-module-1.png)
 
+bifrost_app详细配置：
+![app1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/gateway/gatekeeper/gk-module-settings-1.png)
+
+test_app详细配置：
+![app2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/gateway/gatekeeper/gk-module-settings-2.png)
+
+应用后端代码，[参考](https://github.com/pandaychen/golang_in_action/blob/master/reverse_proxy/gatekeeper/backend.go)
+
+浏览器访问如下 URL：
 ```text
-http://127.0.0.1:8081/gatekeeper/test_http/cgi1?app_id=test_app&sign=62fda0f2212eaffd90dbf04136768c5f
+http://127.0.0.1:8081/gatekeeper/bifrost_app/a?app_id=test_app&sign=62fda0f2212eaffd90dbf04136768c5f
 ```
 
 返回
 
-```text
-Hello World1
+```json
+{"message":"b"}
 ```
+
+观察访问视图：
+![flow1](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/gateway/gatekeeper/gk-module-flow-1.png)
 
 ## 0x02 核心流程分析
 
