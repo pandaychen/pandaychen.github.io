@@ -249,6 +249,12 @@ ZSET 即有序集合，通常用来实现延时队列或者排行榜（如销量
 2、Stream<br>
 3、PUB/SUB（订阅）<br>
 
+基于go-redis的pub/sub[测试代码](https://github.com/pandaychen/golang_in_action/tree/master/redis/go-redis/subpub)在此。基于Redis来实现消息的发布与订阅，优点是比较轻量级（适合数据量不大且容忍数据丢失的场景），缺点是消息不能堆积，一旦消费者节点没有消费消息，消息将会丢失。订阅的模型如下：
+
+![subpub](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/redis/subpub-1.png)
+
+在项目中，一个可实践的场景是借助Redis的订阅/发布机制和WebSocket长连接结合，实现轻量级的订阅发布和消息实时推送功能。
+
 ####  延迟队列
 1、实现一思路 <br>
 - 使用 `ZSET`+ 定时轮询的方式实现延时队列机制，任务集合记为 `taskGroupKey`
@@ -321,5 +327,7 @@ end
 ##	0x05	参考
 -   [Using pipelining to speedup Redis queries](https://redis.io/topics/pipelining)
 -   [聊聊 GO-REDIS 的一些高级用法](http://vearne.cc/archives/1113)
+- [Redis设计与实现：订阅与发布](https://redisbook.readthedocs.io/en/latest/feature/pubsub.html)
+- [把Redis当作队列来用，真的合适吗？](https://www.51cto.com/article/659208.html)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
