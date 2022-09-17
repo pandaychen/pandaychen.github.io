@@ -33,11 +33,14 @@ tags:
 - https 代理
 - URL 重写
 
+从反向代理的架构上来看，`httputil.ReverseProxy`主要是帮助开发者完成了后面的转发及响应逻辑：
+![proxy2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/proxy/reverseproxy1.png)
+
 ## 0x01 核心结构与方法
 
 #### httputil.ReverseProxy 结构
 
-`ReverseProxy` 包含两个重要的属性： `Director` 和 `ModifyResponse`，这两个属性都是函数类型。
+`httputil.ReverseProxy` 包含两个重要的（成员）属性： `Director` 和 `ModifyResponse`，这两个属性都是函数类型。
 
 1、`Director` 属性 <br>
 当接收到客户端请求时，`ServeHTTP` 函数首先调用 `Director` 函数对接受到的请求体进行修改，例如修改请求的目标地址、请求头等；然后使用修改后的请求体发起新的请求
@@ -102,13 +105,20 @@ type ReverseProxy struct {
 }
 ```
 
-####	ReverseProxy 的成员
+####	ReverseProxy 的成员说明
 -	`Transport`：反向代理客户端连接池，这个参数特别注意，现网 **建议采用一个设置适当参数的全局唯一连接池**，否则在高并发场景中会出现连接暴涨 / 泄漏的风险
+-	`Director`：将请求修改为使用`Transfor`发送的新请求，其响应后被复制回未修改的原始客户端，`Director`在返回后不得访问提供的请求
+-	`FlushInterval`：指定在复制响应主体时刷新到客户端的刷新间隔。如果为nil，则不进行周期性刷新
+-	`ErrorLog`：指定一个可选的记录器，用于尝试代理请求时发生的错误，如果为`nil`，则日志记录将通过日志包的标准记录器转到`os.Stderr`
+-	`BufferPool`：可以选择指定一个缓冲池来获取字节片，以便在复制HTTP响应体时由`io.CopyBuffer`使用，是一个不错的优化途径
+-	`ModifyResponse`：用于修改来自后端的响应，如果它返回一个错误，代理将返回一个`StatusBadGateway`错误，同时调用`ErrorLog`的方法
 
 
 #### NewSingleHostReverseProxy 方法
 
 `NewSingleHostReverseProxy` 方法返回一个新的 `ReverseProxy`，将 `URLs` 请求路由到传入参数 `target` 的指定的 `Scheme`, `Host` 以及 `Base path`，也是默认的 `director` 配置，在 `NewSingleHostReverseProxy` 中源码已经对传入的 `URLs` 进行解析并且完成了 `Director` 的修改
+
+注意：`NewSingleHostReverseProxy`将URL路由到目标中提供的方案，主机和基本路径等重要参数
 
 ```golang
 // NewSingleHostReverseProxy returns a new ReverseProxy that routes
@@ -493,11 +503,15 @@ func (p *ReverseProxy) copyResponse(dst io.Writer, src io.Reader, flushInterval 
 	}
 
 	var buf []byte
+	//如果没有定义内存池的实现，那就直接使用copyBuffer
 	if p.BufferPool != nil {
+		//指定了内存池实现
 		buf = p.BufferPool.Get()
 		defer p.BufferPool.Put(buf)
 	}
-	// 复制 response 到 dst，即
+	// 复制 response 到 dst
+	//从scr中读取数据到buf，再把buf数据复制到dst中，此过程消耗性能
+	//因为golang中 reader 和 writer 无法直接转移数据，只能借助buf作为中间转移数据
 	_, err := p.copyBuffer(dst, src, buf)
 	return err
 }
@@ -676,12 +690,88 @@ func (r *Request) Clone(ctx context.Context) *Request {
 
 解决的方法也很简单，修改原始代码，把抛出异常的部分去掉（或者在上层忽略掉这种错误）。看起来，使用 `io.Copy` 实现代理功能时，当客户端主动断开连接时，需要格外小心处理这种错误。
 
-## 0x04 总结
+##	0x04	使用sync.Pool提升reverseproxy性能
+通过现网压测，了解到`http.ReverseProxy.copyResponse`方法中，如果采用默认的配置，则会调用`copyBuffer`方法完成数据转发，会动态申请数组（`32K`），导致gc压力变大
 
-## 0x04 参考
+`http.ReverseProxy`提供了内存池接口，可实现内存池，避免不断动态生成内存
+
+```GOLANG
+// copyBuffer returns any write errors or non-EOF read errors, and the amount
+// of bytes written.
+func (p *ReverseProxy) copyBuffer(dst io.Writer, src io.Reader, buf []byte) (int64, error) {
+    //如果buf为空，此时动态申请 32K 的空间，此操作对gc影响较大
+	if len(buf) == 0 {
+		buf = make([]byte, 32*1024)
+	}
+	var written int64
+	for {
+        //从代理请求返回的响应body中读取数据
+		//并把数据写入到前端响应中
+		nr, rerr := src.Read(buf)
+		if rerr != nil && rerr != io.EOF && rerr != context.Canceled {
+			p.logf("httputil: ReverseProxy read error during body copy: %v", rerr)
+		}
+		if nr > 0 {
+			nw, werr := dst.Write(buf[:nr])
+			if nw > 0 {
+				written += int64(nw)
+			}
+			if werr != nil {
+				return written, werr
+			}
+			if nr != nw {
+				return written, io.ErrShortWrite
+			}
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				rerr = nil
+			}
+			return written, rerr
+		}
+	}
+}
+```
+
+下面是一个`[]byte`内存池的示例，也可以采用多级内存池[实现](https://github.com/pandaychen/goes-wrapper/blob/master/pypool/buffer_pool.go)
+```GOLANG
+// []byte 内存池
+type BytesBufferPool struct {
+    defaultSize int
+    pool sync.Pool
+}
+
+func NewBytesBufferPool(defaultSize int) *BytesBufferPool {
+    p := &BytesBufferPool{
+        defaultSize: defaultSize,
+        pool: sync.Pool{
+            New: func() interface{} {
+                return make([]byte, defaultSize)
+            },
+        },
+    }
+    return p
+}
+
+func (p *BytesBufferPool) Get() []byte {
+    return p.pool.Get().([]byte)
+}
+
+func (p *BytesBufferPool) Put(bs []byte) {
+    p.pool.Put(bs)
+}
+```
+
+
+## 0x04 总结
+本文介绍了`http.ReverseProxy`的实现，已经在现网项目中遇到的一些问题及优化。很多APIGATEWAY的后端转发都是直接调用`http.ReverseProxy`来实现的
+
+
+## 0x05 参考
 
 - [golang 反向代理 reverseproxy 源码分析](https://blog.51cto.com/pmghong/2506101)
 - [gobetween： Modern & minimalistic load balancer for the Сloud era](https://github.com/yyyar/gobetween)
 - [使用 Go 语言徒手撸一个简单的负载均衡器](https://www.infoq.cn/article/h1yh7631okqsfffuvgkt)
+-  [Golang Reverse Proxy](https://www.integralist.co.uk/posts/golang-reverse-proxy/)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
