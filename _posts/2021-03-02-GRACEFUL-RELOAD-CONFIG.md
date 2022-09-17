@@ -17,7 +17,7 @@ Nginx中有个`reload`指令，提供了不重启服务下针对配置文件的�
 1.	通过signal手动触发
 2.	通过文件监听notify自动触发
 
-##	0x01	go中的实现
+##	0x01	golang中的实现
 
 ####	手动触发
 要点有如下几点：
@@ -303,9 +303,61 @@ viper.OnConfigChange(func(in fsnotify.Event) {
 ```
 
 
-##	0x03	ConfigMap/secrets的热更新
+##	0x03	ConfigMap/secrets的（container）热更新
+在kubernetes场景下，ConfigMap 更新时，希望其关联的 Deployment 的业务逻辑也能随之更新，有哪些可行且高效的方案？最好的办法是在当 ConfigMap 发生变更时，直接热更新，从而做到不影响 Pod 的正常运行；兜底方案是（假如无法热更新），就需要触发 Deployment 滚动更新
 
-##	0x04	参考
+####	ConfigMap更新的问题
+ConfigMap volume 的更新机制如下，更新操作由 kubelet 的 Pod 同步循环触发。每次进行 Pod 同步时，Kubelet 都会将 Pod 的所有 ConfigMap volume 标记为**需要重新挂载（RequireRemount）**，而 kubelet 的 volume 控制循环会发现这些需要重新挂载的 volume，去执行一次挂载操作。在 ConfigMap 的重新挂载过程中，kubelet 会先比较远端的 ConfigMap 与 volume 中的 ConfigMap 是否一致，不一致时再做更新。
+
+上面的叙述中，获取远端ConfigMap这个可能是从缓存中获取（由配置中的 `ConfigMapAndSecretChangeDetectionStrategy` 决定），不一定能获取到最新版本（最终能完成自动更新，有延迟），最多的可能延迟时间是:
+
+```text
+Pod 同步间隔（default 10s） + ConfigMap 本地缓存的 TTL
+```
+
+注意，假如使用了 `subPath` 将 ConfigMap 中的某个文件单独挂载到其它目录下，那这个文件是无法热更新的（这是 ConfigMap 的挂载逻辑决定的）
+
+
+1、实时更新<br>
+deployment对配置热更新有实时性要求，建议自行实现Watch逻辑
+-	业务逻辑中通过 ApiServer 的API Watch 对应的 ConfigMap 事件变更来做实时更新
+-	使用远程配置中心（如Etcd/Consul配合Confd实现）来管理配置
+
+2、非实时更新
+如果没有实时性要求，那么可以依赖 ConfigMap 本身的更新逻辑来完成配置热更新
+
+
+####	业务进程重载配置
+更新完配置后，还需要通知应用重新读取配置进行业务逻辑上的更新，在kubernetes场景下有这么几种方式：
+
+1、业务进程监听本地配置文件<br>
+可以在业务进程的实现中加入监听本地文件的变化，在文件变化时触发一次配置热更新。如本文提到的 viper库，目前版本也支持对ConfigMap做Watch支持热更新
+
+2、使用 sidecar 来监听本地配置文件变更<br>
+建议使用镜像[configmap-reload](https://github.com/jimmidyson/configmap-reload)来完成，它的逻辑是Watch 本地文件的变更，并在发生变更时通过 HTTP 调用通知应用进行热更新
+
+####	viper支持ConfigMap的细节
+
+从上一小节的描述，v1.13.0也是支持ConfigMap更新的，当ConfigMap更改时，它所包含的配置文件的实际路径也更改了，所以在`WatchConfig`方法中调用了`filepath.EvalSymlinks`来检测，`filepath.EvalSymlinks` 会将所有路径的符号链接都解析出来，并且该方法返回的路径，是直接可访问的。
+
+```golang
+//如果 path 或返回值是相对路径，则是相对于进程当前工作目录
+// 在当前目录下创建一个 test.txt 文件和一个 symlink 目录，在 symlink 目录下对 test.txt 建一个符号链接 test.txt.link
+fmt.Println(filepath.EvalSymlinks("symlink/test.txt.link"))
+fmt.Println(os.Readlink("symlink/test.txt.link"))
+
+// 输出为：
+// test.txt <nil>
+// ../test.txt <nil>
+```
+
+##	0x04	配置中心（远程更新）
+基于分布式配置中心，远程更新也是一种方式，如下：
+-	Etcd + Confd
+-	Nacos
+-	Apollo 
+
+##	0x05	参考
 -	[Go 每日一库之 viper](https://juejin.cn/post/6844904051369312264)
 -	[go基于viper实现配置文件热更新及其源码分析](https://blog.csdn.net/HYZX_9987/article/details/103924392)
 -	[golang进阶:怎么使用viper管理配置](https://ljlu1504.github.io/2018/12/26/how-to-use-viper-configuration-in-golang)
