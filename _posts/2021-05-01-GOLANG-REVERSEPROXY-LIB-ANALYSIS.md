@@ -46,7 +46,11 @@ tags:
 当接收到客户端请求时，`ServeHTTP` 函数首先调用 `Director` 函数对接受到的请求体进行修改，例如修改请求的目标地址、请求头等；然后使用修改后的请求体发起新的请求
 
 2、`ModifyResponse` 属性 <br>
-接收到响应后，调用 `ModifyResponse` 函数对响应进行修改，最后将修改后的响应体拷贝并响应给客户端，这样就实现了反向代理的整个流程
+-	接收到响应后，调用 `ModifyResponse` 函数对响应进行修改，最后将修改后的响应体拷贝并响应给客户端，这样就实现了反向代理的整个流程
+-	用于修改响应结果及HTTP状态码，当返回结果error不为空时，会调用`ReverseProxy.ErrorHandler`
+
+3、`ErrorHandler `属性<br>
+用于处理后端和`ModifyResponse`成员返回的错误信息，默认将返回传递过来的错误信息，并返回HTTP `502`错误码
 
 ```golang
 // 处理进来的请求，并发送转发至后端 server 实现反向代理，并将响应请求回传给客户端
@@ -108,7 +112,7 @@ type ReverseProxy struct {
 ####	ReverseProxy 的成员说明
 -	`Transport`：反向代理客户端连接池，这个参数特别注意，现网 **建议采用一个设置适当参数的全局唯一连接池**，否则在高并发场景中会出现连接暴涨 / 泄漏的风险
 -	`Director`：将请求修改为使用`Transfor`发送的新请求，其响应后被复制回未修改的原始客户端，`Director`在返回后不得访问提供的请求
--	`FlushInterval`：指定在复制响应主体时刷新到客户端的刷新间隔。如果为nil，则不进行周期性刷新
+-	`FlushInterval`：指定在复制响应主体时刷新到客户端的刷新间隔。如果为`nil`，则不进行周期性刷新
 -	`ErrorLog`：指定一个可选的记录器，用于尝试代理请求时发生的错误，如果为`nil`，则日志记录将通过日志包的标准记录器转到`os.Stderr`
 -	`BufferPool`：可以选择指定一个缓冲池来获取字节片，以便在复制HTTP响应体时由`io.CopyBuffer`使用，是一个不错的优化途径
 -	`ModifyResponse`：用于修改来自后端的响应，如果它返回一个错误，代理将返回一个`StatusBadGateway`错误，同时调用`ErrorLog`的方法
@@ -118,7 +122,7 @@ type ReverseProxy struct {
 
 `NewSingleHostReverseProxy` 方法返回一个新的 `ReverseProxy`，将 `URLs` 请求路由到传入参数 `target` 的指定的 `Scheme`, `Host` 以及 `Base path`，也是默认的 `director` 配置，在 `NewSingleHostReverseProxy` 中源码已经对传入的 `URLs` 进行解析并且完成了 `Director` 的修改
 
-注意：`NewSingleHostReverseProxy`将URL路由到目标中提供的方案，主机和基本路径等重要参数
+注意：`NewSingleHostReverseProxy`将URL路由到目标中提供的方案，主机和基本路径等重要参数；假设目标URI是`/base`，请求的URI是`/cgi1`，那么请求会被被反向代理到`http://x.x.x.x./base/cgi1`，此外，`ReverseProxy`  不会rewrite Host header，需要重写Host，可在`ReverseProxy.Director`自定义
 
 ```golang
 // NewSingleHostReverseProxy returns a new ReverseProxy that routes
@@ -129,17 +133,24 @@ type ReverseProxy struct {
 // To rewrite Host headers, use ReverseProxy directly with a custom
 // Director policy.
 func NewSingleHostReverseProxy(target *url.URL) *ReverseProxy {
+
+	// 获取请求参数，例如请求的是/cgi1?id=123，那么rawQuery就是`id=123`
     targetQuery := target.RawQuery
-    // 默认的 director 配置
+    // 自定义 director 配置
     director := func(req *http.Request) {
-      req.URL.Scheme = target.Scheme
-      req.URL.Host = target.Host
-      req.URL.Path = singleJoiningSlash(target.Path, req.URL.Path)
+      req.URL.Scheme = target.Scheme	// http/https
+      req.URL.Host = target.Host	 // 主机名（ip/端口 或 域名/端口）
+      req.URL.Path = singleJoiningSlash(target.Path, req.URL.Path)	 // 请求URL拼接
+
+	  
       if targetQuery == ""|| req.URL.RawQuery =="" {
         req.URL.RawQuery = targetQuery + req.URL.RawQuery
       } else {
+		// 使用"&"符号拼接请求参数
         req.URL.RawQuery = targetQuery + "&" + req.URL.RawQuery
       }
+
+	  // 若"User-Agent" 这个header不存在，则置空
       if _, ok := req.Header["User-Agent"]; !ok {
         // explicitly disable User-Agent so it's not set to default value
         req.Header.Set("User-Agent", "")
@@ -189,6 +200,8 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 如果终止了则直接放弃本次请求，即调用 cancel()，取消此上下文，当然对应的资源也就释放了。
 其中 http.CloseNotifier 是一个接口，只有一个方法 CloseNotify() <-chan bool，作用是检测连接是否断开
 	*/
+
+	//ctx := req.Context() 这个ctx是为了控制向下一个节点请求时，前面的连接主动退出的控制ctx
 	ctx := req.Context()
 	if cn, ok := rw.(http.CloseNotifier); ok {
 		// 客户端连接终止
@@ -404,8 +417,245 @@ func removeConnectionHeaders(h http.Header) {
 }
 ```
 
+
 上面的通信流程如下图所示：
 ![reverseproxy](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/proxy/reverseproxy1.png)
+
+####	小结
+本小节通过步骤拆解下上面`ReverseProxy.ServeHTTP`的流程：
+
+1、转发器（用来发送实际的请求）`Transport`设置<br>
+转发请求必须要一个http客户端，这里支持开发者自行传入的`Transport`
+```GOLANG
+transport := p.Transport
+if transport == nil {
+    transport = http.DefaultTransport
+}
+```
+
+2、开始处理原始请求，设置一个`ctx`、`cancel`用于及时取消代理转发的过程<br>
+循环判断请求是否终止，拿到当前请求`rw`的`http.ResponseWriter`，然后通过`http.CloseNotifier`获取到`cn.CloseNotify()`，然后就单独启动goroutine来监视`notifyChan` 是否有消息，如果有消息触发就说明，直接触发`cancel()`停止后面的流程
+
+```GOLANG
+// 获取请求的上下文
+ctx := req.Context()
+if cn, ok := rw.(http.CloseNotifier); ok {
+    var cancel context.CancelFunc
+    ctx, cancel = context.WithCancel(ctx)
+    defer cancel()
+    // 获取到请求信号channel
+    notifyChan := cn.CloseNotify()
+    go func() {
+        select {
+        case <-notifyChan:
+            cancel()
+        case <-ctx.Done():
+			//正常退出
+        }
+    }()
+}
+```
+
+3、设置下游请求（`outreq`）的`ctx`信息，并拷贝上游请求的Header到下游请求<br>
+从获取上游的 request 用于代理时访问下游的 request，使用`Request.Clone`[方法](https://cs.opensource.google/go/go/+/refs/tags/go1.19.1:src/net/http/request.go;l=371) Copy相关字段
+
+```GOLANG
+outreq := req.Clone(ctx)
+if req.ContentLength == 0 {
+	outreq.Body = nil // Issue 16036: nil Body for http.Transport retries
+}
+if outreq.Body != nil {
+	defer outreq.Body.Close()
+}
+if outreq.Header == nil {
+	outreq.Header = make(http.Header) // Issue 33142: historical behavior was to always allocate
+}
+```
+
+`Request.Clone`方法如下：
+```GOLANG
+// Clone returns a deep copy of r with its context changed to ctx.
+// The provided ctx must be non-nil.
+//
+// For an outgoing client request, the context controls the entire
+// lifetime of a request and its response: obtaining a connection,
+// sending the request, and reading the response headers and body.
+func (r *Request) Clone(ctx context.Context) *Request {
+	if ctx == nil {
+		panic("nil context")
+	}
+	r2 := new(Request)
+	*r2 = *r
+	r2.ctx = ctx
+	r2.URL = cloneURL(r.URL)
+	if r.Header != nil {
+		r2.Header = r.Header.Clone()
+	}
+	if r.Trailer != nil {
+		r2.Trailer = r.Trailer.Clone()
+	}
+	if s := r.TransferEncoding; s != nil {
+		s2 := make([]string, len(s))
+		copy(s2, s)
+		r2.TransferEncoding = s2
+	}
+	r2.Form = cloneURLValues(r.Form)
+	r2.PostForm = cloneURLValues(r.PostForm)
+	r2.MultipartForm = cloneMultipartForm(r.MultipartForm)
+	return r2
+}
+```
+
+4、对上一步Clone得到的`outreq`做合法性检查：Header检查<br>
+```golang
+if outreq.Header == nil {
+	outreq.Header = make(http.Header) // Issue 33142: historical behavior was to always allocate
+}
+```
+
+5、修改下游请求`outreq`的http相关属性<br>
+这是按照开发者的定义，来修改`outreq`满足下游请求及Header字段的需要；同时对`outreq`的Close字段设置为`false`，这样在`net.http`包的实现中，保证了这条连接可以被复用，提高性能
+
+```GOLANG
+p.Director(outreq)
+outreq.Close = false
+```
+
+6、对`outreq`可能存在的Upgrade头进行特殊处理<br>
+-	先判断请求头 Connection 字段中是否包含 Upgrade 关键字，有的话取出返回Upgrade，没有返回空字符串
+-	然后删除 http.header['Connection']中列出的 hop-by-hop 头信息，所有 Connection 中设置的 key 都删除掉
+
+```GOLANG
+reqUpType := upgradeType(outreq.Header)
+removeConnectionHeaders(outreq.Header)
+```
+
+7、删除`outreq`下游请求里面的逐跳标题<br>
+因为这里需要一个持久的连接，而不管客户端发送给我们什么，但是针对`Te`、`trailers`仍然做保留
+
+```GOLANG
+for _, h := range hopHeaders {
+	//
+	outreq.Header.Del(h)
+}
+if httpguts.HeaderValuesContainsToken(req.Header["Te"], "trailers") {
+	outreq.Header.Set("Te", "trailers")
+}
+```
+
+8、判断请求升级<br>
+如果原始请求的Upgrade不为空，那么再重新设置进去
+
+```GOLANG
+if reqUpType != "" {
+	outreq.Header.Set("Connection", "Upgrade")
+	outreq.Header.Set("Upgrade", reqUpType)
+}
+```
+
+9、追加clientIP信息<br>
+通过req请求头里面的RemoteAddr信息，（更新）追加到请求头的`X-Forwarded-For`信息中
+
+```GOLANG
+if clientIP, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
+		prior, ok := outreq.Header["X-Forwarded-For"]
+		omit := ok && prior == nil // Issue 38079: nil now means don't populate the header
+		if len(prior) > 0 {
+			clientIP = strings.Join(prior, ", ") + ", " + clientIP
+		}
+		if !omit {
+			outreq.Header.Set("X-Forwarded-For", clientIP)
+		}
+```
+
+
+10、下游请求数据<br>
+到此，上面针对下游连接`outreq`的设置已经全部完成，通过连接池，直接请求下游数据。如果请求失败，抛出一个`ErrorHandler`方法并执行；记得上面的ctx了吗？如果此时客户端主动退出，那么将触发上面步骤的`cancel`
+
+```GOLANG
+res, err := transport.RoundTrip(outreq)
+	if err != nil {
+		p.getErrorHandler()(rw, outreq, err)
+		return
+	}
+```
+
+11、处理升级协议请求<br>
+上面的`transport.RoundTrip(outreq)`已经完成，如果状态码是`101`，那么表示要进行请求升级（典型如Websocket协议），接着执行`modifyResponse` ，此时开发者可以针对`101`情况做一些特殊的处理。（参考`handleUpgradeResponse`方法，内部hijack原始的tcp连接，并且同时启动`2`个goroutine持续交换数据直到一方关闭），最后执行特殊的请求升级的返回
+
+```GOLANG
+if res.StatusCode == http.StatusSwitchingProtocols {
+	if !p.modifyResponse(rw, res, outreq) {
+		return
+	}
+	//处理upgrade
+    p.handleUpgradeResponse(rw, outreq, res)
+	return
+}
+```
+
+12、移除下游无用header头<br>
+首先是删除 Connection中的消息头，然后是删除 `hopHeaders`定义的消息头（移除一些无用的Header）
+```golang
+removeConnectionHeaders(res.Header)
+for _, h := range hopHeaders {
+	res.Header.Del(h)
+}
+```
+
+13、修改返回内容`res`<br>
+通过开发者实现的modifyResponse方法来处理后端服务器的响应数据`res`
+
+```GOLANG
+if !p.modifyResponse(rw, res, outreq) {
+	return
+}
+```
+
+14、拷贝头部的数据<br>
+本质上就是代理返回了什么结果，就将内容返回客户端
+-	`rw.Header()`：上游(客户端)的头部数据
+-	`res.Header`：下游(代理层)返回的头部数据
+
+```GOLANG
+copyHeader(rw.Header(), res.Header)
+```
+
+15、写入状态码和刷新Response<br>
+接下来就写入返回的状态码，和周期性刷新内容daoresponse中，将下游响应的状态码写入上游（即客户端）的状态码中。`res.StatusCode`是下游返回的状态码数据。利用`copyResponse`方法持续的将`res.Body`的数据复制到`rw`中，这样就完成了下游响应数据到上游响应数据的传输
+
+```GOLANG
+rw.WriteHeader(res.StatusCode)
+err = p.copyResponse(rw/*Src*/, res.Body/*DST*/, p.flushInterval(res))
+if err != nil {
+    defer res.Body.Close()
+    // Since we're streaming the response, if we run into an error all we can do
+    // is abort the request. Issue 23643: ReverseProxy should use ErrAbortHandler
+    // on read error while copying body.
+    if !shouldPanicOnCopyError(req) {
+        p.logf("suppressing panic for copyResponse error in test; copy error: %v", err)
+        return
+    }
+    panic(http.ErrAbortHandler)
+}
+```
+
+
+16、关闭body，处理Trailer信息<br>
+等数据全部拷贝完成后需要关闭`res.Body`，最后处理下trailer信息
+
+注意这里：`res.Body.Close()`，在[Golang 标准库：net/http 应用（二）](https://pandaychen.github.io/2021/10/01/GOLANG-NETHTTP-PRACTICE/)文中说过，如果不关闭`res.Body`的话，后端的连接是不会进入http连接池复用的
+```GOLANG
+res.Body.Close()
+for k, vv := range res.Trailer {
+	k = http.TrailerPrefix + k
+	for _, v := range vv {
+		rw.Header().Add(k, v)
+	}
+}
+```
+
+至此，`ServeHttp`的核心处理流程（一次请求转发）就结束了
 
 #### handleUpgradeResponse 协议升级
 
@@ -763,11 +1013,37 @@ func (p *BytesBufferPool) Put(bs []byte) {
 ```
 
 
-## 0x05 总结
+##	0x05	其他一些细节
+
+####	X-Forwarded-For设置
+遵循HTTP协议的规范，正常的代理服务器需要设置转发信息（将用户真实IP原封不动的透传到后端真实服务器），以帮助后端服务器获取到真实的客户端IP地址（恶意的除外）；通常会基于HTTP Header来实现：`X-Real-IP`、`X-Forward-For`等，二者区别如下：
+
+-	`X-Real-IP`：通常在离用户最近的代理点上设置，用于记录用户的真实IP，往后的反向代理节点不需要设置，否则将覆盖为上一个反向代理的IP
+-	`X-Forward-For`：记录每个经过的节点IP，以`,`分隔，如请求链路是`client -> proxy1 -> proxy2 -> backend`，那么Header为：`X-Forward-For: clientip,proxy1,proxy2`
+
+所以，在`ServeHTTP`中，在`outreq`的Header部分完成了`X-Forwarded-For`的设置
+```GOLANG
+func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+//...
+// 设置X-Forwarded-For，追加节点IP
+	if clientIP, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
+		// If we aren't the first proxy retain prior
+		// X-Forwarded-For information as a comma+space
+		// separated list and fold multiple headers into one.
+		if prior, ok := outreq.Header["X-Forwarded-For"]; ok {
+			clientIP = strings.Join(prior, ", ") + ", " + clientIP
+		}
+		outreq.Header.Set("X-Forwarded-For", clientIP)
+	}
+//...
+}
+```
+
+## 0x06 总结
 本文介绍了`http.ReverseProxy`的实现，已经在现网项目中遇到的一些问题及优化。很多APIGATEWAY的后端转发都是直接调用`http.ReverseProxy`来实现的
 
 
-## 0x06 参考
+## 0x07 参考
 
 - [golang 反向代理 reverseproxy 源码分析](https://blog.51cto.com/pmghong/2506101)
 - [gobetween： Modern & minimalistic load balancer for the Сloud era](https://github.com/yyyar/gobetween)
