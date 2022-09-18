@@ -184,6 +184,8 @@ func singleJoiningSlash(a, b string) string {
 
 基于先前的经验，实例化的 `httputil.Reverseproxy` 对象必须实现 `ServeHTTP` 方法才能使用 `Handler` 方式调用，本小节具体分析下 [ServeHTTP](https://golang.org/src/net/http/httputil/reverseproxy.go?s=6664:6739#L202) 方法：
 
+####	`ServeHTTP`完整代码
+
 ```golang
 // 实现了 ServeHTTP 接口
 //rw：响应（客户端）的数据
@@ -433,8 +435,15 @@ if transport == nil {
 }
 ```
 
-2、开始处理原始请求，设置一个`ctx`、`cancel`用于及时取消代理转发的过程<br>
-循环判断请求是否终止，拿到当前请求`rw`的`http.ResponseWriter`，然后通过`http.CloseNotifier`获取到`cn.CloseNotify()`，然后就单独启动goroutine来监视`notifyChan` 是否有消息，如果有消息触发就说明，直接触发`cancel()`停止后面的流程
+2、验证请求是否被主动终止<br>
+
+开始处理原始请求，设置一个`ctx`、`cancel`用于及时取消代理转发的过程
+
+先从请求中取出上下文，即`ctx := req.Context()`，然后这里会循环判断请求是否终止，拿到当前请求`rw`的`http.ResponseWriter`，然后通过`http.CloseNotifier`获取到`cn.CloseNotify()`，然后就单独启动goroutine来监视`notifyChan` 是否有消息，如果有消息触发就说明，直接触发`cancel()`停止后面的流程
+
+如果终止了则直接放弃本次请求，即调用`cancel()`，取消此context，当然对应的资源也就被释放了
+
+PS：`http.CloseNotifier`只有一个方法`CloseNotify() <-chan bool`，作用是检测连接是否断开，通常的触发场景如：用户关闭浏览器（页面未加载完成，网络断开等中断请求）
 
 ```GOLANG
 // 获取请求的上下文
@@ -456,7 +465,7 @@ if cn, ok := rw.(http.CloseNotifier); ok {
 }
 ```
 
-3、设置下游请求（`outreq`）的`ctx`信息，并拷贝上游请求的Header到下游请求<br>
+3、设置下游请求（`outreq`）的`ctx`信息，并拷贝上游请求的Header到下游请求（即对外请求的 request）<br>
 从获取上游的 request 用于代理时访问下游的 request，使用`Request.Clone`[方法](https://cs.opensource.google/go/go/+/refs/tags/go1.19.1:src/net/http/request.go;l=371) Copy相关字段
 
 ```GOLANG
@@ -508,6 +517,7 @@ func (r *Request) Clone(ctx context.Context) *Request {
 
 4、对上一步Clone得到的`outreq`做合法性检查：Header检查<br>
 ```golang
+//如果上下文中 header 为 nil，则使用 http 的 默认header 给该 ctx
 if outreq.Header == nil {
 	outreq.Header = make(http.Header) // Issue 33142: historical behavior was to always allocate
 }
@@ -523,7 +533,7 @@ outreq.Close = false
 
 6、对`outreq`可能存在的Upgrade头进行特殊处理<br>
 -	先判断请求头 Connection 字段中是否包含 Upgrade 关键字，有的话取出返回Upgrade，没有返回空字符串
--	然后删除 http.header['Connection']中列出的 hop-by-hop 头信息，所有 Connection 中设置的 key 都删除掉
+-	然后删除 `http.header['Connection']`中列出的 hop-by-hop 头信息（RFC 7230, section 6.1），所有 Connection 中设置的 key 都删除掉
 
 ```GOLANG
 reqUpType := upgradeType(outreq.Header)
@@ -533,9 +543,13 @@ removeConnectionHeaders(outreq.Header)
 7、删除`outreq`下游请求里面的逐跳标题<br>
 因为这里需要一个持久的连接，而不管客户端发送给我们什么，但是针对`Te`、`trailers`仍然做保留
 
+为何要做此处理呢？因为**逐段消息头hop-by-hop是客户端和第一层Proxy之间的消息头，与是否往下传递的 header 信息没有联系，往下游传递的信息里不应该包含这些逐段消息头**
+
+注意：本过程删除的是下游请求 `outreq` 的 Header。此外，在下面第`12`步骤也有删除，但是是删除响应的 Header，注意区分
+
 ```GOLANG
 for _, h := range hopHeaders {
-	//
+	//处理 hop-by-hop 的 header，除了 Te 和 trailers 都删除
 	outreq.Header.Del(h)
 }
 if httpguts.HeaderValuesContainsToken(req.Header["Te"], "trailers") {
@@ -547,6 +561,7 @@ if httpguts.HeaderValuesContainsToken(req.Header["Te"], "trailers") {
 如果原始请求的Upgrade不为空，那么再重新设置进去
 
 ```GOLANG
+//删除上面所有的 hop-by-hop 头后，添加回协议升级所需的所有内容
 if reqUpType != "" {
 	outreq.Header.Set("Connection", "Upgrade")
 	outreq.Header.Set("Upgrade", reqUpType)
@@ -569,8 +584,10 @@ if clientIP, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
 ```
 
 
-10、下游请求数据<br>
+10、向下游请求数据<br>
 到此，上面针对下游连接`outreq`的设置已经全部完成，通过连接池，直接请求下游数据。如果请求失败，抛出一个`ErrorHandler`方法并执行；记得上面的ctx了吗？如果此时客户端主动退出，那么将触发上面步骤的`cancel`
+
+`transport.RoundTrip()`的作用就是执行一个 HTTP 事务，根据请求返回响应
 
 ```GOLANG
 res, err := transport.RoundTrip(outreq)
@@ -597,6 +614,7 @@ if res.StatusCode == http.StatusSwitchingProtocols {
 12、移除下游无用header头<br>
 首先是删除 Connection中的消息头，然后是删除 `hopHeaders`定义的消息头（移除一些无用的Header）
 ```golang
+//删除下游响应数据中一些无用的头部字段
 removeConnectionHeaders(res.Header)
 for _, h := range hopHeaders {
 	res.Header.Del(h)
@@ -614,8 +632,8 @@ if !p.modifyResponse(rw, res, outreq) {
 
 14、拷贝头部的数据<br>
 本质上就是代理返回了什么结果，就将内容返回客户端
--	`rw.Header()`：上游(客户端)的头部数据
--	`res.Header`：下游(代理层)返回的头部数据
+-	`rw.Header()`：上游（客户端）的头部数据，`rw` 为 `ResponseWriter`
+-	`res.Header`：下游（后端服务）返回的头部数据，`res` 为 `roundTrip.(outreq)`的返回，`http.Response`结构
 
 ```GOLANG
 copyHeader(rw.Header(), res.Header)
@@ -623,6 +641,8 @@ copyHeader(rw.Header(), res.Header)
 
 15、写入状态码和刷新Response<br>
 接下来就写入返回的状态码，和周期性刷新内容daoresponse中，将下游响应的状态码写入上游（即客户端）的状态码中。`res.StatusCode`是下游返回的状态码数据。利用`copyResponse`方法持续的将`res.Body`的数据复制到`rw`中，这样就完成了下游响应数据到上游响应数据的传输
+
+这里`http.ReverseProxy`提供的参数`FlushInterval`，可以由开发者设置，改参数为刷新频率（时间间隔），在`p.flushInterval(req, res)`方法中使用
 
 ```GOLANG
 rw.WriteHeader(res.StatusCode)
@@ -642,11 +662,28 @@ if err != nil {
 
 
 16、关闭body，处理Trailer信息<br>
-等数据全部拷贝完成后需要关闭`res.Body`，最后处理下trailer信息
+等数据全部拷贝完成后需要关闭`res.Body`，最后处理下trailer信息（将内容加到上游的头部的 Trailer 字段中）
+
+Trailer的信息放在响应 body 之后，是独立存放响应信息中的，即 `res.Trailer`
 
 注意这里：`res.Body.Close()`，在[Golang 标准库：net/http 应用（二）](https://pandaychen.github.io/2021/10/01/GOLANG-NETHTTP-PRACTICE/)文中说过，如果不关闭`res.Body`的话，后端的连接是不会进入http连接池复用的
 ```GOLANG
-res.Body.Close()
+res.Body.Close()	//正确关闭res.Body
+
+if len(res.Trailer) > 0 {
+	// Force chunking if we saw a response trailer.
+	// This prevents net/http from calculating the length for short
+	// bodies and adding a Content-Length.
+	if fl, ok := rw.(http.Flusher); ok {
+		fl.Flush() // 刷新到上游的数据中心
+	}
+}
+
+if len(res.Trailer) == announcedTrailers {
+	copyHeader(rw.Header(), res.Trailer)
+	return
+}
+// 读取Trailer中的头部信息，并将其设置到上游
 for k, vv := range res.Trailer {
 	k = http.TrailerPrefix + k
 	for _, v := range vv {
@@ -1041,6 +1078,21 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 ## 0x06 总结
 本文介绍了`http.ReverseProxy`的实现，已经在现网项目中遇到的一些问题及优化。很多APIGATEWAY的后端转发都是直接调用`http.ReverseProxy`来实现的
+
+当然，可以自行实现反向代理的功能，不过流程需要满足下面这些（不需要Upgrade支持可以不care）
+
+1.	拷贝上游请求的Header到下游请求
+2.	修改请求（例如协议、参数、url等）
+3.	判断是否需要升级协议（Upgrade）
+4.	删除上游请求中的hop-by-hop Header，即不需要透传到下游的header
+5.	设置`X-Forward-For Header`，追加当前节点IP
+6.	使用HTTP连接池，向下游发起请求
+7.	处理协议升级（httpcode `101`）
+8.	删除不需要返回给上游的Hop-by-hop Header
+9.	修改响应体内容（如有需要）
+10.	拷贝下游响应头部到上游响应请求
+11.	返回HTTP状态码
+12.	定时刷新内容到response
 
 
 ## 0x07 参考
