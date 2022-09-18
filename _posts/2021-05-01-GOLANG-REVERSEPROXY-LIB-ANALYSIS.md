@@ -34,7 +34,7 @@ tags:
 - URL 重写
 
 从反向代理的架构上来看，`httputil.ReverseProxy`主要是帮助开发者完成了后面的转发及响应逻辑：
-![proxy2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/proxy/reverseproxy1.png)
+![proxy2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/proxy/reverseproxy2.png)
 
 ## 0x01 核心结构与方法
 
@@ -763,11 +763,11 @@ func (p *BytesBufferPool) Put(bs []byte) {
 ```
 
 
-## 0x04 总结
+## 0x05 总结
 本文介绍了`http.ReverseProxy`的实现，已经在现网项目中遇到的一些问题及优化。很多APIGATEWAY的后端转发都是直接调用`http.ReverseProxy`来实现的
 
 
-## 0x05 参考
+## 0x06 参考
 
 - [golang 反向代理 reverseproxy 源码分析](https://blog.51cto.com/pmghong/2506101)
 - [gobetween： Modern & minimalistic load balancer for the Сloud era](https://github.com/yyyar/gobetween)
