@@ -17,8 +17,20 @@ tags:
 ##  0x01    sort的典型使用
 Golang 的 `sort.Sort` 使用了一个接口类型 `sort.Interface` 来指定通用的排序算法和可能被排序到的序列类型之间的约定。这个接口的实现由序列的具体表示和它希望排序的元素决定，通常排序的对象是Slice
 
-####    case1：
+####    case1：`[]int`排序
+对 `[]int` slice序列按照从小到大升序排序
+```GOLANG
+type IntSlice []int
 
+func (s IntSlice) Len() int           { return len(s) }
+func (s IntSlice) Less(i, j int) bool { return s[i] < s[j] }
+func (s IntSlice) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
+func main() {
+        s := []int{4, 5, 1, 7, 2, 9}
+        sort.Sort(IntSlice(s))
+        fmt.Println(s)
+}
+```
 
 
 
@@ -32,3 +44,4 @@ sort 包内部实现了四种基本的排序算法：
 
 ##  0x0 参考
 -   [一文搞懂Go语言中的切片排序](https://tonybai.com/2020/11/26/slice-sort-in-go/)
+-   [Go sort](https://www.jianshu.com/p/a7317f1a4e50)
