@@ -908,6 +908,9 @@ func (t *TemplateResource) setVars() error {
 
 #### Confd 的客户端实现：EtcdV3 的客户端
 
+confd的etcdv3的客户端封装，稍微有点绕，核心的逻辑如下：
+![etcdv3]()
+
 在 Confd 的 EtcdV3 [客户端的实现](https://github.com/kelseyhightower/confd/blob/master/backends/etcdv3/client.go) 中，重要的结构体是 `Client` 和 `Watch`，注意 `Client` 结构的 `watches` 成员，其存储了所有需要监听改变的 `key`，对应于配置文件中的 `key` 数组（ps：线上项目中建议开启 Etcd 客户端的 TLS + 认证机制）
 
 ```golang
@@ -1305,6 +1308,10 @@ confd提供了checkcmd和reloadcmd来实现对配置准确性的检查，降低�
 ####	confd应用场景
 1.	nginx动态生成upstream实现服务发现
 2.	prometheus动态生成prometheus.yml实现自动报警
+
+
+####	confd的可借鉴之处
+1.	各类客户端的典型封装，算是比较全面了，项目中可以借鉴
 
 ## 0x07 参考
 - 	[Quick Start Guide](https://github.com/kelseyhightower/confd/blob/master/docs/quick-start-guide.md)
