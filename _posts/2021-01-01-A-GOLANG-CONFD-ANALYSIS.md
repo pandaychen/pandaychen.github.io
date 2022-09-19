@@ -64,11 +64,11 @@ confd支持多种的配置存储后端，本文分析etcd、redis、consul以及
 ## 0x01 Confd 的运行原理
 
 一般配置中心的运行模式如下，这种方式需要在服务端代码中加入定期 PULL or Watch 配置文件发生改变，改变需要重新加载本进程配置，侵入性较强：
-![config-center]()
+![config-center](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/confd/model-1.png)
 
 而使用了 Confd 的方式，我们只要在服务端代码中加入配置热重启的逻辑就行（也可以直接如 Nginx 的 `reload` 指令），配置的远程同步交给 Confd 来完成。
 
-![confd]()
+![confd](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/confd/model-2.png)
 
 ## 0x02 Confd 的使用
 1、安装confd，confd启动的配置文件 `confd.toml`，主要记录了使用的存储后端、`confdir` 等，参数 `watch` 表示实时监听 etcdV3 的变化，如有变化则更新 Confd 管理的配置（推荐使用）<br>
@@ -909,7 +909,7 @@ func (t *TemplateResource) setVars() error {
 #### Confd 的客户端实现：EtcdV3 的客户端
 
 confd的etcdv3的客户端封装，稍微有点绕，核心的逻辑如下：
-![etcdv3]()
+![etcdv3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/confd/confd-goroutine-arch.png)
 
 在 Confd 的 EtcdV3 [客户端的实现](https://github.com/kelseyhightower/confd/blob/master/backends/etcdv3/client.go) 中，重要的结构体是 `Client` 和 `Watch`，注意 `Client` 结构的 `watches` 成员，其存储了所有需要监听改变的 `key`，对应于配置文件中的 `key` 数组（ps：线上项目中建议开启 Etcd 客户端的 TLS + 认证机制）
 
