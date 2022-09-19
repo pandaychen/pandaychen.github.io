@@ -220,6 +220,18 @@ func modifyResponse() func(*http.Response) error {
 
 ##  0x02    case2：修改响应包（支持缓存）
 
+####    简单的修改response
+[示例3](https://github.com/pandaychen/golang_in_action/blob/master/reverse_proxy/reverse3.go#L60)提供了修改response，加入自定义前缀的逻辑：注意修改了resp包体之后需要更新Content-Length的值。下图给出了前后请求的抓包：
+
+```GOLANG
+resp.Body = ioutil.NopCloser(bytes.NewBuffer(newData))
+resp.ContentLength = int64(len(newData))
+resp.Header.Set("Content-Length", fmt.Sprint(len(newData)))
+```
+
+![req1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/reverseproxy/req-1.png)
+
+![req2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/reverseproxy/outreq-1.png)
 
 ##  0x03    case3：给请求后端加上负载均衡
 
