@@ -27,6 +27,33 @@ tags:
 
 -   SSL encryption: As SSL communication with each client is computationally expensive, using a reverse proxy it can handle all your SSL related stuff and then freeing up valuable resources on your actual servers.
 
+####    basic
+如下面调用`NewSingleHostReverseProxy`创建代理的例子，将请求`http://127.0.0.1:8080/test?id=1`转发到`http://1.2.3.4:8081/reverse/test?id=1`：
+
+```GOLANG
+func main() {
+	rs1 := "http://1.2.3.4:12345/reverse"  
+	targetUrl , err := url.Parse(rs1)
+	if err != nil {
+		log.Fatal("err")
+	}
+
+    //代理到哪个地址？
+	proxy := httputil.NewSingleHostReverseProxy(targetUrl)
+
+    //
+	if err := http.ListenAndServe(":8080",proxy);err != nil{
+		log.Fatal("Start server failed,err:",err)
+	}
+}
+```
+
+假设目标URI是`/base`，请求的URI是`/dir`，那么原请求会被反向代理到`http://x.x.x.x./base/dir`；由于`ReverseProxy`实现了`ServeHTTP(ResponseWriter, *Request)`方法，所以可以直接传入`http.ListenAndServe`方法中
+
+
+####    NewSingleHostReverseProxy实现
+参考[此文](https://pandaychen.github.io/2021/07/01/GOLANG-REVERSEPROXY-LIB-ANALYSIS/#newsinglehostreverseproxy-%E6%96%B9%E6%B3%95)
+
 ##  0x01    case1：基础用法
 
 启动一个监听在端口`12345`的http服务：

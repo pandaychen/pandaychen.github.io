@@ -175,7 +175,7 @@ type GatewayAccessControl struct {
 ```
 
 ####	GateWayService
-每个请求到达时，都会使用`GateWayService`对其进行封装，加入网关连接的所有属性，`GateWayService`提供的方法[在此](https://github.com/pandaychen/gatekeeper/blob/master/service/gateway_service.go)
+每个请求到达时，都会使用`GateWayService`对其进行封装，加入网关连接的所有配置属性（请求依赖），`GateWayService`提供的方法[在此](https://github.com/pandaychen/gatekeeper/blob/master/service/gateway_service.go)
 ```GOLANG
 //GateWayService 网关核心服务
 type GateWayService struct {
@@ -190,6 +190,20 @@ func NewGateWayService(w http.ResponseWriter, req *http.Request) *GateWayService
 		w:   w,
 		req: req,
 	}
+}
+```
+
+
+####	Context结构
+```GO
+//Context 对response和request方法的封装
+type Context struct {
+	Res        http.ResponseWriter
+	Req        *http.Request
+	StatusCode int
+	urlValue   url.Values
+	formValue  url.Values
+	done       bool
 }
 ```
 
@@ -214,6 +228,166 @@ gatekeeper 对请求的主要处理如下图所示：
 ##  0x04  核心流程
 
 #### 初始化 & 启动
+
+
+
+####	路由规则匹配与转发
+核心[流程](https://github.com/pandaychen/gatekeeper/blob/master/middleware/match_rule.go)：
+```golang
+//MatchRule 匹配模块中间件
+func MatchRule() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		//封装resp和request
+		gws := service.NewGateWayService(c.Writer, c.Request)
+		if err := gws.MatchRule(); err != nil {
+			public.ResponseError(c, http.StatusBadRequest, err)
+			return
+		}
+		c.Set(MiddlewareServiceKey, gws)
+	}
+}
+```
+
+在`MatchRule`方法中，主要完成对前置路由到后置路由的匹配及替换工作，主要逻辑在`gws.MatchRule`中：
+```GOLANG
+
+//MatchRule 匹配规则
+func (o *GateWayService) MatchRule() error {
+	var currentModule *dao.GatewayModule
+	modules := SysConfMgr.GetModuleConfig()
+Loop:
+	for _, module := range modules.Module {
+		if module.Base.LoadType != "http" {
+			continue
+		}
+		for _, matchRule := range module.MatchRule {
+			urlStr := o.req.URL.Path
+			if matchRule.Type == "url_prefix" && strings.HasPrefix(urlStr, matchRule.Rule+"/") {
+				currentModule = module
+				//提前检测，减少资源消耗
+				if matchRule.URLRewrite == "" {
+					break Loop
+				}
+				for _, uw := range strings.Split(matchRule.URLRewrite, ",") {
+					uws := strings.Split(uw, " ")
+					if len(uws) == 2 {
+						re, regerr := regexp.Compile(uws[0])
+						if regerr != nil {
+							return regerr
+						}
+						rep := re.ReplaceAllString(urlStr, uws[1])
+						o.req.URL.Path = rep
+						public.ContextNotice(o.req.Context(), DLTagMatchRuleSuccess, map[string]interface{}{
+							"url":       o.req.RequestURI,
+							"write_url": rep,
+						})
+						if o.req.URL.Path != urlStr {
+							break
+						}
+					}
+				}
+				break Loop
+			}
+		}
+	}
+	if currentModule == nil {
+		public.ContextWarning(o.req.Context(), DLTagMatchRuleFailure, map[string]interface{}{
+			"msg": "module_not_found",
+			"url": o.req.RequestURI,
+		})
+		return errors.New("module not found")
+	}
+	public.ContextNotice(o.req.Context(), DLTagMatchRuleSuccess, map[string]interface{}{
+		"url": o.req.RequestURI,
+	})
+	o.SetCurrentModule(currentModule)
+	return nil
+}
+```
+
+####	中间件：Picker后端节点
+
+```golang
+//LoadBalance 负载均衡中间件
+func LoadBalance() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		gws, ok := c.MustGet(MiddlewareServiceKey).(*service.GateWayService)
+		if !ok {
+			public.ResponseError(c, http.StatusBadRequest, errors.New("gateway_service not valid"))
+			return
+		}
+
+		//根据LB策略，选择一个后端
+		proxy, err := gws.LoadBalance()
+		if err != nil {
+			public.ResponseError(c, http.StatusProxyAuthRequired, err)
+			return
+		}
+		requestBody, ok := c.MustGet(MiddlewareRequestBodyKey).([]byte)
+		if !ok {
+			public.ResponseError(c, http.StatusBadRequest, errors.New("request_body not valid"))
+			return
+		}
+		c.Request.Body = ioutil.NopCloser(bytes.NewBuffer(requestBody))
+		proxy.ServeHTTP(c.Writer, c.Request)
+
+		//到这里就停止了
+		c.Abort()
+	}
+}
+```
+
+
+```golang
+//LoadBalance 请求负载
+func (o *GateWayService) LoadBalance() (*httputil.ReverseProxy, error) {
+	ipList, err := SysConfMgr.GetModuleIPList(o.currentModule.Base.Name)
+	if err != nil {
+		public.ContextWarning(o.req.Context(), DLTagLoadBalanceFailure, map[string]interface{}{
+			"msg":             err,
+			"modulename":      o.currentModule.Base.Name,
+			"availableIpList": SysConfMgr.GetAvaliableIPList(o.currentModule.Base.Name),
+		})
+		return nil, errors.New("get_iplist_error")
+	}
+	if len(ipList) == 0 {
+		public.ContextWarning(o.req.Context(), DLTagLoadBalanceFailure, map[string]interface{}{
+			"msg":             "empty_iplist_error",
+			"modulename":      o.currentModule.Base.Name,
+			"availableIpList": SysConfMgr.GetAvaliableIPList(o.currentModule.Base.Name),
+		})
+		return nil, errors.New("empty_iplist_error")
+	}
+	proxy, err := o.GetModuleHTTPProxy()
+	if err != nil {
+		public.ContextWarning(o.req.Context(), DLTagLoadBalanceFailure, map[string]interface{}{
+			"msg":    err,
+			"module": o.currentModule.Base.Name,
+		})
+		return nil, err
+	}
+	return proxy, nil
+}
+```
+
+最终调用`SysConfigManage.GetModuleHTTPProxy`方法，选择后端节点：
+```go
+//GetModuleHTTPProxy 获取http代理方法
+func (s *SysConfigManage) GetModuleHTTPProxy(moduleName string) (*httputil.ReverseProxy, error) {
+	rr, err := s.GetModuleRR(moduleName)
+	if err != nil {
+		return nil, err
+	}
+	s.moduleProxyFuncMapLocker.RLock()
+	defer s.moduleProxyFuncMapLocker.RUnlock()
+	proxyFunc, ok := s.moduleProxyFuncMap[moduleName]
+	if ok {
+		return proxyFunc(rr), nil
+	}
+	return nil, errors.New("module proxy empty")
+}
+```
+
 
 ## 0x05 参考
 
