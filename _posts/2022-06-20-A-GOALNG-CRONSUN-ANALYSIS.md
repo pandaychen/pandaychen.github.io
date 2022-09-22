@@ -185,18 +185,31 @@ func (n *Node) Run() (err error) {
 
 ##	0x02	可用性介绍
 
-##	0x03	组件介绍
+
+
+
+##	0x03	cronsun架构
+
+####	整体架构
+cronsun的整体架构如下：
+![cronsun-architecture](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/dcrontab/cronsun/cronsun-architecture.png)
+
+
+####	worker工作流
+![flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/dcrontab/cronsun/cronsun-task-flow.png)
+
+##	0x04	组件介绍
 -	MongoDB
 -	Etcd
 
 ##	核心代码分析
 
 
-##	0x04  总结
+##	0x05  总结
 本项目
 
 
-##  0x05	参考
+##  0x06	参考
 -	[分布式任务系统 cronsun](http://bos.itdks.com/786da33844604637be5479c3a16af11e.pdf)
 - [还在用crontab? 分布式定时任务了解一下](https://www.cnblogs.com/kevinwan/p/14497753.html)
 - [分布式crontab架构](https://www.cnblogs.com/aganippe/p/16012588.html)
