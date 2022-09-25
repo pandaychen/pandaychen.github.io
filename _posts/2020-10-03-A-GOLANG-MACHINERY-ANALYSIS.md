@@ -34,7 +34,7 @@ Machinery 是一个基于分布式消息分发的异步任务队列框架，有�
 此外，在代码上，Machinery 的实现非常的优雅，非常值得阅读。
 
 ####  子模块介绍
-对于异步队列，一般离不开经典的 ** 生产者 - 消费者 ** 模型，由生产者（`Server`）生成任务并放进队列（`Brokers`）中，由消费者（`Worker`）从队列中领取任务并执行（订阅 && 执行），执行结果存储（`Backend`）。Machinery 框架由以下组件（支持多机分布式部署）：
+对于异步队列，一般离不开经典的 **生产者 - 消费者** 模型，由生产者（`Server`）生成任务并放进队列（`Brokers`）中，由消费者（`Worker`）从队列中领取任务并执行（订阅 && 执行），执行结果存储（`Backend`）。Machinery 框架由以下组件（支持多机分布式部署）：
 
 ![workflow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/machinery/machinery3.png)
 
@@ -87,7 +87,7 @@ Machinery 基本的工作流程如下：
 
 由上图可知，除 `PENDING` 状态外，任务的大部分生命周期都位于 Worker 内部流转。当任务在 worker 内部进行状态流转时，Worker 会将状态和结果信息上报 Backend。
 
-生产者 Server 发布任务 -> Broker -> 消费者竞争一个任务，然后进行消费 -> (可选：** 消费后向 Broker 确认已经消费，然后 Broker 删除此任务，否则将超时重发任务 **) -> Backend 保存结果
+生产者 Server 发布任务 -> Broker -> 消费者竞争一个任务，然后进行消费 -> (可选：**消费后向 Broker 确认已经消费，然后 Broker 删除此任务，否则将超时重发任务**) -> Backend 保存结果
 
 1、`PENDING` 状态 <br>
 一旦任务被发布到消息队列中，它的初始化状态就是 `PENDING`
