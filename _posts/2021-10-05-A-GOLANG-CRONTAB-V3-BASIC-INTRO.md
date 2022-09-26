@@ -474,7 +474,10 @@ func (c *Cron) run() {
 ![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/dcrontab/crontab-core-event-loop.png)
 
 ##  0x05  小结
-本文分析了基于 Golang 实现的单机定时任务库。
+本文分析了基于 Golang 实现的单机定时任务库，不过，由于Cron的数据都是存储在内存（没有持久化persistent），所以一旦服务重启，所有的数据会丢失。一般需要做一些改进：
+1.  增加可重入机制，如服务挂掉可以有重新注册的机制
+2.  给Cron增加持久化的实现，常用Etcd/Redis集群等来做Cron的持久化
+
 
 ## 0x06     参考
 
