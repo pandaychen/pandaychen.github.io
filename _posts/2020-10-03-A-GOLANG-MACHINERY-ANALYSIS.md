@@ -1,6 +1,6 @@
 ---
 layout: post
-title: Golang 的分布式任务队列：machinery 分析（一）
+title: Golang 的分布式任务队列：Machinery （v1）分析（一）
 subtitle: 如何使用 Golang 实现通用的任务调度作业模型
 date: 2020-11-03
 author: pandaychen
@@ -8,18 +8,24 @@ catalog: true
 tags:
     - Machinery
     - 队列
+    - 异步队列
 ---
 
 ## 0x00 前言
-Machinery 是一个基于分布式消息分发的异步任务队列框架，有点类似于 Celery。异步任务的主要作用是解耦，即将需要长时间执行的逻辑单独处理，避免响应延时带来的问题；此外借助于 machinery，可以完成各种复杂类型任务的调度、编排、结果记录等功能，完美的支持了日常业务场景。考虑如下几个问题：
+Machinery 是一个基于分布式消息分发的异步任务队列框架，有点类似于 Celery。异步任务的主要作用是解耦，即将需要长时间执行的逻辑单独处理，避免响应延时带来的问题；此外借助于 Machinery，可以完成各种复杂类型任务的调度、编排、结果记录等功能，完美的支持了日常业务场景。考虑如下几个问题：
 
 -  Machinery 的架构 / 模块划分的实现
 -  Machinery 如何有无 HA 实现的机制？
 -  Machinery 的 worker 有无负载均衡的机制？
+-	Machinery 生产/消费者语义的一致性如何？
 
 ![task-queue](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/machinery/overview.png)
 
-####  基础使用例子
+####  应用1：异步email发送
+使用例子[见此](https://github.com/pandaychen/go-machinery/blob/master/README.md)，一个简单的基于machinery的email异步投递例子，架构图如下：
+![example-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/machinery/machinery-basic-example-1.png)
+
+####	应用2：异步累加
 
 
 ####  特点
@@ -27,11 +33,11 @@ Machinery 是一个基于分布式消息分发的异步任务队列框架，有�
 -  延迟（延时）任务支持
 -  任务回调机制
 -  任务结果记录
--  支持 Workflow 模式：Chain/Group/Chord
+-  支持 Workflow 模式：`Chain/Group/Chord`
 -  多 Brokers 支持：Redis/AMQP/... 等
 -  多 Backends 支持：Redis/Memcache/AMQP/MongoDB/... 等
 
-此外，在代码上，Machinery 的实现非常的优雅，非常值得阅读。
+此外，在代码上，Machinery 的实现非常的优雅，非常值得阅读。[v1版本](https://github.com/RichardKnop/machinery/tree/master/v1)
 
 ####  子模块介绍
 对于异步队列，一般离不开经典的 **生产者 - 消费者** 模型，由生产者（`Server`）生成任务并放进队列（`Brokers`）中，由消费者（`Worker`）从队列中领取任务并执行（订阅 && 执行），执行结果存储（`Backend`）。Machinery 框架由以下组件（支持多机分布式部署）：
@@ -45,13 +51,13 @@ Machinery 是一个基于分布式消息分发的异步任务队列框架，有�
 -  Signature 模块：任务实体，用来描述任务的执行过程、所需参数等信息
 
 1、Server<br>
-一般 Server 的逻辑会嵌入到对外部暴露的服务（如 Apiserver）实现，本质上像一个轻客户端；Server 是消息的生产者，通常嵌入到业务模块中，由业务方调用，负责生产、发布异步任务
+一般 Server 的逻辑会嵌入到对外部暴露的服务（如 ApiService）实现，本质上是一个lightly客户端；Server 是消息的生产者，通常嵌入到业务模块中，由业务方调用，负责生产、发布异步任务
 
 2、Worker<br>
 Worker 是消费者、工作模块，用于监听、消费 / 执行异步任务；如果任务执行失败，Worker 会调用 Server 的方法重新发布任务，直至任务重试次数归零
 
 3、Broker<br>
-Broker 是一个消息队列中间件，提供任务的持久化（暂时保存产生的任务以便于消费   ）。Server 和 Worker 通过 Broker 进行通信，在一定程度上解耦两个子模块
+Broker 是一个消息队列中间件，提供任务的持久化（暂时保存产生的任务以便于消费）。Server 和 Worker 通过 Broker 进行通信，在一定程度上解耦两个子模块
 
 4、Backend<br>
 Backend 是后端存储，保存了任务的执行状态和最终执行结果
@@ -62,7 +68,7 @@ Backend 是后端存储，保存了任务的执行状态和最终执行结果
 6、State<br>
 即任务状态：如 `PENDING`、`SUCCESS`、`FAILURE` 等。任务状态及结果会被设置 TTL（默认为 `1 hour`），也即每个任务的状态最多保持 `1` 个小时。
 
-####  基础的工作流程
+####  Machinery基础工作流程
 ![work-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/machinery/machinery-work-flow1.png)
 
 Machinery 基本的工作流程如下：
@@ -73,7 +79,59 @@ Machinery 基本的工作流程如下：
 
 下面，本文基于 [V1](https://github.com/RichardKnop/machinery/tree/master/v1) 版本对代码进行完整的分析。
 
-## 0x01  核心代码分析
+
+##	0x01	分析步骤
+本文主要按照下面四个模块进行分析：
+
+1、Server：https://github.com/RichardKnop/machinery/blob/master/v1/server.go<br>
+
+2、Broker：https://github.com/RichardKnop/machinery/tree/master/v1/brokers<br>
+任务存储，每个broker都需要实现如下方法：
+```golang
+// Broker - a common interface for all brokers
+type Broker interface {
+	GetConfig() *config.Config
+	SetRegisteredTaskNames(names []string)
+	IsTaskRegistered(name string) bool
+	StartConsuming(consumerTag string, concurrency int, p TaskProcessor) (bool, error)
+	StopConsuming()
+	Publish(ctx context.Context, task *tasks.Signature) error
+	GetPendingTasks(queue string) ([]*tasks.Signature, error)
+	GetDelayedTasks() ([]*tasks.Signature, error)
+	AdjustRoutingKey(s *tasks.Signature)
+}
+```
+
+3、Worker：https://github.com/RichardKnop/machinery/blob/master/v1/worker.go<br>
+
+4、Backend：https://github.com/RichardKnop/machinery/tree/master/v1/backends<br>
+每个backend都需要实现如下方法
+```GOLANG
+// Backend - a common interface for all result backends
+type Backend interface {
+	// Group related functions
+	InitGroup(groupUUID string, taskUUIDs []string) error
+	GroupCompleted(groupUUID string, groupTaskCount int) (bool, error)
+	GroupTaskStates(groupUUID string, groupTaskCount int) ([]*tasks.TaskState, error)
+	TriggerChord(groupUUID string) (bool, error)
+
+	// Setting / getting task state
+	SetStatePending(signature *tasks.Signature) error
+	SetStateReceived(signature *tasks.Signature) error
+	SetStateStarted(signature *tasks.Signature) error
+	SetStateRetry(signature *tasks.Signature) error
+	SetStateSuccess(signature *tasks.Signature, results []*tasks.TaskResult) error
+	SetStateFailure(signature *tasks.Signature, err string) error
+	GetState(taskUUID string) (*tasks.TaskState, error)
+
+	// Purging stored stored tasks states and group meta data
+	IsAMQP() bool
+	PurgeState(taskUUID string) error
+	PurgeGroupMeta(groupUUID string) error
+}
+```
+
+## 0x02  machinery的任务状态机
 
 ####  任务状态机：状态维护及变迁
 任务作为一个框架的原子单位，流经了系统的各个子模块，其生命周期起于发布，终于结果（任务有且只有成功和失败两个终态）。所以对其建立 [状态流转模型](https://github.com/RichardKnop/machinery/blob/master/v1/tasks/state.go) 是很有用的，在 Machinery 中每个任务状态有 `PENDING`、`RECEIVED`、`STARTED`、`RETRY`、`SUCCESS`/`FAILURE` 几种，任务在生成和处理的不同阶段的状态机如下图所示：
@@ -85,7 +143,7 @@ Machinery 基本的工作流程如下：
 
 ![state](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/machinery/machinery-work-state1.png)
 
-由上图可知，除 `PENDING` 状态外，任务的大部分生命周期都位于 Worker 内部流转。当任务在 worker 内部进行状态流转时，Worker 会将状态和结果信息上报 Backend。
+由上图可知，除 `PENDING` 状态外，**任务的大部分生命周期都位于 Worker 内部流转**。当任务在 worker 内部进行状态流转时，Worker 会将状态和结果信息上报 Backend。
 
 生产者 Server 发布任务 -> Broker -> 消费者竞争一个任务，然后进行消费 -> (可选：**消费后向 Broker 确认已经消费，然后 Broker 删除此任务，否则将超时重发任务**) -> Backend 保存结果
 
@@ -104,10 +162,12 @@ Machinery 基本的工作流程如下：
 5、`SUCCESS`/`FAILURE`<br>
 任务的最终结果状态
 
-## 0x01 结构 && 通用方法
-本文以 Redis 为中间件作为分析。
+## 0x03 代码分析：结构 && 通用方法
+本文以 Redis 为中间件作为分析，用在两处：
+-	Redis用作broker
+-	Redis用作backend
 
-####  Signature
+####  Signature：任务实体
 `Signature` 即任务实体，用来描述任务的执行过程、所需参数等信息。
 ```golang
 // Signature represents a single task invocation
@@ -140,8 +200,8 @@ type Signature struct {
 }
 ```
 
-####  任务
-[](https://github.com/RichardKnop/machinery/blob/master/v1/tasks/task.go#L22)
+#### `Task`：一个`Signature`被执行的抽象
+[Task](https://github.com/RichardKnop/machinery/blob/master/v1/tasks/task.go#L22)的定义如下：
 ```golang
 // Task wraps a signature and methods used to reflect task arguments and
 // return values after invoking the task
@@ -153,11 +213,10 @@ type Task struct {
 }
 ```
 
-`Signature` 与 `Task` 的区别是：TODO
-
+`Signature` 与 `Task` 的区别是：`Task`包含了`Signature`以及各种处理`Signature`的方法集合
 
 ####  Server 模块
-[实现](https://github.com/RichardKnop/machinery/blob/master/v1/server.go)
+[Server](https://github.com/RichardKnop/machinery/blob/master/v1/server.go)定义如下：
 ```golang
 type Server struct {
 	config            *config.Config
@@ -238,11 +297,11 @@ type Backend interface {
 }
 ```
 
-## 0x02  业务逻辑分析 - Broker
+## 0x04  业务逻辑分析 - Broker
 
-## 0x03  业务逻辑分析 - Worker
+## 0x05  业务逻辑分析 - Worker
 
-## 0x04  业务逻辑分析 - 任务视角
+## 0x06  业务逻辑分析 - 任务视角
 Machinery 的最大的特点在于它利用消息队列的能力实现了各种模式的任务投递，如单任务、批任务、工作流任务和链式任务，这些模式底层都是调用 `SendTaskWithContext` 方法来完成任务投递。本小节以任务维度来分析
 
 ####  任务的一般流程
@@ -580,14 +639,14 @@ func (b *Broker) StartConsuming(consumerTag string, concurrency int, taskProcess
 }
 ```
 
-##    0x05  一些细节
+##    0x07  一些细节
 版本锁的 bug：https://github.com/RichardKnop/machinery/commit/d8e5bcf7469429aaeb3346499e8a278924c44e53
 
-##    0x06  总结
+##    0x08  总结
 基于 [前文](https://pandaychen.github.io/2022/01/01/A-KAFKA-USAGE-SUMUP-2/) 中分析 Kafka 的生产消费可靠模型，Machinery 框架有 4 个组件，Server 负责任务的生产，Broker 负责任务的分发，Worker 负责任务的执行，Backend 负责存储任务的状态。Server 确保任务发布到 Broker 中了，Broker 确保任务被成功消费了，Worker 确保任务会被成功执行。**Machinery 不确保 Worker 能顺利执行完任务，只能确保 Worker 能取到任务**
 
 
-## 0x07  参考
+## 0x09  参考
 -  [machinery 中文文档](https://zhuanlan.zhihu.com/p/270640260)
 -  [Golang 任务队列 machinery 使用与源码剖析（一）](https://cloud.tencent.com/developer/article/1169675)
 - [Golang 任务队列 machinery 使用与源码剖析（一）](https://cloud.tencent.com/developer/article/1169675)
@@ -595,3 +654,4 @@ func (b *Broker) StartConsuming(consumerTag string, concurrency int, taskProcess
 - [feat: Kafka broker](https://github.com/RichardKnop/machinery/pull/449/files#)
 - [有赞延迟队列设计](https://tech.youzan.com/queuing_delay/)
 - [分布式任务队列 machinery 的使用](https://www.lijiaocn.com/%E7%BC%96%E7%A8%8B/2017/11/06/go-async-tasks.html)
+-	[Task orchestration in Go Machinery.](https://medium.com/swlh/task-orchestration-in-go-machinery-66a0ddcda548)
