@@ -77,6 +77,37 @@ func main() {
 }
 ```
 
+####  一些注意点
+- `Start`和`Run`方法的区别，前者异步，后者同步
+- 在启动的前后，都可以添加处理方法，都可以生效，如下面的例子，两个事件均可注册成功
+
+```golang
+func main() {
+    log.Println("Starting cron ....")
+
+    c := cron.New(cron.WithSeconds())
+    //        c.Start()
+
+    c.AddFunc("*/5 * * * * *", func() {
+            log.Println("Runing  every 5 second...")
+    })
+    go c.Run()
+
+    c.AddFunc("* * * * * *", func() {
+            log.Println("Runing ...")
+    })
+
+    t1 := time.NewTimer(time.Second * 10)
+
+    for {
+        select {
+        case <-t1.C:
+                t1.Reset(time.Second * 10)
+        }
+    }
+}
+```
+
 ## 0x02 代码分析
 
 #### 核心数据结构
