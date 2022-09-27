@@ -473,11 +473,161 @@ func (c *Cron) run() {
 
 ![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/dcrontab/crontab-core-event-loop.png)
 
+
+####  Schedule.Next方法
+`Next`[方法](https://github.com/robfig/cron/blob/master/spec.go#L58)用来计算某个指定的表达式，如`*/2 * * * *`离下一次触发，还需要多久时间，这个时间是相对时间，在触发的区间间隔内依次递减
+```golang
+//结果为1m0.43638698s （当然，这个时间不是固定的，而是在一个周期内递减）
+schedule, err := cron.ParseStandard("*/2 * * * *")
+if err != nil {
+        fmt.Println(err)
+        return
+}
+
+unixTsToExpireNs := schedule.Next(time.Now()).UnixNano() - 1
+
+now := time.Now().UnixNano()
+expiration := time.Duration(unixTsToExpireNs + 1 - now)
+
+fmt.Println(expiration)
+```
+
+源码如下：
+```GOLANG
+// Next returns the next time this schedule is activated, greater than the given
+// time.  If no time can be found to satisfy the schedule, return the zero time.
+func (s *SpecSchedule) Next(t time.Time) time.Time {
+	// General approach
+	//
+	// For Month, Day, Hour, Minute, Second:
+	// Check if the time value matches.  If yes, continue to the next field.
+	// If the field doesn't match the schedule, then increment the field until it matches.
+	// While incrementing the field, a wrap-around brings it back to the beginning
+	// of the field list (since it is necessary to re-verify previous field
+	// values)
+
+	// Convert the given time into the schedule's timezone, if one is specified.
+	// Save the original timezone so we can convert back after we find a time.
+	// Note that schedules without a time zone specified (time.Local) are treated
+	// as local to the time provided.
+	origLocation := t.Location()
+	loc := s.Location
+	if loc == time.Local {
+		loc = t.Location()
+	}
+	if s.Location != time.Local {
+		t = t.In(s.Location)
+	}
+
+	// Start at the earliest possible time (the upcoming second).
+	t = t.Add(1*time.Second - time.Duration(t.Nanosecond())*time.Nanosecond)
+
+	// This flag indicates whether a field has been incremented.
+	added := false
+
+	// If no time is found within five years, return zero.
+	yearLimit := t.Year() + 5
+
+WRAP:
+	if t.Year() > yearLimit {
+		return time.Time{}
+	}
+
+	// Find the first applicable month.
+	// If it's this month, then do nothing.
+	for 1<<uint(t.Month())&s.Month == 0 {
+		// If we have to add a month, reset the other parts to 0.
+		if !added {
+			added = true
+			// Otherwise, set the date at the beginning (since the current time is irrelevant).
+			t = time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, loc)
+		}
+		t = t.AddDate(0, 1, 0)
+
+		// Wrapped around.
+		if t.Month() == time.January {
+			goto WRAP
+		}
+	}
+
+	// Now get a day in that month.
+	//
+	// NOTE: This causes issues for daylight savings regimes where midnight does
+	// not exist.  For example: Sao Paulo has DST that transforms midnight on
+	// 11/3 into 1am. Handle that by noticing when the Hour ends up != 0.
+	for !dayMatches(s, t) {
+		if !added {
+			added = true
+			t = time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, loc)
+		}
+		t = t.AddDate(0, 0, 1)
+		// Notice if the hour is no longer midnight due to DST.
+		// Add an hour if it's 23, subtract an hour if it's 1.
+		if t.Hour() != 0 {
+			if t.Hour() > 12 {
+				t = t.Add(time.Duration(24-t.Hour()) * time.Hour)
+			} else {
+				t = t.Add(time.Duration(-t.Hour()) * time.Hour)
+			}
+		}
+
+		if t.Day() == 1 {
+			goto WRAP
+		}
+	}
+
+	for 1<<uint(t.Hour())&s.Hour == 0 {
+		if !added {
+			added = true
+			t = time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, loc)
+		}
+		t = t.Add(1 * time.Hour)
+
+		if t.Hour() == 0 {
+			goto WRAP
+		}
+	}
+
+	for 1<<uint(t.Minute())&s.Minute == 0 {
+		if !added {
+			added = true
+			t = t.Truncate(time.Minute)
+		}
+		t = t.Add(1 * time.Minute)
+
+		if t.Minute() == 0 {
+			goto WRAP
+		}
+	}
+
+	for 1<<uint(t.Second())&s.Second == 0 {
+		if !added {
+			added = true
+			t = t.Truncate(time.Second)
+		}
+		t = t.Add(1 * time.Second)
+
+		if t.Second() == 0 {
+			goto WRAP
+		}
+	}
+
+	return t.In(origLocation)
+}
+```
+
+
 ##  0x05  小结
 本文分析了基于 Golang 实现的单机定时任务库，不过，由于Cron的数据都是存储在内存（没有持久化persistent），所以一旦服务重启，所有的数据会丢失。一般需要做一些改进：
 1.  增加可重入机制，如服务挂掉可以有重新注册的机制
 2.  给Cron增加持久化的实现，常用Etcd/Redis集群等来做Cron的持久化
 
+
+####  数据结构的选型
+有开发者认为，可以使用timewheel或者heap来实现上述复杂的`for...select`中的排序机制，可以提高海量任务注册时排序的性能，见[issue：entries datastruct #236](https://github.com/robfig/cron/issues/236)，不过作者认为会存在如此大规模任务调用的场景：）
+
+
+####  任务持久化
 
 ## 0x06     参考
 

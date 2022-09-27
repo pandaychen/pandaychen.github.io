@@ -1,14 +1,14 @@
 ---
 layout: post
 title: golang-LRU 缓存设计与实现（二）
-subtitle: 分析 go-zero 中的进程内缓存库实现
+subtitle: 分析 go-zero 中的进程内缓存库collection.Cache实现
 date: 2022-06-02
 header-img: img/super-mario.jpg
 author: pandaychen
 catalog: true
 tags:
   - 缓存
-  - GoZero
+  - Go-Zero
 ---
 
 ##  0x00    开篇
