@@ -262,7 +262,7 @@ func (s byTime) Less(i, j int) bool {
 ##    0x03  内置 JobWrapper 介绍
 
 ####    Recover：捕捉 panic，避免进程异常退出
-此 wrapper 比较好理解，在执行内层的 Job 逻辑前，添加 recover() 调用。如果 Job.Run() 执行过程中有 panic。这里的 recover() 会捕获到，输出调用堆栈
+此 `wrapper` 比较好理解，在执行内层的 Job 逻辑前，添加 `recover()`调用。如果 `Job.Run()` 执行过程中有 `panic`。这里的 `recover()` 会捕获到，输出调用堆栈
 ```golang
 // cron.go
 func Recover(logger Logger) JobWrapper {
