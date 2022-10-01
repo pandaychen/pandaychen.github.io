@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      gRPC 微服务构建之日志（Logging）
-subtitle:   使用 gRPC 日志拦截器记录
+subtitle:   使用 gRPC 实现zap日志拦截器（With Tracing）
 date:       2020-03-01
 author:     pandaychen
 header-img:
@@ -138,7 +138,7 @@ grpclog.Errorf("err %v", err)
 ```
 
 比如，日志的输出实例：
-```javascript
+```json
 {
 	"level": "info",
 	"ts": "2020-10-15T07:51:43.384Z",
@@ -357,7 +357,7 @@ func DefaultClientCodeToLevel(code codes.Code) zapcore.Level {
 
 ####  日志输出
 使用了 Zap 拦截器的输出如下，示例代码 [在此](https://github.com/pandaychen/grpc_in_action/tree/master/zaplogger)：
-```javascript
+```json
 {
 	"level": "info",
 	"ts": "2020-10-15T09:05:17.877Z",
@@ -373,15 +373,26 @@ func DefaultClientCodeToLevel(code codes.Code) zapcore.Level {
 }
 ```
 
-##  0x04    关于日志的一些优化细节
+##	0x04	封装Zap增加TraceId
+
+##	0x05	日志染色
+
+####	什么是日志染色
+通俗点说，染色日志是解决对特定场景（用户）行为的日志记录。在一个调用链里面，标志出某个特定需求的过程，让整个调用链里的上下文信息一直被传输下去，就像一开始被标记染色一样。在排查问题时，只想要某几个用户的日志信息，通过染色日志把这几个用户的日志另外打印一份，并收集在同一个地方，这样可以方便的查找到这些染色用户的日志。
+
+举例来说，比如某微信用户反馈语音发送存在问题，通过对用户ID进行染色，后端服务接收到染色用户的请求后，就会将该用户本次调用的处理过程日志打印出来。此外，还可以通过染色执行特定逻辑，比如新上线一个功能，开放给部分用户使用，通过染色，后端服务可以判断用户是否在测试名单中，再执行相应的服务逻辑。
+
+##  0x06    关于日志的一些优化细节
 如何在高并发的实时系统中优化日志写入呢？在笔者之前的 DPDK 网络包处理项目中，总结了这几条经验：
 1.  线程将待落地日志结构化（标识日志类型、等级、内容等）写入 RingBuffer，读端从 RingBuffer 中取出日志，落地写入
 2.  单线程写日志
 3.  在 Golang 中，利用 单独的 goroutine 异步写日志
 4.  打印 `GoroutineId` 对性能产生较大的影响，打印函数行号对性能有一定的影响
 
-##  0x05  参考
+##  0x07  参考
 -   [从 Go 高性能日志库 zap 看如何实现高性能 Go 组件](https://mp.weixin.qq.com/s/i0bMh_gLLrdnhAEWlF-xDw)
 -   [在 Go 语言项目中使用 Zap 日志库](https://www.liwenzhou.com/posts/Go/zap/)
+-	[jupiter：2.3 日志](https://jupiter.douyu.com/jupiter/2.3logger.html#_2-3-5-%E4%B8%9A%E5%8A%A1%E7%9A%84%E6%96%87%E6%9C%AC%E6%97%A5%E5%BF%97)
+-	[TARS染色日志 ｜ 收集记录特定日志](https://cloud.tencent.com/developer/article/1791859)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
