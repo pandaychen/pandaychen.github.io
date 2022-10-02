@@ -500,7 +500,7 @@ server {
 问题1：Nginx 的 upstream 机制支持自动剔除故障的后端吗？答案是作用有限；Nginx 的收费版本 [`Nginx-Plus`](https://www.nginx.com/products/nginx/) 提供了自动探测的能力<br>
 
 ####    项目中的配置参考
-
+关于Nginx的域名解析配置，可以参考[Nginx resolver address from /etc/resolv.conf](https://serverfault.com/questions/638822/nginx-resolver-address-from-etc-resolv-conf)，其中提供了不少可以参考的方案
 
 ##	0x08	参考
 -	[nginx 平滑的基于权重轮询算法分析](https://tenfy.cn/2018/11/12/smooth-weighted-round-robin/)
@@ -510,5 +510,6 @@ server {
 -   [nginx的proxy_next_upstream使用中的一个坑](https://zhuanlan.zhihu.com/p/35803906)
 -   [How To Set Up Nginx Load Balancing with SSL Termination](https://www.digitalocean.com/community/tutorials/how-to-set-up-nginx-load-balancing-with-ssl-termination)
 - [nginx中resolver参数配置解释](https://www.rootop.org/pages/4307.html)
+- [Nginx resolver address from /etc/resolv.conf](https://serverfault.com/questions/638822/nginx-resolver-address-from-etc-resolv-conf)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
