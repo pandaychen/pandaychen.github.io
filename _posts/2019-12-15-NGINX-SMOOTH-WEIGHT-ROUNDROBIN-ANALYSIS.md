@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      Nginx 负载均衡及算法分析
-subtitle:   Nginx使用与总结
+subtitle:   Nginx 实现反向代理的项目使用与总结
 date:       2019-12-15
 author:     pandaychen
 header-img: img/encryption.jpg
@@ -361,19 +361,154 @@ http {
 }
 ```
 
-##  0x06    回顾 && 总结
+##  0x06  Nginx 配置中的resolver
+
+####  背景&&问题引入
+在笔者的工作项目中，有一个基于openresty的Nginx网关（基于kubernetes部署），Nginx配置如下：
+
+```text
+worker_processes  1;
+
+#error_log  logs/error.log;
+#error_log  logs/error.log  notice;
+#error_log  logs/error.log  info;
+
+#pid        logs/nginx.pid;
+
+events {
+    worker_connections  1024;
+}
+
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+    resolver 8.8.8.8 ipv6=off;
+
+    #log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+    #                  '$status $body_bytes_sent "$http_referer" '
+    #                  '"$http_user_agent" "$http_x_forwarded_for"';
+
+    #access_log  logs/access.log  main;
+
+    sendfile        on;
+    #tcp_nopush     on;
+
+    #keepalive_timeout  0;
+    keepalive_timeout  65;
+
+    #gzip  on;
+
+    lua_package_path '/usr/local/openresty/nginx/lua/?.lua;$prefix/lua/?.lua;/blah/?.lua;;';
+    lua_code_cache   off;
+    #下面为业务配置
+    include /usr/local/openresty/nginx/conf.d/*.conf;
+}
+```
+
+业务配置如下：
+```text
+upstream backend_service {
+    server xx-serv-cgi:9081;  #xx-serv-cgi 是kubernetes的ServiceName
+}
+
+server {
+    listen       443 ssl;
+    ssl_certificate     ../conf/server.crt;
+    ssl_certificate_key  ../conf/server.key;
+
+    ssl_session_timeout  5m;
+    ssl_protocols TLSv1.2;
+    ssl_prefer_server_ciphers   on;
+
+    server_name  localhost;
+    root   /usr/local/openresty/nginx/html/bf.ied.com/;
+    index  index.html;
+
+    #使用lua认证
+    access_by_lua_file  lua/access.lua;
+
+    location ^~ /somepath/ {
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header Cookie $http_cookie;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header Host $host;
+      proxy_pass http://backend_service/;
+      proxy_pass_request_headers      on;
+    }
+
+    location / {  
+        add_header Access-Control-Allow-Origin *;
+        add_header Access-Control-Allow-Methods 'GET, POST, OPTIONS';
+        add_header Access-Control-Allow-Headers 'DNT,X-Mx-ReqToken,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization';
+
+        if ($request_method = 'OPTIONS') {
+            return 204;
+        }
+    }
+}
+```
+
+其中，反向代理的地址，即`xx-serv-cgi`是API后端的服务名字（以`ClusterIP`方式部署的服务），在此通过DNS解析拿到实际的IP
+```text
+upstream backend_service {
+    server xx-serv-cgi:9081;  #xx-serv-cgi 是kubernetes的ServiceName
+}
+```
+
+容器内的`/etc/resolv.conf`配置如下，其中nameserver为kubernetes集群的CoreDNS服务地址：
+```bash
+nameserver 192.168.35.98
+search xxx-xxxx.svc.cluster.local svc.cluster.local cluster.local
+options ndots:5
+```
+
+![COREDNS](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2019/nginx-with-coredns.png)
+
+注意`resolver 8.8.8.8 ipv6=off;`配置为公网的DNS，上述配置部署到现网环境遇到几个问题（kubernetes集群版本`1.20.6`）：
+1.  解析外网域名，错误日志出现一个`nslookup`指令完全不存在的地址导致访问超时，原因未知
+2.  更换resolver配置为集群的CoreDNS地址，如`resolver 192.168.35.98 ipv6=off;`后，问题`1`解决，但是出现当重启了`xx-serv-cgi`对应的服务后，此时Nginx拿不到重启之后新的`xx-serv-cgi`的Pod地址，还是使用之前的IP连接导致出现问题，必须重启一次该openresty的Pod才能解决
+
+那么如何解决`2`的问题？
+
+####  问题原因&&解决
+根本原因是`proxy_pass`指令后面跟域名的话并不是每次请求都会解析出此域名的IP（必须重启Nginx才能解决），所以会导致后端变化时造成服务无法访问。解决此问题，可以通过 `set` 指令设置一个变量，通过 `resolver` 实现每次访问都重新解析出IP的方式（**同时必须搭配`valid`参数使用**），如下：
+
+```text
+upstream backend_service {
+    server xx-serv-cgi:9081;  #xx-serv-cgi 是kubernetes的ServiceName
+}
+
+server {
+    listen 80;
+    server_name xxxx;
+    #resolver 是 DNS 服务器地址, valid 设定 DNS 刷新频率
+    resolver 192.168.35.98 valid=5s;
+    set $service_lb backend_service;
+
+    location / {
+        proxy_pass http://$service_lb;
+    }
+}
+```
+
+需要特别注意：
+1.  `set` 指令不能写到 `location` 里面，否则不会生效
+2.  `valid`为DNS请求刷新频率，即每隔`5s`后访问虚拟主机的时候就会产生一次DNS解析
+
+
+##  0x07    回顾 && 总结
 问题1：Nginx 的 upstream 机制支持自动剔除故障的后端吗？答案是作用有限；Nginx 的收费版本 [`Nginx-Plus`](https://www.nginx.com/products/nginx/) 提供了自动探测的能力<br>
 
 ####    项目中的配置参考
 
 
-##	0x07	参考
+##	0x08	参考
 -	[nginx 平滑的基于权重轮询算法分析](https://tenfy.cn/2018/11/12/smooth-weighted-round-robin/)
 -   [加权轮询策略剖析](http://blog.csdn.net/xiajun07061225/article/details/9318871)
 -   [解析 Nginx 负载均衡策略](http://www.cnblogs.com/wpjamer/articles/6443332.html)
 -   [Nginx 做负载均衡器以及 Proxy 缓存配置](https://mp.weixin.qq.com/s?__biz=MzA3MzYwNjQ3NA==&mid=401736802&idx=1&sn=9508d9a05b725c66a05e05d8dad6dec1#rd)
 -   [nginx的proxy_next_upstream使用中的一个坑](https://zhuanlan.zhihu.com/p/35803906)
 -   [How To Set Up Nginx Load Balancing with SSL Termination](https://www.digitalocean.com/community/tutorials/how-to-set-up-nginx-load-balancing-with-ssl-termination)
-
+- [nginx中resolver参数配置解释](https://www.rootop.org/pages/4307.html)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
