@@ -440,6 +440,9 @@ func (l *List) remove(e *Element) {
 -	Cache中实现LRU机制的[链式结构](https://pandaychen.github.io/2022/06/02/A-GOLANG-LRUCACHE-ANALYSIS-2/#keylru-%E7%9A%84%E5%AE%9E%E7%8E%B0)
 
 
+####	List的坑
+
+
 ##	0x03	ring包
 `container/ring` 实现了环形链表的功能，其典型应用场景是构造定长环形队列，比如用来保存固定size的元素，如最近`N`条日志等。Ring的结构如下：
 
