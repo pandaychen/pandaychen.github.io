@@ -21,6 +21,8 @@ Machinery 是一个基于分布式消息分发的异步任务队列框架，有�
 
 ![task-queue](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/machinery/overview.png)
 
+笔者针对machinery-v1的代码[注释](https://github.com/pandaychen/machinery)在此。
+
 ####  应用1：异步email发送
 使用例子[见此](https://github.com/pandaychen/go-machinery/blob/master/README.md)，一个简单的基于machinery的email异步投递例子，架构图如下：
 ![example-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/machinery/machinery-basic-example-1.png)
