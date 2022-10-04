@@ -225,6 +225,9 @@ gatekeeper 对请求的主要处理如下图所示：
 ![flow1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/gateway/gatekeeper/gatekeeper-flow1.png)
 
 
+####	gatekeeper的路由转发规则
+
+
 ##  0x04  核心流程
 
 #### 初始化 & 启动
