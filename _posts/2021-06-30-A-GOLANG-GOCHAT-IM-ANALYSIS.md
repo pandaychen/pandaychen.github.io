@@ -35,14 +35,25 @@ gochat的架构图如下：
 -   task模块
 
 
-##	0x01	流程
+##  0x01    核心数据结构
+核心数据结构：
+-   Server
+-   Bucket
+-   Room
+-   Channel
+
+各个数据结构之前的关系如下图所示，需要注意的是channel（会话）本质上是属于
+![]()
+
+##	0x02	系统架构
 笔者整理了下gochat的模块调用架构：
 ![architecture](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/go-chat/gochat.png)
+
+##	0x03	数据流程
 
 ####    用户发送信息流程
 ![send-message](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/gochat/send-broadcast-message-flow.png)
 
-##	0x02	数据流程
 
 ##  0x04	参考
 -	[gochat](https://github.com/LockGit/gochat)
