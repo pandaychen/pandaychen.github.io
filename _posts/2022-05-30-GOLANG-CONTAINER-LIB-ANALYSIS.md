@@ -434,6 +434,7 @@ func (l *List) remove(e *Element) {
 }
 ```
 
+2、`Pop`方法实现<br>
 
 ####	List的典型应用场景
 -	时间轮的[任务链表定义](https://pandaychen.github.io/2022/05/28/A-TIMEWHEEL-ANALYSIS/#0x02-go-zero-%E7%9A%84%E6%97%B6%E9%97%B4%E8%BD%AE)
@@ -442,6 +443,129 @@ func (l *List) remove(e *Element) {
 
 ####	List的坑
 
+1、删除List中的所有元素<br>
+先列举一个删除（所有节点）有问题的代码，未能全部删除链表中的节点：
+```Golang
+func main() {
+	l := list.New()
+	l.PushBack(1)
+	l.PushBack(2)
+	l.PushBack(3)
+	l.PushBack(4)
+
+	//遍历list，删除元素
+	for e := l.Front(); e != nil; e = e.Next() {
+			fmt.Println("removing", e.Value)
+			l.Remove(e)
+	}
+	fmt.Println("After Removing...")
+	//遍历删除完元素后的list
+	for e := l.Front(); e != nil; e = e.Next() {
+			fmt.Println(e.Value)
+	}
+}
+```
+
+从`list.Remove`的实现排查原因，注意到返回被删除的`Element`时，会将`e.next = nil`，所以问题来源于此，需要在上述代码中先临时保存`e.next`，再用于后续逻辑：
+```GOLANG
+// remove removes e from its list, decrements l.len, and returns e.
+func (l *List) remove(e *Element) *Element {
+  e.prev.next = e.next
+  e.next.prev = e.prev
+  e.next = nil // avoid memory leaks
+  e.prev = nil // avoid memory leaks
+  e.list = nil
+  l.len--
+  return e
+}
+```
+
+调整后的代码如下：
+```golang
+func main() {
+  l := list.New()
+  l.PushBack(1)
+  l.PushBack(2)
+  l.PushBack(3)
+  l.PushBack(4)
+  var n *list.Element
+  for e := l.Front(); e != nil; e = n {
+	  //save next
+	  n = e.Next()
+      l.Remove(e)
+  }
+  for e := l.Front(); e != nil; e = e.Next() {
+      fmt.Println(e.Value)
+  }
+}
+```
+
+
+2、List大部分方法不检查传入参数为`nil`<br>
+从list包各个方法的实现来看，大部分针对`e *Element`进行操作的元素都可能会导致程序崩溃，原因是`e *Element`可能为`nil`，大部分方法没有对此值进行是否为`nil`的检查，所以可能出现Core问题，此时需要开发者自行解决健壮性问题。
+
+如下例子：
+```GOLANG
+//list中只有1个元素，但是要删除2个元素
+func DelElement() {
+	l := list.New()
+	l.PushBack(1)
+	fmt.Println(l.Front().Value) 
+	value := l.Remove(l.Front())
+	fmt.Println(value) 
+	value1 := l.Remove(l.Front()) //panic: runtime error: invalid memory address or nil pointer dereference
+	fmt.Println(value1)
+}
+```
+
+Core的原因，看下`list.Remove`实现便知，`list.Remove`方法没有对参数进行是否为`nil`的检查：
+```GO
+func (l *List) Front() *Element {
+    if l.len == 0 {
+		//返回nil
+        return nil
+    }
+    return l.root.next
+}
+
+func (l *List) Remove(e *Element) interface{} {
+	if e.list == l {
+		// if e.list == l, l must have been initialized when e was inserted
+		// in l or l == nil (e is a zero Element) and l.remove will crash
+		l.remove(e)
+	}
+	return e.Value
+}
+```
+
+3、List并发：需要加锁<br>
+如下面的例子，会core掉。`(l *list)PushBackList(other *list)`的实现方式是`other *list`中元素添加在`l list`的后面，实现是取出`other`中所有元素，将其顺次挂载在`l`中。
+
+```GOLANG
+//将ls中元素添加到l过程中，如果ls中元素减少，程序便会崩溃
+func main() {
+        runtime.GOMAXPROCS(8)
+        l := list.New()
+        ls := list.New()
+        for i := 0; i < 10000; i++ {
+                ls.PushBack(i)
+        }
+        go ls.Remove(l.Back())
+        l.PushBackList(ls) //invalid memory address or nil pointer dereference
+}
+```
+
+`PushBackList`的实现如下：首先获取`other`的长度`n`，然后循环`n`次取出其元素将其插入`l`中。问题出现在循环`n`次时若过程中`other`的元素变化（假设其中有些元素被删除），这就导致`e`的指针可能为`nil`，此时使用`e.Value`取值，程序便会崩溃
+```GOLANG
+func (l *List) PushBackList(other *List) {
+	l.lazyInit()
+	for i, e := other.Len(), other.Front(); i > 0; i, e = i-1, e.Next() {
+		l.insertValue(e.Value, l.root.prev)
+	}
+}
+```
+
+所以项目中对list并发操作时需要加写锁
 
 ##	0x03	ring包
 `container/ring` 实现了环形链表的功能，其典型应用场景是构造定长环形队列，比如用来保存固定size的元素，如最近`N`条日志等。Ring的结构如下：
@@ -585,3 +709,4 @@ type Set struct {
 -	[go 标准库 container 支持 multi goroutine 吗？](https://groups.google.com/g/golang-china/c/JdbR_CGo3ao/m/apyVG5grRVEJ)
 -	[Usage of the Heap Data Structure in Go (Golang), with Examples](https://www.tugberkugurlu.com/archive/usage-of-the-heap-data-structure-in-go-golang-with-examples)
 -	[Data types in Kubernetes: PriorityQueue](https://dev.to/chuck_ha/data-types-in-kubernetes-priorityqueue-38d2)
+-	[Golang中container/list包中的坑](https://cloud.tencent.com/developer/article/1072498)
