@@ -313,7 +313,7 @@ Logs由顺序排列的Log Entry组成 ，每个Log Entry包含command和产生�
 
 ####  日志复制的例子
 
-![log-replication]()
+![log-replication](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/raft/core-km/log-replication.jpg)
 
 从图中看，LogIndex `1-4`的日志已经完成同步，LogIndex `5`正在同步，LogIndex `6`还未开始同步，下一小节会基于官方文档完整的描述日志复制的过程
 
@@ -353,6 +353,7 @@ Logs由顺序排列的Log Entry组成 ，每个Log Entry包含command和产生�
 ####  举例：强行覆盖Leader日志的测试用例
 
 ##  0x06  状态机
+![state-machine](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/raft/core-km/raft-state-machine.png)
 
 ##  0x07  安全性及约束
 为何要引入安全性Safty？因为当前的 Leader election 领导选举 和 Log replication 日志复制并不能保证Raft算法的安全性，在一些特殊情况下，可能导致数据不一致，所以需要引入下面安全性规则对场景进行约束，保证Raft协议的CP特性。
@@ -398,13 +399,13 @@ Logs由顺序排列的Log Entry组成 ，每个Log Entry包含command和产生�
 
 问题：为何Raft要保证`Leader`完备性的规则？
 
-![leader_completeness]()
+![leader_completeness](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/raft/core-km/leader_completeness.jpg)
 
 1.  假如集群中`Follower4`在LogIndex3 故障宕机，经过一段时间，任期Term3的`Leader`接收并提交了很多日志（假设LogIndex1-5已提交，LogIndex6正在复制中）
 2.  此时`Follower4`恢复正常，在没有和`Leader`完成同步日志的情况下，如果`Leader`突然宕机，此时开始领导选举。再假设在Term4 `Follower4`当选`Leader`。根据日志复制的规则，其他`Follower`强制复制`Leader`的日志，那么已经提交却没完成同步的日志将会被强制覆盖掉，这会导致已提交日志被覆盖
 3.  所以，通过本约束限制上一步中`Follower4`，让它不可以成为`Leader`
 
-![leader_completeness_2.jpg]()
+![leader_completeness_2.jpg](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/raft/core-km/leader_completeness_2.jpg)
 
 
 Leader完备性，意义为被选举人必须比自己知道的更多（比较term 、log index）
@@ -426,7 +427,7 @@ Leader完备性，意义为被选举人必须比自己知道的更多（比较te
 
 问题：为何Raft要保证状态机安全性原则？
 
-![state_machine _safety.jpg]()
+![state_machine _safety.jpg](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/raft/core-km/state_machine_safety.jpg)
 
 
 1.  任期Term2：`Follower1`是`Leader`，此时LogIndex3已经复制到`Follower2`，且正在给`Follower3`复制，此时`Follower`突然宕机（`Follower3`复制失败，logIndex3并未被提交）
