@@ -13,11 +13,13 @@ tags:
 ---
 
 ##  0x00    前言
-前文 []() 中，了解到 CAP 定理中，满足 AP 的典型协议就是 Gossip，本文就介绍下该协议。
+前文 [Etcd 最佳实（踩）践（坑）](https://pandaychen.github.io/2019/10/20/ETCD-BEST-PRACTISE/#0x02-cap-%E5%AE%9A%E7%90%86%E5%9F%BA%E7%A1%80) 中，了解 CAP 定理中，满足 AP 的典型协议就是 Gossip，本文就介绍下该协议。
 
 Gossip protocol 也叫 Epidemic Protocol （流行病协议），是一种 **去中心化、容错并保证最终一致性的协议**；其基本思想是通过不断的和集群中的节点 Gossip 交换信息，经过 `O(log(N))` 个回合, Gossip 协议即可将信息传递到所有的节点（其中 `N` 表示节点的个数）。典型的实现有这么几个：
 -   Redis 集群间通信
 -   Consul 集群间各节点交换数据
+-   Prometheus的告警组件alertmanager
+-   区块链项目
 
 Gossip 协议的目的是解决状态在集群中的传播和状态一致性的保证两个问题
 
@@ -48,9 +50,9 @@ Gossip 协议实现信息指数级的快速传播，因此在有新信息需要�
 ####    Gossip 通信过程
 Gossip 协议分为 Push-based 和 Pull-based 两种模式，具体工作流程如下：
 
-1、Push-based 模式 <br>
+![work-mode](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/cap/gossip/gossip-pull-and-push.png)
 
-![]()
+1、Push-based 模式 <br>
 
 -   网络中的某个节点随机选择 `N` 个节点作为数据接收对象
 -   该节点向其选中的 `N` 个节点传输相应数据
@@ -60,8 +62,6 @@ Gossip 协议分为 Push-based 和 Pull-based 两种模式，具体工作流程�
 如此经过一段时间之后，整个集群都收到了此条 Gossip 消息，从而达到最终一致。另外注意每次消息传递都会选择尚未发送过的节点进行传播（单向的），如 `A->B`, 则当 `B` 进行传播的时候，不会再发送给 `A`
 
 2、Pull-based 模式 <br>
-
-![]()
 
 -   集群内的所有节点，随机选择其它 `k` 个节点询问有没有新数据
 -   接收到请求的节点，返回新数据
@@ -96,15 +96,194 @@ Consul 中的每个数据中心有一个 LAN 池，它包含了该数据中心�
 2、WAN 池<br>
 WAN 池是全局唯一的，所有数据中心的 Server 都应该加入到 WAN 池中，由 WAN 池提供的成员关系信息允许 server 做一些跨数据中心的请求
 
-####    gossip库的实现： hashicorp/memberlist
-`hashicorp/memberlist`基于 Gossip 协议，实现了集群内节点发现、节点失效探测、节点故障转移、节点状态同步等（所有动作都在 `schedule()` 中调用）
+##  0x03    gossip库的实现： hashicorp/memberlist
+`hashicorp/memberlist`基于 Gossip 协议，实现了集群内节点发现、节点失效探测、节点故障转移、节点状态同步等（所有动作都在 `schedule()` 中调用），[项目地址](https://github.com/hashicorp/memberlist)。memberlist项目将协议相关的参数都封装成配置项[Config](https://github.com/hashicorp/memberlist/blob/master/config.go#L16)，开发者可自行设置调优（gossip协议的收敛速度越快，消耗的带宽越高）。本文代码基于[V0.1.5](https://github.com/hashicorp/memberlist/tree/v0.1.5)
 
-1、节点状态：三种<br>
--   alive： 存活节点
--   suspect： 对于 `PingMsg` 没有应答或应答超时，这个节点的状态是可疑的
--   dead： 节点已dead
 
-2、各个Gossip节点周期性任务<br>
+####  构建gossip集群的基本步骤
+```GO
+1、new个配置文件 c := memberlist.DefaultLocalConfig() 2、创建gossip网络 m, err := memberlist.Create(c) 3、将节点加入到集群 m.Join(parts) 4、实现delegate接口 5、将我们需要同步的数据加到广播队列 broadcasts.QueueBroadcast(userdate)
+```
+
+####    memberlist的协议
+1、广播协议<br>
+集群的内的广播通过UDP报文向每个节点发送消息（不确保消息一定能发送到），广播先进入广播队列，广播队列里的消息可能被其他更优先的消息覆盖掉。广播队列里的消息发送失败超过一定次数后，会被抛弃
+
+2、数据交互<br>
+Push/Pull：每隔一个随机浮动的间隔，会随机选取一个节点建立TCP连接，然后将本地的全部节点 状态、用户数据发送过去，然后对端将其掌握的全部节点状态、用户数据发送回来，然后完成`2`份数据的合并（设计此主要为了加速集群内信息的收敛速度）
+
+3、通讯协议<br>
+-   使用UDP传输PING消息、间接PING消息、ACK消息、NACK消息、Suspect消息、 Alive消息、Dead消息、用户消息
+-   使用TCP传输用户数据、PUSH-PULL消息
+
+
+####    节点状态机
+1、alive： 存活节点，当新节点启动时，会向集群内广播Alive消息
+2、suspect： 对于 `PingMsg` 没有应答或应答超时，这个节点的状态是可疑的<br>
+-   当探测一些节点失败时，或者suspect某个节点的信息时，会将本地对应的此节点信息标记为suspect，然后启动一个定时器，并发出一个suspect广播，此期间内如果收到其他节点发来的相同的suspect信息时，将本地记录该节点suspect的确认数`+1`，当定时器超时后，该节点信息仍然不是alive的，且确认数达到要求，会将该节点标记为dead
+-   当本节点收到别的节点发来的suspect消息时（和上面对应），本节点是alive的，所以会发送alive广播，从而清除其他节点上的suspect标记
+
+3、dead： 节点已dead<br>
+-   当本节点离开集群时或者本地探测的其他节点超时被标记死亡，会向集群发送本节点dead广播。收到dead广播消息的节点会跟本地的记录比较，当本地记录也是dead时会忽略消息，当本地的记录不是dead时，会删除本地的记录再将dead消息再次广播出去，形成再次传播（针对本节点收到其他节点的消息）
+-   如果从其他节点收到自身的dead广播消息时，说明本节点相对于其他节点网络分区，此时会发起一个alive广播以修正其他节点上存储的本节点数据（更新）
+
+probe动作（连线）：
+-   当节点启动后，每隔一定时间间隔，会选取一个节点对其发送PING消息，当PING消息失败后，会随机选取 `IndirectChecks`个节点发起间接PING的请求和直接更其再发起一个tcp PING消息。收到间接PING请求的节点会根据请求中的地址发起一个PING消息，将PING的结果返回给间接请求的源节点
+-   如果探测超时之间内，本节点没有收到任何一个要探测节点的ACK消息，则标记要探测的节点状态为suspect
+
+状态机的转换如下：
+![state-machine](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/cap/gossip/gossip-state-machine.png)
+
+
+####    Memberlist结点抽象
+[Memberlist](https://github.com/hashicorp/memberlist/blob/v0.1.5/memberlist.go#L34)结构定义如下：
+比较重要的成员：
+-   `nodes`：
+-   `nodeMap`：存储系统节点及状态的映射
+-   `nodeTimers`： 
+-   `transport Transport`：提供UDP/TCP的本地服务实现，主要用于实现gossip协议交互（通用性）
+
+```GOLANG
+type Memberlist struct {
+	sequenceNum uint32 // Local sequence number
+	incarnation uint32 // Local incarnation number
+	numNodes    uint32 // Number of known nodes (estimate)
+	pushPullReq uint32 // Number of push/pull requests
+
+	config         *Config
+	shutdown       int32 // Used as an atomic boolean value
+	shutdownCh     chan struct{}
+	leave          int32 // Used as an atomic boolean value
+	leaveBroadcast chan struct{}
+
+	shutdownLock sync.Mutex // Serializes calls to Shutdown
+	leaveLock    sync.Mutex // Serializes calls to Leave
+
+	transport Transport
+
+	handoffCh            chan struct{}
+	highPriorityMsgQueue *list.List
+	lowPriorityMsgQueue  *list.List
+	msgQueueLock         sync.Mutex
+
+	nodeLock   sync.RWMutex
+	nodes      []*nodeState          // Known nodes
+	nodeMap    map[string]*nodeState // Maps Addr.String() -> NodeState
+	nodeTimers map[string]*suspicion // Maps Addr.String() -> suspicion timer
+	awareness  *awareness
+
+	tickerLock sync.Mutex
+	tickers    []*time.Ticker
+	stopTick   chan struct{}
+	probeIndex int
+
+	ackLock     sync.Mutex
+	ackHandlers map[uint32]*ackHandler
+
+	broadcasts *TransmitLimitedQueue
+
+	logger *log.Logger
+}
+```
+
+####    协议的通信通用方法：Transport
+memberlist的内部实现包含了全部的通信过程，因此需要一个Transport实现来底层的通信api，memberlist提供的默认实现是[NetTransport](https://github.com/hashicorp/memberlist/blob/v0.1.5/net_transport.go#L40)
+```GOLANG
+Transport
+type Transport interface {
+    // 传入Config中的AdvertiseAddr和AdvertisePort，返回给上层一个用于告知
+    // 集群内其他成员的本节点ip和端口
+    FinalAdvertiseAddr(ip string, port int) (net.IP, int, error)
+
+    // 向指定addr发送一段数据，返回完成通信的当前时刻，该时刻可以用来判断RTT
+    WriteTo(b []byte, addr string) (time.Time, error)
+
+    // PacketCh 返回一个chan，当每从其他成员收到一个udp报文时，将报文封装成
+    // *Packet写入该chan，上层逻辑通过该chan读取udp信息
+    PacketCh() <-chan *Packet
+
+    // 创建一个TCP连接给上层使用
+    DialTimeout(addr string, timeout time.Duration) (net.Conn, error)
+
+    // 返回一个chan，每当本地tcp端口收到一个连接，通过该chan交由上层处理
+    StreamCh() <-chan net.Conn
+
+    // 退出时，调用该函数，释放相关通信资源
+    Shutdown() error
+}
+```
+
+默认提供的transport：
+```GOLANG
+type NetTransport struct {
+	config       *NetTransportConfig
+	packetCh     chan *Packet
+	streamCh     chan net.Conn
+	logger       *log.Logger
+	wg           sync.WaitGroup
+	tcpListeners []*net.TCPListener
+	udpListeners []*net.UDPConn
+	shutdown     int32
+}
+```
+
+
+####    初始化Memberlist
+在`newMemberlist`初始化过程中，将建立本地的监听本地的TCP/UDP服务，来处理其他节点传送过来的数据
+```GOLANG
+// newMemberlist creates the network listeners.
+// Does not schedule execution of background maintenance.
+func newMemberlist(conf *Config) (*Memberlist, error) {
+    //......
+	m := &Memberlist{
+		config:               conf,
+		shutdownCh:           make(chan struct{}),
+		leaveBroadcast:       make(chan struct{}, 1),
+		transport:            transport,
+		handoffCh:            make(chan struct{}, 1),
+		highPriorityMsgQueue: list.New(),
+		lowPriorityMsgQueue:  list.New(),
+		nodeMap:              make(map[string]*nodeState),
+		nodeTimers:           make(map[string]*suspicion),
+		awareness:            newAwareness(conf.AwarenessMaxMultiplier),
+		ackHandlers:          make(map[uint32]*ackHandler),
+		broadcasts:           &TransmitLimitedQueue{RetransmitMult: conf.RetransmitMult},
+		logger:               logger,
+	}
+	m.broadcasts.NumNodes = func() int {
+		return m.estNumNodes()
+	}
+	go m.streamListen()     //处理TCP连接及协议包
+	go m.packetListen()      //处理UDP及协议包
+	go m.packetHandler()
+	return m, nil
+}
+```
+
+
+####    
+```GOLANG
+// Create will create a new Memberlist using the given configuration.
+// This will not connect to any other node (see Join) yet, but will start
+// all the listeners to allow other nodes to join this memberlist.
+// After creating a Memberlist, the configuration given should not be
+// modified by the user anymore.
+func Create(conf *Config) (*Memberlist, error) {
+	m, err := newMemberlist(conf)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.setAlive(); err != nil {
+		m.Shutdown()
+		return nil, err
+	}
+	m.schedule()
+	return m, nil
+}
+```
+
+
+####    各个Gossip节点周期性任务
 `schedule`中通过独立goroutine启动周期性任务：
 -   故障检测：`m.probe`
 -   状态合并（Push/Pull 消息）：`pushPullTrigger`方法
@@ -441,8 +620,14 @@ func (m *Memberlist) gossip() {
 
 
 
+
+####    一些细节问题
+广播风暴
+为了避免循环广播造成广播风暴，每个节点用一个uint32 Incarnation来标识每次广播的序号，当收到小于 本地记录的该节点Incarnation的广播消息时，忽略之。Incarnation只有再每一次节点重新alive时，会增长 一次。
+
+
 ##  0x03    hashicorp/memberlist测试
-用memberlist库实现集群节点发现的功能，样例代码[参考]()，下面输出演示了一个`3`节点的集群，手动停止一个节点后的变化情况（最终变成`2`个节点）
+用memberlist库实现集群节点发现的功能，样例代码[参考](https://github.com/pandaychen/golang_in_action/blob/master/gossip/memberlist.go)，下面输出演示了一个`3`节点的集群，手动停止一个节点后的变化情况（最终变成`2`个节点）
 
 ```text
 -------------start--------------
@@ -510,7 +695,12 @@ Member: VM_120_245_centos-8002 192.168.10.1
 Member: VM_120_245_centos-8001 192.168.10.1
 ```
 
+####    asim-KV：A distributed in-memory key-value store    
+[asim-kv](https://github.com/asim/kv)是另外一个基于memberlist实现的kv项目，可以通过API访问内部存储
+
 ##  0x04  参考
 -   [P2P 网络核心技术：Gossip 协议](https://zhuanlan.zhihu.com/p/41228196)
--   [](https://zhuanlan.zhihu.com/p/369178156)
--   [聊聊 Gossip 的一个实现]()
+-   [Gossip协议及Consul中的实现](https://zhuanlan.zhihu.com/p/369178156)
+-   [聊聊 Gossip 的一个实现](https://vearne.cc/archives/584)
+-   [hashicorp memberlist 分析](https://lrita.github.io/2017/05/14/hashicorp-memberlist/#config)
+-   [gossip协议与memberlist实现](https://blog.csdn.net/qq_33339479/article/details/120411306)
