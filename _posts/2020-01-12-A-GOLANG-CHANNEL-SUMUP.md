@@ -373,6 +373,85 @@ func main() {
 }
 ```
 
+####    检查buffered channel是否已满
+使用buffered channel时，可能需要检查当前的channel是否已经满（不希望goroutine被阻塞），采用`default`分支来规避该场景：
+
+```GOLANG
+cc := make(chan int, 1)
+cc <- data1
+
+select {
+    case cc <- data2:
+        fmt.Println("data equeue")
+    default:
+        fmt.Println("channel was full")
+}
+```
+
+####    fan-in
+利用channel实现fan-in的典型场景，并发的从多个channel中获取数据，将其合并到结果channel中：
+
+```GOLANG
+func fanIn(chans []chan int, out chan int) {
+    wg := sync.WaitGroup{}
+    wg.Add(len(chans))
+    for _, ch := range chans {
+        go func(ch chan int) {
+            for t := range ch {
+                out <- t
+            }
+            wg.Done()
+        }(ch)
+    }
+    wg.Wait()
+    close(out)
+}
+```
+
+####    检测channel是否被关闭
+channel 被关闭时仍然可以读数据，但是写会导致`panic`，通常使用`data, ok := <- chan`的`ok`来判断channel是否被关闭，只有当channel无数据，且channel被`close`了，才会返回`ok==false`
+
+```GOLANG
+func checkChanClose(ch chan int) bool {
+    select {
+    case _, received := <- ch:
+        return !received
+    default:
+    }
+    return false
+}
+```
+
+但是实际中，一般不会直接使用`checkChanClose`方法，因为可能有延迟，如下代码：
+```golang
+if checkChanClose(ch) {
+    // 关闭的场景，exit  
+    return
+}
+// 假设这里被异步close了
+// 未关闭的场景，继续执行（可能还是会 panic）
+ch <- x
+```
+
+所以，这个问题就变成如何避免使用到已经被closed的channel，避免 `panic`。并且，要保证按照如下顺序触发：
+1. 先触发 `ctx.Done()` 事件
+2. 再执行`close(c)`关闭channel操作，保证这个时序的才能保证
+```GOLANG
+select {
+        case <-ctx.Done():
+            return
+        case v, ok := <-c:
+            // do something
+            if !ok{
+                //channel is close
+                //do something
+            }
+        default:
+            // do default 
+}
+```
+
+
 ##      0x03 channel 的陷阱
 
 -       `nil` channel 会阻塞
