@@ -226,8 +226,6 @@ func longestPrefix(k1, k2 string) int {
 2.  如果在某个 child 节点中找到相同前缀则继续往下找（需匹配完本节点的所有 prefix，看上面的 `longestPrefix` 方法）
 3.  直到查找到某个节点处停止；如果某个 child 节点部分前缀是字符串前缀，则需要将公共前缀作为新节点，原来孩子节点的孩子作为新节点的孩子（分裂的目的是确保了一个节点的孩子数目不会超过总的字符串的个数）
 
-插入的用例，假设以空字符串作为结尾：
-![]()
 
 ```golang
 // Insert is used to add a newentry or update
@@ -375,7 +373,32 @@ func (ps Params) ByName(name string) string {
 }
 ```
 
-#### Path
+#### Path：特殊匹配模式介绍
+httprouter的两种特殊的匹配模式：
+1、`:name`匹配模式：**精准匹配的，同时只能匹配一个**
+
+```text
+Pattern: /user/:name
+
+/user/panday              //匹配
+/user/you                 //匹配
+/user/panday/profile      //不匹配
+/user/                    //不匹配
+```
+
+因为httprouter这个路由就是单一匹配的，所以使用命名参数的时候，一定要注意，是否有其他注册的路由和命名参数的路由，匹配同一个路径，比如`/user/new`这个路由和`/user/:name`就是冲突的，不能同时注册。
+
+2、`*name`匹配模式，是一种匹配所有的模式，较少用
+因为是匹配所有的模式，所以只要*前面的路径匹配，就是匹配的，不管路径多长或有几层，都匹配
+
+```text
+Pattern: /user/*name
+
+/user/panday              //匹配
+/user/you                 //匹配
+/user/panday/profile      //匹配
+/user/                    //匹配
+```
 
 #### Router
 
@@ -1516,11 +1539,17 @@ PUT /user/installations/:installation_id/repositories/:repository_id
 ####	case3：多种path的寻找过程
 路由信息：第一条`/user/info`，第二条`/user/info/:name`，第三条`/user/info/:name/*age`
 
+-	路由1：root树为空树并且没有通配符，在`insertChild`方法中直接设置当前节点（第`1`层节点），设置path为`/user/info`
+-	路由2：先找到与当前节点的最长匹配长度，长度小于单前path长度，重置path为`/:name`且当前节点的wilChild为`false`，取出剩余path第`1`个字符进行判断，根据第`1`个字符逻辑 在当前节点新增孩子（图中第`2`级孩子），并将当前node指向第`2`层节点，调用`insertChild`将`/:name`插入到第`2`层节点，逻辑同case1，这样形成了第`2`层和第`3`层节点
+-	路由3：先找到与第`1`层节点的共同前缀，path更新为`/:name/*age`，取出剩余path第一个字符`/`，`/`在当前的`indices`里，对孩子节点做优先级调整，并且将当前节点更新下沉到孩子节点,也就是图中第`2`层节点，继续下一次循环查找
+-	path`/:name/*age`与第`2`层节点的共同前缀为`/`，当前第`2`层节点wildCard为`true`，这个时候将当前节点指定到孩子节点，即图中第`3`层节点，并且判断path在下划线之前的部分，即`:name`与`3`层节点的path相同，然后继续循环查找
+-	path剩余部分为`:name/*age`，当前node指向第`3`层节点，继续查找插入位置；共同前缀为`:name`，更新path变为`/*age`，由于在第二部分处理完以后只有第`3`层节点。这个时候直接新增节点，进入`insertChild`逻辑。与case2的后半部分按照相同的逻辑，形成第四五六层节点
+
 
 ![CASE3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/http-gin/gin-case3.png)
 
 
-##	0x08	其他一些细节
+##	0x09	其他一些细节
 
 1、编译验证<br>
 如下面代码：
@@ -1541,7 +1570,7 @@ func ParamsFromContext(ctx context.Context) Params {
 3、子节点的冲突问题<br>
 
 
-## 0x09 参考
+## 0x0A 参考
 
 - [基数树 (Radix Tree)](https://juejin.cn/post/6933244263241089037)
 - [Radix tree](https://en.wikipedia.org/wiki/Radix_tree)
