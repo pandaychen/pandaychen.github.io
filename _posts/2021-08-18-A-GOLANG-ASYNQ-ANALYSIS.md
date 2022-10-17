@@ -23,7 +23,7 @@ tags:
 -   UI及客户端、metrics支持（CLI检查和远程控制队列和任务）
 -   支持任务设置执行时间or最长可运行的时间
 
-库的使用示例[在此](https://github.com/hibiken/asynq/wiki/Getting-Started)
+库的使用示例[在此](https://github.com/hibiken/asynq/wiki/Getting-Started)，本文基于`v0.23.0`[版本](https://github.com/hibiken/asynq/releases/tag/v0.23.0)
 
 ##  0x01    代码分析
 asynq整体流程上和先前分析的中间件大同小异，并且该中间件严重依赖Redis，所有的原子化逻辑都是通过lua脚本实现的（如任务的出入队列等等），按照任务的状态划分了不同的redis数据结构及[逻辑](https://github.com/hibiken/asynq/blob/master/internal/rdb/rdb.go)：
@@ -158,6 +158,129 @@ type processor struct {
 	finished chan<- *base.TaskMessage
 }
 
+```
+
+
+####	任务的状态
+每个任务的唯一key`asynq:{<qname>}:t:<task_id>`，在Redis数据结构为HashTable，有如下字段：
+-	`msg`：任务关联数据
+-	`state`：任务状态（`pending`、`active`、`completed`、`aggregating`、`scheduled`、`retry`、`archived`）
+-	`pending_since`：
+-	`unique_key`：
+-	`group`：
+-	`result`：
+
+1、[`Enqueue`](https://github.com/hibiken/asynq/blob/master/internal/rdb/rdb.go#L96)方法，关联`enqueueCmd`<br>
+```GOLANG
+// enqueueCmd enqueues a given task message.
+//
+// Input:
+// KEYS[1] -> asynq:{<qname>}:t:<task_id>
+// KEYS[2] -> asynq:{<qname>}:pending
+// --
+// ARGV[1] -> task message data
+// ARGV[2] -> task ID
+// ARGV[3] -> current unix time in nsec
+//
+// Output:
+// Returns 1 if successfully enqueued
+// Returns 0 if task ID already exists
+var enqueueCmd = redis.NewScript(`
+if redis.call("EXISTS", KEYS[1]) == 1 then
+	return 0
+end
+redis.call("HSET", KEYS[1],
+           "msg", ARGV[1],
+           "state", "pending",
+           "pending_since", ARGV[3])
+redis.call("LPUSH", KEYS[2], ARGV[2])
+return 1
+`)
+```
+
+2、`enqueueUniqueCmd`<br>
+```GOLANG
+// enqueueUniqueCmd enqueues the task message if the task is unique.
+//
+// KEYS[1] -> unique key
+// KEYS[2] -> asynq:{<qname>}:t:<taskid>
+// KEYS[3] -> asynq:{<qname>}:pending
+// --
+// ARGV[1] -> task ID
+// ARGV[2] -> uniqueness lock TTL
+// ARGV[3] -> task message data
+// ARGV[4] -> current unix time in nsec
+//
+// Output:
+// Returns 1 if successfully enqueued
+// Returns 0 if task ID conflicts with another task
+// Returns -1 if task unique key already exists
+var enqueueUniqueCmd = redis.NewScript(`
+local ok = redis.call("SET", KEYS[1], ARGV[1], "NX", "EX", ARGV[2])
+if not ok then
+  return -1 
+end
+if redis.call("EXISTS", KEYS[2]) == 1 then
+  return 0
+end
+redis.call("HSET", KEYS[2],
+           "msg", ARGV[3],
+           "state", "pending",
+           "pending_since", ARGV[4],
+           "unique_key", KEYS[1])
+redis.call("LPUSH", KEYS[3], ARGV[1])
+return 1
+`)
+```
+
+3、`dequeueCmd`<br>
+```GOLANG
+
+// Input:
+// KEYS[1] -> asynq:{<qname>}:pending
+// KEYS[2] -> asynq:{<qname>}:paused
+// KEYS[3] -> asynq:{<qname>}:active
+// KEYS[4] -> asynq:{<qname>}:lease
+// --
+// ARGV[1] -> initial lease expiration Unix time
+// ARGV[2] -> task key prefix
+//
+// Output:
+// Returns nil if no processable task is found in the given queue.
+// Returns an encoded TaskMessage.
+//
+// Note: dequeueCmd checks whether a queue is paused first, before
+// calling RPOPLPUSH to pop a task from the queue.
+var dequeueCmd = redis.NewScript(`
+if redis.call("EXISTS", KEYS[2]) == 0 then
+	local id = redis.call("RPOPLPUSH", KEYS[1], KEYS[3])
+	if id then
+		local key = ARGV[2] .. id
+		redis.call("HSET", key, "state", "active")
+		redis.call("HDEL", key, "pending_since")
+		redis.call("ZADD", KEYS[4], ARGV[1], id)
+		return redis.call("HGET", key, "msg")
+	end
+end
+return nil`)
+```
+
+举例来说，redis数据如下：
+```text
+127.0.0.1:6379[1]> keys *
+ 1) "asynq:servers:{VM_120_245_centos:20022:69678348-e2e8-4a40-a729-6f50b8180194}"
+ 2) "asynq:{critical}:processed:2022-10-17"
+ 3) "asynq:servers"
+ 4) "asynq:{low}:scheduled"
+ 5) "asynq:{low}:processed:2022-10-17"
+ 6) "asynq:workers"
+ 7) "asynq:{critical}:processed:2022-10-08"
+ 8) "dq_queue_order"
+ 9) "asynq:{low}:processed:2022-10-08"
+10) "1570239831121"
+11) "15702398321"
+12) "asynq:queues"
+13) "asynq:{default}:processed:2022-10-08"
 ```
 
 
@@ -312,6 +435,11 @@ func (fn HandlerFunc) ProcessTask(ctx context.Context, task *Task) error {
 ```
 
 3、等待任务执行结果<br>
+开头列举的，asynq支持任务的控制核心就在此实现，如；
+-	`p.abort`：
+-	`lease.Done()`：任务执行过期（超时）了
+-	`ctx.Done()`：
+-	`<-resCh`：任务正常结束，获取结果成功/失败
 ```GOLANG
 func (p *processor) exec() {
     //...
@@ -337,9 +465,208 @@ func (p *processor) exec() {
 			}
     //...
 }
+
+//处理结果
+func (p *processor) handleSucceededMessage(l *base.Lease, msg *base.TaskMessage) {
+	if msg.Retention > 0 {
+		//
+		p.markAsComplete(l, msg)
+	} else {
+		p.markAsDone(l, msg)
+	}
+}
 ```
-##  0x02    总结
+
+注意：`markAsComplete`是
+
+4、处理任务执行失败：`handleFailedMessage`<br>
+最终，需要retry重试的任务在`p.retry`方法中被打上下一次重试的时间，然后在`retryCmd`中通过`ZADD`添加到`asynq:{<qname>}:retry`对应的SortedSet中
+```GOLANG
+
+func (p *processor) handleFailedMessage(ctx context.Context, l *base.Lease, msg *base.TaskMessage, err error) {
+	if p.errHandler != nil {
+		p.errHandler.HandleError(ctx, NewTask(msg.Type, msg.Payload), err)
+	}
+	if !p.isFailureFunc(err) {
+		// retry the task without marking it as failed
+		p.retry(l, msg, err, false /*isFailure*/)
+		return
+	}
+	if msg.Retried >= msg.Retry || errors.Is(err, SkipRetry) {
+		p.logger.Warnf("Retry exhausted for task id=%s", msg.ID)
+		p.archive(l, msg, err)
+	} else {
+		//调用p.retry重试
+		p.retry(l, msg, err, true /*isFailure*/)
+	}
+}
+
+func (p *processor) retry(l *base.Lease, msg *base.TaskMessage, e error, isFailure bool) {
+	if !l.IsValid() {
+		// If lease is not valid, do not write to redis; Let recoverer take care of it.
+		return
+	}
+	ctx, _ := context.WithDeadline(context.Background(), l.Deadline())
+
+	//计算下一次重试触发的时间
+	d := p.retryDelayFunc(msg.Retried, e, NewTask(msg.Type, msg.Payload))
+	retryAt := time.Now().Add(d)
+
+	//调用broker的retry的方法
+	err := p.broker.Retry(ctx, msg, retryAt, e.Error(), isFailure)
+	if err != nil {
+		errMsg := fmt.Sprintf("Could not move task id=%s from %q to %q", msg.ID, base.ActiveKey(msg.Queue), base.RetryKey(msg.Queue))
+		p.logger.Warnf("%s; Will retry syncing", errMsg)
+		p.syncRequestCh <- &syncRequest{
+			fn: func() error {
+				return p.broker.Retry(ctx, msg, retryAt, e.Error(), isFailure)
+			},
+			errMsg:   errMsg,
+			deadline: l.Deadline(),
+		}
+	}
+}
+
+// Retry moves the task from active to retry queue.
+// It also annotates the message with the given error message and
+// if isFailure is true increments the retried counter.
+func (r *RDB) Retry(ctx context.Context, msg *base.TaskMessage, processAt time.Time, errMsg string, isFailure bool) error {
+	var op errors.Op = "rdb.Retry"
+	now := r.clock.Now()
+	modified := *msg
+	if isFailure {
+		modified.Retried++
+	}
+	modified.ErrorMsg = errMsg
+	modified.LastFailedAt = now.Unix()		//下一次触发的时间，属性关联于Redis的SortSet
+	encoded, err := base.EncodeMessage(&modified)
+	if err != nil {
+		return errors.E(op, errors.Internal, fmt.Sprintf("cannot encode message: %v", err))
+	}
+	expireAt := now.Add(statsTTL)
+	keys := []string{
+		base.TaskKey(msg.Queue, msg.ID),
+		base.ActiveKey(msg.Queue),
+		base.LeaseKey(msg.Queue),
+		base.RetryKey(msg.Queue),
+		base.ProcessedKey(msg.Queue, now),
+		base.FailedKey(msg.Queue, now),
+		base.ProcessedTotalKey(msg.Queue),
+		base.FailedTotalKey(msg.Queue),
+	}
+	argv := []interface{}{
+		msg.ID,
+		encoded,
+		processAt.Unix(),
+		expireAt.Unix(),
+		isFailure,
+		int64(math.MaxInt64),
+	}
+	return r.runScript(ctx, op, retryCmd, keys, argv...)
+}
+
+// KEYS[1] -> asynq:{<qname>}:t:<task_id>
+// KEYS[2] -> asynq:{<qname>}:active
+// KEYS[3] -> asynq:{<qname>}:lease
+// KEYS[4] -> asynq:{<qname>}:retry
+// KEYS[5] -> asynq:{<qname>}:processed:<yyyy-mm-dd>
+// KEYS[6] -> asynq:{<qname>}:failed:<yyyy-mm-dd>
+// KEYS[7] -> asynq:{<qname>}:processed
+// KEYS[8] -> asynq:{<qname>}:failed
+// -------
+// ARGV[1] -> task ID
+// ARGV[2] -> updated base.TaskMessage value
+// ARGV[3] -> retry_at UNIX timestamp
+// ARGV[4] -> stats expiration timestamp
+// ARGV[5] -> is_failure (bool)
+// ARGV[6] -> max int64 value
+var retryCmd = redis.NewScript(`
+if redis.call("LREM", KEYS[2], 0, ARGV[1]) == 0 then  
+  return redis.error_reply("NOT FOUND")
+end
+if redis.call("ZREM", KEYS[3], ARGV[1]) == 0 then
+  return redis.error_reply("NOT FOUND")
+end
+redis.call("ZADD", KEYS[4], ARGV[3], ARGV[1])
+redis.call("HSET", KEYS[1], "msg", ARGV[2], "state", "retry")
+if tonumber(ARGV[5]) == 1 then
+	local n = redis.call("INCR", KEYS[5])
+	if tonumber(n) == 1 then
+		redis.call("EXPIREAT", KEYS[5], ARGV[4])
+	end
+	local m = redis.call("INCR", KEYS[6])
+	if tonumber(m) == 1 then
+		redis.call("EXPIREAT", KEYS[6], ARGV[4])
+	end
+    local total = redis.call("GET", KEYS[7])
+    if tonumber(total) == tonumber(ARGV[6]) then
+    	redis.call("SET", KEYS[7], 1)
+    	redis.call("SET", KEYS[8], 1)
+    else
+    	redis.call("INCR", KEYS[7])
+    	redis.call("INCR", KEYS[8])
+    end
+end
+return redis.status_reply("OK")`)
+```
 
 
-##  0x03 参考
+
+##	0x02	metrics指标
+本小节主要看下asynq定义的[metrics](https://github.com/hibiken/asynq/tree/master/x/metrics)，一款异步队列中间件需要考虑哪些指标
+
+####	指标定义与说明
+
+```GOLANG
+// Descriptors used by QueueMetricsCollector
+var (
+	tasksQueuedDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "", "tasks_enqueued_total"),
+		"Number of tasks enqueued; broken down by queue and state.",
+		[]string{"queue", "state"}, nil,
+	)
+
+	queueSizeDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "", "queue_size"),
+		"Number of tasks in a queue",
+		[]string{"queue"}, nil,
+	)
+
+	queueLatencyDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "", "queue_latency_seconds"),
+		"Number of seconds the oldest pending task is waiting in pending state to be processed.",
+		[]string{"queue"}, nil,
+	)
+
+	queueMemUsgDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "", "queue_memory_usage_approx_bytes"),
+		"Number of memory used by a given queue (approximated number by sampling).",
+		[]string{"queue"}, nil,
+	)
+
+	tasksProcessedTotalDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "", "tasks_processed_total"),
+		"Number of tasks processed (both succeeded and failed); broken down by queue",
+		[]string{"queue"}, nil,
+	)
+
+	tasksFailedTotalDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "", "tasks_failed_total"),
+		"Number of tasks failed; broken down by queue",
+		[]string{"queue"}, nil,
+	)
+
+	pausedQueues = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "", "queue_paused_total"),
+		"Number of queues paused",
+		[]string{"queue"}, nil,
+	)
+)
+```
+
+
+##  0x03    总结
+
+
+##  0x04 参考
 -   [如何实现一个任务队列](https://chordl.me/2021/how-to-build-a-task-queue-7bed4aef)
