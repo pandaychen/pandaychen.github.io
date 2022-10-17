@@ -440,6 +440,7 @@ func (fn HandlerFunc) ProcessTask(ctx context.Context, task *Task) error {
 -	`lease.Done()`：任务执行过期（超时）了
 -	`ctx.Done()`：
 -	`<-resCh`：任务正常结束，获取结果成功/失败
+
 ```GOLANG
 func (p *processor) exec() {
     //...
@@ -481,8 +482,8 @@ func (p *processor) handleSucceededMessage(l *base.Lease, msg *base.TaskMessage)
 
 4、处理任务执行失败：`handleFailedMessage`<br>
 最终，需要retry重试的任务在`p.retry`方法中被打上下一次重试的时间，然后在`retryCmd`中通过`ZADD`添加到`asynq:{<qname>}:retry`对应的SortedSet中
-```GOLANG
 
+```GOLANG
 func (p *processor) handleFailedMessage(ctx context.Context, l *base.Lease, msg *base.TaskMessage, err error) {
 	if p.errHandler != nil {
 		p.errHandler.HandleError(ctx, NewTask(msg.Type, msg.Payload), err)
@@ -609,8 +610,6 @@ if tonumber(ARGV[5]) == 1 then
 end
 return redis.status_reply("OK")`)
 ```
-
-
 
 ##	0x02	metrics指标
 本小节主要看下asynq定义的[metrics](https://github.com/hibiken/asynq/tree/master/x/metrics)，一款异步队列中间件需要考虑哪些指标
