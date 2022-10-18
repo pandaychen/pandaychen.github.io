@@ -25,6 +25,11 @@ tags:
 
 库的使用示例[在此](https://github.com/hibiken/asynq/wiki/Getting-Started)，本文基于`v0.23.0`[版本](https://github.com/hibiken/asynq/releases/tag/v0.23.0)
 
+
+####	asynq架构
+![arch](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/asyncq/asyncq-arch.jpg)
+
+
 ##  0x01    代码分析
 asynq整体流程上和先前分析的中间件大同小异，并且该中间件严重依赖Redis，所有的原子化逻辑都是通过lua脚本实现的（如任务的出入队列等等），按照任务的状态划分了不同的redis数据结构及[逻辑](https://github.com/hibiken/asynq/blob/master/internal/rdb/rdb.go)：
 
@@ -35,6 +40,9 @@ asynq整体流程上和先前分析的中间件大同小异，并且该中间件
 -   paused：asynq:{<qname>}:paused：HASHTABLE类型
 
 此外，还有各种不同类型的结构，用来记录任务执行的状态、计数器等等
+
+####	任务流
+![flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/asyncq/asyncq-flow.png)
 
 ####    任务操作的Redis封装
 1、[`dequeueCmd`](https://github.com/hibiken/asynq/blob/master/internal/rdb/rdb.go#L204)：用于把任务从`pending`List取出，放到`active`List中
@@ -665,7 +673,10 @@ var (
 
 
 ##  0x03    总结
+本文介绍了asynq的实现，asynq的代码非常值得一读，实现思路非常清晰
 
 
 ##  0x04 参考
 -   [如何实现一个任务队列](https://chordl.me/2021/how-to-build-a-task-queue-7bed4aef)
+-	[Redis Zrangebyscore 命令](https://www.runoob.com/redis/sorted-sets-zrangebyscore.html)
+-	[Asynq 实现 Go 后台作业异步定时任务处理](https://learnku.com/articles/40071)
