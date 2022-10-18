@@ -100,7 +100,7 @@ type Channel struct {
 ####    各个子模块的关系
 
 各个数据结构之前的关系如下图所示，需要注意的是channel（会话）本质上是属于`Bucket`
-![struct](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/go-chat/gochat-struct.png)
+![struct](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/go-chat/gochat-struct.png)
 
 ##	0x02	系统架构
 笔者整理了下gochat的模块调用架构：
