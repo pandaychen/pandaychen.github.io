@@ -23,6 +23,8 @@ cronsun 是一个分布式任务系统，单个节点和 Linux 机器上的 `cro
 1.  [Golang CRON 库 Crontab 的使用与设计](https://pandaychen.github.io/2021/10/05/A-GOLANG-CRONTAB-V3-BASIC-INTRO/)
 2.  [基于 CRON 库扩展的分布式 Crontab 的实现](https://pandaychen.github.io/2022/01/16/A-GOLANG-CRONTAB-V3-ANALYSIS/)
 
+本文分析的版本基于[v0.3.5](https://github.com/shunfei/cronsun/releases/tag/v0.3.5)
+
 ##	0x01	cronsun架构
 
 ```text
@@ -202,8 +204,42 @@ cronsun的整体架构如下：
 -	MongoDB
 -	Etcd
 
+
+
 ##	核心代码分析
 
+####	Server：部署在工作机器上的agent
+Server模块即node 服务，用于在所需要执行 cron 任务的机器启动服务，替代 cron 执行所需的任务，本质是一个基于etcd-watcher监听机制的轻量级agent，[入口](https://github.com/shunfei/cronsun/blob/master/bin/node/server.go)
+
+调用流程：
+```go
+```
+
+
+####	Node结构
+[Node](https://github.com/shunfei/cronsun/blob/master/node/node.go)实现如下：
+
+
+```go
+// Node 执行 cron 命令服务的结构体
+type Node struct {
+	*cronsun.Client
+	*cronsun.Node
+	*cron.Cron
+
+	jobs   Jobs // 和结点相关的任务
+	groups Groups
+	cmds   map[string]*cronsun.Cmd
+
+	link
+	// 删除的 job id，用于 group 更新
+	delIDs map[string]bool
+
+	ttl  int64
+	lID  client.LeaseID // lease id
+	done chan struct{}
+}
+```
 
 ##	0x05  总结
 本项目

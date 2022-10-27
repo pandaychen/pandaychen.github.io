@@ -390,6 +390,80 @@ func (tw *TimingWheel) removeTask(key interface{}) {
 ```
 
 
+##	0x04	一些细节问题
+1、ticker丢失<br>
+注意到核心scheduler的各个`case`，在另外一个版本的[实现](https://github.com/ouqiang/timewheel/blob/master/timewheel.go#L96)如下：
+```golang
+func (tw *TimeWheel) start() {
+	for {
+		select {
+		case <-tw.ticker.C:
+			tw.tickHandler()
+		case task := <-tw.addTaskChannel:
+			tw.addTask(&task)
+		case key := <-tw.removeTaskChannel:
+			tw.removeTask(key)
+		case <-tw.stopChannel:
+			tw.ticker.Stop()
+			return
+		}
+	}
+}
+
+func (tw *TimeWheel) tickHandler() {
+	l := tw.slots[tw.currentPos]
+	tw.scanAndRunTask(l)
+	if tw.currentPos == tw.slotNum-1 {
+		tw.currentPos = 0
+	} else {
+		tw.currentPos++
+	}
+}
+```
+
+假设`tickHandler`的执行耗时超过了一个`tw.ticker.C`周期，那么就会导致时间轮精度不准，这里如何优化的思路是，借助一个`tickQueue chan time.Time`，将`<-tw.ticker.C`的结果进行存储，当`tickQueue`满时抛出异常，说明当前时间轮的任务执行有问题（延迟任务），优化代码如下：
+
+
+```go
+//增加一个异步的ticker缓冲器
+func (tw *TimeWheel) tickGenerator() {
+	if tw.tickQueue == nil {
+		return
+	}
+
+	for  {
+		select {
+		case <-tw.ticker.C:
+			select {
+			case tw.tickQueue <- time.Now():
+			default:
+				panic("raise long time blocking")
+			}
+		}
+	}
+}
+
+
+func (tw *TimeWheel) start() {
+	for {
+		select {
+		case <-tw.tickQueue:	//替换为从缓冲器触发
+			tw.tickHandler()
+		case task := <-tw.addTaskChannel:
+			tw.addTask(&task)
+		case key := <-tw.removeTaskChannel:
+			tw.removeTask(key)
+		case <-tw.stopChannel:
+			tw.ticker.Stop()
+			return
+		}
+	}
+}
+```
+
+2、时间轮本身的任务执行应该是**异步的（回调任务的执行不应该堵塞）**，可以考虑将回调任务使用协程池的方式进行调度，或者结合一些异步队列中间件，将到期的任务进行异步化处理
+
+
 ##  0x05  总结
 本文分析了一款典型的简单时间轮的实现，通过给任务节点添加 `circle` 字段来解决一维时间轮无法扩展时间的问题，从而突破长时间的限制。可以借鉴的地方有如下：
 1.	任务的删除、更新操作，都仅仅通过标记的方式延迟进行，避免并发的加锁问题，仅在方法`scanAndRunTasks`中实现
