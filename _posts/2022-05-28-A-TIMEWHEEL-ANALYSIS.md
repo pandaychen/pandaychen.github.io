@@ -390,7 +390,7 @@ func (tw *TimingWheel) removeTask(key interface{}) {
 ```
 
 
-##	0x04	一些细节问题
+##	0x05	一些细节问题
 1、ticker丢失<br>
 注意到核心scheduler的各个`case`，在另外一个版本的[实现](https://github.com/ouqiang/timewheel/blob/master/timewheel.go#L96)如下：
 ```golang
@@ -464,7 +464,7 @@ func (tw *TimeWheel) start() {
 2、时间轮本身的任务执行应该是**异步的（回调任务的执行不应该堵塞）**，可以考虑将回调任务使用协程池的方式进行调度，或者结合一些异步队列中间件，将到期的任务进行异步化处理
 
 
-##  0x05  总结
+##  0x06  总结
 本文分析了一款典型的简单时间轮的实现，通过给任务节点添加 `circle` 字段来解决一维时间轮无法扩展时间的问题，从而突破长时间的限制。可以借鉴的地方有如下：
 1.	任务的删除、更新操作，都仅仅通过标记的方式延迟进行，避免并发的加锁问题，仅在方法`scanAndRunTasks`中实现
 2.	外部操作接口，如任务的增删改，也是通过异步的方式实现
@@ -472,6 +472,6 @@ func (tw *TimeWheel) start() {
 
 ![go-zero-timewheel](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/timewheel/go-zero-timewheel-1.jpg)
 
-##  0x06  参考
+##  0x07  参考
 -   [go-zero 如何应对海量定时 / 延迟任务？](https://segmentfault.com/a/1190000037496480)
 -	[层级时间轮的 Golang 实现](http://russellluo.com/2018/10/golang-implementation-of-hierarchical-timing-wheels.html)
