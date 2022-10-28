@@ -188,50 +188,198 @@ func (n *Node) Run() (err error) {
 ##	0x02	可用性介绍
 
 
-
-
 ##	0x03	cronsun架构
 
 ####	整体架构
 cronsun的整体架构如下：
-![cronsun-architecture](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/dcrontab/cronsun/cronsun-architecture.png)
 
+图中的worker节点即工作节点，会部署cronsun的Node组件（轻量级agent）
+
+![cronsun-architecture](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/dcrontab/cronsun/cronsun-architecture.png)
 
 ####	worker工作流
 ![flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/dcrontab/cronsun/cronsun-task-flow.png)
+
+
+####	etcd的key作用
+cronsun的worker节点运作机制依赖于Etcd的Watch，参考[核心配置](https://github.com/shunfei/cronsun/blob/master/conf/files/base.json.sample)，先列举下Etcd的key（Prefix）的作用：
+```JSON
+{   
+    "Node": "/cronsun/node/",	#存放系统的所有node节点信息
+    "Proc": "/cronsun/proc/",
+    "Cmd": "/cronsun/cmd/",		#存放普通任务（监听）
+    "Once": "/cronsun/once/",	#存放单机单进程任务
+    "Csctl": "/cronsun/csctl/",	#
+    "Lock": "/cronsun/lock/",	#任务的互斥锁
+    "Group": "/cronsun/group/",	#存放系统的分组信息，组-->node列表
+    "Noticer": "/cronsun/noticer/",	
+}
+```
 
 ##	0x04	组件介绍
 -	MongoDB
 -	Etcd
 
+##	0x05	核心代码分析
+
+本小节，按照下面的模块对代码进行分析：
+-	存储单元：Job（任务描述）
+-	Worker：工作节点（模块）
+-	Master：管理模块
 
 
-##	核心代码分析
+####	Group结构：分组
+`Group`用以将同一类型的节点Node（Worker）进行分组，同时注册到`/cronsun/group/<id>`中；成员`NodeIDs`为Node的节点id列表
+```GOLANG
+// 结点类型分组
+// 注册到 /cronsun/group/<id>
+type Group struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+
+	NodeIDs []string `json:"nids"`
+}
+```
+
+####	Job结构
+`Job`[结构](https://github.com/shunfei/cronsun/blob/master/job.go#L38)代表了需要执行的 cron cmd 命令，会被写入到Etcd的`/cronsun/cmd/groupName/<id>`路径，value为`Job`序列化后的值
+```GO
+// 注册到 /cronsun/cmd/groupName/<id>
+type Job struct {
+	ID      string     `json:"id"`
+	Name    string     `json:"name"`
+	Group   string     `json:"group"`
+	Command string     `json:"cmd"`
+	User    string     `json:"user"`
+	Rules   []*JobRule `json:"rules"`
+	Pause   bool       `json:"pause"`   // 可手工控制的状态
+	Timeout int64      `json:"timeout"` // 任务执行时间超时设置，大于 0 时有效
+	// 设置任务在单个节点上可以同时允许多少个
+	// 针对两次任务执行间隔比任务执行时间要长的任务启用
+	Parallels int64 `json:"parallels"`
+	// 执行任务失败重试次数
+	// 默认为 0，不重试
+	Retry int `json:"retry"`
+	// 执行任务失败重试时间间隔
+	// 单位秒，如果不大于 0 则马上重试
+	Interval int `json:"interval"`
+	// 任务类型
+	// 0: 普通任务
+	// 1: 单机任务
+	// 如果为单机任务，node 加载任务的时候 Parallels 设置 1
+	Kind int `json:"kind"`
+	// 平均执行时间，单位 ms
+	AvgTime int64 `json:"avg_time"`
+	// 执行失败发送通知
+	FailNotify bool `json:"fail_notify"`
+	// 发送通知地址
+	To []string `json:"to"`
+	// 单独对任务指定日志清除时间
+	LogExpiration int `json:"log_expiration"`
+
+	// 执行任务的结点，用于记录 job log
+	runOn    string
+	hostname string
+	ip       string
+	// 用于存储分隔后的任务
+	cmd []string
+	// 控制同时执行任务数
+	Count *int64 `json:"-"`
+}
+```
+
+`Job`中的`Rules   []*JobRule`成员，规定了`Job`的执行条件，比如允许/不允许在哪些Node上运行等等；`JobRule`定义如下：
+
+```golang
+type JobRule struct {
+	ID             string   `json:"id"`
+	Timer          string   `json:"timer"`
+	GroupIDs       []string `json:"gids"`
+	NodeIDs        []string `json:"nids"`
+	ExcludeNodeIDs []string `json:"exclude_nids"`
+
+	Schedule cron.Schedule `json:"-"`
+}
+```
+
+`JobRule`的成员作用如下：
+-	`GroupIDs`：
+-	`NodeIDs`：
+-	`ExcludeNodeIDs`：
+-	`Schedule`：
+
+
+
+####	重要：任务执行的最小单元Cmd
+任务的基本属性再加上任务执行的限制（条件）就构成了任务执行的最小单元结构[`Cmd`](https://github.com/shunfei/cronsun/blob/master/job.go#L129)：
+```GOLANG
+type Cmd struct {
+	*Job
+	*JobRule
+}
+```
+
 
 ####	Server：部署在工作机器上的agent
 Server模块即node 服务，用于在所需要执行 cron 任务的机器启动服务，替代 cron 执行所需的任务，本质是一个基于etcd-watcher监听机制的轻量级agent，[入口](https://github.com/shunfei/cronsun/blob/master/bin/node/server.go)
 
 调用流程：
-```go
+```golang
+func main(){
+	//...
+	n, err := node.NewNode(conf.Config)
+	if err != nil {
+		log.Errorf(err.Error())
+		return
+	}
+
+	//生成node，并且注册自己的信息到etcd
+	if err = n.Register(); err != nil {
+		log.Errorf(err.Error())
+		return
+	}
+
+	//封装etcd 的lease方法，keepalive
+	if err = cronsun.StartProc(); err != nil {
+		log.Warnf("[process key will not timeout]proc lease id set err: %s", err.Error())
+	}
+
+	//分别启动N个独立的goroutine，实现worker的主体逻辑（详细见node分析）
+	if err = n.Run(); err != nil {
+		log.Errorf(err.Error())
+		return
+	}
+
+	//本进程退出时处理，如注册新号等等
+
+	log.Infof("cronsun %s service started, Ctrl+C or send kill sign to exit", n.String())
+	// 注册退出事件
+	event.On(event.EXIT, n.Stop, conf.Exit, cronsun.Exit)
+	// 注册监听配置更新事件
+	event.On(event.WAIT, cronsun.Reload)
+	// 监听退出信号
+	event.Wait()
+	// 处理退出事件
+	event.Emit(event.EXIT, nil)
+	log.Infof("exit success")
 ```
 
 
 ####	Node结构
 [Node](https://github.com/shunfei/cronsun/blob/master/node/node.go)实现如下：
 
-
-```go
+```golang
 // Node 执行 cron 命令服务的结构体
 type Node struct {
-	*cronsun.Client
-	*cronsun.Node
-	*cron.Cron
+	*cronsun.Client		//etcd客户端
+	*cronsun.Node		
+	*cron.Cron			//沿用了robfig/cron
 
 	jobs   Jobs // 和结点相关的任务
 	groups Groups
 	cmds   map[string]*cronsun.Cmd
 
-	link
+	link		//存储了一个（机器）节点上所有的分组任务信息以及规则数据
 	// 删除的 job id，用于 group 更新
 	delIDs map[string]bool
 
@@ -241,11 +389,190 @@ type Node struct {
 }
 ```
 
-##	0x05  总结
+`Node`关联了一个`cronsun.Node`[结构](https://github.com/shunfei/cronsun/blob/master/node.go#L25)，保存了该节点的相关信息，用于注册到Etcd中，路径为`/cronsun/node/<id>`：
+
+```GOLANG
+// 执行 cron cmd 的进程
+// 注册到 /cronsun/node/<id>
+type Node struct {
+	ID       string `bson:"_id" json:"id"`  // machine id
+	PID      string `bson:"pid" json:"pid"` // 进程 pid
+	PIDFile  string `bson:"-" json:"-"`
+	IP       string `bson:"ip" json:"ip"` // node ip
+	Hostname string `bson:"hostname" json:"hostname"`
+
+	Version  string    `bson:"version" json:"version"`
+	UpTime   time.Time `bson:"up" json:"up"`     // 启动时间
+	DownTime time.Time `bson:"down" json:"down"` // 上次关闭时间
+
+	Alived    bool `bson:"alived" json:"alived"` // 是否可用
+	Connected bool `bson:"-" json:"connected"`   // 当 Alived 为 true 时有效，表示心跳是否正常
+}
+```
+
+`cronsun.Node`基于Etcd封装了N个方法，见[此](https://github.com/shunfei/cronsun/blob/master/node.go)，在实例正常上/下线时，还会同步状态信息到mongoDB
+
+####	任务分组：`link`结构
+此外，`Node`还定义了一个成员[`link`](https://github.com/shunfei/cronsun/blob/master/node/group.go#L17)，用于定义任务分组：
+
+```golang
+type jobLink struct {
+	gname string
+	// rule id
+	rules map[string]bool
+}
+
+// map[group id]map[job id]*jobLink
+// 用于 group 发生变化的时候修改相应的 job
+type link map[string]map[string]*jobLink
+```
+
+
+####	任务分组的封装
+1、`addJob`：根据`job.Rules`的关系，向`link`分组组增加任务并设置关系<br>
+-	`gid`：组id
+-	`jid`：任务（Job）id
+-	`rid`：规则id
+
+```GOLANG
+func (l link) addJob(job *cronsun.Job) {
+        for _, r := range job.Rules {
+				//遍历rules，遍历GroupIDs
+                for _, gid := range r.GroupIDs {
+                        l.add(gid, job.ID, r.ID, job.Group)
+                }
+        }
+}
+
+func (l link) add(gid, jid, rid, gname string) {
+        js, ok := l[gid]
+        if !ok {
+                js = make(map[string]*jobLink, 4)
+                l[gid] = js
+        }
+
+        j, ok := js[jid]
+        if !ok {
+                j = &jobLink{
+                        gname: gname,
+                        rules: make(map[string]bool),
+                }
+                js[jid] = j
+        }
+
+        j.rules[rid] = true
+}
+```
+
+
+####	Node结构的方法
+1、Node启动方法<br>
+流程如下：
+-	调用``[方法](https://github.com/shunfei/cronsun/blob/master/job.go#L342)从Etcd中获取任务
+```GOLANG
+// 启动服务
+func (n *Node) Run() (err error) {
+	go n.keepAlive()
+
+	defer func() {
+		if err != nil {
+			n.Stop(nil)
+		}
+	}()
+
+	//获取job列表（从etcd）
+	if err = n.loadJobs(); err != nil {
+		return
+	}
+
+	n.Cron.Start()	//开启robfig/cron的定时器
+	go n.watchJobs()
+	go n.watchExcutingProc()
+	go n.watchGroups()
+	go n.watchOnce()
+	go n.watchCsctl()
+
+	// On 结点实例启动后，在 mongoDB 中记录存活信息
+	n.Node.On()
+	return
+}
+```
+
+2、`Node`关于`Job`任务的封装的方法<br>
+```GOLANG
+func (n *Node) addJob(job *cronsun.Job, notice bool) {
+        n.link.addJob(job)
+
+        if job.IsRunOn(n.ID, n.groups) {
+                n.jobs[job.ID] = job
+        }
+
+        cmds := job.Cmds(n.ID, n.groups)
+        if len(cmds) == 0 {
+                return
+        }
+
+        for _, cmd := range cmds {
+                n.addCmd(cmd, notice)
+        }
+        return
+}
+```
+
+####	Node监听各个用法的用途
+1、`n.watchJobs()`方法<br>
+监听`/cronsun/cmd/`这个Prefix，用于增加/修改/删除任务，操作的对象是`Job`
+```GOLANG
+func (n *Node) watchJobs() {
+        rch := cronsun.WatchJobs()
+        for wresp := range rch {
+                for _, ev := range wresp.Events {
+                        switch {
+                        case ev.IsCreate():
+								//任务创建
+                                job, err := cronsun.GetJobFromKv(ev.Kv.Key, ev.Kv.Value)
+                                if err != nil {
+                                        log.Warnf("err: %s, kv: %s", err.Error(), ev.Kv.String())
+                                        continue
+                                }
+
+                                job.Init(n.ID, n.Hostname, n.IP)
+                                n.addJob(job, true)
+                        case ev.IsModify():
+								//任务修改
+                                job, err := cronsun.GetJobFromKv(ev.Kv.Key, ev.Kv.Value)
+                                if err != nil {
+                                        log.Warnf("err: %s, kv: %s", err.Error(), ev.Kv.String())
+                                        continue
+                                }
+
+                                job.Init(n.ID, n.Hostname, n.IP)
+                                n.modJob(job)
+                        case ev.Type == client.EventTypeDelete:
+								//任务删除
+                                n.delJob(cronsun.GetIDFromKey(string(ev.Kv.Key)))
+                        default:
+                                log.Warnf("unknown event type[%v] from job[%s]", ev.Type, string(ev.Kv.Key))
+                        }
+                }
+        }
+}
+```
+
+2、`n.watchExcutingProc()`方法<br>
+
+3、`n.watchGroups()`方法<br>
+
+4、`n.watchOnce()`方法<br>
+
+5、`n.watchCsctl`方法<br>
+
+
+##	0x06  总结
 本项目
 
 
-##  0x06	参考
+##  0x07	参考
 -	[分布式任务系统 cronsun](http://bos.itdks.com/786da33844604637be5479c3a16af11e.pdf)
 - [还在用crontab? 分布式定时任务了解一下](https://www.cnblogs.com/kevinwan/p/14497753.html)
 - [分布式crontab架构](https://www.cnblogs.com/aganippe/p/16012588.html)
