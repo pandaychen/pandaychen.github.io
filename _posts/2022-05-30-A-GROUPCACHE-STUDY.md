@@ -22,11 +22,11 @@ goupcache 仅仅是缓存库，业务逻辑需要自己构建。[文章](https:/
 ![bushu](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/groupcache/app-1.png)
 
 如图，客户端使用 `set/get` 指令时，直接操作存取的是数据源（数据库 DB Server）；使用 `cget` 指令，则是从 groupcache 中查找数据。该 demo 封装了 groupcache，有如下组件：
--   Db-server：模拟本地存储
--   front-Server（内置了 groupCache Server）：监听了两个 tcp 端口，一个用于和客户端通信，另一个用于和 groupcache peer 进行通信
+-   DB-server：模拟本地存储
+-   frontend-Server（内置了 groupCache Server）：监听了`2`个 tcp 端口，一个用于和客户端通信，另一个用于和 groupcache peer 进行通信
 -   Client 客户端：模拟客户端请求
 
-其中，客户端和 groupcache 通过 rpc（`net/rpc`）进行通信，而 groupcache 的各个 peer 之间通过 http 协议进行通信。set/get 是直接针对数据存储服务器 DB Server 的存取，cget 是通过一个前端 frontend 的 rpc 接口间接访问 groupcache-server 来获取数据，** 假如 groupcache server 中没有数据，那么就进一步访问数据存储服务器来获取数据，将数据存储在缓存中，并返还给客户端 **。上述的逻辑如下 [代码](https://github.com/capotej/groupcache-db-experiment/blob/master/frontend/frontend.go#L22)：
+其中，客户端和 groupcache 通过 rpc（`net/rpc`）进行通信，而 groupcache 的各个 peer 之间通过 http 协议进行通信。set/get 是直接针对数据存储服务器 DB Server 的存取，cget 是通过一个前端 frontend 的 rpc 接口间接访问 groupcache-server 来获取数据，**假如 groupcache server 中没有数据，那么就进一步访问数据存储服务器来获取数据，将数据存储在缓存中，并返还给客户端**。上述的逻辑如下 [代码](https://github.com/capotej/groupcache-db-experiment/blob/master/frontend/frontend.go#L22)：
 
 ```GO
 func (s *Frontend) Get(args *api.Load, reply *api.ValueResult) error {
@@ -193,6 +193,16 @@ func (s *Frontend) Get(args *api.Load, reply *api.ValueResult) error {
 -   LRU
 
 
+####	再看一个例子
+![ex1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/groupcache/app-2-flow.png)
+
+如上图，有`4`个groupcache节点，当 GET `foo` 请求到 groupcache-1 后
+1.	groupcache-1 先看看自己的 cache 里有没有 `foo`，有的话直接返回
+2.	若无，则检查此`foo`请求是否自己管理，检查的方法是利用consistent一致性算法：一致性hash将所有节点平均打散，然后当 `foo` 进来后用相同hash算法就会得到一个值（就是`foo`这个key最终会落到哪个groupcache节点上），落在哪个区间就属于哪个节点
+	-	若是，去 DataSever 获取，然后本地缓存一份后返回客户端
+	-	否则问 group-2（假设 `foo`由此节点管理) 索要数据，成功返回后 groupcache-1 本地也会缓存一份
+3.	在 `2` 的过程中，所有当前并发请求到 groupcache-1 的 GET `foo` 请求都会阻塞，直到第一个请求返回
+
 ####   基础数据结构及实现
 
 1、byteView<br>
@@ -226,6 +236,17 @@ type Map struct {
 3、[LRU 算法](https://github.com/golang/groupcache/blob/master/lru/lru.go)<br>
 LRU 的作用是，groupcache 没有更新和删除接口，提供了避免空间只增不减的缓存淘汰机制
 
+`Group`结构体的`cache`成员即LRU的Cache实现：
+```golang
+type cache struct {
+	mu         sync.RWMutex
+	nbytes     int64 // of all keys and values
+	lru        *lru.Cache
+	nhit, nget int64
+	nevict     int64 // number of evictions
+}
+```
+
 4、singleflight 机制 <br>
 singleflight 保证同时多个并发请求下，多个同参数的 get 请求只执行一次操作功能
 
@@ -248,7 +269,7 @@ type Group struct {
 	// (amongst its peers) is authoritative. That is, this cache
 	// contains keys which consistent hash on to this process's
 	// peer number.
-	mainCache cache
+	mainCache cache			//lru缓存结构
 
 	// hotCache contains keys/values for which this peer is not
 	// authoritative (otherwise they would be in mainCache), but
@@ -258,7 +279,7 @@ type Group struct {
 	// network card could become the bottleneck on a popular key.
 	// This cache is used sparingly to maximize the total number
 	// of key/value pairs that can be stored globally.
-	hotCache cache
+	hotCache cache	//lru缓存结构
 
 	// loadGroup ensures that each key is only fetched once
 	// (either locally or remotely), regardless of the number of
@@ -312,6 +333,9 @@ type Group struct {
     Stats Stats // 统计数据
 }
 ```
+
+![set-and-get](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/groupcache/groupcache-set-and-get.png)
+
 
 `Getter`定义了一个Cache如何从数据库中获取到相应的数据，比如是通过网络还是本地IO等方法，通常由开发者传入这个回调实现，比如前文例子中的[`stringcache`](https://github.com/capotej/groupcache-db-experiment/blob/master/frontend/frontend.go#L60)；`ctx Context` 是操作的附带信息，`key` 请求的 id，`Sink`抽象了数据载体的行为（类型）。groupcache 提供了一些常用的 Sink 如 `StringSink`，`BytesSliceSink` 和 `ProtoSink`等
 ```GO
@@ -401,9 +425,212 @@ func (h *httpGetter) Get(ctx context.Context, in *pb.GetRequest, out *pb.GetResp
 }
 ```
 
+##	0x04	PeerPicker的实例化结构：HTTPPool分析
+如上一小节所述，groupcache定义了`PeerPicker`，该结构是对节点调度器抽象。调度器主要负责根据管理 key 和节点的一致性映射。本小节分析`HTTPPool`实现
+
+####	HTTPPool结构
+每一个groupcache节点都包含一个`HTTPPool`，此结构关联一个`peers  *consistenthash.Map`结构，里面保存了集群所有节点对应的**一致性hash构建的hashring**
+```GO
+// HTTPPool implements PeerPicker for a pool of HTTP peers.
+type HTTPPool struct {
+	// Context optionally specifies a context for the server to use when it
+	// receives a request.
+	// If nil, the server uses the request's context
+	Context func(*http.Request) context.Context
+
+	// Transport optionally specifies an http.RoundTripper for the client
+	// to use when it makes a request.
+	// If nil, the client uses http.DefaultTransport.
+	Transport func(context.Context) http.RoundTripper
+
+	// this peer's base URL, e.g. "https://example.net:8000"
+	self string
+
+	// opts specifies the options.
+	opts HTTPPoolOptions
+
+	mu          sync.Mutex // guards peers and httpGetters
+	peers       *consistenthash.Map
+	httpGetters map[string]*httpGetter // keyed by e.g. "http://10.0.0.2:8008"
+}
+```
+
+通过指定虚拟节点副本数和hash计算方法对consistent-hash结构进行初始化：
+```go
+p.peers = consistenthash.New(p.opts.Replicas, p.opts.HashFn)
+```
+
+####	HTTPPool.Set方法：更新本node的consistent-hash结构
+```GOLANG
+// Set updates the pool's list of peers.
+// Each peer value should be a valid base URL,
+// for example "http://example.net:8000".
+func (p *HTTPPool) Set(peers ...string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.peers = consistenthash.New(p.opts.Replicas, p.opts.HashFn)
+	p.peers.Add(peers...)
+	p.httpGetters = make(map[string]*httpGetter, len(peers))
+	for _, peer := range peers {
+		p.httpGetters[peer] = &httpGetter{transport: p.Transport, baseURL: peer + p.opts.BasePath}
+	}
+}
+```
+
+#### 	HTTPPool.PickPeer方法：根据一致性hash查找到对应的groupcache节点
+本方法根据一致性hash的原理，以查询的key为计算参数，查找到负责此key存储的groupcache后端节点，然后调用对应的`p.httpGetters[peer]`方法，获取数据并返回
+```GOLANG
+func (p *HTTPPool) PickPeer(key string) (ProtoGetter, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.peers.IsEmpty() {
+		return nil, false
+	}
+	if peer := p.peers.Get(key); peer != p.self {
+		return p.httpGetters[peer], true
+	}
+	return nil, false
+}
+```
+
+####	HTTPPool.ServeHTTP方法：本节点为其他节点提供查询服务的处理方法
+```GOLANG
+func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Parse request.
+	if !strings.HasPrefix(r.URL.Path, p.opts.BasePath) {
+		panic("HTTPPool serving unexpected path: " + r.URL.Path)
+	}
+	parts := strings.SplitN(r.URL.Path[len(p.opts.BasePath):], "/", 2)
+	if len(parts) != 2 {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	groupName := parts[0]
+	key := parts[1]
+
+	// Fetch the value for this group/key.
+	group := GetGroup(groupName)
+	if group == nil {
+		http.Error(w, "no such group: "+groupName, http.StatusNotFound)
+		return
+	}
+	var ctx context.Context
+	if p.Context != nil {
+		ctx = p.Context(r)
+	} else {
+		ctx = r.Context()
+	}
+
+	group.Stats.ServerRequests.Add(1)
+	var value []byte
+	err := group.Get(ctx, key, AllocatingByteSliceSink(&value))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Write the value to the response body as a proto message.
+	body, err := proto.Marshal(&pb.GetResponse{Value: value})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-protobuf")
+	w.Write(body)
+}
+```
+
+####	groupcache节点的客户端功能
+```GOLANG
+type httpGetter struct {
+	transport func(context.Context) http.RoundTripper	//http客户端
+	baseURL   string
+}
+```
+
+####	httpGetter.Get方法：向其他节点请求数据
+本方法对应上面的`HTTPPool.ServeHTTP`方法，可以一起结合来看，是属于http客户端的功能封装
+```GO
+func (h *httpGetter) Get(ctx context.Context, in *pb.GetRequest, out *pb.GetResponse) error {
+	u := fmt.Sprintf(
+		"%v%v/%v",
+		h.baseURL,
+		url.QueryEscape(in.GetGroup()),
+		url.QueryEscape(in.GetKey()),
+	)
+	req, err := http.NewRequest("GET", u, nil)
+	if err != nil {
+		return err
+	}
+	req = req.WithContext(ctx)
+	tr := http.DefaultTransport
+	if h.transport != nil {
+		tr = h.transport(ctx)
+	}
+	res, err := tr.RoundTrip(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("server returned: %v", res.Status)
+	}
+	b := bufferPool.Get().(*bytes.Buffer)
+	b.Reset()
+	defer bufferPool.Put(b)
+	_, err = io.Copy(b, res.Body)
+	if err != nil {
+		return fmt.Errorf("reading response body: %v", err)
+	}
+	err = proto.Unmarshal(b.Bytes(), out)
+	if err != nil {
+		return fmt.Errorf("decoding response body: %v", err)
+	}
+	return nil
+}
+```
+
+##	0x05	核心方法分析
+
+####	核心方法：Group.Get分析
+整个`Group.Get`的流程图如下：
+![get-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/groupcache/groupcache-arch1.png)
+```golang
+func (g *Group) Get(ctx context.Context, key string, dest Sink) error {
+	g.peersOnce.Do(g.initPeers)
+	g.Stats.Gets.Add(1)
+	if dest == nil {
+		return errors.New("groupcache: nil dest Sink")
+	}
+	value, cacheHit := g.lookupCache(key)
+
+	if cacheHit {
+		g.Stats.CacheHits.Add(1)
+		return setSinkView(dest, value)
+	}
+
+	// Optimization to avoid double unmarshalling or copying: keep
+	// track of whether the dest was already populated. One caller
+	// (if local) will set this; the losers will not. The common
+	// case will likely be one caller.
+	destPopulated := false
+	value, destPopulated, err := g.load(ctx, key, dest)
+	if err != nil {
+		return err
+	}
+	if destPopulated {
+		return nil
+	}
+	return setSinkView(dest, value)
+}
+```
 
 ##  0x04    groupcache VS memcache
 Groupcache 库既是服务器，也是客户端，当在本地 groupcache 缓存中没有查找的数据时，通过一致性哈希，查找到该 key 所对应的 peer 服务器，再通过 http 协议，从该 peer 服务器上获取所需要的数据；还有一点就是当多个客户端同时访问 memcache 中不存在的键时，会导致多个客户端从 mysql 获取数据并同时插入 memcache 中，而在相同情况下，groupcache 只会有一个客户端从 mysql 获取数据，其他客户端阻塞，直到第一个客户端获取到数据之后，再返回给多个客户端
+
+##	0x0	思考
+1、HTTPPool的consistent节点能否动态设置？<br>
+比如groupcache节点发生了上/下线，如何实现一致性hash的动态调整？
 
 
 ##  0x05  参考
