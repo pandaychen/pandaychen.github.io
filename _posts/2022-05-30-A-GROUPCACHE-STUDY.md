@@ -13,7 +13,7 @@ tags:
 ##  0x00    前言
 [groupcache](https://github.com/golang/groupcache) 是一个分布式缓存库，支持多节点互备热数据，有良好的稳定性和较高的并发性。测试用例，可以参考此文章：[Playing with groupcache](https://capotej.com/blog/2013/07/28/playing-with-groupcache/)；此外，还可以参考作者的幻灯片：[dl.google.com: Powered by Go](https://go.dev/talks/2013/oscon-dl.slide#63)
 
-先前讨论缓存更新时，分布式场景下需要解决 ** 缓存更新导致的缓存一致性问题 **，而 GroupCache 仅支持外部 get，不支持外部 set/update/delete（当然有内部 Set 操作），自然就没有更新导致的缓存一致性问题。由于 GroupCache 只能 get，不能 update 和 delete，也无法设置过期时间，只能通过 lru 算法淘汰最近最少访问的数据；因而 Groupcache 比较适合那些数据长时间不变更的缓存。典型的应用场景是为下载服务提供静态资源缓存
+先前讨论缓存更新时，分布式场景下需要解决 **缓存更新导致的缓存一致性问题**，而 GroupCache 仅支持外部 get，不支持外部 set/update/delete（当然有内部 Set 操作），自然就没有更新导致的缓存一致性问题。由于 GroupCache 只能 get，不能 update 和 delete，也无法设置过期时间，只能通过 lru 算法淘汰最近最少访问的数据；因而 Groupcache 比较适合那些数据长时间不变更的缓存。典型的应用场景是为下载服务提供静态资源缓存
 
 
 ##  0x01    groupcache-db-experiment 的应用
