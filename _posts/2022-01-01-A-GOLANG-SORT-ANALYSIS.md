@@ -32,7 +32,20 @@ func main() {
 }
 ```
 
+####  case2：查找
+可以利用sort.Search方法对有序数据进行查找，注意要遵循：使用`sort.Search`时，入参条件是根据要查找的序列是升序序列还是降序序列来决定的，如果是升序序列，则传入的条件应该是**>=目标元素值**；如果是降序序列，则传入的条件应该是**<=目标元素值**
+```golang
+func main() {
+        arrInts := []int{13, 35, 57, 79}
+        findPos := sort.Search(len(arrInts), func(i int) bool {
+                //return arrInts[i] >= 35 //true
+                return arrInts[i]==35 //wrong! 输出不符合预期
+        })
 
+        fmt.Println(findPos)
+        return
+}
+```
 
 ##  0x02    分析
 sort 包内部实现了四种基本的排序算法：
@@ -45,3 +58,4 @@ sort 包内部实现了四种基本的排序算法：
 ##  0x0 参考
 -   [一文搞懂Go语言中的切片排序](https://tonybai.com/2020/11/26/slice-sort-in-go/)
 -   [Go sort](https://www.jianshu.com/p/a7317f1a4e50)
+- [Go标准库sort.Search是这样实现的二分查找](https://segmentfault.com/a/1190000040178984)
