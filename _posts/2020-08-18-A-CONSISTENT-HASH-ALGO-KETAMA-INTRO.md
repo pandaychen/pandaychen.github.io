@@ -40,7 +40,7 @@ adam@examle.com => adam
 
 ##  0x01    consistent-hash的原理
 
-####    基础方式
+####    实现步骤
 1、把节点（用户存储kv的服务器节点）通过hash后，映射到一个范围是`[0，2^32]`的环上，比如，采用`ip:port`来命名一个节点，下图有N0~N2共`3`个物理节点：
 
 ![ch-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/consistenthash/consistent-hash-1.png)
@@ -49,11 +49,13 @@ adam@examle.com => adam
 
 ![ch-2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/consistenthash/consistent-hash-2.png	)
 
-3、可优化点：当删除某个服务器时，可能存在该服务器前和后面的直接的key数据没有均衡分布，所以通常引入虚拟节点来优化均衡性问题。因为节点越多，它们在环上的分布就越均匀，使用虚拟节点还可以降低节点之间的负载差异，理论的情况，从`n`个服务器扩容到`n+1`时，只需要重新映射 $\frac{k}{n+1}$ 的key（`k`为hashring的key总数），如下图：
+3、可优化点：当删除某个服务器时，可能存在该服务器前和后面的直接的key数据没有均衡分布，所以通常引入虚拟节点来优化均衡性问题。因为节点越多，它们在环上的分布就越均匀，使用虚拟节点还可以降低节点之间的负载差异。理论的情况，从`n`个服务器扩容到`n+1`时，只需要重新映射 $\frac{k}{n+1}$ 的key（`k`为hashring的key总数），如下图：
 
-![ch-3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/consistenthash/consistent-hash-3.png)
+![ch-3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/consistenthash/consistent-hash-4.png)
 
 此时，查找的逻辑变更为如下：
+-	先根据key，通过固定的hash算法计算得到虚拟节点的value（映射到hashring上的value）
+-	再根据value查找到对应的真实Node节点
 
 ![ch-4](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/consistenthash/consistent-hash-5.png)
 
@@ -62,6 +64,10 @@ adam@examle.com => adam
 
 ####    数据结构
 ketama的管理节点定义如下：
+-	`replicas`：生成虚拟节点的副本数
+-	`ringKeys`：hashring结构（注意，这里的`[]int`必须是有序的，才能表达出hashring的特性）
+-	`hashMap`：存储虚拟节点对应真实节点的映射关系
+
 ```GO
 type KetamaConsistent struct {
 	sync.RWMutex
@@ -73,6 +79,121 @@ type KetamaConsistent struct {
 }
 ```
 
+####	操作方法
+
+1、向consistent-hash中添加真实Node节点<br>
+```GO
+//向CH中添加ServerNode（物理节点）
+func (k *KetamaConsistent) AddSrvNode(srvnodes ...string) {
+	k.Lock()
+	defer k.Unlock()
+
+	for _, node := range srvnodes {
+		//扩容副本
+		for i := 0; i < k.replicas; i++ {
+			//将副本转变为ring上的key
+			key := int(k.hash([]byte(strconv.Itoa(i) + node)))
+
+			if _, ok := k.hashMap[key]; !ok {
+				k.ringKeys = append(k.ringKeys, key)
+			}
+			k.hashMap[key] = node
+			k.serviceMap[node] = append(k.serviceMap[node], strconv.Itoa(key))
+		}
+	}
+
+	//方便二分查找，对ringKeys数组排序
+	sort.Ints(k.ringKeys)
+}
+```
+
+2、从consistent-hash中移除真实Node<br>
+```GOLANG
+//有现网服务器宕机,需要将该server关联的所有key，从ring上移除
+func (k *KetamaConsistent) RemoveSrvNode(nodes ...string) {
+	k.Lock()
+	defer k.Unlock()
+
+	deletedkey_list := make([]int, 0)
+	for _, node := range nodes {
+		for i := 0; i < k.replicas; i++ {
+			key := int(k.hash([]byte(strconv.Itoa(i) + node)))
+
+			if _, ok := k.hashMap[key]; ok {
+				deletedkey_list = append(deletedkey_list, key)
+				delete(k.hashMap, key)
+			}
+		}
+		//删除原有Srv节点的所有映射
+		delete(k.serviceMap, node)
+	}
+
+	if len(deletedkey_list) > 0 {
+		k.deleteKeys(deletedkey_list)
+	}
+}
+```
+
+`k.deleteKeys`为从hashring中移除key数组，实现如下：
+```GO
+//从ring（数组）中移除key，采用二分法较为高效
+func (k *KetamaConsistent) deleteKeys(deletedKeysList []int) {
+
+	//按升序排序
+	sort.Ints(deletedKeysList)
+
+	index := 0
+	count := 0
+	for _, key := range deletedKeysList {
+		for ; index < len(k.ringKeys); index++ {
+			k.ringKeys[index-count] = k.ringKeys[index]
+			if key == k.ringKeys[index] {
+				count++
+				index++
+				break
+			}
+		}
+	}
+
+	for ; index < len(k.ringKeys); index++ {
+		k.ringKeys[index-count] = k.ringKeys[index]
+	}
+
+	k.ringKeys = k.ringKeys[:len(k.ringKeys)-count]
+}
+```
+
+3、根据指定的key，在consistent-hash上查询指定的Node<br>
+```GOLANG
+func (k *KetamaConsistent) GetSrvNode(client_key string) (string, bool) {
+	if k.IsEmpty() {
+		return "", false
+	}
+	k.RLock()
+	defer k.RUnlock() //HERE must use  k.RUnlock() (core if use  k.Unlock() )
+
+	//计算客户端传入的client_key的hash值
+	hashval := int(k.hash([]byte(client_key)))
+
+	//这里隐含了一层意思：k.keys[i] >= hash时，有可能计算出来的hash值比ring上的所有key值都大
+	//为了找个一个Key应该放入哪个服务器，先哈希你的key，得到一个无符号整数, 沿着圆环找到和它相邻的最大的数，这个数对应的服务器就是被选择的服务器
+	//对于靠近 2^32的 key, 因为没有超过它的数字点，按照圆环的原理，选择圆环中的第一个服务器
+	//（通过这个函数，将一个可能不存在与ringkey数组的key（但是一定在环上），修正为离它最近的ringKey数组的key的下标）
+	index := sort.Search(len(k.ringKeys), func(i int) bool {
+		return k.ringKeys[i] >= hashval //if overflow,then returns len(k.ringKeys)
+	})
+
+	if index == len(k.ringKeys) {
+		//it will core if not deal this case
+		index = 0
+	}
+
+	conhash_key := k.ringKeys[index] //
+
+	serveraddr, exsits := k.hashMap[conhash_key]
+	return serveraddr, exsits
+}
+```
 
 ##  0x03    其他consistent-hash
 
@@ -80,7 +201,7 @@ type KetamaConsistent struct {
 可以参考此文：[一致性哈希算法（三）- 跳跃一致性哈希法](https://writings.sh/post/consistent-hashing-algorithms-part-3-jump-consistent-hash)，根据[论文]()中的测试结果， Jump Consistent Hash在执行速度、内存消耗、映射均匀性上比ketama要好。
 
 
-##  0x0 参考
+##  0x04 参考
 -   [一致性 hash 算法 - consistent hashing](https://blog.csdn.net/sparkliang/article/details/5279393)
 -   [一致性哈希 （Consistent Hashing）的前世今生](https://candicexiao.com/consistenthashing/)
 -   [一致性哈希算法（二）- 哈希环法](https://writings.sh/post/consistent-hashing-algorithms-part-2-consistent-hash-ring)
