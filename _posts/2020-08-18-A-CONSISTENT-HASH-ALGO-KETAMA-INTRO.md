@@ -41,7 +41,7 @@ adam@examle.com => adam
 ##  0x01    consistent-hash的原理
 
 ####    实现步骤
-1、把节点（用户存储kv的服务器节点）通过hash后，映射到一个范围是`[0，2^32]`的环上，比如，采用`ip:port`来命名一个节点，下图有N0~N2共`3`个物理节点：
+1、把节点（用户存储kv的服务器节点）通过hash后，映射到一个范围是`[0,2^32]`的环上，比如，采用`ip:port`来命名一个节点，下图有N0~N2共`3`个物理节点：
 
 ![ch-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/consistenthash/consistent-hash-1.png)
 
@@ -60,7 +60,12 @@ adam@examle.com => adam
 ![ch-4](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/consistenthash/consistent-hash-5.png)
 
 ##  0x02    consistent-hash的一种实现：ketama算法
-本小节分析下ketama的一种实现[代码](https://github.com/pandaychen/grpclb2etcd/blob/master/utils/ketama.go)
+本小节分析下ketama的实现[代码](https://github.com/pandaychen/grpclb2etcd/blob/master/utils/ketama.go)，其思路如下：
+
+1.	将server（server的虚拟副本）和key同时映射到hashring上（区间为`[0~2^32]`)
+2.	为了将key映射（放置）到server，找到**第一个比key的映射值大的server的映射值**，则key就映射到这台server上；如果没找到，则映射至第一台server（即在hashring上的首个server位置）
+3.	为了平衡性，可以添加一层虚拟节点到物理节点的映射，将key首先映射到虚拟节点，然后再映射到物理节点
+其中的策略就是将哈希空间固定并分段，段分割点就是新的映射值，将映射到段中间的所有key都映射到段分割点。这样段分割点如果失效，那么只影响映射到该段分割点的key，而不影响其他key，添加段分割点是同样的逻辑
 
 ####    数据结构
 ketama的管理节点定义如下：
