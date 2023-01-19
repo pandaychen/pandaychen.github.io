@@ -33,5 +33,7 @@ Janusec 的特点如下：
 ## 0x0 参考
 -	[数据安全架构与治理](https://doc.janusec.com/download/Janusec-Application-Gateway.pdf)
 -	[零信任下的应用安全网关该如何建设？](https://blog.csdn.net/a59a59/article/details/103763203)
+- [Zero trust system](https://github.com/pritunl/pritunl-zero)
+- [应用管理](https://doc.janusec.com/cn/application-management/)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
