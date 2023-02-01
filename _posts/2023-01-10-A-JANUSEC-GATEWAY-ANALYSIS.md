@@ -29,11 +29,38 @@ Janusec 的特点如下：
 
 ##  0x02  安全防护
 
+####  WAF (Web应用防火墙)
+防止CC攻击
+防SQL注入、XSS等
+防敏感数据泄露
+HTTPS支持，不需要Agent
+
+##  0x03  
+统一的Web化管理
+统一的Web化管理
+Web SSH安全运维
+OAuth2身份认证
+
+
+数字证书保护
+私钥加密存储
+不使用文件形态的证书
+内存解密使用
+
+可扩展的架构
+多网关/负载均衡
+私有化部署
+自动策略同步
+软件形式交付
 
 ## 0x0 参考
 -	[数据安全架构与治理](https://doc.janusec.com/download/Janusec-Application-Gateway.pdf)
 -	[零信任下的应用安全网关该如何建设？](https://blog.csdn.net/a59a59/article/details/103763203)
 - [Zero trust system](https://github.com/pritunl/pritunl-zero)
 - [应用管理](https://doc.janusec.com/cn/application-management/)
+- [阿里云-安全办公平台](https://help.aliyun.com/product/181210.htm?spm=5176.19595751.J_3643955890.5.5cf254a3yqNhOg)
+- [《零信任网络》系列连载 (一)：一文读懂零信任网络](https://www.secrss.com/articles/12798)
+- [中通零信任安全代理ZFE](https://www.secrss.com/articles/29068)
+- [零触碰与零信任](https://res-www.zte.com.cn/mediares/magazine/publication/com_cn/article/202103/10.pdf)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
