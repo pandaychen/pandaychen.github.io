@@ -8,19 +8,20 @@ author:     pandaychen
 catalog:    true
 tags:
     - Kratos
+    - errgroup
 ---
 
 ##  0x00    前言
 问题一：一般在 Golang 中，直接使用 `go` 命令字开启子 goroutine 来实现并发，但是直接 go 的话函数是无法对返回数据进行 error 处理的。（`go` 开启的方法也无返回值）如何实现？
 
-问题二：调用并发的 goroutine 去批量执行 Job，有失败的可能，如何把第一个出错的 goroutine 信息返回给调用端。
+问题二：调用并发的 goroutine 去批量执行 Job，有失败的可能，如何把第一个出错的 goroutine 信息返回给调用端？
 
 
 通常有几种处理方法：
 
-1.  打日志，不推荐
+1、打日志，不推荐<br>
 
-2.  采用 `recovery` 方式捕捉错误，比较常见的处理方法：
+2、采用 `recovery` 方式捕捉错误，比较常见的处理方法<br>
 
 ```golang
 func cal(a int , b int ,n *sync.WaitGroup)  {
@@ -46,7 +47,7 @@ func main() {
 }
 ```
 
-3.	针对协程池场景，使用 channel 作为错误传出的媒介。
+3、针对协程池场景，使用 channel 作为错误传出的媒介<br>
 
 但是有没有更简单更优雅的方法呢？答案就是 `errgroup`。`errgroup` 包为一组子任务的 goroutine 提供了 goroutine 同步及错误取消功能。
 
@@ -81,7 +82,7 @@ if err := g.Wait(); err == nil {
 
 上面这段代码的输出是：
 
-```bash
+```text
 Get http://www.google1.com/: dial tcp: lookup www.google.com1 on 183.60.83.19:53: no such host
 ```
 
@@ -105,7 +106,7 @@ type Group struct {
 -   `err error`： 用来保存第一个错误
 -   `errOnce sync.Once`：`sync.Once` 机制是 `golang` 特有的 Singleton 模式，可以保证它的回调函数只执行一次
 -   `wg sync.WaitGroup`： 等待所有 goroutine 结束的固定轮子
--   `cancel func()`：这里保存的是 contex.WithCancel 返回的 `cancel` 参数，用以取消所有子协程的运行
+-   `cancel func()`：这里保存的是 `contex.WithCancel` 返回的 `cancel` 参数，用以取消所有子协程的运行
 
 总结: `wg` 用来保证在所有 goroutine 结束后返回 `err` 的值。在对 `err` 赋值的时候，只取第一个 `err` 值，这里使用到 `sync.Once` 保证。
 
@@ -137,17 +138,22 @@ func (g *Group) Wait() error {
 ####	Go 方法
 `Go` 方法是多 routine 并发的常用套路了。
 1.	运行用户传入的方法 `f()`
-2.	当 f() 出错时，进入错误处理收集的逻辑，使用 `g.errOnce.DO()` 保证回调函数只会被执行一次
+2.	当 `f()` 出错时，进入错误处理收集的逻辑，使用 `g.errOnce.DO()` 保证回调函数只会被执行一次
 	-	将一个错误保存 `g.err = err`
 	-	如果设置了 `cancel`，那么同时关闭 `g.cancel()`
 
-这里尤其注意：g.errOnce.Do(func() {
-				g.err = err
-				if g.cancel != nil {
-				    // 如果出现第一个 err 为非 nil 就会去调用关闭接口，即关闭后面的所有子 gorourine
-					g.cancel()
-				}
-			})
+这里尤其注意下面这段代码：
+
+```golang
+g.errOnce.Do(func() {
+	g.err = err
+	if g.cancel != nil {
+		// 如果出现第一个 err 为非 nil 就会去调用关闭接口，即关闭后面的所有子 gorourine
+		g.cancel()
+	}
+})
+```
+
 
 ```golang
 func (g *Group) Go(f func() error) {
