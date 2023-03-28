@@ -36,7 +36,7 @@ golang 的闭包有如下特点：
 
 ##  0x01 应用场景
 
-`path/filepath` 包的 `Walk` 方法是典型的应用场景：
+`path/filepath` 包的 `Walk` [方法](https://pkg.go.dev/path/filepath#Walk)是典型的应用场景：
 ```golang
 Walk(root stirng, walkFn WalkFunc) error
 ```
