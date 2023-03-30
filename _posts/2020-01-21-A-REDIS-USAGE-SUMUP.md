@@ -31,6 +31,45 @@ tags:
 >You should try to find the sweet spot of concurrent connections, pipelined requests and your Redis memory.
 
 
+####  Pipeline 的坑
+注意当`pipeClient.Exec`方法返回err时，还需要处理返回值（当`err==redis.Nil`时），看下面批量`HGet`，其他批量操作也是同理，测试代码见[pipeline.go](https://github.com/pandaychen/golang_in_action/blob/master/redis/go-redis/pipeline.go)
+
+```GO
+// PipelineGetHashField 使用pipeline命令获取多个hash key的单个字段
+// keyList，需要获取的hash key列表
+// field 需要获取的字段值
+func PipelineGetHashField(keyList []string,filed string) []string {
+    pipeClient :=client.Pipeline()
+    for _, key := range keyList {
+        pipeClient.HGet(key, filed)
+    }
+    res, err := pipeClient.Exec()
+    if err != nil {
+        if err != redis.Nil {
+            logrus.WithField("key_list", keyList).Errorf("get from redis error:%s", err.Error())
+        }
+        // 注意这里如果某一次获取时出错（常见的redis.Nil），返回的err即不为空
+        // 如果需要处理redis.Nil为默认值，此处不能直接return
+    }
+    valList := make([]string, 0, len(keyList))
+    for index, cmdRes := range res {
+        var val string
+        // 此处断言类型为在for循环内执行的命令返回的类型,上面HGet返回的即为*redis.StringCmd类型
+        // 处理方式和直接调用同样处理即可
+        cmd, ok := cmdRes.(*redis.StringCmd)
+        if ok {
+            val,err = cmd.Result()
+            if err != nil {
+                logrus.WithField("key",keyList[index]).Errorf("get key error:%s",err.Error())
+            }
+        }
+        valList = append(valList, val)
+    }
+    return valList
+}
+```
+
+
 ##  0x02    Pool 连接池使用
 &emsp;&emsp; 连接池的好处，在于避免每次 Redis 操作时，新建 TCP 连接的开销，在要求高性能的场景推荐开启。个人建议，使用的 Redis 客户端库，包含的连接池至少满足下面的特性：
 1.  连接健康检查
@@ -49,10 +88,10 @@ tags:
 
 
 ####  连接池的大小的合理性
-在go-redis中，在高并发的场景下，如果连接池的size设置过小，可能会导致`connection pool timeout`的[报错](https://github.com/go-redis/redis/issues/195)。一般通过如下策略优化：
+在 go-redis 中，在高并发的场景下，如果连接池的 size 设置过小，可能会导致 `connection pool timeout` 的 [报错](https://github.com/go-redis/redis/issues/195)。一般通过如下策略优化：
 - 优化耗时过久的操作
 - 调大连接池的大小
-- 合理设置`PoolTimeout`、`IdleTimeout`、`ReadTimeout`、`MinIdleConns`以及`WriteTimeout`等[参数](https://github.com/go-redis/redis/blob/master/options.go#L31)的值
+- 合理设置 `PoolTimeout`、`IdleTimeout`、`ReadTimeout`、`MinIdleConns` 以及 `WriteTimeout` 等 [参数](https://github.com/go-redis/redis/blob/master/options.go#L31) 的值
 
 如：
 ```golang
@@ -215,7 +254,7 @@ ZSET 即有序集合，通常用来实现延时队列或者排行榜（如销量
 4.  ZSET 的成员 `member` 是唯一的, 但分数 `score` 却允许重复
 5.  ZSET 是通过哈希表实现的，所以添加 / 删除 / 查找的复杂度都是 `O(1)`
 6.  从使用意义来看，`ZSET` 中只有 `score` 值非常重要，`value` 值没有特别的意义，只需要保证它是唯一的就可以
-7.  `ZREMRANGEBYSCORE key startScore endScore`会删除`[startScore,endScore]`区间的数据（包含左右区间）
+7.  `ZREMRANGEBYSCORE key startScore endScore` 会删除 `[startScore,endScore]` 区间的数据（包含左右区间）
 
 ```golang
 127.0.0.1:6379>  zadd key1 1 a 2 b 3 c
@@ -242,18 +281,15 @@ ZSET 即有序集合，通常用来实现延时队列或者排行榜（如销量
 
 ####  消息队列
 主要是利用 Redis 的 List 数据结构，实现 Broker 机制，又细分为三种模式：
-1、List<br>
-
-- 使用生产者：`LPUSH`；消费者：`RBPOP` 或 `RPOP` 模拟队列
-
+1、List：使用生产者：`LPUSH`；消费者：`RBPOP` 或 `RPOP` 模拟队列<br>
 2、Stream<br>
 3、PUB/SUB（订阅）<br>
 
-基于go-redis的pub/sub[测试代码](https://github.com/pandaychen/golang_in_action/tree/master/redis/go-redis/subpub)在此。基于Redis来实现消息的发布与订阅，优点是比较轻量级（适合数据量不大且容忍数据丢失的场景），缺点是消息不能堆积，一旦消费者节点没有消费消息，消息将会丢失。订阅的模型如下：
+基于 go-redis 的 pub/sub[测试代码](https://github.com/pandaychen/golang_in_action/tree/master/redis/go-redis/subpub) 在此。基于 Redis 来实现消息的发布与订阅，优点是比较轻量级（适合数据量不大且容忍数据丢失的场景），缺点是消息不能堆积，一旦消费者节点没有消费消息，消息将会丢失。订阅的模型如下：
 
 ![subpub](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/redis/subpub-1.png)
 
-在项目中，一个可实践的场景是借助Redis的订阅/发布机制和WebSocket长连接结合，实现轻量级的订阅发布和消息实时推送功能。
+在项目中，一个可实践的场景是借助 Redis 的订阅 / 发布机制和 WebSocket 长连接结合，实现轻量级的订阅发布和消息实时推送功能。
 
 ####  延迟队列
 1、实现一思路 <br>
@@ -266,7 +302,8 @@ ZSET 即有序集合，通常用来实现延时队列或者排行榜（如销量
 
 
 ####  滑动窗口
-场景 1、通过 Redis 构建滑动窗口并实现计数器限流 <br>
+
+######  场景 1：通过 Redis 构建滑动窗口并实现计数器限流
 
 比如，系统要限定用户的某个行为在指定的时间里只能允许发生 `N` 次，采用滑动窗口的方式实现。利用 `ZSET` 可实现滑动窗口的机制。如下图所示，使用 ZSET 记录所有用户的访问历史数据，每个 `key` 表示不同的用户，用 `score` 标记时间范围的刻度，`value` 这里无意义，仅用于唯一性考虑。该流程大致流程如下：
 ![redis-rolling](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/redis/redis-rolling-window1.png)
@@ -279,13 +316,13 @@ ZSET 即有序集合，通常用来实现延时队列或者排行榜（如销量
 4.  该方案的 Redis 操作都是针对同一个 `key` 的，使用 `pipeline` 可以显著提升存取效率
 5.  该方案的缺点是要记录时间窗口内所有的行为记录，如果这个并发量很大，会消耗大量的内存
 
-通常分布式场景使用lua脚本实现，如下：
+通常分布式场景使用 lua 脚本实现，如下：
 ```lua
---KEYS[1]:限流对应的key
---ARGV[1]:一分钟之前的时间戳（假设按照1分钟为滑动窗口的区间）
---ARGV[2]:此时此刻的时间戳（score值）
---ARGV[3]:允许通过的最大数量
---ARGV[4]:member名称（随机生成）
+--KEYS[1]: 限流对应的 key
+--ARGV[1]: 一分钟之前的时间戳（假设按照 1 分钟为滑动窗口的区间）
+--ARGV[2]: 此时此刻的时间戳（score 值）
+--ARGV[3]: 允许通过的最大数量
+--ARGV[4]:member 名称（随机生成）
 redis.call('zremrangeByScore', KEYS[1], 0, ARGV[1])
 local res = redis.call('zcard', KEYS[1])
 if (res == nil) or (res < tonumber(ARGV[3])) then
@@ -294,8 +331,8 @@ if (res == nil) or (res < tonumber(ARGV[3])) then
 else return 1 end
 ```
 
-场景2、通过 `EXPIRE` 实现滑动窗口计数器限流<br>
-和上面使用ZSET不同，这里用`EXPIRE`来模拟窗口（注意：仅能使用秒为单位），从某个时间点开始每次请求过来请求数`+=1`，同时判断当前时间窗口内请求数是否超过限制，超过限制则拒绝该请求，然后下个时间窗口开始时计数器清零等待请求，lua代码如下：
+###### 场景 2：通过 `EXPIRE` 实现滑动窗口计数器限流
+和上面使用 `ZSET` 不同，这里用 `EXPIRE` 来模拟窗口（注意：仅能使用秒为单位），从某个时间点开始每次请求过来请求数 `+=1`，同时判断当前时间窗口内请求数是否超过限制，超过限制则拒绝该请求，然后下个时间窗口开始时计数器清零等待请求，lua 代码如下：
 
 ```lua
 -- KYES[1]: 限流器 key
@@ -327,7 +364,7 @@ end
 ##	0x05	参考
 -   [Using pipelining to speedup Redis queries](https://redis.io/topics/pipelining)
 -   [聊聊 GO-REDIS 的一些高级用法](http://vearne.cc/archives/1113)
-- [Redis设计与实现：订阅与发布](https://redisbook.readthedocs.io/en/latest/feature/pubsub.html)
-- [把Redis当作队列来用，真的合适吗？](https://www.51cto.com/article/659208.html)
+- [Redis 设计与实现：订阅与发布](https://redisbook.readthedocs.io/en/latest/feature/pubsub.html)
+- [把 Redis 当作队列来用，真的合适吗？](https://www.51cto.com/article/659208.html)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
