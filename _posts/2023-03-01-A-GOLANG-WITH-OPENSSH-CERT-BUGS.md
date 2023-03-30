@@ -22,7 +22,7 @@ tags:
 
 以上的问题核心点是兼容性问题，主要涉及到三方的兼容性问题：
 1.  golang（`golang.org/x/crypto/ssh`）版本（也有可能是二进制版本），主要影响两块：
-    -   CA 服务端：证书签发（不同 go 版本编译的生成证书的格式可能不一样，如 `1.11` 和 `1.17` 编译出的 CA 服务生成的 `RSA-2048` 证书）
+    -   CA 服务端：证书签发（不同 go 版本编译的生成证书的格式可能不一样，如 `1.11` 和 `1.17` 编译出的 CA 服务生成的 `RSA-2048` 证书，`1.11` 的编译方式为 `GOPATH`，`1.17` 的编译方式为 `GOMOD`）
     -   SSH 客户端：证书解析及登录（主要是解析证书，`1.11` 版本的客户端不一定能解析出 `1.17` 版本生成的证书）
 2.  Openssh：sshd 版本（服务器），对算法、证书类型有兼容性要求
 3.  Openssh：ssh 版本（客户端），包括 `ssh-keygen` 工具的兼容性问题
@@ -48,19 +48,23 @@ ssh-rsa-cert-v01@openssh.com AAAAHHNzaC1yc2EtY2VydC12MDFAb3BlbnNzaC5jb20AAAAgZMQ
 ssh-rsa-cert-v01@openssh.com AAAAHHNzaC1yc2EtY2VydC12MDFAb3BlbnNzaC5jb20AAAAgi/KmRy5YtOjKCUSAitf10h5IdWpACFUDo9NSP6qSs5wAAAADAQABAAAAgQDfGZzMFJ2SzSEAOon6/KXjqx2SRgS2KvBNTb4DI1Yxqa4pBSyJnCcTFNib/HR2JVwN7JleBQom3l176f1mhxC5mlmK36M0Q1/wpLxaS2WKRGXB/MSiaAZZ6GMstxjFbT3VRLCRCrXnNbuITuWjaME1s1C8pXz32VhRUTSmSQJY/QAAAAAAAAAAAAAAAQAAACIwIzIwMDUwMDA2OTIjcGFuZGF5Y2hlbiMxNjc5NjUwNDAzAAAACAAAAARyb290AAAAAGQPXmMAAAAAZCt+YwAAAAAAAACCAAAAFXBlcm1pdC1YMTEtZm9yd2FyZGluZwAAAAAAAAAXcGVybWl0LWFnZW50LWZvcndhcmRpbmcAAAAAAAAAFnBlcm1pdC1wb3J0LWZvcndhcmRpbmcAAAAAAAAACnBlcm1pdC1wdHkAAAAAAAAADnBlcm1pdC11c2VyLXJjAAAAAAAAAAAAAAEXAAAAB3NzaC1yc2EAAAADAQABAAABAQDEO4S/IT4G0A3qq2Ef+8oC4SDokRKDs3hiFK2cy7IXDVXZ7QJh69jRB2jgT/uZ/is931/K0MZzxTpTrd/10HJ1vYNTq1MBADgGk5Mn0Sak3EgHRdqvz18R8dRMMk+9GmZaY1vyljxxIeJPBUEX+KL+mdOD9p+jsjvpdd51GrJ2K8bP4mypM/djzuqLZpMgWVm2ag5G7MKvBZElj4aDX2fmp5aKvBGNNzMSLT7Oa6jOeDiZMtd1dxCyXD0fpJeHJtsiFIGhVgCfAI/sJj0E61vo7hOB6z/x4LesO2ppUCjTCGGWKB/t7UIRT8Rp8QGPh4Uj285J75QjpFFr1FRPGId9AAABFAAAAAxyc2Etc2hhMi0yNTYAAAEAodWzSWaumaululv6bgUpT/3A2Sl+EefVC9JcB6+oOybi26lg+V+wj/HcK2N5TW/Ov//xJGt6+fwNyOE6VFamzkzYAjlAn8OZxredW6xfnWDVsNh8JTHkKAwzgQ24V+U2Yrrl3iQ0S/BOTpMxdRusHyc37dTo1vVeTKbB7VDUKqAf5qxEUI3PtC8gxRDER68mKFHc+vy35vzYRqs/sHLTpYclokUlBmtcwrl8DLWCT1FWGz7iFmfHsvL3VIeGI+piKPg4IhVvaNKpwu8scrrbn1oHLq/CTuiR2h6OAJR3Mg+ULlemZhYsO72gzQ3Oz4rAya7Tftp5soIKH/Oxt2eNdQ==
 ```
 
-| go 客户端版本 | go 证书服务版本 | SSHD 版本 | 登录成功 | 报错 |
+| go 客户端版本 | go 证书服务版本（证书版本） | SSHD 版本 | 登录成功 | 报错 |
 |  -------- |-------- |-------- |-------- |-------- |
 | 1.11 | 1.11 | sshd6.0p1|succ | 无 |
-| 1.11 | 1.17 | sshd6.0p1| | 无 |
-|  1.17| 1.11| sshd6.0p1|  succ | 无 |
+| 1.11 | 1.17 | sshd6.0p1| failed | 见图 1.1 |
+| 1.17| 1.11| sshd6.0p1|  succ | 无 |
+| 1.17| 1.17| sshd6.0p1| failed| 见图 1.2 |
+| 1.11 | 1.11 | sshd7.4p1|succ | 无 |
+| 1.11 | 1.17 | sshd7.4p1| succ | 无 |
+| 1.17| 1.11| sshd7.4p1|  failed | 见图 1.3 |
+| 1.17| 1.17| sshd7.4p1| failed| 见图 1.4 |
+| 1.11 | 1.11 | sshd8.8p1|succ | 无 |
+| 1.11 | 1.17 | sshd8.8p1| succ | 无 |
+| 1.17| 1.11| sshd8.8p1|  failed | 见图 1.5 |
+| 1.17| 1.17| sshd8.8p1| failed| 见图 1.6 |
 
-####    sshd7.4p1 版本测试
 
-
-####    sshd8.8p1 版本测试
-
-
-
+所以，结论是当用户证书使用 `RSA-2048` 时，`go1.11` 版本的兼容性是最好的
 ##      0x02    原因
 
 
