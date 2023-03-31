@@ -19,6 +19,7 @@ tags:
 -   [x/crypto/ssh: "ssh-rsa-cert-v01@openssh.com" does not work for sshd OpenSSH 7.2-7.7 #58371](https://github.com/golang/go/issues/58371)
 -   [x/crypto/ssh: cannot sign certificate with different algorithm #36261](https://github.com/golang/go/issues/36261)
 -   [x/crypto/ssh: rsa-sha2-256/rsa-sha2-512 tracking issue](https://github.com/golang/go/issues/49952#issuecomment-1314152075)
+-   [OpenSSH server compatibility issues #17197](https://github.com/gravitational/teleport/issues/17197)
 
 以上的问题核心点是兼容性问题，主要涉及到三方的兼容性问题：
 1.  golang（`golang.org/x/crypto/ssh`）版本（也有可能是二进制版本），主要影响两块：
@@ -58,13 +59,47 @@ ssh-rsa-cert-v01@openssh.com AAAAHHNzaC1yc2EtY2VydC12MDFAb3BlbnNzaC5jb20AAAAgi/K
 | 1.11 | 1.17 | sshd7.4p1| succ | 无 |
 | 1.17| 1.11| sshd7.4p1|  failed | 见图 1.3 |
 | 1.17| 1.17| sshd7.4p1| failed| 见图 1.4 |
-| 1.11 | 1.11 | sshd8.8p1|succ | 无 |
-| 1.11 | 1.17 | sshd8.8p1| succ | 无 |
-| 1.17| 1.11| sshd8.8p1|  failed | 见图 1.5 |
-| 1.17| 1.17| sshd8.8p1| failed| 见图 1.6 |
+| 1.11 | 1.11 | sshd8.8p1|failed | 见图1.7 |
+| 1.11 | 1.17 | sshd8.8p1| failed | 见图1.8 |
+| 1.17| 1.11| sshd8.8p1|  failed | 见图 1.9 |
+| 1.17| 1.17| sshd8.8p1| succ| 无 |
+
+不过，图1.9的错误，可以通过修改sshd_config配置来解决：
+```TEXT
+CASignatureAlgorithms ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,ssh-ed25519,rsa-sha2-512,rsa-sha2-256,ssh-rsa
+```
+
+
+图1.7/1.8的客户端的报错如下，这个暂时无解：
+```text
+[root@VM_130_14_centos ~]# ./client -addr x.x.x.x:36000
+2023/03/31 13:08:15 dial error: ssh: handshake failed: ssh: no common algorithm for host key; client offered: [ssh-rsa-cert-v01@openssh.com ssh-dss-cert-v01@openssh.com ecdsa-sha2-nistp256-cert-v01@openssh.com ecdsa-sha2-nistp384-cert-v01@openssh.com ecdsa-sha2-nistp521-cert-v01@openssh.com ssh-ed25519-cert-v01@openssh.com ecdsa-sha2-nistp256 ecdsa-sha2-nistp384 ecdsa-sha2-nistp521 ssh-rsa ssh-dss ssh-ed25519], server offered: [rsa-sha2-512 rsa-sha2-256]
+```
+
+####    错误1.1
+[PIC1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.1.png)
+
+####    错误1.2
+[PIC2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.2.png)
+
+####    错误1.3
+[PIC3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.3.png)
+
+####    错误1.4
+[PIC4](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.4.png)
+
+####    错误1.7
+[PIC7](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.7.png)
+
+####    错误1.8
+[PIC8](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.8.png)
+
+####    错误1.9
+[PIC9](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.9.png)
 
 
 所以，结论是当用户证书使用 `RSA-2048` 时，`go1.11` 版本的兼容性是最好的
+
 ##      0x02    原因
 
 
