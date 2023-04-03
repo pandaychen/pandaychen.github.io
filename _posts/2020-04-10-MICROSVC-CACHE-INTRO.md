@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      微服务基础之多级服务缓存（Cache）
+title:      微服务中的缓存（二）：微服务基础之多级服务缓存（Cache）
 subtitle:   微服务应用中缓存的使用策略、问题及解决
 date:       2020-04-10
 author:     pandaychen
@@ -9,6 +9,7 @@ catalog: true
 category:   false
 tags:
     - 缓存
+    - Cache
 ---
 
 
