@@ -77,25 +77,25 @@ CASignatureAlgorithms ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp52
 ```
 
 ####    错误1.1
-[PIC1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.1.png)
+![PIC1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.1.png)
 
 ####    错误1.2
-[PIC2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.2.png)
+![PIC2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.2.png)
 
 ####    错误1.3
-[PIC3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.3.png)
+![PIC3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.3.png)
 
 ####    错误1.4
-[PIC4](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.4.png)
+![PIC4](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.4.png)
 
 ####    错误1.7
-[PIC7](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.7.png)
+![PIC7](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.7.png)
 
 ####    错误1.8
-[PIC8](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.8.png)
+![PIC8](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.8.png)
 
 ####    错误1.9
-[PIC9](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.9.png)
+![PIC9](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.9.png)
 
 
 所以，结论是当用户证书使用 `RSA-2048` 时，`go1.11` 版本的兼容性是最好的
