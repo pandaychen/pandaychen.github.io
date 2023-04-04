@@ -20,6 +20,7 @@ tags:
 -   [x/crypto/ssh: cannot sign certificate with different algorithm #36261](https://github.com/golang/go/issues/36261)
 -   [x/crypto/ssh: rsa-sha2-256/rsa-sha2-512 tracking issue](https://github.com/golang/go/issues/49952#issuecomment-1314152075)
 -   [OpenSSH server compatibility issues #17197](https://github.com/gravitational/teleport/issues/17197)
+-   [x/crypto/ssh: support RSA SHA-2 host key signatures #37278](https://github.com/golang/go/issues/37278)
 
 以上的问题核心点是兼容性问题，主要涉及到三方的兼容性问题：
 1.  golang（`golang.org/x/crypto/ssh`）版本（也有可能是二进制版本），主要影响两块：

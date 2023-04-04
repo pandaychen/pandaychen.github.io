@@ -10,7 +10,7 @@ category:   false
 tags:
     - 缓存
     - Redis
-    - Mysql
+    - MySQL
     - Cache
     - Go-Zero
 ---
