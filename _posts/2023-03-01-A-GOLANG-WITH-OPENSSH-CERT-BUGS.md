@@ -29,7 +29,7 @@ tags:
 2.  Openssh：sshd 版本（服务器），对算法、证书类型有兼容性要求
 3.  Openssh：ssh 版本（客户端），包括 `ssh-keygen` 工具的兼容性问题
 
-##      0x01    兼容性测试
+##      0x01    RSA证书：兼容性测试
 现网使用的 go 版本主要是：`go1.11` 以及 `go.17`，主要选择两种用户证书类型：`RSA-2048`、`ED25519`，CA 根证书的类型为 `RSA-2048`，sshd 版本选择三种：
 -   `OpenSSH_6.0p1, OpenSSL 1.0.0-fips 29 Mar 2010`
 -   `OpenSSH_7.4p1, OpenSSL 1.0.2k-fips  26 Jan 2017`
@@ -39,14 +39,14 @@ tags:
 
 `RSA-2048` 用户证书（1.11 版本服务端签发）：
 
-```text
+```
 ssh-rsa-cert-v01@openssh.com AAAAHHNzaC1yc2EtY2VydC12MDFAb3BlbnNzaC5jb20AAAAgZMQk5qch3lX21XXtjrx8aBuBPlM8qTG17S6jJmMOVogAAAADAQABAAABAQCYHr8nSSO3iJzyUYv2ZAGx3m+jB4dv6EuRWP5MMVaSGpnQxaiWq9AJC6iQ61o44BMCvtidlPfk3crgr9MHTifWkaMQyEwpa3vmkXKBIMTYEVJOp3bAWVhl9ialdfzGQZKqE21LqCMQ5WmBOZMcpk3ntctpm4tb7ua7VK5E+4oOlA4/vZkZX5u2kzLJaAKblJNR6GEAMU7npraz0whZly27XS8DQEKMwWsW2IlVREyehKT83ji5t58a/p9uHISq1aM1siUmvvW6AVJ50x35KO8/HF9Lyo5HUh0scqmXJVL8vmMl6kHTcMVze6WInyPtEmbPQOq8tM+NGYR5E4VUYiklAAAAAAAAAAAAAAABAAAALzEwMDYjMTUwLjEwOS4xMTguMTYjMzYwMDEjcGFuZGF5Y2hlbiNyb290I25vdXNlAAAACAAAAARyb290AAAAAGOrwY8AAAAAZJkPjwAAAAAAAACCAAAAFXBlcm1pdC1YMTEtZm9yd2FyZGluZwAAAAAAAAAXcGVybWl0LWFnZW50LWZvcndhcmRpbmcAAAAAAAAAFnBlcm1pdC1wb3J0LWZvcndhcmRpbmcAAAAAAAAACnBlcm1pdC1wdHkAAAAAAAAADnBlcm1pdC11c2VyLXJjAAAAAAAAAAAAAAEXAAAAB3NzaC1yc2EAAAADAQABAAABAQDBzOZVYg9fUyWGCJBLvWRMaW3BWexjNcPoQ1sOY2zHNliEnI9Ui87XpTTmxltbkToeBBZarBrNXlaFJsY1ZZ9WUh8HWo8T54iY8odNKzCS9MIuZkgT8l/LJzt54zI+XXXcwqEm0QvmRmnEsLmBC1Td7n2q0f87nFoTCFXHNd6EPdAi3G8IU2uxldbswu/xCp8yQw1OqjzSzt9jpuTyr10PQmV8uDu3H06IeUfQiFgCSI7kwumV9alIIP4rhhqz4nySF+mC83Y5r/AoKAD3rEPu/rfmVN5V6jt1wz3WMLWbIDI7FByDupCAcK8Tr901bAlh8mTBD5Y2VTB/luczebm1AAABDwAAAAdzc2gtcnNhAAABAJQbKtw8n2YJnQjezZ8Qv1ogi2GH+nUslkoYYhd0WptNxGDmaSCm/bdnmaQ3+9IczUe7Vieklw4aFYXfn2qeHFEKAEM92TKnxktivlS7tQok3WerKxMBKSCO0yLe3qHVVVGDBBtsz3RJvLnplDRQqA1CJ+IEgcWsHIIqKlVYQZDsb7fwH2Uf8EVN1E9V3BhxR6AcyfbyVCPegBKy/muQHNsOzDmmOaMQEDLLOZDp2sHLdQMSRXYeBhcAN7igbJvejVcbtznxnxl9iQwiDbuaVggSAj0TpplE8rE9G0fosowhiq4qztAPqaOnuKzhqnHQtI8RABnlJ7t8xrQmyriSakc=
 ```
 
 
 `RSA-2048` 用户证书（1.17 版本服务端签发）：
 
-```text
+```
 ssh-rsa-cert-v01@openssh.com AAAAHHNzaC1yc2EtY2VydC12MDFAb3BlbnNzaC5jb20AAAAgi/KmRy5YtOjKCUSAitf10h5IdWpACFUDo9NSP6qSs5wAAAADAQABAAAAgQDfGZzMFJ2SzSEAOon6/KXjqx2SRgS2KvBNTb4DI1Yxqa4pBSyJnCcTFNib/HR2JVwN7JleBQom3l176f1mhxC5mlmK36M0Q1/wpLxaS2WKRGXB/MSiaAZZ6GMstxjFbT3VRLCRCrXnNbuITuWjaME1s1C8pXz32VhRUTSmSQJY/QAAAAAAAAAAAAAAAQAAACIwIzIwMDUwMDA2OTIjcGFuZGF5Y2hlbiMxNjc5NjUwNDAzAAAACAAAAARyb290AAAAAGQPXmMAAAAAZCt+YwAAAAAAAACCAAAAFXBlcm1pdC1YMTEtZm9yd2FyZGluZwAAAAAAAAAXcGVybWl0LWFnZW50LWZvcndhcmRpbmcAAAAAAAAAFnBlcm1pdC1wb3J0LWZvcndhcmRpbmcAAAAAAAAACnBlcm1pdC1wdHkAAAAAAAAADnBlcm1pdC11c2VyLXJjAAAAAAAAAAAAAAEXAAAAB3NzaC1yc2EAAAADAQABAAABAQDEO4S/IT4G0A3qq2Ef+8oC4SDokRKDs3hiFK2cy7IXDVXZ7QJh69jRB2jgT/uZ/is931/K0MZzxTpTrd/10HJ1vYNTq1MBADgGk5Mn0Sak3EgHRdqvz18R8dRMMk+9GmZaY1vyljxxIeJPBUEX+KL+mdOD9p+jsjvpdd51GrJ2K8bP4mypM/djzuqLZpMgWVm2ag5G7MKvBZElj4aDX2fmp5aKvBGNNzMSLT7Oa6jOeDiZMtd1dxCyXD0fpJeHJtsiFIGhVgCfAI/sJj0E61vo7hOB6z/x4LesO2ppUCjTCGGWKB/t7UIRT8Rp8QGPh4Uj285J75QjpFFr1FRPGId9AAABFAAAAAxyc2Etc2hhMi0yNTYAAAEAodWzSWaumaululv6bgUpT/3A2Sl+EefVC9JcB6+oOybi26lg+V+wj/HcK2N5TW/Ov//xJGt6+fwNyOE6VFamzkzYAjlAn8OZxredW6xfnWDVsNh8JTHkKAwzgQ24V+U2Yrrl3iQ0S/BOTpMxdRusHyc37dTo1vVeTKbB7VDUKqAf5qxEUI3PtC8gxRDER68mKFHc+vy35vzYRqs/sHLTpYclokUlBmtcwrl8DLWCT1FWGz7iFmfHsvL3VIeGI+piKPg4IhVvaNKpwu8scrrbn1oHLq/CTuiR2h6OAJR3Mg+ULlemZhYsO72gzQ3Oz4rAya7Tftp5soIKH/Oxt2eNdQ==
 ```
 
@@ -62,7 +62,7 @@ ssh-rsa-cert-v01@openssh.com AAAAHHNzaC1yc2EtY2VydC12MDFAb3BlbnNzaC5jb20AAAAgi/K
 | 1.17| 1.17| sshd7.4p1| failed| 见图 1.4 |
 | 1.11 | 1.11 | sshd8.8p1|failed | 见图1.7 |
 | 1.11 | 1.17 | sshd8.8p1| failed | 见图1.8 |
-| 1.17| 1.11| sshd8.8p1|  failed | 见图 1.9 |
+| 1.17| 1.11| sshd8.8p1|  failed | 见图 1.9（可解决） |
 | 1.17| 1.17| sshd8.8p1| succ| 无 |
 
 不过，图1.9的错误，可以通过修改sshd_config配置来解决：
@@ -101,7 +101,52 @@ CASignatureAlgorithms ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp52
 
 所以，结论是当用户证书使用 `RSA-2048` 时，`go1.11` 版本的兼容性是最好的
 
-##      0x02    原因
+####    不兼容的原因
+
+
+##      0x02    ED25519证书：兼容性测试
+[ED25519](https://ed25519.cr.yp.to/)证书的使用版本要求SSHD>=6.5，[来源](http://www.openssh.com/txt/release-6.5)；Ed25519 的安全性在 RSA 2048 与 RSA 4096 之间，且性能在数十倍以上。
+
+PS：在 Go 1.13 之前，`crypto/ed25519` 包不是 Go 语言标准库，导入方式为：
+```GO
+import golang.org/x/crypto/ed25519
+```
+
+在 Go 1.13 及以后的版本中，`crypto/ed25519` 包已经被纳入标准库中，导入方式为：
+```GO
+import "crypto/ed25519"
+```
+
+
+####    兼容性测试
+
+`ED25519` 用户证书（1.11 版本服务端签发）：
+
+```
+ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAIAFIKJh9OoK9DH5DZo3bQWJPIy905pqcw3mwxvCFtYHiAAAAINKD1QyP6+ocmCZE6UTGNFDnqW0QPhDZvHCFRlPpTcGlAAAAAAAAAAEAAAABAAAADm1lQGV4YW1wbGUuY29tAAAACAAAAARyb290AAAAAGRBMowAAAAAZEPVjAAAAAAAAACCAAAAFXBlcm1pdC1YMTEtZm9yd2FyZGluZwAAAAAAAAAXcGVybWl0LWFnZW50LWZvcndhcmRpbmcAAAAAAAAAFnBlcm1pdC1wb3J0LWZvcndhcmRpbmcAAAAAAAAACnBlcm1pdC1wdHkAAAAAAAAADnBlcm1pdC11c2VyLXJjAAAAAAAAAAAAAAEXAAAAB3NzaC1yc2EAAAADAQABAAABAQDBzOZVYg9fUyWGCJBLvWRMaW3BWexjNcPoQ1sOY2zHNliEnI9Ui87XpTTmxltbkToeBBZarBrNXlaFJsY1ZZ9WUh8HWo8T54iY8odNKzCS9MIuZkgT8l/LJzt54zI+XXXcwqEm0QvmRmnEsLmBC1Td7n2q0f87nFoTCFXHNd6EPdAi3G8IU2uxldbswu/xCp8yQw1OqjzSzt9jpuTyr10PQmV8uDu3H06IeUfQiFgCSI7kwumV9alIIP4rhhqz4nySF+mC83Y5r/AoKAD3rEPu/rfmVN5V6jt1wz3WMLWbIDI7FByDupCAcK8Tr901bAlh8mTBD5Y2VTB/luczebm1AAABDwAAAAdzc2gtcnNhAAABAHixVxHblCxKRxinG9w4ocQtpqrgn9BgjA3HarjPiwV6b1G/39YRFpMOlgiY9+bNpBWBxNPuUKIRzYR9g37prlmowsb7Hk2US8GQf+UJYMVS8RhCMWDt7Bh0F45kBw4ClHMTLCHILvCWx6JpcuKc8/OEetzhL48y296Z4uWIpiDJyOI28l1GhiROdbRZH8OOx10YzvM1Nj/CRnAP0HAcGXa1r050h7tY/X/C/8beQk4guYdH7xPUTq6Xnkanccx3cwlcyZy7V1wDCwRXwGec8VFbEZDSDL0kC0supU5kBPTe/zvxm1WAL2cuxNPx3wjdrdaPy1OLygTosAVN2DRsqj0= 
+```
+
+
+`ED25519` 用户证书（1.17 版本服务端签发）：
+
+```
+ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAIG0DBY0vjF53ufNKHsSVSU9IV0a6KAOunlyn+YEB82RxAAAAINKD1QyP6+ocmCZE6UTGNFDnqW0QPhDZvHCFRlPpTcGlAAAAAAAAAAEAAAABAAAADm1lQGV4YW1wbGUuY29tAAAACAAAAARyb290AAAAAGRBNJAAAAAAZEPXkAAAAAAAAACCAAAAFXBlcm1pdC1YMTEtZm9yd2FyZGluZwAAAAAAAAAXcGVybWl0LWFnZW50LWZvcndhcmRpbmcAAAAAAAAAFnBlcm1pdC1wb3J0LWZvcndhcmRpbmcAAAAAAAAACnBlcm1pdC1wdHkAAAAAAAAADnBlcm1pdC11c2VyLXJjAAAAAAAAAAAAAAEXAAAAB3NzaC1yc2EAAAADAQABAAABAQDBzOZVYg9fUyWGCJBLvWRMaW3BWexjNcPoQ1sOY2zHNliEnI9Ui87XpTTmxltbkToeBBZarBrNXlaFJsY1ZZ9WUh8HWo8T54iY8odNKzCS9MIuZkgT8l/LJzt54zI+XXXcwqEm0QvmRmnEsLmBC1Td7n2q0f87nFoTCFXHNd6EPdAi3G8IU2uxldbswu/xCp8yQw1OqjzSzt9jpuTyr10PQmV8uDu3H06IeUfQiFgCSI7kwumV9alIIP4rhhqz4nySF+mC83Y5r/AoKAD3rEPu/rfmVN5V6jt1wz3WMLWbIDI7FByDupCAcK8Tr901bAlh8mTBD5Y2VTB/luczebm1AAABFAAAAAxyc2Etc2hhMi01MTIAAAEAKHWJmja0TnuD1NmdPbWSZciYj5j40sBPDXZimtMAMblFe2CVIZOQYZIzbRH9Zl9Uo2Kgp6xFCsJvo28ZnE3F/eoyNprx3T5pRFCGHNp0Keo8LGAC9jn5iqSegeLTxA8eF2nxP1g6PMzGiyz01n3Kp6ocQqPaMiAEJY5gnd6UvhPfV9MlSgZCTbqjxL1Pl/JivE4RbQRpQtly2xjParuhubH7P8kZvHbF6PLRbJf6mKdCp7yYLfNKJO5ujeOVct447TgiPXfP85zS4OMNEFhYD253wrn0LCBqiiTvNh2mlfO0GiZ+bC0BTwRh61CK05XsLedZnjlviZ6+gSbNwkmgmg== 
+```
+
+| go 客户端版本 | go 证书服务版本（证书版本） | SSHD 版本 | 登录成功 | 报错 |
+|  -------- |-------- |-------- |-------- |-------- |
+| 1.11 | 1.11 | sshd6.0p1|failed | 不支持 |
+| 1.11 | 1.17 | sshd6.0p1| failed | 不支持 |
+| 1.17| 1.11| sshd6.0p1|  failed | 不支持 |
+| 1.17| 1.17| sshd6.0p1| failed| 不支持 |
+| 1.11 | 1.11 | sshd7.4p1|succ |  |
+| 1.11 | 1.17 | sshd7.4p1| succ |  |
+| 1.17| 1.11| sshd7.4p1|  succ |  |
+| 1.17| 1.17| sshd7.4p1| succ|  |
+| 1.11 | 1.11 | sshd8.8p1|failed | |
+| 1.11 | 1.17 | sshd8.8p1| failed |  |
+| 1.17| 1.11| sshd8.8p1|  failed | 见图 1.9（同RSA） |
+| 1.17| 1.17| sshd8.8p1| succ| 无 |
 
 
 ##  0x03    总结
@@ -109,5 +154,6 @@ CASignatureAlgorithms ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp52
 ##  0x04    参考
 -   [Use RSA CA Certificates with OpenSSH 8.2](https://ibug.io/blog/2020/04/ssh-8.2-rsa-ca/)
 -   [SSH Certificates: How Do OpenSSH Certificates Compare to X.509?](https://goteleport.com/blog/x509-vs-openssh-certificates/)
+-   [How to secure your SSH server with public key Ed25519 Elliptic Curve Cryptography](https://cryptsus.com/blog/how-to-secure-your-ssh-server-with-public-key-elliptic-curve-ed25519-crypto.html)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
