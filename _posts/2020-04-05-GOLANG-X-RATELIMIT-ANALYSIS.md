@@ -364,5 +364,7 @@ func (r *Reservation) CancelAt(now time.Time) {
 ##  0x07  参考
 -	[time/rate 源码](https://github.com/golang/time/blob/master/rate/rate.go)
 -	[Golang 标准库限流器 time/rate 实现剖析](https://www.cyhone.com/articles/analisys-of-golang-rate/)
+-	[系统库golang.org/x/time/rate 限频器bug](https://cloud.tencent.com/developer/article/1890999)
+
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
