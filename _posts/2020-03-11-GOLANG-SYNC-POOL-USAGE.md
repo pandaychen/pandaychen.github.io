@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      Golang 中的 sync.Pool 使用与实现分析
+title:      Golang 中的 sync.Pool 使用
 subtitle:   调优系列：Golang 优化系列之临时对象池
 date:       2020-03-11
 author:     pandaychen
@@ -9,10 +9,14 @@ catalog: true
 category:   false
 tags:
     - Golang
+    - Pool
 ---
 
 ##  0x00	前言
-当多个 goroutine 都需要创建同⼀个对象的时候，如果 goroutine 数过多，导致对象的创建数⽬剧增，进⽽导致 GC 压⼒增大。形成 **并发⼤ --> 占⽤内存⼤ -->GC 缓慢 --> 处理并发能⼒降低 --> 并发更⼤** 这样的恶性循环。 在这个时候，需要有⼀个对象池，每个 goroutine 不再⾃⼰单独创建对象，⽽是从对象池中获取出⼀个对象。`sync.Pool` 本质上就是池化的机制，用来减少 GC 和 malloc 的时间。它可以用来**保存一组可独立访问的临时对象**。注意这里的临时这两个字，它说明 pool 中的对象可能会被 gc 回收。
+
+当多个 goroutine 都需要创建同⼀个对象的时候，如果 goroutine 数过多，导致对象的创建数⽬剧增，进⽽导致 GC 压⼒增大。形成并发⼤ `-->` 占⽤内存⼤ `-->` GC 缓慢 `-->` 处理并发能⼒降低 `-->` 并发更⼤这样的恶性循环。 在这个时候，需要有⼀个对象池，每个 goroutine 不再⾃⼰单独创建对象，⽽是从对象池中获取出⼀个对象。`sync.Pool` 本质上就是池化的机制，用来减少 GC 和 malloc 的时间。它可以用来 **保存一组可独立访问的临时对象**。注意这里的临时这两个字，它说明 pool 中的对象可能会被 GC 回收。
+
+sync.Pool 是 Golang 内置的对象池技术，可用于缓存临时对象，避免因频繁建立临时对象所带来的消耗以及对 GC 造成的压力。
 
 先引入一个普通的场景，http 解响应包，在高并发下，`data []byte` 每次都大概率从 heap 上分配新内存，而 `data` 在请求完毕后就成为了垃圾数据等待 gc；即在并发量、请求体都很大的情况下，内存就会迅速被占满，这种情况就非常适合使用 `sync.Pool` 进行优化
 
@@ -50,7 +54,7 @@ func handler(writer http.ResponseWriter, req *http.Request) {
 var pool *sync.Pool
 
 type Person struct {
-        Name string
+    Name string
 }
 
 func initPool() {
@@ -67,12 +71,19 @@ func main() {
 	p := pool.Get().(*Person)
 	p.Name = "first"
 
-	// 需要在 Put 前，清楚 p 的各个成员，这里为了展示，就不清除了
+	// 需要在 Put 前，清除 p 的各个成员，这里为了展示，就不清除了
+	// 放回对象池中以供其他goroutine调用
 	pool.Put(p)
 	fmt.Println("Get from pool:", pool.Get().(*Person))
 	fmt.Println("Pool is empty", pool.Get().(*Person))
 }
 ```
+
+使用简单易懂：
+
+1.	初始化一个`sync.Pool`对象，并初始化`New`匿名函数，当对象池中没有对象时调用
+2.	通过`Get()`从池子里获取对象，进行业务逻辑处理
+3.	使用完后利用`Put()`把对象放回池子里，供后续的goroutine调用
 
 ####	bytes.Buffer
 `Get` 方法会返回 Pool 中已存在的 `*bytes.Buffer`，否则将调用 `New` 方法来初始化新的 `*bytes.Buffer`，但在缓冲区使用后，必须将其重置并放回 Pool 中
@@ -131,8 +142,9 @@ func main(){
 }
 ```
 
-####	[]byte多级字节池
-[多级字节池](https://github.com/pandaychen/goes-wrapper/blob/master/pypool/buffer_pool.go)的实现，预先生成不同size的`sync.Pool`：
+####	[]byte 多级字节池
+[多级字节池](https://github.com/pandaychen/goes-wrapper/blob/master/pypool/buffer_pool.go) 的实现，预先生成不同 size 的 `sync.Pool`：
+
 ```golang
 var (
 	bufPool32k     sync.Pool
@@ -149,12 +161,32 @@ var (
 
 ####	标准库 fmt 中的应用
 Go 标准库也大量使用了 `sync.Pool`，例如 `fmt` 和 `encoding/json` 等；下面是 `fmt.Printf` 的实现。从代码分析可知，`fmt.Printf` 的调用是非常频繁的，利用 `sync.Pool` 复用 `pp` 对象能够极大地提升性能，减少内存占用，同时降低 GC 压力。注意下面 `Put` 放回前，对 `buf` 清空的技巧 `p.buf = p.buf[:0]`
+
 ```GOLANG
 // go 1.13.6
 
+// Use simple []byte instead of bytes.Buffer to avoid large dependency.
+type buffer []byte
+
+func (b *buffer) write(p []byte) {
+	*b = append(*b, p...)
+}
+
+func (b *buffer) writeString(s string) {
+	*b = append(*b, s...)
+}
+
+func (b *buffer) writeByte(c byte) {
+	*b = append(*b, c)
+}
+
+func (bp *buffer) writeRune(r rune) {
+	*bp = utf8.AppendRune(*bp, r)
+}
+
 // pp is used to store a printer's state and is reused with sync.Pool to avoid allocations.
 type pp struct {
-    buf buffer
+    buf buffer		//buffer定义见上
     //...
 }
 
@@ -200,6 +232,24 @@ func Printf(format string, a ...interface{}) (n int, err error) {
 }
 ```
 
+从上面的代码分析可知，`sync.Pool`被用来存储`pp`结构体，结构体中的`buf buffer`成员，是一个变长的slice，因而`pp`在使用完毕后，被放回Pool中备其他调用方复用，以此来减少内存的申请和释放次数
+
+特别注意上面`free`的实现中的一个细节，即若slice cap大于某一个阈值的buffer，则对此对象不做放回处理（等待OS层面的GC），以此防止出现大内存不会释放的情况：
+```golang
+//fmt
+func (p *pp) free() {
+    if cap(p.buf) > 64<<10 {	//64k
+        return
+    }
+
+    p.buf = p.buf[:0]
+    p.arg = nil
+    p.value = reflect.Value{}
+    ppFree.Put(p)
+}
+```
+
+
 ##	0x01	sync.Pool 的实现
 本小节，分析下 `sync.Pool` 的源码。
 
@@ -235,6 +285,7 @@ golang 中 `sync.Pool` 的目的是缓存已分配但未使用的对象，以便
 -	`sync.Pool` 主要是为了对象的复用，避免重复创建、销毁。将暂时不用的对象缓存起来，待下次需要的时候直接使用，不用再次经过内存分配，复用对象的内存，减轻 GC 的压力
 -	是协程安全的，`Get` 和 `Put` 操作无需加锁
 -	只适合暂时缓存，不适合长期存储数据；因为 GC 时会清除 `sync.Pool` 的数据，存储在 pool 中的对象在不被通知的情况下随时可能被清理掉，所以 `sync.Pool` 并不适应用于线程池、DB 连接池之类的存储
+-	当对象被`Put`放回`sync.Pool`时，不应当还有其他异步操作对放回的对象进行操作，防止放生竞争
 
 ##  0x04	参考
 -   [Go 1.13 中 sync.Pool 是如何优化的?](https://colobu.com/2019/10/08/how-is-sync-Pool-improved-in-Go-1-13/)
