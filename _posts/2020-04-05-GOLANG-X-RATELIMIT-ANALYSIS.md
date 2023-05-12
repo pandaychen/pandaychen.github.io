@@ -149,6 +149,7 @@ func (lim *Limiter) advance(now time.Time) (newNow time.Time, newLast time.Time,
 	// token 取 burst 最大值，因为显然 token 数不能大于桶容量
 	tokens := lim.tokens + delta
 	if burst := float64(lim.burst); tokens > burst {
+		//burst为令牌桶的设计容量，tokens不能超过此值
 		tokens = burst
 	}
 
@@ -184,7 +185,7 @@ func (lim *Limiter) reserveN(now time.Time, n int, maxFutureReserve time.Duratio
 		}
 	}
 
-	// 通过 advance 拿到 now 到 lim.last 之前跨度一共可用的 token 数（<= 令牌桶个数）
+	// 通过 advance 拿到 now 到 lim.last 之间跨度一共可用的 token 数（<= 令牌桶个数）
 	now, last, tokens := lim.advance(now)
 
 	// Calculate the remaining number of tokens resulting from the request.
@@ -361,7 +362,153 @@ func (r *Reservation) CancelAt(now time.Time) {
 }
 ```
 
-##  0x07  参考
+##	0x07	细节：x/time/rate的Bug
+
+
+####	bug复现
+
+`time/rate`在并发goroutine运行下存在bug，参考[关联issue](https://github.com/golang/time/pull/17)，版本`go version go1.17 linux/amd64`，参考如下代码：
+```go
+func main() {
+        var succCount, failCount int64
+        //limit := rate.Every(100 * time.Millisecond)
+        //burst := 1
+        limiter := rate.NewLimiter(10, 1)
+        start := time.Now()
+        for i := 0; i < 5000; i++ {
+                go func() {
+                        for {
+                                if limiter.Allow() {
+                                        atomic.AddInt64(&succCount, 1)
+                                } else {
+                                        atomic.AddInt64(&failCount, 1)
+                                }
+                        }
+                }()
+        }
+
+        time.Sleep(2 * time.Second)
+        elapsed := time.Since(start)
+        fmt.Println("elapsed=", elapsed, "succCount=", atomic.LoadInt64(&succCount), "failCount=", atomic.LoadInt64(&failCount))
+}
+```
+
+上述这段代码的输出如下，未达到限流目的：
+```
+[root@VM_120_245_centos ~]# ./rate 
+elapsed= 2.009389403s succCount= 27905 failCount= 4738594
+```
+
+####	bug原因
+回到上面的`advance`方法及其返回参数（获取`now`到`lim.last`之间的令牌数，不超过`burst`令牌桶的大小）：
+```GO
+// advance calculates and returns an updated state for lim resulting from the passage of time.
+// lim is not changed.
+func (lim *Limiter) advance(now time.Time) (newNow time.Time, newLast time.Time, newTokens float64) {
+	last := lim.last
+	if now.Before(last) {
+		last = now
+	}
+
+	// Avoid making delta overflow below when last is very old.
+	maxElapsed := lim.limit.durationFromTokens(float64(lim.burst) - lim.tokens)
+	elapsed := now.Sub(last)
+	if elapsed > maxElapsed {
+		elapsed = maxElapsed
+	}
+
+	// Calculate the new number of tokens, due to time that passed.
+	delta := lim.limit.tokensFromDuration(elapsed)
+	tokens := lim.tokens + delta
+	if burst := float64(lim.burst); tokens > burst {
+		tokens = burst
+	}
+
+	//2023-05-12 18:47:59.119059031 +0800 CST m=+1.003917034 2023-05-12 18:47:58.115177368 +0800 CST m=+0.000035321 1
+	return now, last, tokens
+}
+```
+
+-	`newNow`：直接返回了未修改参数，貌似无意义
+-	`newLast`：是返回上次tokens被更新的时间点，如果当前传入的时间点是在上次更新的时间点之前的话同样会返回当前传入的时间点；
+-	`tokens`： 返回根据当前的时间点与上次更新的时间点之间的流逝时间转换成token数量，为float类型
+
+再列举下上面的`reserveN`方法：
+```GO
+// Allow is shorthand for AllowN(time.Now(), 1).
+func (lim *Limiter) Allow() bool {
+	return lim.AllowN(time.Now(), 1)
+}
+
+// AllowN reports whether n events may happen at time now.
+// Use this method if you intend to drop / skip events that exceed the rate limit.
+// Otherwise use Reserve or Wait.
+func (lim *Limiter) AllowN(now time.Time, n int) bool {
+	return lim.reserveN(now, n, 0/*参数为0*/).ok
+}
+
+// reserveN is a helper method for AllowN, ReserveN, and WaitN.
+// maxFutureReserve specifies the maximum reservation wait duration allowed.
+// reserveN returns Reservation, not *Reservation, to avoid allocation in AllowN and WaitN.
+func (lim *Limiter) reserveN(now time.Time, n int, maxFutureReserve time.Duration) Reservation {
+	lim.mu.Lock()
+    
+    // 判断limit是否为无限大，直接返回ok
+	if lim.limit == Inf {
+		lim.mu.Unlock()
+		return Reservation{
+			ok:        true,
+			lim:       lim,
+			tokens:    n,
+			timeToAct: now,
+		}
+	}
+    // 通过advance函数获取到now这个时间点可以用的token数量
+	now, last, tokens := lim.advance(now)
+    
+	// Calculate the remaining number of tokens resulting from the request.
+	tokens -= float64(n)
+
+	// Calculate the wait duration
+	var waitDuration time.Duration
+	if tokens < 0 {
+		waitDuration = lim.limit.durationFromTokens(-tokens)
+	}
+
+	// Decide result
+	ok := n <= lim.burst/*请求的不能超过桶大小*/ && waitDuration <= maxFutureReserve /*最终转换为时间进行比较*/
+
+	// Prepare reservation
+	r := Reservation{
+		ok:    ok,
+		lim:   lim,
+		limit: lim.limit,
+	}
+	if ok {
+		r.tokens = n
+		r.timeToAct = now.Add(waitDuration)
+	}
+    // 更新状态这里，ok为true时就更新当前的时间点以及需要更新的字段，为false不需要更新
+	// Update state
+	if ok {
+		lim.last = now
+		lim.tokens = tokens
+		lim.lastEvent = r.timeToAct
+	} else {
+		lim.last = last
+	}
+
+	lim.mu.Unlock()
+	return r
+}
+```
+
+从`Limiter.last`结构的定义看，last是tokens字段更新的时间点，获取token成功时候更新，不成功的时候不应该更新，所以，修复此BUG需要把`lim.last = last`这段代码移除即可。
+
+####	bug解决
+[新版本库](https://github.com/golang/time/blob/master/rate/rate.go#L379)已经修复了这个问题
+
+##  0x08  参考
 -	[time/rate 源码](https://github.com/golang/time/blob/master/rate/rate.go)
 -	[Golang 标准库限流器 time/rate 实现剖析](https://www.cyhone.com/articles/analisys-of-golang-rate/)
 -	[系统库golang.org/x/time/rate 限频器bug](https://cloud.tencent.com/developer/article/1890999)
