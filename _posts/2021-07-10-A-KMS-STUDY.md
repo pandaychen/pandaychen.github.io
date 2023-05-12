@@ -114,3 +114,4 @@ KMS 的信封加密，需要自己保存管理 `DEK`。如何处理 `DEK` 的管
 -   [腾讯云 KMS](https://cloud.tencent.com/document/product/573/8790)
 -   [阿里云 KMS](https://help.aliyun.com/document_detail/42339.html)
 -   [AWS CLOUD KMS Data encryption using AWS KMS Key](https://tech.david-cheong.com/data-encryption-using-aws-kms-key/)
+-   [KMS开放API及最佳实践多语言样例](https://github.com/aliyun/alibabacloud-kms-demo)
