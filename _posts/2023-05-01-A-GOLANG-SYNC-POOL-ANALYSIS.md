@@ -35,3 +35,4 @@ tags:
 
 ##  0x0 参考
 -   [深度分析 Golang sync.Pool 底层原理](https://www.cyhone.com/articles/think-in-sync-pool/)
+-   [Runtime: Golang 之 sync.Pool 源码分析](https://blog.haohtml.com/archives/24697)
