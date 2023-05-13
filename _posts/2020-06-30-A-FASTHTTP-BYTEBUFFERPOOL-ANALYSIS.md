@@ -268,7 +268,8 @@ func (p *Pool) Put(b *ByteBuffer) {
 
 ####    calibrate方法
 1.  使用`atomic`包的`CompareAndSwapUint64`和`StoreUint64`来实现互斥锁功能
-2.  
+2.  汇总`calls`数组，得到频率最高的切片长度
+3.  修正得到`maxSize`的值
 
 ```golang
 func (p *Pool) calibrate() {
@@ -322,15 +323,54 @@ func (p *Pool) calibrate() {
 
 上面的逻辑和标准库的`fmt`包实现异曲同工，参考[标准库 fmt 中的应用](https://pandaychen.github.io/2020/03/11/GOLANG-SYNC-POOL-USAGE/#%E6%A0%87%E5%87%86%E5%BA%93-fmt-%E4%B8%AD%E7%9A%84%E5%BA%94%E7%94%A8)
 
+##  0x04    应用
+最常见的应用场景是解析http响应时：
+```go
+func doHttpRequest(){
+    //...
+    resp, err := client.Do(req)
 
-##  0x04 总结
+    if err!=nil{
+        return
+    }
+
+	defer resp.Body.Close()
+
+	ret.HTTPCode = resp.StatusCode
+	if resp.StatusCode != http.StatusOK {
+		err = fmt.Errorf("http code is %d", resp.StatusCode)
+		return
+	}
+
+    //
+	b := bytebufferpool.Get()
+	_, err = b.ReadFrom(resp.Body)
+	if err != nil {
+		return
+	}
+
+	l := b.Len()
+	if l < 0 {
+		return
+	}
+
+    //使用后归还
+	ret.Response = b.Bytes()
+    bytebufferpool.Put(b)
+
+    // ....
+}
+```
+
+
+##  0x05 总结
 本文分析了bytebufferpool的实现细节：
 
 -   相对于标准库`sync.Pool`更优的点，基于切片的长度实现的精细化回收复用池
 -   容量**最小值**取 `2^6 = 64`（是 `64` 位计算机上 CPU 缓存行的大小，可以一次性被加载到 CPU 缓存行）
 -   使用`atomic`而不是锁来实现并发控制，可借鉴
 
-##  0x05	参考
+##  0x06	参考
 -   [Anti-memory-waste byte buffer pool：bytebufferpool](https://github.com/valyala/bytebufferpool)
 -	[深入理解高性能字节池 bytebufferpool](https://blog.csdn.net/why444216978/article/details/122016389)
 -   [缓存池 bytebufferpool 库实现原理](https://www.jianshu.com/p/a730d095ae51)
