@@ -26,13 +26,17 @@ tags:
 
 `sync.Pool` 适合于管理需要重复使用的对象，这些对象由 golang 的垃圾回收 GC 管理，无需调用者介入。当 GC 需要将其中部分对象进行回收时，不会告知使用者。使用者也无从得知当前 Pool 中管理有多少对象，并且每次 `Put` 和 `Get` 操作都是随机获得的对象。
 
-本文以go1.16为例，分析下`sync.Pool`的源码实现
+本文以`go1.16`为例，分析下`sync.Pool`的[源码实现](https://github.com/golang/go/blob/master/src/sync/pool.go)
 
 ##  0x01    源码分析
 
+##  0x  总结
+`sync.Pool`中的资源随时都有可能被销毁而消失
 
 
 
 ##  0x0 参考
 -   [深度分析 Golang sync.Pool 底层原理](https://www.cyhone.com/articles/think-in-sync-pool/)
 -   [Runtime: Golang 之 sync.Pool 源码分析](https://blog.haohtml.com/archives/24697)
+-   [Go语言之 sync.pool 源码分析](https://www.lixueduan.com/posts/go/sync-pool/)
+-   [Go sync.Pool 浅析](https://segmentfault.com/a/1190000040029288)
