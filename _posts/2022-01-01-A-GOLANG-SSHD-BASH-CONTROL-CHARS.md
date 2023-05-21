@@ -1,7 +1,7 @@
 ---
 layout: post
 title: 使用 Golang 实现 SSH 和 SSHD（三）
-subtitle: Bash 中的控制字符功能说明
+subtitle: Bash 中的控制字符功能说明 && 分析
 date: 2022-01-01
 author: pandaychen
 catalog: true
@@ -162,7 +162,8 @@ xterm sequences:
 
 
 
-##  0x07  其他细节
+
+##  0x07  关于终端的其他细节
 
 ####  终端的区别：vt100 VS xterm
 终端类型，`vt100`/`vt102`/`vt220`/`xterm`直接的区别是什么？引用此问题[What's the difference between various $TERM variables?](https://unix.stackexchange.com/questions/43945/whats-the-difference-between-various-term-variables)
@@ -183,7 +184,25 @@ But unless your terminal looks like this or this, there's only a few others you 
 - `linux` - when logging in via a Linux console (e.g. Ctrl+Alt+F1)
 - `dumb` - when everything is broken
 
-##  0x08  参考
+##  0x09  zmodem协议
+
+本小节分析下`rz/sz`的底层zmodem协议的基础知识
+
+####  zmodem协议格式
+
+Zmodem协议的格式包括以下几个部分：
+1.  发送方发送起始帧：发送方发送起始帧，告诉接收方它要开始传输文件了
+2.  接收方发送应答帧：接收方收到起始帧后，发送应答帧，告诉发送方它已经准备好接收文件了
+3.  发送方发送文件头：发送方发送文件头，包括文件名、文件大小、修改时间等信息
+4.  接收方发送应答帧：接收方收到文件头后，发送应答帧，告诉发送方它已经准备好接收文件数据了
+5.  发送方发送文件数据：发送方发送文件数据，每发送一定数量的数据，就会等待接收方发送确认帧
+6.  接收方发送确认帧：接收方收到文件数据后，发送确认帧，告诉发送方它已经成功接收了数据
+7.  发送方发送结束帧：发送方发送结束帧，告诉接收方文件传输已经完成
+8.  接收方发送应答帧：接收方收到结束帧后，发送应答帧，告诉发送方它已经成功接收了文件
+
+在传输过程中，如果出现错误或中断，Zmodem协议可以从中断的地方继续传输，而不需要重新开始。这是通过发送方和接收方之间的握手协议来实现的。如果出现错误或中断，发送方会发送一个中断帧，接收方会发送一个中断应答帧，然后重新开始传输
+
+##  0x0A 参考
 - [ascii](https://zh.wikipedia.org/zh/ASCII)
 - [ANSI_escape_code](https://en.wikipedia.org/wiki/ANSI_escape_code)
 - [ANSI Escape Sequences](https://gist.github.com/fnky/458719343aabd01cfb17a3a4f7296797)
