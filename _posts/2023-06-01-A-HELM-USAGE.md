@@ -87,17 +87,38 @@ helm cm-push ./${repo_name}-0.2.14.tgz bifrost -f                   #推送到 b
 ```
 
 
-6、使用 heml 回滚配置 <br>
+6、使用 helm 回滚配置 <br>
+
+[Helm 回滚](https://helm.sh/zh/docs/helm/helm_rollback/)
+
+##  0x02    go template
+
+1、管道的用法<br>
+
+在编写Helm template时，建议优先使用管道来替代函数调用的方式，如下面的例子：
+
+```YAML
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-configmap
+data:
+  myvalue: "Hello World"
+  drink: {{ .Values.favorite.drink | quote }}
+  # 大写，然后双引号包裹
+  food: {{ .Values.favorite.food | upper | quote }} 
+```
 
 
-##  0x02    模板的一些坑
+##  0x03    模板的一些坑
 
 ####    生成证书格式的模板
 
 ####    生成 yaml 数组的模板
 
-##  0x03    参考
+##  0x04    参考
 -   [Kubernetes 包管理器](https://helm.sh/zh/)
 -   [一文掌握 kubernetes 包管理工具 Helm](https://blog.csdn.net/weixin_53072519/article/details/126693667)
 -   [Helm Chart & template 函数](https://jicki.cn/helm-chart/)
 -   [通过 Helm 部署 CMDB](https://github.com/TencentBlueKing/bk-cmdb/blob/master/helm/README.md)
+-   [Helm template快速入门](https://juejin.cn/post/6844904199818313735)
