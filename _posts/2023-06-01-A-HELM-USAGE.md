@@ -6,10 +6,9 @@ date:       2023-06-01
 author:     pandaychen
 catalog:    true
 tags:
-    - helm
+    - Helm
+    - kubernetes
 ---
-
-
 
 ##  0x00    前言
 
