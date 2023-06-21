@@ -60,7 +60,7 @@ xxxxx https://helm.xxx.xxx.com/xxx/xxx/     #私有仓库
 |-- .helmignore
 |-- templates   #自己定义的 yaml 文件（按需修改为自己的应用配置）
 |   |-- deployment.yaml
-|   |-- _helpers.tpl        #公共模板
+|   |-- _helpers.tpl        #公共模板，作为子模板，可被其他模板文件引用，Helm不会交给K8s处理
 |   |-- hpa.yaml
 |   |-- ingress.yaml
 |   |-- NOTES.txt
