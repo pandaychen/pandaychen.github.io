@@ -100,7 +100,7 @@ helm chart 的语法是 go template 的语法，所以建议可以先系统的�
 
 在编写Helm template时，建议优先使用管道来替代函数调用的方式，如下面的例子：
 
-```YAML
+```text
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -145,7 +145,7 @@ xxxxxxx-svc:
 
 那么，chart模板文件中的格式要写成下面这样（假设服务的配置使用`configmap.yaml`）：
 
-```yaml
+```text
 apiVersion: v1
 kind: ConfigMap
 metadata:
