@@ -211,3 +211,5 @@ Zmodem协议的格式包括以下几个部分：
 - [TERMINAL TYPE DESCRIPTIONS SOURCE FILE](https://invisible-island.net/ncurses/terminfo.src.html)
 - [控制终端代码 - Linux 控制终端转义和控制序列](http://manpages.ubuntu.com/manpages/bionic/zh_CN/man4/console_codes.4.html)
 - [VT100 Terminal Package](https://github.com/xyproto/vt100/)
+- [手撸ZMODEM协议](https://zhuanlan.zhihu.com/p/579720546)
+- [ZMODEM protocol](http://wiki.synchro.net/ref:zmodem)

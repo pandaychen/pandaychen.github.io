@@ -355,7 +355,11 @@ fmt.Println(os.Readlink("symlink/test.txt.link"))
 基于分布式配置中心，远程更新也是一种方式，如下：
 -	Etcd + Confd
 -	Nacos
--	Apollo 
+-	Apollo
+-	Etcd + viper
+
+
+####	
 
 ##	0x05	参考
 -	[Go 每日一库之 viper](https://juejin.cn/post/6844904051369312264)
