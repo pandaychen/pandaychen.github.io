@@ -78,6 +78,7 @@ xxxxx https://helm.xxx.xxx.com/xxx/xxx/     #私有仓库
 
 
 5、使用 helm 打包 Chart 配置文件 <br>
+
 ```bash
 helm repo add bitnami https://charts.bitnami.com/bitnami
 helm plugin install https://github.com/chartmuseum/helm-push        #安装 push 插件
@@ -93,6 +94,8 @@ helm cm-push ./${repo_name}-0.2.14.tgz bifrost -f                   #推送到 b
 
 ##  0x02    go template
 
+helm chart 的语法是 go template 的语法，所以建议可以先系统的学习一下 go template
+
 1、管道的用法<br>
 
 在编写Helm template时，建议优先使用管道来替代函数调用的方式，如下面的例子：
@@ -104,15 +107,70 @@ metadata:
   name: {{ .Release.Name }}-configmap
 data:
   myvalue: "Hello World"
-  drink: {{ .Values.favorite.drink | quote }}
-  # 大写，然后双引号包裹
-  food: {{ .Values.favorite.food | upper | quote }} 
+  drink: {{ .Values.favorite.drink | quote }}   
+  food: {{ .Values.favorite.food | upper | quote }}   # 大写，然后双引号包裹
 ```
+
+2、内置对象<br>
+
+参考[内置对象](https://helm.sh/docs/chart_template_guide/#built-in-objects)
 
 
 ##  0x03    模板的一些坑
 
 ####    生成证书格式的模板
+比如需要引用的`values.yaml`中包含了如下x509证书格式的内容:
+
+```YAML
+xxxxxxx-svc:
+  service:
+    type: LoadBalancer
+    annotations:
+      service.kubernetes.io/loadbalance-id: lb-xxxxxx
+      service.kubernetes.io/tke-existed-lbid: lb-xxxxxx
+  jwtkeys:
+    RsaPriKey: |-
+      -----BEGIN PRIVATE KEY-----
+      MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQC76fWIS89iXwKY
+      xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+      Avlug15mg2MkciSsy7YlzDdAkA==
+      -----END PRIVATE KEY-----
+    RsaPubKey: |-
+      -----BEGIN PUBLIC KEY-----
+      MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAu+n1iEvPYl8CmNijKzY1
+      xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+      jQIDAQAB
+      -----END PUBLIC KEY-----
+```
+
+那么，chart模板文件中的格式要写成下面这样（假设服务的配置使用`configmap.yaml`）：
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "common.names.fullname" . }}-xxxxxxxx
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": pre-upgrade,pre-install
+    "helm.sh/hook-weight": "-2"
+data:
+  xxxxxxx-svc.yaml: |-
+    {{ include "xxxx.svcCommonConfig" . | nindent 4 }}
+
+    debug: {{ .Values.xxxxxxxx.debug }}
+    server:
+      host: 0.0.0.0
+      port: 80
+      readTimeout: 60
+      writeTimeout: 60
+      idleTimeout: 180
+
+
+    jwtKeys:
+      RsaPriKey: |- {{ .Values.xxxxxxxx.jwtkeys.RsaPriKey | nindent 8 }}    #改成.Values.xxxxxxxx.jwtkeys.RsaPriKey会报错
+      RsaPubKey: |- {{ .Values.xxxxxxxx.jwtkeys.RsaPubKey | nindent 8 }}
+```
 
 ####    生成 yaml 数组的模板
 
@@ -122,3 +180,4 @@ data:
 -   [Helm Chart & template 函数](https://jicki.cn/helm-chart/)
 -   [通过 Helm 部署 CMDB](https://github.com/TencentBlueKing/bk-cmdb/blob/master/helm/README.md)
 -   [Helm template快速入门](https://juejin.cn/post/6844904199818313735)
+-   [玩K8S不得不会的HELM](https://juejin.cn/post/6844904081366974472)
