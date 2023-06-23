@@ -249,6 +249,36 @@ func (p *pp) free() {
 }
 ```
 
+####	gin 框架
+gin 框架会给每个请求分配一个 `Context` 用以进行追踪，从 pool 中获取 `Context` 对象，用完后又还回去，注意 还回去之前这里也调用了 `reset()` 方法进行字段清空。如下：
+```go
+func New() *Engine {
+	engine := &Engine{
+		
+	}
+	engine.pool.New = func() interface{} {
+		return engine.allocateContext()
+	}
+	return engine
+}
+
+func (engine *Engine) allocateContext() *Context {
+	return &Context{engine: engine}
+}
+
+func (engine *Engine) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	c := engine.pool.Get().(*Context)
+	c.writermem.reset(w)
+	c.Request = req
+	//清空
+	c.reset()
+
+	engine.handleHTTPRequest(c)
+
+	//使用完毕放回
+	engine.pool.Put(c)
+}
+```
 
 ##	0x01	sync.Pool 的实现
 本小节，分析下 `sync.Pool` 的源码。
