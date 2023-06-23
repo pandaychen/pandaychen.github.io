@@ -155,5 +155,7 @@ ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29
 -   [Use RSA CA Certificates with OpenSSH 8.2](https://ibug.io/blog/2020/04/ssh-8.2-rsa-ca/)
 -   [SSH Certificates: How Do OpenSSH Certificates Compare to X.509?](https://goteleport.com/blog/x509-vs-openssh-certificates/)
 -   [How to secure your SSH server with public key Ed25519 Elliptic Curve Cryptography](https://cryptsus.com/blog/how-to-secure-your-ssh-server-with-public-key-elliptic-curve-ed25519-crypto.html)
+-   [Hashicorp Vault SSH secret engine with OpenSSH 8.2 and later](https://sarunas-krisciukaitis.medium.com/hashicorp-vault-ssh-secret-engine-with-openssh-8-2-and-later-f7405ee55d19)
+-   [Sign SSH keys using rsa-sha2-256 algorithm](https://github.com/hashicorp/vault/pull/8383)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
