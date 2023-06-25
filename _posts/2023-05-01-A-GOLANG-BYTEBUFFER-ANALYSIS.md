@@ -24,9 +24,32 @@ type Buffer struct {
 }
 ```
 
+-	`buf`：底层的缓冲字节切片，用于保存数据。`len(buf)`表示字节切片长度，`cap(buf)`表示切片容量
+-	`off`：已读计数，在该位置之前的数据都是被读取过的，`off`表示下次读取时的开始位置。因此未读数据部分为 `buf[off:len(buf)]`
+-	`lastRead`：保存上次的读操作类型，用于后续的回退操作
+
 从结构看，很像先前文章 [数据结构与算法回顾（四）：环形内存缓冲区 ringbuffer](https://pandaychen.github.io/2022/04/05/A-LINIX-C-BASED-RING-BUFFER-ANALYSIS/) 介绍的环形缓冲区
+此外，由于底层存储是字节切片，理解golang的slice底层机制就很重要
+
 
 ![bytes.buffer](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/bytes/bytesbuffer-1.png)
+
+####	使用
+
+```go
+func main(){
+	var buffer bytes.Buffer
+	n, err := buffer.WriteString("this is a test for bytes buffer")
+	fmt.Println(n, err)                     // 31  nil
+	fmt.Println(buffer.Len(), buffer.Cap()) // 31 64
+
+	s := make([]byte, 1000)
+	n, err = buffer.Read(s)
+	fmt.Println(n, err)                     // 31 nil
+	fmt.Println(string(s))                  // this is a test for bytes buffer
+	fmt.Println(buffer.Len(), buffer.Cap()) // 0 64
+}
+```
 
 
 ##  0x01	bytes.Buffer 提供的核心方法
@@ -140,12 +163,75 @@ const (
 )
 ```
 
+
+####	Reset()方法
+```go
+func (b *Buffer) Reset() {
+ b.buf = b.buf[:0]
+ b.off = 0
+ b.lastRead = opInvalid
+}
+```
+
+
 ##	0x03	bytes.Buffer 的内存伸缩策略
 
 ##  0x04  bytes.Buffer 的坑
 笔者在工作中遇到过两个问题
 
-1、`bytes.Buffer` 结构不是并发安全 <br>
+1、`bytes.Buffer` 结构不是并发安全（not thread safe） <br>
+
+解决方法有两种：
+
+a）增加互斥锁，封装操作<br>
+
+缺点是，对性能有较大损耗
+```GO
+// Buffer is a goroutine safe bytes.Buffer
+type Buffer struct {
+	buffer bytes.Buffer
+	mutex  sync.Mutex
+}
+
+// Write appends the contents of p to the buffer, growing the buffer as needed. It returns
+// the number of bytes written.
+func (s *Buffer) Write(p []byte) (n int, err error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	return s.buffer.Write(p)
+}
+
+// String returns the contents of the unread portion of the buffer
+// as a string.  If the Buffer is a nil pointer, it returns "<nil>".
+func (s *Buffer) String() string {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	return s.buffer.String()
+}
+```
+
+b）使用`io.Pipe()`来完成异步功能（当然这里仅仅是解决并发安全）<br>
+
+参考[Is the Go bytes.Buffer thread-safe?](https://stackoverflow.com/questions/19646717/is-the-go-bytes-buffer-thread-safe)的回答：
+
+Use `io.Pipe()` function call which provide pair of connected objects `(*PipeReader, *PipeWriter)` for synchronous read/write. This could be done in parallel, and it's a thread-safe.
+
+示例代码如下：
+
+```go
+fileBytes := //convert image file to []byte here
+pipeReader, pipeWriter := io.Pipe()
+
+// create a new thread to handle Write
+go func() {
+  defer pipeWriter.Close()
+  pipeWriter.Write(fileBytes)
+}()
+
+// in main thread
+sendToCloud(pipeReader)
+```
+
 
 2、`bytes.Buffer` 的内存疯涨问题 <br>
 这个解决办法也比较简单，对`bytes.Buffer`进行封装，在`Write*`相关方法前先检测当前的buffer长度，如果超过限制则不再进行写入即可，如下：
@@ -182,4 +268,8 @@ func (p *BufferV2) Write(data []byte) (int, error) {
 ##  0x06  参考
 -   [Golang bytes.Buffer 用法精述](https://cloud.tencent.com/developer/article/1456243)
 -	[Go 语言 bytes.Buffer 源码详解之 1](https://mp.weixin.qq.com/s?__biz=MzU5NzU2NDk2MA==&mid=2247484928&idx=1&sn=fa4a3158e26d5833f500281623adf776&chksm=fe50cd4fc92744599bc74b546d6e80f7d30471ed54258b232a3c1cd28173f87b086e3851009d#rd)
+-	[Go 语言 bytes.Buffer 源码详解之 2](https://juejin.cn/post/7049755662040956958)
 -	[buffer.go](https://go.dev/src/bytes/buffer.go)
+-	[Is the Go bytes.Buffer thread-safe?](https://stackoverflow.com/questions/19646717/is-the-go-bytes-buffer-thread-safe)
+-	[io.Pipe vs bytes.Buffer](https://www.reddit.com/r/golang/comments/vh2xng/iopipe_vs_bytesbuffer/)
+-	[Golang's bytes.Buffer thread safety for one writer/one reader](https://stackoverflow.com/questions/42445301/golangs-bytes-buffer-thread-safety-for-one-writer-one-reader)
