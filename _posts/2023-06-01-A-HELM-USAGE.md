@@ -174,7 +174,14 @@ data:
 
 ####    生成 yaml 数组的模板
 
-##  0x04    参考
+
+##  0x04  helm模板参考
+直接学习现有项目的helm配置（画瓢）更快，比如：
+
+- [pomerium-helm](https://github.com/pomerium/pomerium-helm/tree/main/charts/pomerium/templates)
+- [Helm chart repository for example charts](https://github.com/helm/examples)
+
+##  0x05    参考
 -   [Kubernetes 包管理器](https://helm.sh/zh/)
 -   [一文掌握 kubernetes 包管理工具 Helm](https://blog.csdn.net/weixin_53072519/article/details/126693667)
 -   [Helm Chart & template 函数](https://jicki.cn/helm-chart/)
