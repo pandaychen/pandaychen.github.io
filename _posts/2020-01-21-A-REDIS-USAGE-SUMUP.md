@@ -255,6 +255,9 @@ ZSET 即有序集合，通常用来实现延时队列或者排行榜（如销量
 5.  ZSET 是通过哈希表实现的，所以添加 / 删除 / 查找的复杂度都是 `O(1)`
 6.  从使用意义来看，`ZSET` 中只有 `score` 值非常重要，`value` 值没有特别的意义，只需要保证它是唯一的就可以
 7.  `ZREMRANGEBYSCORE key startScore endScore` 会删除 `[startScore,endScore]` 区间的数据（包含左右区间）
+8.  一个key表示一个有序集合
+
+![ZSET](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/redis/sorted-set-1.png)
 
 ```golang
 127.0.0.1:6379>  zadd key1 1 a 2 b 3 c
@@ -268,6 +271,9 @@ ZSET 即有序集合，通常用来实现延时队列或者排行榜（如销量
 2) "b"
 3) "a"
 127.0.0.1:6379> ZREMRANGEBYSCORE key1 1 3
+(integer) 3
+
+127.0.0.1:6379> zadd scoreboard 100 userA 90 userB 80 userC 
 (integer) 3
 ```
 
