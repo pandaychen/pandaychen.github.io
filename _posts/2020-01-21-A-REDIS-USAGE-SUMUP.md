@@ -293,9 +293,9 @@ ZSET 即有序集合，通常用来实现延时队列或者排行榜（如销量
 
 ####  延迟队列
 1、实现一思路 <br>
-- 使用 `ZSET`+ 定时轮询的方式实现延时队列机制，任务集合记为 `taskGroupKey`
+- 使用 `ZSET` 配合定时轮询的方式实现延时队列机制，任务集合记为 `taskGroupKey`
 - 生成任务以 **当前时间戳** 与 **延时时间** 相加后得到任务真正的触发时间，记为 `time1`，任务的 uuid 即为 `taskid`，当前时间戳记为 `curTime`
-- 使用 `ZADD taskGroupKey time1 taskid` 将任务写入 ZSET
+- 使用 `ZADD taskGroupKey time1 taskid` 将任务写入 `ZSET`
 - 主逻辑不断以轮询方式 `ZRANGE taskGroupKey curTime MAXTIME withscores` 获取 `[curTime,MAXTIME)` 之间的任务，记为已经到期的延时任务（集）
 - 处理延时任务，处理完成后删除即可
 - 保存当前时间戳 `curTime`，作为下一次轮询时的 `ZRANGE` 指令的范围起点
@@ -305,11 +305,12 @@ ZSET 即有序集合，通常用来实现延时队列或者排行榜（如销量
 
 ######  场景 1：通过 Redis 构建滑动窗口并实现计数器限流
 
-比如，系统要限定用户的某个行为在指定的时间里只能允许发生 `N` 次，采用滑动窗口的方式实现。利用 `ZSET` 可实现滑动窗口的机制。如下图所示，使用 ZSET 记录所有用户的访问历史数据，每个 `key` 表示不同的用户，用 `score` 标记时间范围的刻度，`value` 这里无意义，仅用于唯一性考虑。该流程大致流程如下：
+比如，系统要限定用户的某个行为在指定的时间里只能允许发生 `N` 次，采用滑动窗口的方式实现。利用 `ZSET` 可实现滑动窗口的机制。如下图所示，使用 `ZSET` 记录所有用户的访问历史数据，每个 `key` 表示不同的用户，用 `score` 标记时间范围的刻度，`value` 这里无意义，仅用于唯一性考虑。该流程大致流程如下：
+
 ![redis-rolling](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/redis/redis-rolling-window1.png)
 
-1.  当用户 A 访问时，向 ZSET 中添加 `ZADD usernameA ${curTime} ${uuid}`，其中 `score` 值 `$curtime` 为当前时间戳，`value` 值 `${uuid}` 为保证唯一性的字符串（或者改用毫秒时间戳减少 `size`）
-2.  针对用户 `usernameA`，限流只需要计算指定的时间区间的总数 `ZCOUNT usernameA ${startTime} ${endTime}`，将此值与限流值 `limiter` 比较即可；通过 `score` 值圈出时间窗口，实现了滑动窗口的效果
+1.  当用户 A 访问时，向 ZSET 中添加 `ZADD usernameA curTime uuid`，其中 `score` 值 `$curtime` 为当前时间戳，`value` 值 `uuid` 为保证唯一性的字符串（或者改用毫秒时间戳减少 `size`）
+2.  针对用户 `usernameA`，限流只需要计算指定的时间区间的总数 `ZCOUNT usernameA startTime endTime`，将此值与限流值 `limiter` 比较即可；通过 `score` 值圈出时间窗口，实现了滑动窗口的效果
 3.  对于 `score` 窗口之外的数据，会有占用内存过大的风险，有两个方法优化：
   - 异步清理 `score` 过期的数据（滑动窗口外的数据）
   - 若某个时间段检查用户并并未触发限流（滑动窗口内的行为是空记录），那么可以直接删掉 ZSET 的此 `key` 以减少内存占用
@@ -317,6 +318,7 @@ ZSET 即有序集合，通常用来实现延时队列或者排行榜（如销量
 5.  该方案的缺点是要记录时间窗口内所有的行为记录，如果这个并发量很大，会消耗大量的内存
 
 通常分布式场景使用 lua 脚本实现，如下：
+
 ```lua
 --KEYS[1]: 限流对应的 key
 --ARGV[1]: 一分钟之前的时间戳（假设按照 1 分钟为滑动窗口的区间）
