@@ -7,8 +7,8 @@ header-img: img/super-mario.jpg
 author: pandaychen
 catalog: true
 tags:
-  - 数据结构
-  - Sort
+    - 数据结构
+    - Sort
 ---
 
 ##  0x00    前言
@@ -16,6 +16,6 @@ tags:
 
 
 
-##  参考
+##  0x03  参考
 -   [PingCAP training courses](https://github.com/heteddy/talent-plan/tree/master/tidb/mergesort)
 -   [TiDB 源码阅读（十五） Sort Merge Join](https://zhuanlan.zhihu.com/p/41535500)
