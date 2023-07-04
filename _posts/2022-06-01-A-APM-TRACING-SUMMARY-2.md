@@ -61,6 +61,11 @@ a_span_id:d_span_id:c_span_id:1
 ####    demo 1：basic
 
 最基础的例子，调用 `StartSpan` 创建，调用 `Finish` 结束一个 span
+
+1.  初始化一个 tracer
+2.  记录一个简单的 span
+3.  在 span 上添加注释信息（KV）
+
 ```go
 import (
     "fmt"
@@ -273,6 +278,7 @@ func main() {
 
         helloTo := r.FormValue("helloTo")
         helloStr := fmt.Sprintf("Hello, %s!", helloTo)
+        // LogFields 和 LogKV 底层是调用的同一个方法
         span.LogFields(
             otlog.String("event", "string-format"),
             otlog.String("value", helloStr),
@@ -307,11 +313,134 @@ func main() {
 }
 ```
 
-看一下后台的调用链, 可以看到它在调用其他服务的时候，是将 trace 相关的信息都放到 header 中， 通过 `span.Tracer().Inject` 方法注入；然后对接的服务就会在 header 中将 trace 信息取出来， 通过 `tracer.Extract` 方法导出；本质还是通过 head 中的特定 kv 来做，如下图：
+看一下后台的调用链, 可以看到它在调用其他服务的时候，是将 trace 相关的信息都放到 header 中， 通过 `span.Tracer().Inject` 方法注入；然后对接的服务就会在 header 中将 trace 信息取出来， 通过 `tracer.Extract` 方法导出；本质还是通过 head 中的特定 kv （`UBER-TRACE-ID`）来做，如下图：
 
-![extract-1]()
-![extract-1]()
+![extract-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/tracing/extract-1.png)
 
+![extract-2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/tracing/extract-2.png)
+
+
+####   demo4：baggage
+通过 baggage 方法，可以在 span 中存储参数，然后该参数会跟着 span 传递到整个 trace；只需要修改一个地方就可以在整个 trace 中获取到该参数，而不用修改 trace 中的每一个地方
+
+```GO
+// after starting the span
+span.SetBaggageItem("greeting", greeting)   // 客户端存入参数
+greeting := span.BaggageItem("greeting")    // 服务端获取
+```
+
+##  0x02    汇总一些方法论
+
+####    进程内：使用 ctx 来包装 tracer
+
+使用 ctx 包装 tracer 要注意下面几点：
+-   通过 `opentracing.ChildOf(rootSpan.Context())` 保留 span 之间的因果关系
+-   通过 ctx 来实现在各个功能函数之间传递 span
+
+
+1、span 因果关系
+
+由于 span 是链路追踪里的最小组成单元，为了保留各个功能之间的因果关系，必须在各个方法之间传递 span 并且新建 span 时指定 `opentracing.ChildOf(rootSpan.Context())`，否则新建的 span 会是独立的，无法构成一个完整的 trace；比如方法 A 调用了 B、C、D，那么就需要将方法 A 中的 span 传递到方法 B/C/D 中。通过 `opentracing.ChildOf(rootSpan.Context())` 建立两个 span 之间的引用关系，如果不指定则会创建一个新的 span（在 jaeger-UI 中查看的时候就是一个新的 trace）
+
+参考上述的 demo2 例子，利用 span 方式传递的代码如下：
+```GO
+childSpan := rootSpan.Tracer().StartSpan(
+    "formatString",
+    opentracing.ChildOf(rootSpan.Context()),
+)
+```
+
+```GO
+func main() {
+	var (
+        service_name = "example1"
+        span_name = "say-hello"
+        helloTo =  "pandaychen"
+    )
+
+	// 1. 初始化 tracer
+	tracer, closer := config.NewTracer("hello")
+	defer closer.Close()
+	// 2. 开始新的 Span （注意: 必须要调用 Finish() 方法 span 才会上传到后端）
+	span := tracer.StartSpan("say-hello")
+	defer span.Finish()
+
+    // 通过传递父 span 来实现子 span 的生成
+	helloStr := formatString(span, helloTo)
+	printHello(span, helloStr)
+}
+
+func formatString(span opentracing.Span, helloTo string) string {
+	childSpan := span.Tracer().StartSpan(
+		"formatString",
+		opentracing.ChildOf(span.Context()),
+	)
+	defer childSpan.Finish()
+
+	return fmt.Sprintf("Hello, %s!", helloTo)
+}
+
+func printHello(span opentracing.Span, helloStr string) {
+	childSpan := span.Tracer().StartSpan(
+		"printHello",
+		opentracing.ChildOf(span.Context()),
+	)
+	defer childSpan.Finish()
+
+	println(helloStr)
+}
+```
+
+
+2、通过 ctx 传递 span
+
+前述保留的 span 的因果关系，但是需要在各个方法中传递 span 的方式，缺点是可能会污染整个程序，可以借助 Go 的 `context.Context` 对象来进行传递，即 demo2 的方式：
+
+```GO
+func main()
+    //...
+    ctx := context.Background()
+    ctx = opentracing.ContextWithSpan(ctx, span)    //span 与 ctx 打包
+    helloStr := formatString(ctx, helloTo)
+    printHello(ctx, helloStr)
+    //...
+}
+
+func formatString(ctx context.Context, helloTo string) string {
+    span, _ := opentracing.StartSpanFromContext(ctx, "formatString")
+    defer span.Finish()
+    ...
+
+func printHello(ctx context.Context, helloStr string) {
+    span, _ := opentracing.StartSpanFromContext(ctx, "printHello")
+    defer span.Finish()
+    ...
+```
+
+特别注意的是：
+
+1.  `opentracing.StartSpanFromContext()` 返回的第二个参数是子 ctx, 如果需要的话可以将该子 ctx 继续往下传递，而不是传递父 ctx
+2.  `opentracing.StartSpanFromContext()` 默认使用 `GlobalTracer` 来开始一个新的 span，所以使用之前需要设置 `GlobalTracer`，即 `opentracing.SetGlobalTracer(tracer)`
+
+
+
+####    进程间：追踪 rpc
+
+通过 `Inject(spanContext, format, carrier)` 和 `Extract(format, carrier)` 来实现在 RPC 调用中传递上下文。参数`format` 为编码方式，由 OpenTracing API 定义，具体如下：
+
+-   TextMap–span 上下文被编码为字符串键 - 值对的集合
+-   Binary–span 上下文被编码为字节数组
+-   HTTPHeaders–span 上下文被作为 HTTPHeader
+
+carrier 则是底层实现的抽象：比如 TextMap 的实现则是一个包含 `Set(key, value)` 函数的接口。Binary 则是 `io.Writer` 接口
+
+参考Demo3的实现，客户端通过 `Inject` 方法将 span 注入到 `req.Header` 中去，随着请求发送到服务端。服务端则通过 `Extract` 方法，解析请求头中的 span 信息
+
+##  0x03    一种封装的思路
+[博客](http://kebingzao.com/2020/12/25/jaeger-use/) 基于 `TextMapCarrier` 给出了一种典型的封装接口，如下：
+
+
+carrier 判断使用哪种服务，决定使用哪种方法从请求中获取上下文；例如，web 服务通过 HTTP 头作为 carrier，从 HTTP 请求中获 span 上下文（如下所示）：
 
 
 
@@ -322,3 +451,5 @@ func main() {
 -   [基于 jaeger 微服务调用链实现方案](http://kebingzao.com/2020/12/25/jaeger-use/)
 -   [Learning Go by examples: part 10 - Instrument your Go app with OpenTelemetry and send traces to Jaeger - Distributed Tracing](https://dev.to/aurelievache/learning-go-by-examples-part-10-instrument-your-go-app-with-opentelemetry-and-send-traces-to-jaeger-distributed-tracing-1p4a)
 -   [分布式链路追踪教程 (三)---Jaeger 简单使用](https://www.lixueduan.com/posts/tracing/03-jaeger-quick-start/)
+-   [分布式链路追踪（OpenTracing 标准）和 Jaeger 实现](https://xiaoming.net.cn/2021/03/25/Opentracing%E6%A0%87%E5%87%86%E5%92%8CJaeger%E5%AE%9E%E7%8E%B0/)
+-   [Opentracing & jaeger 源码学习](https://freephenix.github.io/jaegeropentracing-yuan-ma-xue-xi/)
