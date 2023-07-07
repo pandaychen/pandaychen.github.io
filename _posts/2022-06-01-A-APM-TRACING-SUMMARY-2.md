@@ -7,6 +7,7 @@ author: pandaychen
 catalog: true
 tags:
   - OpenTracing
+  - Jaeger
 ---
 
 ##  0x00    前言
@@ -341,6 +342,8 @@ greeting := span.BaggageItem("greeting")    // 服务端获取
 1、span 因果关系
 
 由于 span 是链路追踪里的最小组成单元，为了保留各个功能之间的因果关系，必须在各个方法之间传递 span 并且新建 span 时指定 `opentracing.ChildOf(rootSpan.Context())`，否则新建的 span 会是独立的，无法构成一个完整的 trace；比如方法 A 调用了 B、C、D，那么就需要将方法 A 中的 span 传递到方法 B/C/D 中。通过 `opentracing.ChildOf(rootSpan.Context())` 建立两个 span 之间的引用关系，如果不指定则会创建一个新的 span（在 jaeger-UI 中查看的时候就是一个新的 trace）
+`opentracing.StartSpan` 方法的第二个参数 `opentracing.ChildOf` 可接受一个 `opentracing.Span` 对象，表示当前 Span 的父 Span。如果将当前 Span 的父 Span 设置为当前上下文中的 Span，那么就可以在当前 Span 上创建一个子 Span，而不是创建一个新的 Span
+
 
 参考上述的 demo2 例子，利用 span 方式传递的代码如下：
 ```GO
@@ -348,6 +351,11 @@ childSpan := rootSpan.Tracer().StartSpan(
     "formatString",
     opentracing.ChildOf(rootSpan.Context()),
 )
+
+// 另一种方法
+parentSpan := opentracing.SpanFromContext(ctx)
+childSpan := opentracing.StartSpan("child", opentracing.ChildOf(parentSpan.Context()))
+defer childSpan.Finish()
 ```
 
 ```GO
@@ -422,11 +430,9 @@ func printHello(ctx context.Context, helloStr string) {
 1.  `opentracing.StartSpanFromContext()` 返回的第二个参数是子 ctx, 如果需要的话可以将该子 ctx 继续往下传递，而不是传递父 ctx
 2.  `opentracing.StartSpanFromContext()` 默认使用 `GlobalTracer` 来开始一个新的 span，所以使用之前需要设置 `GlobalTracer`，即 `opentracing.SetGlobalTracer(tracer)`
 
+####    进程间：追踪 RPC
 
-
-####    进程间：追踪 rpc
-
-通过 `Inject(spanContext, format, carrier)` 和 `Extract(format, carrier)` 来实现在 RPC 调用中传递上下文。参数`format` 为编码方式，由 OpenTracing API 定义，具体如下：
+通过 `Inject(spanContext, format, carrier)` 和 `Extract(format, carrier)` 来实现在 RPC 调用中传递上下文。参数 `format` 为编码方式，由 OpenTracing API 定义，具体如下：
 
 -   TextMap–span 上下文被编码为字符串键 - 值对的集合
 -   Binary–span 上下文被编码为字节数组
@@ -434,17 +440,186 @@ func printHello(ctx context.Context, helloStr string) {
 
 carrier 则是底层实现的抽象：比如 TextMap 的实现则是一个包含 `Set(key, value)` 函数的接口。Binary 则是 `io.Writer` 接口
 
-参考Demo3的实现，客户端通过 `Inject` 方法将 span 注入到 `req.Header` 中去，随着请求发送到服务端。服务端则通过 `Extract` 方法，解析请求头中的 span 信息
+参考 Demo3 的实现，客户端通过 `Inject` 方法将 span 注入到 `req.Header` 中去，随着请求发送到服务端。服务端则通过 `Extract` 方法，解析请求头中的 span 信息
 
 ##  0x03    一种封装的思路
-[博客](http://kebingzao.com/2020/12/25/jaeger-use/) 基于 `TextMapCarrier` 给出了一种典型的封装接口，如下：
 
+####    封装 1：基于 span 传递（No `context.Context`）
+[博客](http://kebingzao.com/2020/12/25/jaeger-use/) 基于 `TextMapCarrier` 给出了一种典型的封装接口，不使用 `context.Context`，主要代码如下：
+
+```go
+var (
+    Tracer opentracing.Tracer
+    Closer io.Closer
+)
+
+func InitTracer(serviceName, agentHostPort string) error {
+    if Tracer != nil && Closer != nil {
+        return nil
+    }
+
+    cfg := jaegerConfig.Configuration{
+        Sampler: &jaegerConfig.SamplerConfig{
+            Type: "const",
+            Param: 1,
+        },
+        Reporter: &jaegerConfig.ReporterConfig{
+            LogSpans: false,
+            LocalAgentHostPort: agentHostPort,
+        },
+        ServiceName: serviceName,
+    }
+
+    _tracer, _closer, err := cfg.NewTracer()
+    if err != nil {
+        fmt.Println("Init GlobalJaegerTracer failed, err : %v", err)
+        return err
+    }
+
+    Tracer = _tracer
+    Closer = _closer
+    return nil
+}
+
+func getParentSpan(operationName, traceId string, startIfNoParent bool) (span opentracing.Span, err error) {
+    if Tracer == nil {
+        err = errors.New("jaeger tracing error : Tracer is nil")
+        fmt.Println(err)
+        return
+    }
+
+    parentSpanCtx, err := Tracer.Extract(opentracing.TextMap, opentracing.TextMapCarrier{"UBER-TRACE-ID":traceId})
+    if err != nil {
+        if startIfNoParent {
+            //fmt.Println("startIfNoParent","create new:",err)
+            span = Tracer.StartSpan(operationName)  // 如果 span 不存在，则新建
+        }
+    } else {
+        span = Tracer.StartSpan(operationName, opentracing.ChildOf(parentSpanCtx))
+    }
+
+    err = nil
+    return
+}
+
+func StartSpan(operationName, parentSpanTraceId string, startIfNoParent bool) (span opentracing.Span, spanTraceId string, err error) {
+    plainParentSpan, err := getParentSpan(operationName, parentSpanTraceId, startIfNoParent)
+    if err != nil || plainParentSpan == nil {
+        fmt.Println("No span return")
+        return
+    }
+
+    m := map[string]string{}
+    carrier := opentracing.TextMapCarrier(m)
+    err = Tracer.Inject(plainParentSpan.Context(), opentracing.TextMap, carrier)
+    if err != nil {
+        fmt.Println("jaeger tracing inject error :", err)
+        return
+    }
+
+    spanTraceId = carrier["uber-trace-id"]
+    span = plainParentSpan
+    return
+}
+
+func FinishSpan(span opentracing.Span) {
+    if span != nil {
+        span.Finish()
+    }
+}
+```
+
+封装的核心点在于使用 `opentracing.TextMapCarrier`、`Inject` 和 `Extract` 把 `traceId` 与 span 包装起来；客户端第一次请求的时候，由于是直接命令行调用，所以 `Extract` 会失败，同时创建一个新的 rootspan：
+
+```
+startIfNoParent create new: Cannot convert empty string to tracer state
+```
+
+
+####    封装 2：基于 context（gin）
+[OpenTracing middleware for gin-gonic](https://github.com/opentracing-contrib/go-gin/blob/master/ginhttp/server.go) 提供了 gin 中间件的一种实现，核心代码如下：
+
+```go
+// Middleware is a gin native version of the equivalent middleware in:
+//   https://github.com/opentracing-contrib/go-stdlib/
+func Middleware(tr opentracing.Tracer, options ...MWOption) gin.HandlerFunc {
+	opts := mwOptions{
+		opNameFunc: func(r *http.Request) string {
+			return "HTTP" + r.Method
+		},
+		spanObserver: func(span opentracing.Span, r *http.Request) {},
+		urlTagFunc: func(u *url.URL) string {
+			return u.String()
+		},
+	}
+	for _, opt := range options {
+		opt(&opts)
+	}
+
+	return func(c *gin.Context) {
+        // 从 HTTP 请求头中提取 SpanContext
+		carrier := opentracing.HTTPHeadersCarrier(c.Request.Header)
+		ctx, _ := tr.Extract(opentracing.HTTPHeaders, carrier)  //why ignore error?
+        if err != nil && err != opentracing.ErrSpanContextNotFound {
+            log.Printf("Failed to extract SpanContext: %v", err)
+        }
+		op := opts.opNameFunc(c.Request)
+
+        // 创建 Span
+		sp := tr.StartSpan(op, ext.RPCServerOption(ctx))
+		ext.HTTPMethod.Set(sp, c.Request.Method)
+		ext.HTTPUrl.Set(sp, opts.urlTagFunc(c.Request.URL))
+		opts.spanObserver(sp, c.Request)
+
+		// set component name, use "net/http" if caller does not specify
+		componentName := opts.componentName
+		if componentName == "" {
+			componentName = defaultComponentName
+		}
+		ext.Component.Set(sp, componentName)
+
+        // 注意：将 context 更新上下文中
+        // 将上下文设置到请求中
+		c.Request = c.Request.WithContext(
+            // 将 Span 注入到上下文中
+			opentracing.ContextWithSpan(c.Request.Context(), sp))
+
+        // NEXT
+		c.Next()
+
+		ext.HTTPStatusCode.Set(sp, uint16(c.Writer.Status()))
+		sp.Finish()
+	}
+}
+```
+
+上述代码比较直观了，有一点不理解的是调用 `tr.Extract` 的返回值 err 为何不处理？有一种解释是如果选择创建一个新的 Root Span，那么新的 Root Span 将不会与之前的 Root Span 相关联，这可能会导致分布式追踪的效果不佳。因此，如果我们希望在出现错误时仍然能够进行分布式追踪，最好的做法是忽略该错误，继续使用当前的 Root Span
+
+个人认为较合理的封装，见此 []()
+
+如果 `SpanContext` 为 `nil`，那么说明该请求没有携带有效的 `SpanContext`，此时可以创建一个新的 Root Span，并将其注入到上下文中。如下：
+```GO
+span := tracer.StartSpan(c.Request.URL.Path)    // 使用当前请求的 URL Path 作为新的 Span 的操作名称
+defer span.Finish()
+
+// 将 Span 注入到上下文中
+ctx := opentracing.ContextWithSpan(c.Request.Context(), span)
+
+// 将上下文设置到请求中
+c.Request = c.Request.WithContext(ctx)
+```
+此外，需要注意的是，在创建新的 Root Span 时，需要根据具体的业务需求和设计来确定操作名称和其他属性。例如，可以使用请求的 URL Path、HTTP 方法、请求参数等信息作为操作名称和标签，以便更好地跟踪服务的执行过程
+
+####    封装 3：基于 context（gRPC）
+
+
+##  0x04    其他细节
 
 carrier 判断使用哪种服务，决定使用哪种方法从请求中获取上下文；例如，web 服务通过 HTTP 头作为 carrier，从 HTTP 请求中获 span 上下文（如下所示）：
 
 
 
-##  0x04    参考
+##  0x05    参考
 - [OpenTracing Tutorial - Go](https://github.com/yurishkuro/opentracing-tutorial/tree/master/go)
 - [APM 原理与框架选型](https://www.cnblogs.com/xiaoqi/p/apm.html)
 -   [调用链追踪系统在伴鱼：OpenTelemetry 最佳实践案例分享](https://www.infoq.cn/article/2gao0xpw37arecbycpxl)
@@ -453,3 +628,5 @@ carrier 判断使用哪种服务，决定使用哪种方法从请求中获取上
 -   [分布式链路追踪教程 (三)---Jaeger 简单使用](https://www.lixueduan.com/posts/tracing/03-jaeger-quick-start/)
 -   [分布式链路追踪（OpenTracing 标准）和 Jaeger 实现](https://xiaoming.net.cn/2021/03/25/Opentracing%E6%A0%87%E5%87%86%E5%92%8CJaeger%E5%AE%9E%E7%8E%B0/)
 -   [Opentracing & jaeger 源码学习](https://freephenix.github.io/jaegeropentracing-yuan-ma-xue-xi/)
+-   [腾讯云文档：通过 gin Jaeger 中间件上报](https://cloud.tencent.com/document/product/1463/57863)
+-   [Golang gRPC Middlewares: interceptor chaining, auth, logging, retries and more.](https://github.com/grpc-ecosystem/go-grpc-middleware)
