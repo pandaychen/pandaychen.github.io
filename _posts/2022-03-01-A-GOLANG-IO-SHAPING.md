@@ -49,7 +49,7 @@ tags:
 或者有另外一种思路，直接使用时间区间的大小作为 token 的数量，每个 token 对应一个流量（如 `256Kb`），假设 `1s` 可允许 `10` 个 token，那么 `100ms` 仅能获取 `1` 个 token，`50ms` 只能获取 `0.5` 个 token
 
 ##  0x04    代码分析
-
+代码实现在[此](https://github.com/pandaychen/goes-wrapper/blob/master/pyio/limit_io.go)，核心是采用令牌桶算法实现。
 
 
 ####    测试
