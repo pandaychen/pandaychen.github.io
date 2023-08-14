@@ -20,6 +20,9 @@ Netfilter 模块，在网络层的五个位置（也就是 iptables 四表五链
 
 ![netfilter](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/mitm/iptables/iptables-2.png)
 
+
+为安全起见，以下用DL服务代替代理服务；此外，本文部分章节参考了公司同事的文章，没法标注引用地址（表示感谢）
+
 ##  0x01    iptables 的四表五链
 
 四表五链，链是很重要的概念，每个链都包含了若干个表的元素（这里的元素代表若干条 iptables 规则），所有同一类的规则构成了 iptables 的表。注意每一个链对应的表都是不完全一样的，表和链之间是多对多的对应关系
@@ -184,10 +187,116 @@ iptables -t nat -A PREROUTING -p tcp -d 15.45.23.67 --dport 80 -j DNAT --to-dest
 
 ##  0x  透明代理配置
 
+背景：
+1.  用户通过路由器访问某些站点（用户所有对外请求的数据都要经过路由器）
+2.  用户侧无感知配置（需要在用户的路由器上配置透明代理）
+3.  自动分流（国内vs国外），分离国内流量和国外流量，同时将国外流量送往代理
+
+
+架构图如下：
+![tproxy]()
+
+和之前的方案相比，绿色部分从socks5协议替换为了透明代理。因为我们不希望对数据做任何变更，只有这样下面的客户端应用才能无感知。
+
+####    tproxy
+`Tproxy` 是Linux内核自带的一个模块，它可以在不改变数据包内容的前提下将数据包转发到本地的socket上。Tproxy透明代理需要`iptables`，`ip rule`， `ip route` 相互配合。
+这个特点和我们的需求非常契合，我们只要把图中 国内代理服务 部署在路由器上监听一个本地端口，然后配置tproxy将需要代理的流量转发到这个端口之后加密送到海外问题就解决了。
+
+
+1    tproxy的经典配置
+
+tproxy需要用到iptables，配置如下，这个配置会将所有去180.1.1.0/24的tcp请求送去tproxy透明代理，再送去本地的1081端口。tproxy源码可以参考[](linux\net\netfilter\xt_TPROXY.c)
+
+```bash
+# iptables -t mangle -A PREROUTING -d 1.1.1.0/24 -p tcp -m socket -j MARK --set-mark 1
+# iptables -t mangle -A PREROUTING -d 1.1.1.0/24 -p tcp -j TPROXY --on-port 1081 --on-ip 127.0.0.1 --tproxy-mark 0x1/0x1
+
+# ip rule add fwmark 1 lookup 100
+# ip route add local 0.0.0.0/0 dev lo table 100
+```
+
+再次强调一下，Tproxy确实没有改变数据包内容，而是在本地把对应的socket换了。
+
+tproxy工作在PREROUTING链的mangle表，上面也说了tproxy只是替换了socket没有做其他操作，下一步经过nat表后进入路由判断。由于没有修改数据包的目标ip，正常路由匹配后发现目标ip不是本机ip会走图中的数据转发流向，进入FORWARD链，然后进入POSTROUTING链离开本机。
+
+但是我们需要数据进入本机才能被本机的socket捕获进入下一步加密逻辑。这里上面说的1,3,4命令就起作用了。
+
+```bash
+# iptables -t mangle -A PREROUTING -d 1.1.1.0/24 -p tcp -m socket -j MARK --set-mark 1
+# iptables -t mangle -A PREROUTING -d 1.1.1.0/24 -p tcp -j TPROXY --on-port 1081 --on-ip 127.0.0.1 --tproxy-mark 0x1/0x1
+
+# ip rule add fwmark 1 lookup 100
+# ip route add local 0.0.0.0/0 dev lo table 100
+```
+
+1.  给所有要tproxy处理的数据（目的ip为`1.1.1.0/24`的报文）打上`mark 1`
+2.  
+3.  添加路由规则，发现有`mark 1`的数据包走id为`100`的路由表
+4.  给id为`100`的路由表添加一条路由，去往`0.0.0.0/0` （即任何数据）的数据送往 本地 `lo` 接口
+
+
+注意：上图也看到了tproxy工作在PREROUTING链的mangle表，而路由器本身发起的请求会走图中 数据发出流向 的方向，先走OUTPUT链再走POSTROUTING链直接离开本机。因此我们无法对路由本身发起的请求做透明代理。（不要在路由器上直接CURL测试这样是没有效果的）
+
+经过这样一番骚操作，数据包就会进入INPUT链，进而被之前替换好的socket读取。
+
+
+####    自己实现的代理程序
+在本地监听1081端口就可以获取到从tproxy过来的数据了，参考项目[go-tproxy]()，记得一定要设置socket的选项
+
+支持接收非本地端口的请求，需要在socket上设置 SOL_IP, IP_TRANSPARENT 选项
+
+```golang
+if err := syscall.SetsockoptInt(int(f.Fd()), syscall.SOL_IP, syscall.IP_TRANSPARENT, 1); err != nil {
+      //fmt.Printf(1, "set sock opt int error %s \n", err.Error())
+      return
+}
+```
+
+####    代理程序：服务端
+
+到这里我们已经能从透明代理中拿到客户端送来的数据了，下面就是构建加密通讯的头包把目标ip port相关信息送到海外。
+可以通过c.LocalAddr().String()获取目的地地址和端口，之后按照socks5协议中 代理请求 协议格式拼接包头，后面逻辑就和之前文章讲的一样了，这里就不赘述了。
+
+
+####    分离流量：
+
+
+
+####    小结
+
+再次回顾下一个外部请求是如何经过`tproxy`透明代理转发到最终服务器的：
+
+1.  用户请求`curl https://www.google.com`
+2.  `dnsmasq`返回了google对应的ip并把ip加入xxxlist的ipset
+3.  `curl`根据返回的ip组装了ip包发给了路由器，注意，用户发出的包是正常的数据包，srcip为本机ip，dstip为google的ip
+4.  数据包进入了路由器`iptables` 的`PREROUTING`链的`mangle`表
+5.  `PREROUTING`链把数据给了 `proxy`链
+6.  经过一番匹配，`proxy`中的 `set`模块在`xxxlist` ipset中找到了google ip，因此这个数据包没有离开`proxy`链
+7.  socket模块给这个数据包打上了`mark 1`标签
+8.  数据包进入`tproxy`，`tproxy`的作用是把对应的socket替换为绑定在`127.0.0.1:1801`端口上的科学上网国内客户端
+9.  `tproxy`工作完成，由于数据包有`mark 1`标签路由时使用了id为`100`的路由表
+10. 路由表中只有一条路由（所有数据都去`lo`），因此数据包送入`INPUT`链，最终被`1801`端口上的程序接收
+11. 代理程序读取到数据包的目的地址，构建了一个`socks5` 代理请求协议头
+12. 协议头和后续数据走加密通道传输到海外代理服务端
+13. 海外代理服务端请求google后，将返回数据加密送回
+14. 国内代理服务收到响应数据后解密，发给你的ip。回包走`OUTPUT`链走`POSTROUTING`离开路由
+15. 用户收到回包，由于请求包的数据头没被修改，响应包的源地址是请求包的目标地址，`curl`收到了包解析展现结果在屏幕上
+
+整个透明代理过程使用了 ipset、iptables、tproxy、ip rule、ip route以及各种加密通讯技术。
 
 ##  0x01 数据包的旅程
+
+
+##  0x  一些疑问
+
+####    如何理解iptables的转发条件：本机
 
 
 ##  参考
 -   [深入浅出带你理解 iptables 原理](https://zhuanlan.zhihu.com/p/547257686)
 -   [iptables 的四表五链与 NAT 工作原理 _](https://tinychen.com/20200414-iptables-principle-introduction/)
+-   [Transparent proxy support](https://www.kernel.org/doc/html/latest/networking/tproxy.html#making-non-local-sockets-work)
+-   [](https://blog.gmem.cc/iptables)
+-   [iptables详解（4）：iptables匹配条件总结之一](https://www.zsythink.net/archives/1544)
+-   [tproxy（透明代理）](https://www.zhaohuabing.com/learning-linux/docs/tproxy/)
+-   [go-tproxy项目](https://github.com/KatelynHaworth/go-tproxy/blob/master/tproxy_tcp.go)
