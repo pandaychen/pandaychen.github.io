@@ -18,10 +18,19 @@ Netfilter 模块，在网络层的五个位置（也就是 iptables 四表五链
 
 ![netfilter](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/mitm/iptables/netfilter-1.png)
 
-![netfilter](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/mitm/iptables/iptables-2.png)
+iptables 的位置：
+![iptables](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/mitm/iptables/iptables-1.png)
+
+本文部分章节参考了公司同事的文章，没法标注引用地址（表示感谢）
 
 
-为安全起见，以下用DL服务代替代理服务；此外，本文部分章节参考了公司同事的文章，没法标注引用地址（表示感谢）
+####    本文关注的 iptables 几个重点话题
+
+1.  四表五链及配置原理
+2.  NAT
+3.  基于 tproxy 的透明代理（本质是 iptables 配置）
+4.  iptables 与 tun 虚拟网卡的配合
+5.  典型配置
 
 ##  0x01    iptables 的四表五链
 
@@ -84,11 +93,11 @@ raw>mangle>nat>filter
 
 如前图所示，请求报文流入本地要经过的链如下：
 
--   请求报文要进入本机的某个应用程序，首先会到达 iptables 防火墙的 `PREROUTING` 链，然后又 `PREROUTING` 链转发到 `INPUT` 链，最后转发到所在的应用程序上，即`PREROUTING—>INPUT—>PROCESS`
+-   请求报文要进入本机的某个应用程序，首先会到达 iptables 防火墙的 `PREROUTING` 链，然后又 `PREROUTING` 链转发到 `INPUT` 链，最后转发到所在的应用程序上，即 `PREROUTING—>INPUT—>PROCESS`
 
 -   请求报文从本机流出要经过的链：请求报文读取完应用程序要从本机流出，首先要经过 iptables 的 `OUTPUT` 链，然后转发到 `POSTROUTING` 链，最后从本机成功流出，`PROCESS—>OUTPUT—>POSTROUTING`
 
--   请求报文经过本机向其他主机转发时要经过的链：请求报文要经过本机向其他的主机进行换发时，首先进入 A 主机的 PREROUTING 链，此时不会被转发到 INPUT 链，因为不是发给本机的请求报文，此时会通过 FORWARD 链进行转发，然后从 A 主机的 POSTROUTING 链流出，最后到达 B 主机的 PREROUTING 链；即`PREROUTING—>FORWARD—>POSTROUTING`
+-   请求报文经过本机向其他主机转发时要经过的链：请求报文要经过本机向其他的主机进行换发时，首先进入 A 主机的 PREROUTING 链，此时不会被转发到 INPUT 链，因为不是发给本机的请求报文，此时会通过 FORWARD 链进行转发，然后从 A 主机的 POSTROUTING 链流出，最后到达 B 主机的 PREROUTING 链；即 `PREROUTING—>FORWARD—>POSTROUTING`
 
 
 ####   链与表的关系
@@ -108,11 +117,16 @@ iptables 的链就是因为在访问该链的时候会按照每个链对应的�
 
 那么，规则是如何命中这些报文的呢？
 
+
+####    usage
+
+![params](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/mitm/iptables/iptables-params.png)
+
 ####    iptables 规则命中
 
 1）规则概念
 规则（rules）其实就是网络管理员预定义的条件，规则一般的定义为 “如果数据包头符合这样的条件，就这样处理这个数据包”。规则存储在内核空间的信息 包过滤表中，这些规则分别指定了源地址、目的地址、传输协议（如 TCP、UDP、ICMP）和服务类型（如 HTTP、FTP 和 SMTP）等。
-当数据包与规则匹配时，iptables 就根据规则所定义的方法来处理这些数据包，如放行 (accept), 拒绝(reject) 和丢弃 (drop) 等。配置防火墙的主要工作是添加, 修改和删除等规则。
+当数据包与规则匹配时，iptables 就根据规则所定义的方法来处理这些数据包，如放行 (accept), 拒绝 (reject) 和丢弃 (drop) 等。配置防火墙的主要工作是添加, 修改和删除等规则。
 其中：
 匹配（match）：符合指定的条件，比如指定的 IP 地址和端口。
 丢弃（drop）：当一个包到达时，简单地丢弃，不做其它任何处理。
@@ -184,28 +198,75 @@ iptables -t nat -A PREROUTING -p tcp -d 15.45.23.67 --dport 80 -j DNAT --to-dest
 
 ##  0x0 NAT 工作原理
 
+通常用 iptables 配置 SNAT 和 DNAT，如下图所示，网关进行一次 SNAT 转换，将来源 IP 换成出口公网 IP，这样发给服务器的数据服务器才能知道响应给谁。服务器收到数据后，会返回一个数据包，这里仍然会标记上来源 IP 为服务器的 IP。响应到网关的数据包，网关进行一个 DNAT 转换，将目标地址 IP 换成内网私有 IP，并将数据包发给设备
 
-##  0x  透明代理配置
+![NAT](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/mitm/iptables/nat-1.png)
+
+
+####    NAT 的典型配置
+
+
+##  0x0  重点：使用 tproxy 实现透明代理
 
 背景：
 1.  用户通过路由器访问某些站点（用户所有对外请求的数据都要经过路由器）
 2.  用户侧无感知配置（需要在用户的路由器上配置透明代理）
-3.  自动分流（国内vs国外），分离国内流量和国外流量，同时将国外流量送往代理
+3.  具备自动分流（国内 vs 国外）的能力，分离国内流量和国外流量，同时将国外流量送往代理
 
 
 架构图如下：
-![tproxy]()
+![tproxy](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/transparent-proxy-with-tproxy.png)
 
-和之前的方案相比，绿色部分从socks5协议替换为了透明代理。因为我们不希望对数据做任何变更，只有这样下面的客户端应用才能无感知。
+注意，路由器、透明代理、国内代理服务（带客户端功能），可能是部署在同台 Linux 主机上，本例采用 tproxy+sockv5 客户端实现透明代理功能
 
 ####    tproxy
-`Tproxy` 是Linux内核自带的一个模块，它可以在不改变数据包内容的前提下将数据包转发到本地的socket上。Tproxy透明代理需要`iptables`，`ip rule`， `ip route` 相互配合。
-这个特点和我们的需求非常契合，我们只要把图中 国内代理服务 部署在路由器上监听一个本地端口，然后配置tproxy将需要代理的流量转发到这个端口之后加密送到海外问题就解决了。
+`Tproxy` 是 Linux 内核自带的一个模块，它可以在 ** 不改变数据包内容的前提下将数据包转发到本地的 socket 上 **。Tproxy 透明代理需要 `iptables`，`ip rule`， `ip route` 相互配合。猜测按照如下的配置来搞定透明代理：
+1.  将国内代理服务部署在路由器上监听一个本地端口
+2.  配置 tproxy ，将需要代理的流量转发到这个端口之后，有国内的代理服务客户端加密之后发送到海外的代理服务，之后的流程就是正常的代理访问
+
+####    tproxy 的经典配置
+先看下最经典的 tproxy 配置：这个配置会将使得所有去到目的网段 `1.1.1.0/24` 的 tcp 请求送去 tproxy 透明代理，再送去本地的 `1081` 端口。tproxy 源码可以参考 [xt_TPROXY.c](https://github.com/torvalds/linux/blob/master/net/netfilter/xt_TPROXY.c)
+
+```bash
+iptables -t mangle -A PREROUTING -d 1.1.1.0/24 -p tcp -m socket -j MARK --set-mark 1
+iptables -t mangle -A PREROUTING -d 1.1.1.0/24 -p tcp -j TPROXY --on-port 1081 --on-ip 127.0.0.1 --tproxy-mark 0x1/0x1
+
+ip rule add fwmark 1 lookup 100
+ip route add local 0.0.0.0/0 dev lo table 100
+```
+
+上面配置的主要含义是：
+
+1.  在 mangle 表的 PREROUTING 链中，匹配目的 IP 地址为 `1.1.1.0/24`，协议为 TCP，并使用 `socket` 匹配器，将数据报文的标记设置为 `1`
+2.  在 mangle 表的 PREROUTING 链中，匹配目的 IP 地址为 `1.1.1.0/24`，协议为 TCP，使用 TPROXY 扩展，将数据报文重定向到本地 IP 地址 `127.0.0.1` 的 `1081` 端口，并设置 TProxy 标记为 `0x1/0x1`
+3.  添加一个规则，当数据报文的标记为 `1` 时，使用 `100` 号路由表进行路由
+4.  在 `100` 号路由表中添加一条本地路由，将所有数据报文都路由到 `lo` 接口上
+
+所以，上述配置的作用是实现数据报文的透明代理。当数据报文的目的 IP 地址为 `1.1.1.0/24` 时，内核会根据第一条 iptables 规则将数据报文的标记设置为 `1`，并根据第二条 iptables 规则将数据报文重定向到本地的 `1081` 端口上。然后，根据第三条规则，内核将数据报文路由到 `100` 号路由表中，并根据第四条规则将数据报文路由到 `lo` 接口上，从而实现数据报文的透明代理
 
 
-1    tproxy的经典配置
+####    配置生效解读
 
-tproxy需要用到iptables，配置如下，这个配置会将所有去180.1.1.0/24的tcp请求送去tproxy透明代理，再送去本地的1081端口。tproxy源码可以参考[](linux\net\netfilter\xt_TPROXY.c)
+![iptables-flow](iptables-flow.jpg)
+
+由于 tproxy 工作在 PREROUTING 链的 mangle 表，上面也说了 tproxy 只是替换了 socket 没有做其他操作，下一步经过 nat 表后进入路由判断。由于没有修改数据包的目标 ip，正常路由匹配后发现目标 ip 不是本机 ip 会走图中的数据转发流向，进入 FORWARD 链，然后进入 POSTROUTING 链离开本机。
+
+但是需要数据进入本机才能被本机的 socket 捕获进入下一步加密逻辑。这里上面说的 1,3,4 命令就起作用了。
+
+
+1 行 给所有要 tproxy 处理的数据打上 mark 1。
+3 行 添加路由规则，发现有 mark 1 的数据包走 id 为 100 的路由表
+4 行 给 id 为 100 的路由表添加一条路由，去往 0.0.0.0/0 （任何数据）的数据送往 本地 lo 端口。
+
+注意：上图也看到了 tproxy 工作在 PREROUTING 链的 mangle 表，而路由器本身发起的请求会走图中 数据发出流向 的方向，先走 OUTPUT 链再走 POSTROUTING 链直接离开本机。因此我们无法对路由本身发起的请求做透明代理。（不要在路由器上直接 CURL 测试这样是没有效果的）
+
+经过这样一番骚操作，数据包就会进入 INPUT 链，进而被之前替换好的 socket 读取。
+
+再次强调一下，Tproxy 确实没有改变数据包内容，而是在本地把对应的 socket 换了。
+
+tproxy 工作在 PREROUTING 链的 mangle 表，上面也说了 tproxy 只是替换了 socket 没有做其他操作，下一步经过 nat 表后进入路由判断。由于没有修改数据包的目标 ip，正常路由匹配后发现目标 ip 不是本机 ip 会走图中的数据转发流向，进入 FORWARD 链，然后进入 POSTROUTING 链离开本机。
+
+但是我们需要数据进入本机才能被本机的 socket 捕获进入下一步加密逻辑。这里上面说的 1,3,4 命令就起作用了。
 
 ```bash
 # iptables -t mangle -A PREROUTING -d 1.1.1.0/24 -p tcp -m socket -j MARK --set-mark 1
@@ -215,88 +276,209 @@ tproxy需要用到iptables，配置如下，这个配置会将所有去180.1.1.0
 # ip route add local 0.0.0.0/0 dev lo table 100
 ```
 
-再次强调一下，Tproxy确实没有改变数据包内容，而是在本地把对应的socket换了。
-
-tproxy工作在PREROUTING链的mangle表，上面也说了tproxy只是替换了socket没有做其他操作，下一步经过nat表后进入路由判断。由于没有修改数据包的目标ip，正常路由匹配后发现目标ip不是本机ip会走图中的数据转发流向，进入FORWARD链，然后进入POSTROUTING链离开本机。
-
-但是我们需要数据进入本机才能被本机的socket捕获进入下一步加密逻辑。这里上面说的1,3,4命令就起作用了。
-
-```bash
-# iptables -t mangle -A PREROUTING -d 1.1.1.0/24 -p tcp -m socket -j MARK --set-mark 1
-# iptables -t mangle -A PREROUTING -d 1.1.1.0/24 -p tcp -j TPROXY --on-port 1081 --on-ip 127.0.0.1 --tproxy-mark 0x1/0x1
-
-# ip rule add fwmark 1 lookup 100
-# ip route add local 0.0.0.0/0 dev lo table 100
-```
-
-1.  给所有要tproxy处理的数据（目的ip为`1.1.1.0/24`的报文）打上`mark 1`
-2.  
-3.  添加路由规则，发现有`mark 1`的数据包走id为`100`的路由表
-4.  给id为`100`的路由表添加一条路由，去往`0.0.0.0/0` （即任何数据）的数据送往 本地 `lo` 接口
+1.  给所有要 tproxy 处理的数据（目的 ip 为 `1.1.1.0/24` 的报文）打上 `mark 1`
+2.
+3.  添加路由规则，发现有 `mark 1` 的数据包走 id 为 `100` 的路由表
+4.  给 id 为 `100` 的路由表添加一条路由，去往 `0.0.0.0/0` （即任何数据）的数据送往 本地 `lo` 接口
 
 
-注意：上图也看到了tproxy工作在PREROUTING链的mangle表，而路由器本身发起的请求会走图中 数据发出流向 的方向，先走OUTPUT链再走POSTROUTING链直接离开本机。因此我们无法对路由本身发起的请求做透明代理。（不要在路由器上直接CURL测试这样是没有效果的）
+注意：上图也看到了 tproxy 工作在 PREROUTING 链的 mangle 表，而路由器本身发起的请求会走图中 数据发出流向 的方向，先走 OUTPUT 链再走 POSTROUTING 链直接离开本机。因此我们无法对路由本身发起的请求做透明代理。（不要在路由器上直接 CURL 测试这样是没有效果的）
 
-经过这样一番骚操作，数据包就会进入INPUT链，进而被之前替换好的socket读取。
+经过这样一番骚操作，数据包就会进入 INPUT 链，进而被之前替换好的 socket 读取。
 
 
-####    自己实现的代理程序
-在本地监听1081端口就可以获取到从tproxy过来的数据了，参考项目[go-tproxy]()，记得一定要设置socket的选项
-
-支持接收非本地端口的请求，需要在socket上设置 SOL_IP, IP_TRANSPARENT 选项
+####    代理程序 1：国内服务
+在本地监听 `1081` 端口就可以获取到从 tproxy 过来的数据了，参考项目 [go-tproxy](https://github.com/KatelynHaworth/go-tproxy)，记得一定要设置 socket 的选项。支持接收非本地端口的请求，需要在 socket 上设置 `SOL_IP`、`IP_TRANSPARENT` 选项，否则的话会被tproxy丢弃。
 
 ```golang
-if err := syscall.SetsockoptInt(int(f.Fd()), syscall.SOL_IP, syscall.IP_TRANSPARENT, 1); err != nil {
-      //fmt.Printf(1, "set sock opt int error %s \n", err.Error())
-      return
+func main(){
+    // ...
+
+    // 监听本地1081端口
+    addr, _ := net.ResolveTCPAddr("tcp", "0.0.0.0:1081")
+    server, err := net.ListenTCP("tcp", addr)
+    if err != nil {
+       //myPrintf(1, "create tcp get error %s \n", err.Error())
+       return
+    }
+
+    f, err := server.File()
+    if err != nil {
+        //myPrintf(1, "get server file error %s \n", err.Error())
+        return
+    }
+
+    if err := syscall.SetsockoptInt(int(f.Fd()), syscall.SOL_IP, syscall.IP_TRANSPARENT, 1); err != nil {
+        //fmt.Printf(1, "set sock opt int error %s \n", err.Error())
+        return
+    }
+
+    //...
 }
 ```
 
+至此，通过tproxy机制再加上本地的监听socket，已经能从透明代理中拿到客户端送来的数据了，下面就是构建加密通讯的头包把目标ip port相关信息送到海外代理服务。
+可以通过c.LocalAddr().String()获取目的地地址和端口，之后按照socks5协议中 代理请求 协议格式拼接包头，即可
+
+```go
+func (tproxy *Tproxy) onReceive(fd int32, c net.Conn, mainConn net.Conn) {
+
+   h, p, err := net.SplitHostPort(c.LocalAddr().String())
+   if err != nil {
+      myPrintf(1, "SplitHostPort error %s \n", err)
+      return
+   }
+
+   var data []byte
+   ip := net.ParseIP(h)
+   if ip4 := ip.To4(); ip4 != nil {
+      data = append([]byte("\x05\x01\x00\x01"), []byte(ip4)...)
+   } else if ip6 := ip.To16(); ip6 != nil {
+      data = append([]byte("\x05\x01\x00\x04"), []byte(ip6)...)
+   }
+
+   i, _ := strconv.Atoi(p)
+   port := make([]byte, 2)
+   binary.BigEndian.PutUint16(port, uint16(i))
+   data = append(data, port...)
+   
+   //后续加密送往海外代理服务的逻辑
+}
+```
+
+总结：到这里我们已经实现了对所有客户端去往`1.1.1.0/24`地址的请求透明代理并发送到海外，那么怎么实现国内外流量分离呢？
+
 ####    代理程序：服务端
 
-到这里我们已经能从透明代理中拿到客户端送来的数据了，下面就是构建加密通讯的头包把目标ip port相关信息送到海外。
-可以通过c.LocalAddr().String()获取目的地地址和端口，之后按照socks5协议中 代理请求 协议格式拼接包头，后面逻辑就和之前文章讲的一样了，这里就不赘述了。
+到这里我们已经能从透明代理中拿到客户端送来的数据了，下面就是构建加密通讯的头包把目标 ip port 相关信息送到海外。
+可以通过 c.LocalAddr().String() 获取目的地地址和端口，之后按照 socks5 协议中 代理请求 协议格式拼接包头，后面逻辑就和之前文章讲的一样了，这里就不赘述了。
 
 
 ####    分离流量：
 
+这里介绍了两种方案：
+
+一种方案是将所有国内ip段写到iptable中，如果目标地址是国内ip段就直接路由不走代理。
+另一种方案是准备一个域名名单，名单中的域名解析dns后自动加入一个ipset后续用这个ipset判断。
+
+iptables
+这个网站可以下载到所有国内ip网段，选CIDR格式
+下载完大概是这个样子：一个网段一行，大概有6000多行
+
+
+43.224.68.0/22
+......
+然后根据导出的网段生成iptables 命令。注意：一定要把本机ip，内网地址加到免代理列表中，否则你就连不上你的路由器了
+
+//单独创建一个proxy链用于管理代理地址 并在PREROUTING链中引入proxy
+iptables -t mangle -N proxy
+iptables -t mangle -A PREROUTING -j proxy
+
+//对于去往本地地址，内网地址的 直接return 离开proxy链会继续PREROUTING链其他处理
+iptables -t mangle -A proxy -d 127.0.0.1/32 -j RETURN
+iptables -t mangle -A proxy -d 172.16.0.0/12 -j RETURN
+iptables -t mangle -A proxy -d 192.168.0.0/16 -j RETURN
+iptables -t mangle -A proxy -d 10.0.0.0/8 -j RETURN
+
+//根据之前下载的国内ip网段生成的iptables命令，如果命中国内网段也return离开proxy链
+iptables -t mangle -A proxy -d 43.224.68.0/22 -j RETURN
+//.....其余的网段
+......
+
+//最后余下的全部走代理，udp也配置起来
+iptables -t mangle -A proxy -p tcp -m socket -j MARK --set-mark 1
+iptables -t mangle -A proxy -p tcp -j TPROXY --on-port 1081 --on-ip 127.0.0.1 --tproxy-mark 0x1/0x1
+iptables -t mangle -A proxy -p udp -m socket -j MARK --set-mark 1
+iptables -t mangle -A proxy -p udp -j TPROXY --on-port 1081 --on-ip 127.0.0.1 --tproxy-mark 0x1/0x1
+
+这个方案最大的问题是iptables中匹配的条数太多，每个流量都要经过6000多行规则匹配效率不高。
+
+dns
+我们需要用到一个开源的dns服务dnsmasq，这块的配置大家可以自行百度一下。然后下载这样一份配置文件，放到dnsmasq的配置目录下。这是一个代理名单，只要dns解析了名单中的域名，在返回域名对应ip同时会把加入到叫gfwlist的ipset中。
+
+https://raw.githubusercontent.com/phusbot/dnsmasq_gfwlist_ipset/master/dnsmasq_gfwlist_ipset.conf
+
+可以使用如下命令查看列表中的ip
+
+root@X-WRT:~# ipset list gfwlist
+Name: gfwlist
+Type: hash:ip
+Revision: 4
+Header: family inet hashsize 1024 maxelem 65536
+Size in memory: 23976
+References: 1
+Number of entries: 867
+Members:
+104.244.42.194
+208.115.237.76
+54.88.42.242
+172.217.160.97
+142.250.66.46
+......
+之后的iptables只需判断目的地ip是否在ipset中，相对简单很多，而且一般家用你访问外部的域名就那么几个所以ipset也不会特别大，相比之前iptables 6000多的规则这个方案看起来少很多。
+
+//创建一个ipset
+ipset create gfwlist hash:ip
+
+//单独创建一个proxy链用于管理代理地址 并在PREROUTING链中引入proxy
+iptables -t mangle -N proxy
+iptables -t mangle -A PREROUTING -j proxy
+
+//对于去往本地地址，内网地址的 直接return 离开proxy链会继续PREROUTING链其他处理
+iptables -t mangle -A proxy -d 127.0.0.1/32 -j RETURN
+iptables -t mangle -A proxy -d 172.16.0.0/12 -j RETURN
+iptables -t mangle -A proxy -d 192.168.0.0/16 -j RETURN
+iptables -t mangle -A proxy -d 10.0.0.0/8 -j RETURN
+
+//没有在gfwlist ipset中的目的地直接return 离开proxy链
+iptables -t mangle -A proxy -m set ! --match-set gfwlist dst -j RETURN
+
+//最后余下的全部走代理，udp也配置起来
+iptables -t mangle -A proxy -p tcp -m socket -j MARK --set-mark 1
+iptables -t mangle -A proxy -p tcp -j TPROXY --on-port 1081 --on-ip 127.0.0.1 --tproxy-mark 0x1/0x1
+iptables -t mangle -A proxy -p udp -m socket -j MARK --set-mark 1
+iptables -t mangle -A proxy -p udp -j TPROXY --on-port 1081 --on-ip 127.0.0.1 --tproxy-mark 0x1/0x1
+总结：DNS的方案，如果你访问的外部域名特别多导致ipset非常大可以考虑用第一种方案。
 
 
 ####    小结
 
-再次回顾下一个外部请求是如何经过`tproxy`透明代理转发到最终服务器的：
+再次回顾下一个外部请求是如何经过 `tproxy` 透明代理转发到最终服务器的：
 
-1.  用户请求`curl https://www.google.com`
-2.  `dnsmasq`返回了google对应的ip并把ip加入xxxlist的ipset
-3.  `curl`根据返回的ip组装了ip包发给了路由器，注意，用户发出的包是正常的数据包，srcip为本机ip，dstip为google的ip
-4.  数据包进入了路由器`iptables` 的`PREROUTING`链的`mangle`表
-5.  `PREROUTING`链把数据给了 `proxy`链
-6.  经过一番匹配，`proxy`中的 `set`模块在`xxxlist` ipset中找到了google ip，因此这个数据包没有离开`proxy`链
-7.  socket模块给这个数据包打上了`mark 1`标签
-8.  数据包进入`tproxy`，`tproxy`的作用是把对应的socket替换为绑定在`127.0.0.1:1801`端口上的科学上网国内客户端
-9.  `tproxy`工作完成，由于数据包有`mark 1`标签路由时使用了id为`100`的路由表
-10. 路由表中只有一条路由（所有数据都去`lo`），因此数据包送入`INPUT`链，最终被`1801`端口上的程序接收
-11. 代理程序读取到数据包的目的地址，构建了一个`socks5` 代理请求协议头
+1.  用户请求 `curl https://www.google.com`
+2.  `dnsmasq` 返回了 google 对应的 ip 并把 ip 加入 xxxlist 的 ipset
+3.  `curl` 根据返回的 ip 组装了 ip 包发给了路由器，注意，用户发出的包是正常的数据包，srcip 为本机 ip，dstip 为 google 的 ip
+4.  数据包进入了路由器 `iptables` 的 `PREROUTING` 链的 `mangle` 表
+5.  `PREROUTING` 链把数据给了 `proxy` 链
+6.  经过一番匹配，`proxy` 中的 `set` 模块在 `xxxlist` ipset 中找到了 google ip，因此这个数据包没有离开 `proxy` 链
+7.  socket 模块给这个数据包打上了 `mark 1` 标签
+8.  数据包进入 `tproxy`，`tproxy` 的作用是把对应的 socket 替换为绑定在 `127.0.0.1:1801` 端口上的科学上网国内客户端
+9.  `tproxy` 工作完成，由于数据包有 `mark 1` 标签路由时使用了 id 为 `100` 的路由表
+10. 路由表中只有一条路由（所有数据都去 `lo`），因此数据包送入 `INPUT` 链，最终被 `1801` 端口上的程序接收
+11. 代理程序读取到数据包的目的地址，构建了一个 `socks5` 代理请求协议头
 12. 协议头和后续数据走加密通道传输到海外代理服务端
-13. 海外代理服务端请求google后，将返回数据加密送回
-14. 国内代理服务收到响应数据后解密，发给你的ip。回包走`OUTPUT`链走`POSTROUTING`离开路由
-15. 用户收到回包，由于请求包的数据头没被修改，响应包的源地址是请求包的目标地址，`curl`收到了包解析展现结果在屏幕上
+13. 海外代理服务端请求 google 后，将返回数据加密送回
+14. 国内代理服务收到响应数据后解密，发给你的 ip。回包走 `OUTPUT` 链走 `POSTROUTING` 离开路由
+15. 用户收到回包，由于请求包的数据头没被修改，响应包的源地址是请求包的目标地址，`curl` 收到了包解析展现结果在屏幕上
 
-整个透明代理过程使用了 ipset、iptables、tproxy、ip rule、ip route以及各种加密通讯技术。
+整个透明代理过程使用了 ipset、iptables、tproxy、ip rule、ip route 以及各种加密通讯技术。
 
 ##  0x01 数据包的旅程
 
 
 ##  0x  一些疑问
 
-####    如何理解iptables的转发条件：本机
+####    如何理解 iptables 的转发条件：本机
 
 
-##  参考
+##  0x0 参考
 -   [深入浅出带你理解 iptables 原理](https://zhuanlan.zhihu.com/p/547257686)
 -   [iptables 的四表五链与 NAT 工作原理 _](https://tinychen.com/20200414-iptables-principle-introduction/)
 -   [Transparent proxy support](https://www.kernel.org/doc/html/latest/networking/tproxy.html#making-non-local-sockets-work)
--   [](https://blog.gmem.cc/iptables)
--   [iptables详解（4）：iptables匹配条件总结之一](https://www.zsythink.net/archives/1544)
+-   [重温 iptables](https://blog.gmem.cc/iptables)
+-   [iptables 详解（4）：iptables 匹配条件总结之一](https://www.zsythink.net/archives/1544)
 -   [tproxy（透明代理）](https://www.zhaohuabing.com/learning-linux/docs/tproxy/)
--   [go-tproxy项目](https://github.com/KatelynHaworth/go-tproxy/blob/master/tproxy_tcp.go)
+-   [go-tproxy 项目](https://github.com/KatelynHaworth/go-tproxy/blob/master/tproxy_tcp.go)
+-   [Linux-iptables 防火墙、四表五链及 SNAT 与 DNAT 的原理与应用
+目录](https://dianqk.blog/2021/11/20/iptables-tproxy-and-home/)
+-   [iptables 网络防火墙、SNAT、DNAT 原理及端口重定向实战](https://www.cnblogs.com/struggle-1216/p/11994523.html)
