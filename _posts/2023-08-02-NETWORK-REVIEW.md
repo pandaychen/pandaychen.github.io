@@ -13,7 +13,7 @@ tags:
 
 
 ##  0x00    前言
-本文回顾下网络的那些事
+本文回顾下网络的基础知识，主要是网卡、虚拟网卡，以及非常重要的 tap/tun 开发模式及应用构建相关。
 
 ##  0x01    物理网卡 && 虚拟网卡
 
@@ -168,7 +168,59 @@ curl --interface tun0 -O target_url
 
 tap 类型的虚拟网卡是 tun/tap 驱动程序实现的，tap 表示虚拟的是以太网设备，tun 表示虚拟的是点对点设备，这两种设备针对网络包实施不同的封装。前文介绍的 `tun2socks` 基于 tun 虚拟网卡驱动了隧道包封装。本小节关注下虚拟网卡和物理网卡的转发原理是什么（数据包最终肯定要从物理网卡才能流出）以及通信包是如何封装的
 
-##  0x04    tap/tun 的应用场景
+如何向 tun/tap 发送 / 读取数据呢？一般有两种方法：
+
+1. 应用程序可以通过标准的 Socket API 向 Tun/Tap 接口发送 IP 数据包，就好像对一个真实的网卡进行操作一样。除了应用程序以外，操作系统也会根据 TCP/IP 协议栈的处理向 Tun/Tap 接口发送 IP 数据包或者以太网数据包，例如 ARP 或者 ICMP 数据包。Tun/Tap 驱动程序会将 Tun/Tap 接口收到的数据包原样写入到 `/dev/net/tun` 字符设备上，处理 Tun/Tap 数据的应用程序如 VPN 程序可以从该设备上读取到数据包，以进行相应处理
+
+2. 应用程序也可以通过 `/dev/net/tun` 字符设备写入数据包，这种情况下该字符设备上写入的数据包会被发送到 Tun/Tap 虚拟接口上，进入操作系统的 TCP/IP 协议栈进行相应处理，就像从物理网卡进入操作系统的数据一样
+
+
+还有一个问题，内核通过什么信息将数据报文转发到某个 tun 虚拟网卡上呢？
+
+内核将数据报文转发到某个 tun 虚拟网卡上，主要是根据路由表中的路由规则和目的 IP 地址进行匹配。当内核接收到一个数据报文时，它会首先检查该数据报文的目的 IP 地址，然后查找路由表中与该目的 IP 地址匹配的路由规则。如果找到了匹配的路由规则，内核就会根据该路由规则指定的下一跳地址或接口将数据报文转发出去。如果路由规则中指定了 tun 虚拟网卡作为下一跳接口，内核就会将数据报文转发到该虚拟网卡上。此时，数据报文就会被封装成一个新的数据包，并通过 tun 虚拟网卡发送到用户空间的应用程序中进行处理。
+
+需要注意的是，为了使内核能够正确地将数据报文转发到 tun 虚拟网卡上，应用程序需要正确地配置虚拟网卡的 IP 地址和子网掩码，并将该虚拟网卡添加到路由表中
+
+####    通过 VPN 收发包深刻理解 tun 工作机制
+
+
+##  0x04    tap/tun 机制的应用场景
+
+####    1、使用 Tun/Tap 创建点对点隧道
+
+![tun](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/tun-app-1.png)
+
+如上图使用 tun 机制构建点对点的隧道。左侧主机应用程序发送到 Tun 虚拟设备上的 IP 数据包被 VPN 程序通过字符设备接收，然后再通过一个 TCP or UDP 隧道发送到右侧 VPN 服务器上，VPN 服务器将隧道负载中的原始 IP 数据包写入字符设备，这些 IP 包就会出现在右侧的 Tun 虚拟设备上，最后通过操作系统协议栈和 socket 接口发送到右侧的应用程序上（在网络中传输的报肯定是正常的 IP 包，VPN 的包要被封装起来，在 TUN 应用中去解包）
+
+如果采用 tap 隧道实现，那么隧道的负载将是以太数据帧而不是 IP 数据包，而且还会传递 ARP 等广播数据包：
+
+![tun](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/linux-tap-tunnel.png)
+
+
+####    2、使用 Tun/Tap 隧道绕过防火墙
+
+![tunnel](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/linux-access-internet-via-tunnel.png)
+
+结合路由规则和 iptables 规则，可以将 VPN 服务器端的主机作为连接外部网络的网关，以绕过防火墙对客户端的一些外部网络访问限制。如下图所示，防火墙规则允许客户端访问主机 IP2，而禁止访问其他 Internet 上的节点。通过采用 Tun 隧道，从防火墙角度只能看到被封装后的数据包，因此防火墙认为客户端只是在访问 IP2，会对数据进行放行。而 VPN 服务端在解包得到真实的访问目的后，会通过路由规则和 iptables 规则将请求转发到真正的访问目的地上，然后再将真实目的地的响应 IP 数据包封装进隧道后原路返回给客户端，从而达到绕过防火墙限制的目的
+
+
+####    3、使用 Tap 隧道桥接两个远程站点
+
+使用 tap 建立二层隧道将两个远程站点桥接起来，组成一个局域网。对于两边站点中的主机来说，访问对方站点的主机和本地站点的主机的方式没有区别，都处于一个局域网 `192.168.0.0/24` 中
+
+详细配置参考此文：[Linux Tun/Tap 介绍](https://www.zhaohuabing.com/post/2020-02-24-linux-taptun/)
+
+![bridge](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/linux-bridge-tunnel.png)
+
+
+####    4、隧道通信
+tap/tun 最常见的应用也就是用于隧道通信，如 VPN，包括 tunnel 和应用层的 IPsec 等。比较有名的是下面两个：
+1.      [openvpn](https://openvpn.net/)
+2.      [VTun](https://vtun.sourceforge.net/)
+
+
+####    5、透明代理
+
 
 
 ##  0x0  参考
