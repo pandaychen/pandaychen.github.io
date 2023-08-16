@@ -282,19 +282,21 @@ tproxy 工作在 PREROUTING 链的 mangle 表，上面也说了 tproxy 只是替
 4.  给 id 为 `100` 的路由表添加一条路由，去往 `0.0.0.0/0` （即任何数据）的数据送往 本地 `lo` 接口
 
 
-注意：上图也看到了 tproxy 工作在 PREROUTING 链的 mangle 表，而路由器本身发起的请求会走图中 数据发出流向 的方向，先走 OUTPUT 链再走 POSTROUTING 链直接离开本机。因此我们无法对路由本身发起的请求做透明代理。（不要在路由器上直接 CURL 测试这样是没有效果的）
+注意：上图也看到了 tproxy 工作在 PREROUTING 链的 mangle 表，而路由器本身发起的请求会走图中数据发出流向的方向，先走 OUTPUT 链再走 POSTROUTING 链直接离开本机。因此我们无法对路由本身发起的请求做透明代理。（不要在路由器上直接 CURL 测试这样是没有效果的）
 
 经过这样一番骚操作，数据包就会进入 INPUT 链，进而被之前替换好的 socket 读取。
 
+回到 INPUT 链的原因是因为在最后修改之后，去到了 `lo` 接口被接受，需要监听在 `lo` 上的进程还需要额外的 socket 配置，否则包会被 tproxy 丢弃掉；但是这里有个疑问是，为啥这里 `lo` 上不受 iptables 影响了？
+
 
 ####    代理程序 1：国内服务
-在本地监听 `1081` 端口就可以获取到从 tproxy 过来的数据了，参考项目 [go-tproxy](https://github.com/KatelynHaworth/go-tproxy)，记得一定要设置 socket 的选项。支持接收非本地端口的请求，需要在 socket 上设置 `SOL_IP`、`IP_TRANSPARENT` 选项，否则的话会被tproxy丢弃。
+在本地监听 `1081` 端口就可以获取到从 tproxy 过来的数据了，参考项目 [go-tproxy](https://github.com/KatelynHaworth/go-tproxy)，记得一定要设置 socket 的选项。支持接收非本地端口的请求，需要在 socket 上设置 `SOL_IP`、`IP_TRANSPARENT` 选项，否则的话会被 tproxy 丢弃。
 
 ```golang
 func main(){
     // ...
 
-    // 监听本地1081端口
+    // 监听本地 1081 端口
     addr, _ := net.ResolveTCPAddr("tcp", "0.0.0.0:1081")
     server, err := net.ListenTCP("tcp", addr)
     if err != nil {
@@ -317,8 +319,8 @@ func main(){
 }
 ```
 
-至此，通过tproxy机制再加上本地的监听socket，已经能从透明代理中拿到客户端送来的数据了，下面就是构建加密通讯的头包把目标ip port相关信息送到海外代理服务。
-可以通过c.LocalAddr().String()获取目的地地址和端口，之后按照socks5协议中 代理请求 协议格式拼接包头，即可
+至此，通过 tproxy 机制再加上本地的监听 socket，已经能从透明代理中拿到客户端送来的数据了，下面就是构建加密通讯的头包把目标 ip port 相关信息送到海外代理服务。
+可以通过 c.LocalAddr().String() 获取目的地地址和端口，之后按照 socks5 协议中 代理请求 协议格式拼接包头，即可
 
 ```go
 func (tproxy *Tproxy) onReceive(fd int32, c net.Conn, mainConn net.Conn) {
@@ -341,12 +343,12 @@ func (tproxy *Tproxy) onReceive(fd int32, c net.Conn, mainConn net.Conn) {
    port := make([]byte, 2)
    binary.BigEndian.PutUint16(port, uint16(i))
    data = append(data, port...)
-   
-   //后续加密送往海外代理服务的逻辑
+
+   // 后续加密送往海外代理服务的逻辑
 }
 ```
 
-总结：到这里我们已经实现了对所有客户端去往`1.1.1.0/24`地址的请求透明代理并发送到海外，那么怎么实现国内外流量分离呢？
+总结：到这里我们已经实现了对所有客户端去往 `1.1.1.0/24` 地址的请求透明代理并发送到海外，那么怎么实现国内外流量分离呢？
 
 ####    代理程序：服务端
 
@@ -358,47 +360,47 @@ func (tproxy *Tproxy) onReceive(fd int32, c net.Conn, mainConn net.Conn) {
 
 这里介绍了两种方案：
 
-一种方案是将所有国内ip段写到iptable中，如果目标地址是国内ip段就直接路由不走代理。
-另一种方案是准备一个域名名单，名单中的域名解析dns后自动加入一个ipset后续用这个ipset判断。
+一种方案是将所有国内 ip 段写到 iptable 中，如果目标地址是国内 ip 段就直接路由不走代理。
+另一种方案是准备一个域名名单，名单中的域名解析 dns 后自动加入一个 ipset 后续用这个 ipset 判断。
 
 iptables
-这个网站可以下载到所有国内ip网段，选CIDR格式
-下载完大概是这个样子：一个网段一行，大概有6000多行
+这个网站可以下载到所有国内 ip 网段，选 CIDR 格式
+下载完大概是这个样子：一个网段一行，大概有 6000 多行
 
 
 43.224.68.0/22
 ......
-然后根据导出的网段生成iptables 命令。注意：一定要把本机ip，内网地址加到免代理列表中，否则你就连不上你的路由器了
+然后根据导出的网段生成 iptables 命令。注意：一定要把本机 ip，内网地址加到免代理列表中，否则你就连不上你的路由器了
 
-//单独创建一个proxy链用于管理代理地址 并在PREROUTING链中引入proxy
+// 单独创建一个 proxy 链用于管理代理地址 并在 PREROUTING 链中引入 proxy
 iptables -t mangle -N proxy
 iptables -t mangle -A PREROUTING -j proxy
 
-//对于去往本地地址，内网地址的 直接return 离开proxy链会继续PREROUTING链其他处理
+// 对于去往本地地址，内网地址的 直接 return 离开 proxy 链会继续 PREROUTING 链其他处理
 iptables -t mangle -A proxy -d 127.0.0.1/32 -j RETURN
 iptables -t mangle -A proxy -d 172.16.0.0/12 -j RETURN
 iptables -t mangle -A proxy -d 192.168.0.0/16 -j RETURN
 iptables -t mangle -A proxy -d 10.0.0.0/8 -j RETURN
 
-//根据之前下载的国内ip网段生成的iptables命令，如果命中国内网段也return离开proxy链
+// 根据之前下载的国内 ip 网段生成的 iptables 命令，如果命中国内网段也 return 离开 proxy 链
 iptables -t mangle -A proxy -d 43.224.68.0/22 -j RETURN
-//.....其余的网段
+//..... 其余的网段
 ......
 
-//最后余下的全部走代理，udp也配置起来
+// 最后余下的全部走代理，udp 也配置起来
 iptables -t mangle -A proxy -p tcp -m socket -j MARK --set-mark 1
 iptables -t mangle -A proxy -p tcp -j TPROXY --on-port 1081 --on-ip 127.0.0.1 --tproxy-mark 0x1/0x1
 iptables -t mangle -A proxy -p udp -m socket -j MARK --set-mark 1
 iptables -t mangle -A proxy -p udp -j TPROXY --on-port 1081 --on-ip 127.0.0.1 --tproxy-mark 0x1/0x1
 
-这个方案最大的问题是iptables中匹配的条数太多，每个流量都要经过6000多行规则匹配效率不高。
+这个方案最大的问题是 iptables 中匹配的条数太多，每个流量都要经过 6000 多行规则匹配效率不高。
 
 dns
-我们需要用到一个开源的dns服务dnsmasq，这块的配置大家可以自行百度一下。然后下载这样一份配置文件，放到dnsmasq的配置目录下。这是一个代理名单，只要dns解析了名单中的域名，在返回域名对应ip同时会把加入到叫gfwlist的ipset中。
+我们需要用到一个开源的 dns 服务 dnsmasq，这块的配置大家可以自行百度一下。然后下载这样一份配置文件，放到 dnsmasq 的配置目录下。这是一个代理名单，只要 dns 解析了名单中的域名，在返回域名对应 ip 同时会把加入到叫 gfwlist 的 ipset 中。
 
 https://raw.githubusercontent.com/phusbot/dnsmasq_gfwlist_ipset/master/dnsmasq_gfwlist_ipset.conf
 
-可以使用如下命令查看列表中的ip
+可以使用如下命令查看列表中的 ip
 
 root@X-WRT:~# ipset list gfwlist
 Name: gfwlist
@@ -415,30 +417,30 @@ Members:
 172.217.160.97
 142.250.66.46
 ......
-之后的iptables只需判断目的地ip是否在ipset中，相对简单很多，而且一般家用你访问外部的域名就那么几个所以ipset也不会特别大，相比之前iptables 6000多的规则这个方案看起来少很多。
+之后的 iptables 只需判断目的地 ip 是否在 ipset 中，相对简单很多，而且一般家用你访问外部的域名就那么几个所以 ipset 也不会特别大，相比之前 iptables 6000 多的规则这个方案看起来少很多。
 
-//创建一个ipset
+// 创建一个 ipset
 ipset create gfwlist hash:ip
 
-//单独创建一个proxy链用于管理代理地址 并在PREROUTING链中引入proxy
+// 单独创建一个 proxy 链用于管理代理地址 并在 PREROUTING 链中引入 proxy
 iptables -t mangle -N proxy
 iptables -t mangle -A PREROUTING -j proxy
 
-//对于去往本地地址，内网地址的 直接return 离开proxy链会继续PREROUTING链其他处理
+// 对于去往本地地址，内网地址的 直接 return 离开 proxy 链会继续 PREROUTING 链其他处理
 iptables -t mangle -A proxy -d 127.0.0.1/32 -j RETURN
 iptables -t mangle -A proxy -d 172.16.0.0/12 -j RETURN
 iptables -t mangle -A proxy -d 192.168.0.0/16 -j RETURN
 iptables -t mangle -A proxy -d 10.0.0.0/8 -j RETURN
 
-//没有在gfwlist ipset中的目的地直接return 离开proxy链
+// 没有在 gfwlist ipset 中的目的地直接 return 离开 proxy 链
 iptables -t mangle -A proxy -m set ! --match-set gfwlist dst -j RETURN
 
-//最后余下的全部走代理，udp也配置起来
+// 最后余下的全部走代理，udp 也配置起来
 iptables -t mangle -A proxy -p tcp -m socket -j MARK --set-mark 1
 iptables -t mangle -A proxy -p tcp -j TPROXY --on-port 1081 --on-ip 127.0.0.1 --tproxy-mark 0x1/0x1
 iptables -t mangle -A proxy -p udp -m socket -j MARK --set-mark 1
 iptables -t mangle -A proxy -p udp -j TPROXY --on-port 1081 --on-ip 127.0.0.1 --tproxy-mark 0x1/0x1
-总结：DNS的方案，如果你访问的外部域名特别多导致ipset非常大可以考虑用第一种方案。
+总结：DNS 的方案，如果你访问的外部域名特别多导致 ipset 非常大可以考虑用第一种方案。
 
 
 ####    小结
