@@ -12,11 +12,13 @@ tags:
 
 
 ##  Ox00    前言
-WireGuard（简称 wg）是一种快速、现代、安全的 VPN 协议，基于 golang 的开源地址 [在此](https://git.zx2c4.com/wireguard-go)
+WireGuard（简称 wg）是一种快速、现代、安全的 VPN 协议，基于 golang 的开源地址 [在此](https://git.zx2c4.com/wireguard-go)，本文探讨其linux下的配置和实现等细节
 
 
 ##  0x01   工作原理
 WireGuard 以 UDP 实现，但是运行在 IP 层（即 ip-over-udp）。每个 Peer 都会生成一个 `wg0` 虚拟网卡，同时服务端会在物理网卡上监听 UDP `51820` 端口。应用程序的包发送到内核以后，如果地址是虚拟专用网内部的，那么就会交给 `wg0` 设备，WireGuard 就会把这个 IP 包封装成 WireGuard 的包，然后在 UDP 中发送出去，对方的 Peer 的内核收到这个 UDP 包后再反向操作，解包成为 IP 包，然后交给对应的应用程序。 WireGuard 实现的虚拟网卡就像 `eth0` 一样，可以使用标准的 Linux 工具操作，像是 `ip`, `ifconfig` 之类的命令。所以 WireGuard 也就不用实现 QoS 之类的功能，毕竟其他工具已经实现了
+
+![ARCH](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/wireguard/how-wireguard-works.png)
 
 
 ####    基础结构
@@ -45,6 +47,9 @@ wireguard-go 的网络连接管理包括了会话管理、路由管理、握手�
 参考[安装 Wireguard 并组建中心辐射型网络](https://naiv.fun/Ops/53.html)
 
 
+####    多网卡配置方式
+
+![multi-nic](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/wireguard/how-wireguard-works-1.png)
 
 ####    路由方式
 [WireGuard基本原理](https://cshihong.github.io/2020/10/11/WireGuard%E5%9F%BA%E6%9C%AC%E5%8E%9F%E7%90%86/)
@@ -54,6 +59,12 @@ wireguard-go 的网络连接管理包括了会话管理、路由管理、握手�
 wireguard-go的核心协议栈也是基于gvisor[实现的](https://github.com/WireGuard/wireguard-go/blob/master/go.mod#L10)
 
 -   tun 相关接口代码：[tun.go](https://git.zx2c4.com/wireguard-go/tree/tun/netstack/tun.go)
+
+
+##  0x0 值得借鉴的地方
+
+####    wireguard的路由配置方式
+
 
 
 ##  0x0 参考
