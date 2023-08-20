@@ -106,23 +106,25 @@ tap/tun 是设备是用户空间软件和系统网络栈之间的一个通道，
 -       向 TUN 写数据：写的过程其实就是读的过程反过来，拿到的是某个传输层协议的 payload，就拿 UDP 为例，根据该数据报的元信息，构建出完整的 UDP Header，然后将 payload 内容拼接进去；接下来构建 IPv4 Header，然后将 UDP 报文拼接进 IPv4 payload 中。在拿到 IPv4 数据包后，即可序列化为字节序列，写入 TUN 句柄即可（各层的 checksum 需要重新计算）
 -       实际使用中需要考虑更多的 case，包括但不限于分片、丢包、重传、流量控制等等，TCP 作为一个极其复杂的传输层协议，有巨多情况需要考虑，很明显用上面的基本思路是非常繁琐并且难以使用的；上述用户态网络栈都提供了非常友好且直接的接口，可以直接创建一个 TCP/IP 网络栈实例，拿到两个句柄，一端负责读取和写入网络层 IP 数据包，另一端负责接收和写入传输层载荷，中间的复杂转换关系和特殊情况都被内部屏蔽掉了
 
-4、操作系统网络栈
-根据我们的需求，实际就是在 IPv4 和 TCP payload 之间进行转换，而操作系统的网络栈正好就有这个功能，我们无法简单的直接使用操作系统的网络栈代码，但是可以想办法复用操作系统网络栈提供的功能。TUN 在网络层已经打开了一个口子，还需要在传输层也打开一个口子，其实可以利用操作系统提供的 socket。
+4、操作系统网络栈（双方向上的两个功能）
 
-我们使用操作系统提供的 Socket 创建一个传输层的 Listener，将某个 IPv4 数据包的目标 IP 和目标端口修改为我们监听的 IP 和端口，然后通过 TUN 将该 IPv4 数据包注入到操作系统的网络栈中，操作系统就会自动的进行相应的解析，并将所需要的传输层 payload 通过前面创建的 Socket 发送给 Listener，由此便利用操作系统网络栈完成了 “往外读” 的操作。
+-       TUN to kernel：可以使用操作系统提供的 Socket 创建一个传输层的 `Listener`，将上述流程中的 IPv4 数据包的目标 IP 和目标端口修改为（虚拟网卡上）监听的 IP 和端口，然后通过 TUN 将该 IPv4 数据包注入到操作系统的网络栈中，操作系统就会自动的进行相应的解析，并将所需要的传输层 payload 通过前面创建的 Socket 发送给 `Listener`，由此便利用操作系统网络栈完成了 ** 往外读 ** 的操作。该流程本质还是在 IPv4 和 TCP payload 之间进行转换，可以利用操作系统的网络栈实现此功能
+-       kernel to TUN：对于 ** 向里写 ** 的操作，只需要向刚刚创建的传输层连接句柄写入即可，操作系统的网络栈同样会进行相应的封包，最后形成 IPv4 数据包。很明显，需要考虑反向的数据包，当向传输层连接的句柄中写入数据、操作系统的网络栈封包时，源 IP 和源端口会被视为新的目标 IP 和目标端口，因为我们需要使返回的 IPv4 数据包能够被 TUN 接口捕获到，在上面步骤中就不能只修改目标 IP 和目标端口，同时还要修改源 IP 和源端口，源 IP 应该限制为 TUN 网段中的 IP
 
-对于 “向里写” 的操作，只需要向刚刚创建的传输层连接句柄写入即可，操作系统的网络栈同样会进行相应的封包，最后形成 IPv4 数据包。很明显，需要考虑反向的数据包，当向传输层连接的句柄中写入数据、操作系统的网络栈封包时，源 IP 和源端口会被视为新的目标 IP 和目标端口，因为我们需要使返回的 IPv4 数据包能够被 TUN 接口捕获到，在上面步骤中就不能只修改目标 IP 和目标端口，同时还要修改源 IP 和源端口，源 IP 应该限制为 TUN 网段中的 IP。
 
-工作流程
-在利用操作系统网络栈时，通常是以下步骤，这里拿 TCP 协议举例。
+####    tun 数据流程示例
 
-在我们的例子中， TUN 网络的配置为 198.10.0.1/16，主机 IP 为 198.10.0.1，代理客户端监听 198.10.0.1:1313，App 想要访问 google.com:80，自定义的 DNS 服务返回 google.com 的 Fake IP 198.10.2.2。
+本节引入一个例子详细描述下上面的转换过程:
 
-1. Proxy 创建 TCP Socket Listener
+TUN 网络的配置为 `198.10.0.1/16`，虚拟网卡 IP 为 `198.10.0.1`，透明代理客户端（虚拟网卡）监听 `198.10.0.1:1313`，App 访问 `google.com`，自定义的 DNS 服务返回 `google.com` 的 Fake IP `198.10.2.2`（保证后续请求都走到 tun 路由）
+
+1、Proxy 创建 TCP Socket Listener
 
 这里首先要在系统网络栈的传输层开个口子，创建一个 TCP Socket Listener，监听 198.10.0.1:1313
 
-2. 某 App 发起连接
+2、App 发起连接
+
+![1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/tap-flow/tun-mode-1.png)
 
 当某需要代理的 App 发起连接，访问 google.com:80，我们通过自定义的 DNS 服务返回一个 Fake IP (198.10.2.2)，使流量被路由到 TUN 设备上。
 
@@ -134,7 +136,10 @@ TCP connect(198.10.2.2:80)
 198.10.0.1:34567 -> 198.10.2.2:80
 App
 Kernel
-3. 将 TUN 读取到的 IPv4 解析为 TCP 载荷数据
+
+3、将 TUN 读取到的 IPv4 解析为 TCP 载荷数据
+
+![2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/tap-flow/tun-mode-2.png)
 
 TUN 设备捕获到流量，也就是 IPv4 数据包，在读取出来后，需要利用系统网络栈解析出 TCP 载荷数据。
 
@@ -160,7 +165,9 @@ Proxy
 Kernel
 这里为了方便，直接将源 IP 和源端口设置为初始的目标 IP 和目标端口，在实际编程时，有更多的设置策略，也就是 NAT 策略。
 
-4. 代理客户端请求代理服务器
+4、代理客户端请求代理服务器
+
+![3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/tap-flow/tun-mode-3.png)
 
 此时代理客户端已经拿到了请求的真实 TCP 载荷，并且可以通过获取 TCP 连接的 peer 信息得到在第 3 步修改的源 IP 和源端口，通过这些信息可以通过查 NAT 表得到 App 真正想要访问的 IP 和 端口（甚至可以通过查 DNS 请求记录拿到域名信息），因此代理客户端可以根据自己的协议进行加密和封装等操作，然后发送给代理服务端，由代理服务端进行真实的请求操作。
 
@@ -181,7 +188,10 @@ Unwrap response
 Proxy Client
 Proxy Server
 Google
-5. 将返回数据封包回 IPv4 并写入 TUN
+
+5、将返回数据封包回 IPv4 并写入 TUN
+
+![4](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/tap-flow/tun-mode-4.png)
 
 通过代理客户端与代理服务端、代理服务端与谷歌的通信，拿到谷歌真正的返回数据，现在需要重新封装回 IPv4 数据包，还是利用系统网络栈：将数据写入 TCP Socket (198.10.0.1:1313) 中，便可以在 TUN 侧拿到封装好的 IPv4，就是这么轻松。
 
@@ -201,7 +211,10 @@ TUN write IPv4
 4
 Proxy
 Kernel
-6. App 拿到返回数据
+
+6、App 获取最终返回数据
+
+![5](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/tap-flow/tun-mode-5.png)
 
 App
 Kernel

@@ -83,4 +83,5 @@ wireguard-go的核心协议栈也是基于gvisor[实现的](https://github.com/W
 -   [WireGuard 基本原理](https://cshihong.github.io/2020/10/11/WireGuard%E5%9F%BA%E6%9C%AC%E5%8E%9F%E7%90%86/)
 -   [WIREGUARD SITE TO SITE CONFIGURATION](https://www.procustodibus.com/blog/2020/12/wireguard-site-to-site-config/)
 -   [MULTI-HOP WIREGUARD](https://www.procustodibus.com/blog/2022/06/multi-hop-wireguard/)
--   [安装 Wireguard 并组建中心辐射型网络](https://naiv.fun/Ops/53.html)
+-   [安装 Wireguard 并组建中心辐射型网络](https://naiv.fun/Ops/53.html)、
+-   [WireGuard 教程：使用 Netmaker 来管理 WireGuard 的配置](https://icloudnative.io/posts/configure-a-mesh-network-with-netmaker/)
