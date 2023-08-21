@@ -118,114 +118,49 @@ tap/tun 是设备是用户空间软件和系统网络栈之间的一个通道，
 
 TUN 网络的配置为 `198.10.0.1/16`，虚拟网卡 IP 为 `198.10.0.1`，透明代理客户端（虚拟网卡）监听 `198.10.0.1:1313`，App 访问 `google.com`，自定义的 DNS 服务返回 `google.com` 的 Fake IP `198.10.2.2`（保证后续请求都走到 tun 路由）
 
-1、Proxy 创建 TCP Socket Listener
+1、创建 TCP Socket Listener
 
-这里首先要在系统网络栈的传输层开个口子，创建一个 TCP Socket Listener，监听 198.10.0.1:1313
+首先在网络栈的传输层创建一个 TCP Socket Listener，监听地址 `198.10.0.1:1313`
 
-2、App 发起连接
+2、客户端发起连接
 
 ![1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/tap-flow/tun-mode-1.png)
 
-当某需要代理的 App 发起连接，访问 google.com:80，我们通过自定义的 DNS 服务返回一个 Fake IP (198.10.2.2)，使流量被路由到 TUN 设备上。
+当某需要代理的客户端发起连接，访问 `google.com`，通过自定义的 DNS 服务返回一个 Fake IP (`198.10.2.2`)，使流量被路由到 TUN 设备上；当然这里也可以通过配置路由规则或者流量重定向的方法将流量导向 TUN 设备
 
-当然这里也可以不使用 Fake IP 方式来捕获流量，通过配置路由规则或者流量重定向也可以将流量导向 TUN 设备，不过 Fake IP 是最常用的方法，所以这里以此举例。
-
-App
-Kernel
-TCP connect(198.10.2.2:80)
-198.10.0.1:34567 -> 198.10.2.2:80
-App
-Kernel
 
 3、将 TUN 读取到的 IPv4 解析为 TCP 载荷数据
 
 ![2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/tap-flow/tun-mode-2.png)
 
-TUN 设备捕获到流量，也就是 IPv4 数据包，在读取出来后，需要利用系统网络栈解析出 TCP 载荷数据。
+TUN 设备捕获到流量，也就是 IPv4 数据包，在读取出来后，需要利用系统网络栈解析出 TCP 载荷数据；这一步，需要将读取到的 IPv4 数据包进行修改，也就是我们上面说的 源 IP、源端口，目标 IP 和目标端口，还有相应的 checksum 也需要重新计算。修改的目的是让 IPv4 数据包通过 TUN 注入到操作系统网络栈后，能够被正确路由并通过一开始监听的 TCP Socket 将最里层的 TCP payload 返还给应用（本例为了方便，直接将源 IP 和源端口设置为初始的目标 IP 和目标端口，在实际编程时，有更多的设置策略，也就是 NAT 策略，参考下面的描述）
 
-这一步，需要将读取到的 IPv4 数据包进行修改，也就是我们上面说的 源 IP、源端口，目标 IP 和目标端口，还有相应的 checksum 也需要重新计算。修改的目的是让 IPv4 数据包通过 TUN 注入到操作系统网络栈后，能够被正确路由并通过一开始监听的 TCP Socket 将最里层的 TCP payload 返还给我们。
 
-Proxy
-Kernel
-TUN read IPv4
-1
-198.10.0.1:34567 -> 198.10.2.2:80
-Modify src_ip:src_port, dst_ip:dst_port
-2
-198.10.2.2:80 -> 198.10.0.1:1313
-TUN write IPv4
-3
-System NetStack process
-TCP Socket read
-198.10.0.1:1313
-4
-Got TCP payload
-And peer_addr as src_ip:src_port
-Proxy
-Kernel
-这里为了方便，直接将源 IP 和源端口设置为初始的目标 IP 和目标端口，在实际编程时，有更多的设置策略，也就是 NAT 策略。
+
 
 4、代理客户端请求代理服务器
 
 ![3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/tap-flow/tun-mode-3.png)
 
-此时代理客户端已经拿到了请求的真实 TCP 载荷，并且可以通过获取 TCP 连接的 peer 信息得到在第 3 步修改的源 IP 和源端口，通过这些信息可以通过查 NAT 表得到 App 真正想要访问的 IP 和 端口（甚至可以通过查 DNS 请求记录拿到域名信息），因此代理客户端可以根据自己的协议进行加密和封装等操作，然后发送给代理服务端，由代理服务端进行真实的请求操作。
-
-Proxy Client
-Proxy Server
-Google
-Wrap request
-with connection meta info
-Wrapped Request
-1
-Request
-2
-Response
-3
-Wrapped Response
-4
-Unwrap response
-Proxy Client
-Proxy Server
-Google
+此时代理客户端已经拿到了请求的真实 TCP payload，并且可以通过获取 TCP 连接的 peer 信息得到在第 `3` 步修改的源 IP 和源端口，通过这些信息可以通过查 NAT 表得到 App 真正想要访问的 IP 和 端口（甚至可以通过查 DNS 请求记录拿到域名信息），因此代理客户端可以根据自己的协议进行加密和封装等操作，然后发送给代理服务端，由代理服务端进行真实的请求操作
 
 5、将返回数据封包回 IPv4 并写入 TUN
 
 ![4](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/tap-flow/tun-mode-4.png)
 
-通过代理客户端与代理服务端、代理服务端与谷歌的通信，拿到谷歌真正的返回数据，现在需要重新封装回 IPv4 数据包，还是利用系统网络栈：将数据写入 TCP Socket (198.10.0.1:1313) 中，便可以在 TUN 侧拿到封装好的 IPv4，就是这么轻松。
-
-Proxy
-Kernel
-TCP Socket write payload
-198.10.0.1:1313
-1
-System NetStack process
-TUN read IPv4
-2
-198.10.0.1:1313 -> 198.10.2.2:80
-Restore src_ip:src_port, dst_ip:dst_port
-3
-198.10.2.2:80 -> 198.10.0.1:34567
-TUN write IPv4
-4
-Proxy
-Kernel
+通过代理客户端与代理服务端、代理服务端与 `google.com` 的通信，拿到真正的响应数据，现在需要重新封装回 IPv4 数据包，还是利用系统网络栈的能力，将数据写入 TCP Socket (`198.10.0.1:1313`) 中，便可以在 TUN 侧拿到封装好的 IPv4
 
 6、App 获取最终返回数据
 
 ![5](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/tap-flow/tun-mode-5.png)
 
-App
-Kernel
-198.10.0.1:34567 <- 198.10.2.2:80
-TCP read payload
-1
-App
-Kernel
 上面的过程便是利用操作系统网络栈完成 IPv4 到 TCP 载荷数据及其反方向转变的过程。通过这种办法，可以充分利用操作系统的实现，都是饱经检验，质量可靠，且满足各种复杂情况。但是也有缺点，数据需要拷贝多次，增加了性能损耗和延迟。
 
-NAT 策略
+
+####    重要：开发中的若干细节问题
+
+1、NAT 策略
+
 我这里想说的 NAT 策略不是指常说的那四种 NAT 类型，当然你可以去实现不同的 NAT 类型来满足各种各样的需求，但那是更深入的话题，不在本文讨论。
 
 在刚刚的流程的第 3 步中，你应该发现对源 IP 和源端口的修改是有限制的，我们需要将 IP 限定为 TUN 网段，从而使返回的数据包可以重新被 TUN 设备捕获。但是这种限制是非常宽松的，在我们的例子对 TUN 设备网段的配置中，你有 2^16 个 IP 可供选择，每一个 IP 又有 2^16 个端口可供选择。
@@ -234,7 +169,8 @@ NAT 策略
 
 以上两种 NAT 策略在个人电脑上没啥问题，但是如果代理客户端运行在网关上，网络中访问的 IP 数量超过网段中 IP 数量上限，或者 hash(ip:port) 数量超过端口总数 (2^16)，就会难以继续分配 NAT 项。因此我们应该专门编写一个 NAT 管理组件，合理分配 IP 和端口资源，争取做到利用最大化。
 
-防止环路
+2、防止环路
+
 抛开事实不谈，如果我们想要代理全部流量，就是要通过路由规则将所有流量导向我们的 TUN 设备，这是很直观且朴素的想法，就像下面的命令一样单纯：
 
 1
@@ -245,12 +181,12 @@ sudo route add -net 0.0.0.0/0 dev tun0
 
 这是我们不想看到的，需要采取一些措施避免环路的产生。在实践中有不少方法可以避免这种情况的发生，例如通过合理的配置路由规则，使连接代理服务器的流量可以顺利匹配到外部网络接口。只不过这种方法不够灵活，如果代理服务器 IP 发生变化则需要及时改变路由规则，非常麻烦，所以我们接下来介绍其他的方法。
 
-Fake IP
+3、Fake IP
 Fake IP 就是我们上面例子中用到的方法，这是一种限制进入流量的方法。基本思路是自己实现一个 DNS 服务器，对用户的查询返回一个假的 IP 地址，我们可以将返回的 IP 地址限制为 TUN 设备的网络段，这样应用发起的流量其实便是发给 TUN 网络的流量，自然的被路由匹配，而无需像前面那样路由全部的流量，其余的流量包括代理客户端发起的请求便不会被路由，可以保证不产生环路。
 
 当代理客户端需要知道应用真正想要请求的地址时，就通过一些接口向自己实现的 DNS 服务器进行反向查询即可。
 
-策略路由
+4、策略路由
 通过前面的分析，可以发现产生环路是因为代理客户端本身发出的流量被系统路由到 TUN 设备导致的，因此我们可以想办法让代理客户端本身发起的流量不走 TUN 而是从真实的物理网络接口出去。
 
 在 (类)Unix 系统中，可以对代理客户端的流量打上 fwmark 防火墙标记，然后通过策略路由使带有标记的流量走单独的路由表出去，从而绕过全局的流量捕获。
