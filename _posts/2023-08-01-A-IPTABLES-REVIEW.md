@@ -247,7 +247,7 @@ ip route add local 0.0.0.0/0 dev lo table 100
 
 ####    配置生效解读
 
-![iptables-flow](iptables-flow.jpg)
+![iptables-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/iptables-flow.jpg)
 
 由于 tproxy 工作在 PREROUTING 链的 mangle 表，上面也说了 tproxy 只是替换了 socket 没有做其他操作，下一步经过 nat 表后进入路由判断。由于没有修改数据包的目标 ip，正常路由匹配后发现目标 ip 不是本机 ip 会走图中的数据转发流向，进入 FORWARD 链，然后进入 POSTROUTING 链离开本机。
 
