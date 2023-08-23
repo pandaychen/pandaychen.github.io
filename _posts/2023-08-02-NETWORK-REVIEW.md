@@ -401,10 +401,21 @@ tap/tun 最常见的应用也就是用于隧道通信，如 VPN，包括 tunnel 
 大部分的 VPN 实现都是将客户端虚拟网卡（tun）的流量转发到 Linux 服务器虚拟网卡, 然后将服务器虚拟网卡流量再转发到真实的物理网卡上，传输层可以使用 UDP or TCP, 然后对流量进行加密
 
 ####    5、透明代理
-目前很多开源项目都是使用 tun 来实现透明代理，非常方便，一般的原理如下：
+目前很多开源项目都是使用 tun 虚拟网卡技术来实现透明代理，一般的原理如下（以 tun2socks 为例）：
 
+1. 创建 tun 虚拟网卡，配置策略路由使网络应用程序的 TCP 和 UDP 流量经过虚拟网卡
+2. 前向请求链路上 tun2socks 进程从虚拟网卡接收经过操作系统网络协议栈分片的 TCP-UDP/IP 报文，程序再通过用户态网络协议栈 `netstack`/`LwIP` 将 TCP 分片重组成流，转发至连接着 socks5 服务端的 `socket` 上；
+3. 反向响应链路，程序从 `socks5` 服务端接收到流数据后，通过 `netstack`/`LwIP` 的 TCP 写 `API` 送到用户态网络协议栈进行分片，再将分片后的报文送入虚拟网卡，随后被操作系统重组，最终送到网络应用程序
+4. 最最重要的是要理清经由 TUN 收 / 发的数据包流向已经五元组信息如何恢复 / 修改
 
-##  0x0  参考
+注意，上面的重组过程，包含了修改五元组信息（不修改怎么通过物理网卡把数据包发出去），前向链路与反向链路的数据流映射等细节需要处理；此外，还有很多细节问题需要考虑，典型的有如下几个：
+
+- 如何引流？
+- 路由如何自动化配置？
+
+关于透明代理的具体实现，后面再详细说明。
+
+##  0x05  参考
 -   [理解 Linux 虚拟网卡设备 tun/tap 的一切](https://www.junmajinlong.com/virtual/network/all_about_tun_tap/)
 -   [A simple TUN/TAP library written in native Go.](https://github.com/songgao/water)
 -   [tun/tap 虚拟网卡收发机制解析](https://blog.csdn.net/zhou307/article/details/102806500)
@@ -416,3 +427,4 @@ tap/tun 最常见的应用也就是用于隧道通信，如 VPN，包括 tunnel 
 -   [使用 TUN 的模式](https://zu1k.com/posts/coding/tun-mode/)
 -   [A simple VPN written in Go.](https://github.com/net-byte/vtun)
 -   [云原生虚拟网络 tun/tap & veth-pair](https://www.luozhiyun.com/archives/684)
+-   [seeker：通过使用 tun 来实现透明代理。实现了类似 surge 增强模式与网关模式](https://github.com/gfreezy/seeker)

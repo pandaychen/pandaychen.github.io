@@ -699,6 +699,8 @@ wireguard-go 的核心协议栈也是基于 gvisor[实现的](https://github.com
 
 ####    wireguard 的路由配置方式
 
+####	透明代理中的DNS
+
 
 ##  0x0 参考
 -   [wireguard 基本原理和最佳实践](https://www.ctyun.cn/developer/article/400185847689285)
@@ -719,3 +721,8 @@ wireguard-go 的核心协议栈也是基于 gvisor[实现的](https://github.com
 -   [安装 Wireguard 并组建中心辐射型网络](https://naiv.fun/Ops/53.html)、
 -   [WireGuard 教程：使用 Netmaker 来管理 WireGuard 的配置](https://icloudnative.io/posts/configure-a-mesh-network-with-netmaker/)
 -   [Linux 上的 WireGuard 网络分析（一）](https://thiscute.world/posts/wireguard-on-linux/)
+-	[WireGuard 教程：WireGuard 的工作原理](https://icloudnative.io/posts/wireguard-docs-theory/)
+-	[WireGuard基本原理](https://cshihong.github.io/2020/10/11/WireGuard%E5%9F%BA%E6%9C%AC%E5%8E%9F%E7%90%86/)
+-	[Clash DNS 科普](https://github.com/mritd/tpclash/wiki/Clash-DNS-%E7%A7%91%E6%99%AE)
+-	[【WireGuard 白皮书带读 1】摘要 第一章](https://zhuanlan.zhihu.com/p/472525876)
+-	[WireGuard 基础教程：wg-quick 路由策略解读](https://icloudnative.io/posts/linux-routing-of-wireguard/)

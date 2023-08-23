@@ -11,7 +11,7 @@ tags:
 
 
 ##  Ox00    前言
-本文汇总下笔者在调研透明代理的一些分享（Linux下的全流量代理网关）
+本文汇总下笔者在调研透明代理的一些分享（Linux 下的全流量代理网关）
 
 ##  0x01    tproxy VS tun
 
@@ -23,7 +23,8 @@ tags:
 因此，TProxy 适用于基于 TCP 协议的应用，使用相对简单；而 TUN 适用于任何协议的应用，但需要在用户空间编写代理程序，使用相对复杂
 
 
-从实现上来说，tproxy
+从笔者个人经验上来说，基于 tproxy 与 tun 部署的应用的差别如下图：
+
 
 ##  0x02    iptables 构建透明代理
 
@@ -36,8 +37,9 @@ tags:
 
 鉴于 clash premium 不开源（开源版本不支持 tun 虚拟网卡功能），有如下二次开发版本：
 
--   [Clash.Meta](https://github.com/MetaCubeX/Clash.Meta/tree/Meta)这是 [clash](https://github.com/Dreamacro/clash) 的二次开发版本
+-   [Clash.Meta](https://github.com/MetaCubeX/Clash.Meta/tree/Meta) 这是 [clash](https://github.com/Dreamacro/clash) 的二次开发版本
 -   [clash-plus-pro](https://github.com/yaling888/clash)
+- [clashr：My Own Fork of Clash - Support RuleProviders、SSR(Add "chacha20" and "none" ciphers) 、 TCP/UDP Tunnel、MTProxy Inbound、MixEC(RESTful Api+Socks5+MTProxy) Inbound and Tun(from sing-tun or @yaling888 or @comzyh) Inbound](https://github.com/wwqgtxx/clashr)
 
 
 ####    Clash.Meta
@@ -93,7 +95,7 @@ tags:
 -   支持 gvisor / system / lwip 堆栈
 
 
-可以使用工具 [tpclash](https://github.com/mritd/tpclash) 来部署 clash，clash配置文档[参考](https://wiki.metacubex.one/config/)
+可以使用工具 [tpclash](https://github.com/mritd/tpclash) 来部署 clash，clash 配置文档 [参考](https://wiki.metacubex.one/config/)
 
 配置文件如下：
 
@@ -137,23 +139,22 @@ rules:  #这里默认只使用一个代理
 
 
 ##  0x06    seeker
-[seeker](https://github.com/gfreezy/seeker)是基于rust实现的，通过使用 tun 来实现透明代理，实现了类似 surge 增强模式与网关模式
+[seeker](https://github.com/gfreezy/seeker) 是基于 rust 实现的，通过使用 tun 来实现透明代理，实现了类似 surge 增强模式与网关模式
 
-####    seeker的实现原理
-seeker 参考了 Surge for Mac 的实现原理，基本如下：
+####    实现原理
+seeker 参考了 Surge 的实现原理，使用了fake-ip模式，基本如下：
 
-seeker 会在本地启动一个 DNS server，并自动将本机 DNS 修改为 seeker 的 DNS 服务器地址
+1.  seeker 会在本地启动一个 DNS server，并自动将本机 DNS 修改为 seeker 的 DNS 服务器地址
 
-seeker 会创建一个 TUN 设备，并将 IP 设置为 10.0.0.1，系统路由表设置 10.0.0.0/16 网段都路由到 TUN 设备
+2. seeker 会创建一个 TUN 设备，并将 IP 设置为 `10.0.0.1`，系统路由表设置 `10.0.0.0/16 `网段都路由到 TUN 设备
 
-有应用请求 DNS 的时候， seeker 会为这个域名返回 10.0.0.0/16 网段内一个唯一的 IP
+3.  有应用请求 DNS 的时候， seeker 会为这个域名返回 `10.0.0.0/16` 网段内一个唯一的 IP
 
-seeker 从 TUN 接受到 IP 包后，会在内部组装成 TCP/UDP 数据
+4.  seeker 从 TUN 接受到 IP 包后，会在内部组装成 TCP/UDP 数据
 
-seeker 会根据规则和网络连接的 uid 判断走代理还是直连
+5.  seeker 会根据规则和网络连接的 `uid` 判断走代理还是直连
 
-如果需要走代理，将 TCP/UDP 数据转发到 SS 服务器/ socks5 代理，从代理接受到数据后，在返回给应用；如果直连，则本地建立直接将数据发送到目标地址
-
+6.  如果需要走代理，将 TCP/UDP 数据转发到 `SS` 服务器 / `socks5` 代理，从代理接收到数据后，再返回给应用；如果直连，则本地建立直接将数据发送到目标地址
 
 ##  0x07    surge（MAC）
 
