@@ -73,7 +73,7 @@ TABLE_ID := [local | main | default | new | NUMBER]
 32767:  from all lookup default
 ```
 
-左边的数字（`0`, `32764`等）表示规则的优先级：数值越小的规则，优先级越高
+左边的数字（`0`, `32764` 等）表示规则的优先级：数值越小的规则，优先级越高
 
 除了优先级之外，每个规则还有一个选择器（selector）和对应的执行策略（action）。选择器会判断该规则是否适用于当前的数据包，如果适用，就执行对应的策略。最常见的执行策略就是查询一个特定的路由表。如果该路由表包含了当前数据包的路由，那么就执行该路由；否则就会跳过当前路由表，继续匹配下一个路由规则
 
@@ -147,15 +147,16 @@ ip route add default gw 20.0.0.1
 ip route add table 3 via 10.0.0.1 dev eth0 #(eth0 是 10.0.0.1 所在的网卡, 3 是路由表的编号)
 ```
 
-
 3、添加 `ip rule` 规则
 
+将标记 `fwmark` 与指定的路由相关联
 ```BASH
 ip rule add fwmark 3 table 3 #（fwmark 3 是标记，table 3 是路由表 3 上边，意思就是凡是标记了 3 的数据使用 table3 路由表）
 ```
 
+4、使用 `iptables` 给相应的数据打上标记
 
-4、使用 iptables 给相应的数据打上标记
+利用 `iptables` 把数据包打上 `fwmark`（tproxy 也是这样操作的），在 `PREROUTING` 链的 `mangle` 表修改标记，让打了这种标记的包走路由表 `3` 出去：
 
 ```BASH
 iptables -A PREROUTING -t mangle -i eth0 -m iprange --src-range 192.168.0.1-192.168.0.100 -j MARK --set-mark 3
@@ -163,17 +164,18 @@ iptables -A PREROUTING -t mangle -i eth0 -m iprange --src-range 192.168.0.1-192.
 
 上面规则会匹配 `eth0` 接口上源 IP 地址在 `192.168.0.1` 到 `192.168.0.100` 之间的所有传入数据包，如果一个数据包匹配了这个规则，它会被标记为 `3`。这个规则的作用是为了对符合条件的数据包进行标记，以便在后续的处理中进行特殊的路由、过滤或者 QoS 策略等操作。
 
-回顾前文 iptables 的使用，由于 mangle 的处理是优先于 nat 和 fiter 表的，所以相依数据包到达之后先打上标记，之后在通过 `ip rule` 规则，对应的数据包使用相应的路由表进行路由，最后读取路由表信息，将数据包送出网关。
+回顾前文 iptables 的使用，**由于 mangle 的处理是优先于 nat 和 fiter 表的，所以相依数据包到达之后先打上标记，之后在通过 `ip rule` 规则，对应的数据包使用相应的路由表进行路由，最后读取路由表信息，将数据包送出网关**
 
 
-这里可以看出 Netfilter 处理网络包的先后顺序：接收网络包，先 DNAT，然后查路由策略，查路由策略指定的路由表做路由，然后 SNAT，再发出网络包
+这里可以看出 Netfilter 处理网络包的先后顺序：**接收网络包，先 DNAT，然后查路由策略，查路由策略指定的路由表做路由，然后 SNAT，再发出网络包**
 
-![flow]()
+![flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/iptables-route-example.jpg)
+
+特别注意上图中的，蓝色部分，路由寻址
 
 ####    小结
 
 内核是如何知道哪个数据包应该使用哪个路由表的呢？系统中有一套规则会告诉内核如何为每个数据包选择正确的路由表，这套规则就是路由策略数据库，即 `ip rule`
-
 
 ##  0x02    wireguard 中的路由
 
