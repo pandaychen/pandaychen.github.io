@@ -28,7 +28,22 @@ tags:
 
 ##  0x02    iptables 构建透明代理
 
+TProxy（Transparent Proxy）是内核支持的一种透明代理方式，于 Linux 2.6.28 引入。不同于 NAT 修改数据包目的地址实现重定向，**TProxy 仅替换数据包的 skb 原本持有的 socket**，不需要修改数据包标头，TPROXY 是一个 iptables 扩展的名称。
 
+####  使用方式
+
+1.  由 `--on-port`/`--on-ip` 指定重定向目的地
+2.  由于没有修改数据包目的地址，在 `PREROUTING` 之后的路由选择仍会因为目的地址不是本机而走到 `FORWARD` 链。所以需要**策略路由（ip rule）**来引导数据包进入 `INPUT` 链
+
+```BASH
+ip rule add fwmark 0x233 table 100
+ip route add local default dev lo table 100
+
+iptables -t mangle -A PREROUTING -p udp -j TPROXY --on-ip 127.0.0.1 --on-port 10000 --tproxy-mark 0x233
+iptables -t mangle -A PREROUTING -p tcp -j TPROXY --on-ip 127.0.0.1 --on-port 10000 --tproxy-mark 0x233
+```
+
+用监听在 `:10000` 的 socket 替换数据包原 socket，同时打上 `0x233` 标记。设置策略路由，让所有带有 `0x233` 标记的数据包使用 `100` 号路由表。在 `100` 号表中设定默认路由走 `lo` 本地回环设备。而从本地回环设备发出的数据包都会被视作发向本机，也就避免了被转发出去
 
 ##  0x02    v2ray
 [v2ray-core](https://github.com/v2fly/v2ray-core)
@@ -170,3 +185,4 @@ seeker 参考了 Surge 的实现原理，使用了fake-ip模式，基本如下�
 -   [透明代理入门](https://xtls.github.io/document/level-2/transparent_proxy/transparent_proxy.html#iptables-%E5%AE%9E%E7%8E%B0%E9%80%8F%E6%98%8E%E4%BB%A3%E7%90%86%E5%8E%9F%E7%90%86)
 -   [GO Simple Tunnel](https://gost.run/)
 -   [Surge 官方中文指引：理解 Surge 原理](https://manual.nssurge.com/book/understanding-surge/cn/)
+-   [深入理解 Linux TProxy](https://rook1e.com/p/linux-tproxy/)

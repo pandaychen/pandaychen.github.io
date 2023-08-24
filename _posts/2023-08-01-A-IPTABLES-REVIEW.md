@@ -15,7 +15,7 @@ tags:
 最新笔者在研究全流量代理，本文回顾一下 iptables 的原理，先回顾下 netfilter/iptables 的基础概念：
 
 iptables 可以参考下面若干文章：
--  [IPtables](https://www.zsythink.net/archives/category/%e8%bf%90%e7%bb%b4%e7%9b%b8%e5%85%b3/iptables)，非常全面了。
+-  [IPtables](https://www.zsythink.net/archives/category/%e8%bf%90%e7%bb%b4%e7%9b%b8%e5%85%b3/iptables)，文章合集，非常全面了
 -  [重温 iptables](https://blog.gmem.cc/iptables)
 
 Netfilter 模块，在网络层的五个位置（也就是 iptables 四表五链中的五链）注册了一些钩子函数，用来截取数据包；把数据包的信息拿出来匹配各个链位置在对应表中的规则，匹配之后再进行相应的处理
@@ -61,7 +61,7 @@ iptables 的位置：
 -   `filter`：用来对数据包进行过滤，具体的规则要求决定如何处理一个数据包
 
 
-| 名称 | 功能（位置） | 包含链 | 典型场景（作用） |
+| 名称 | 功能（位置） | 包含链 | 典型场景 |
 |  -------- |-------- |-------- |-------- |
 |`filter` 表 | 负责过滤功能，防火墙 | 包含三个规则链：`INPUT`，`FORWARD`，`OUTPUT`||
 |`nat`（Network Address Translation）表 | 用于网络地址转换（IP、端口）| 包含三个规则链：`PREROUTING`，`POSTROUTING`，`OUTPUT`||
@@ -540,6 +540,49 @@ iptables -t mangle -A proxy -p udp -j TPROXY --on-port 1081 --on-ip 127.0.0.1 --
 ![route](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/packet_flow11.jpg)
 
 ##  0x08  一些疑问
+
+####  透明代理：IP_TRANSPARENT选项
+`IP_TRANSPARENT` 选项允许 socket 将任意非本机地址视为本机地址，进而可以绑定在非本机地址，伪装为非本机地址发送、接收数据；例如，网关（`192.168.0.1` / `1.2.3.4`）作为透明代理，劫持了客户端（`192.168.0.200`）与远端（`2.2.2.2`）的连接。代替客户端与远端连接，又伪装成远端与客户端连接：
+
+```BASH
+$ netstat -atunp
+Proto Recv-Q Send-Q Local Address           Foreign Address            State       PID/Program name
+tcp        0      0 1.2.3.4:37338        2.2.2.2:443            ESTABLISHED    2904/proxy
+tcp        0      0 ::ffff:2.2.2.2:443  ::ffff:192.168.0.200:56418 ESTABLISHED 2904/proxy
+```
+
+####  透明代理：socket替换的原理是什么？
+可以参考此文[一文吃透 Linux TProxy 透明代理](https://asphaltt.github.io/post/linux-how-tproxy-works/)\
+
+####  `-m socket`的作用
+回看tproxy透明代理第一步操作：
+```bash
+iptables -t mangle -A proxy -p tcp -m socket -j MARK --set-mark 1
+```
+
+这里使用到`-m socket` 来优化性能，`nf_tproxy_get_sock_v4()` 的注释中提到了这一点：
+
+```text
+/*
+ * Please note that there's an overlap between what a TPROXY target
+ * and a socket match will match. Normally if you have both rules the
+ * "socket" match will be the first one, effectively all packets
+ * belonging to established connections going through that one.
+*/
+```
+
+被 TProxy 重定向过的数据包建立连接后，网络栈中有了数据包原始五元组与 socket 的映射关系。之后相同五元组的数据包在网络栈的常规处理中匹配到的 socket，也即 TPROXY 中第一次用数据包五元组匹配的 `sk = nf_tproxy_get_sock_v4(...., NF_TPROXY_LOOKUP_ESTABLISHED)` ，就是正确的（或者说已重定向过的），没必要进行后续的 socket 替换。所以用 `iptables socket` 规则分流出这一部分，提升性能
+
+以 TCP 为例：
+
+```BASH
+iptables -t mangle -N tproxy_divert
+iptables -t mangle -A tproxy_divert -j MARK --set-mark 0x233
+iptables -t mangle -A tproxy_divert -j ACCEPT
+
+iptables -t mangle -A PREROUTING -p tcp -m socket -j tproxy_divert
+iptables -t mangle -A PREROUTING -p tcp -j TPROXY --on-port 10000 --on-ip 127.0.0.1 --tproxy-mark 0x233
+```
 
 ####    如何理解 iptables 的转发条件：本机
 
