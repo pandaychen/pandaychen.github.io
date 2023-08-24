@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      重拾 Linux 网络（一）：iptables
-subtitle:
+subtitle:   如何利用 iptables 构建透明代理
 date:       2023-08-01
 author:     pandaychen
 catalog:    true
@@ -14,6 +14,10 @@ tags:
 ##  0x00    前言
 最新笔者在研究全流量代理，本文回顾一下 iptables 的原理，先回顾下 netfilter/iptables 的基础概念：
 
+iptables 可以参考下面若干文章：
+-  [IPtables](https://www.zsythink.net/archives/category/%e8%bf%90%e7%bb%b4%e7%9b%b8%e5%85%b3/iptables)，非常全面了。
+-  [重温 iptables](https://blog.gmem.cc/iptables)
+
 Netfilter 模块，在网络层的五个位置（也就是 iptables 四表五链中的五链）注册了一些钩子函数，用来截取数据包；把数据包的信息拿出来匹配各个链位置在对应表中的规则，匹配之后再进行相应的处理
 
 ![netfilter](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/mitm/iptables/netfilter-1.png)
@@ -22,7 +26,6 @@ iptables 的位置：
 ![iptables](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/mitm/iptables/iptables-1.png)
 
 本文部分章节参考了公司同事的文章，没法标注引用地址（表示感谢）
-
 
 ####    本文关注的 iptables 几个重点话题
 
@@ -60,10 +63,10 @@ iptables 的位置：
 
 | 名称 | 功能（位置） | 包含链 | 典型场景（作用） |
 |  -------- |-------- |-------- |-------- |
-|filter 表 | 负责过滤功能，防火墙 | 包含三个规则链：`INPUT`，`FORWARD`，`OUTPUT`||
-|nat（Network Address Translation）表 | 用于网络地址转换（IP、端口）| 包含三个规则链：PREROUTING，POSTROUTING，OUTPUT||
-|mangle 表 | 拆解报文，作出修改，封装报文 | 包含五个规则链：PREROUTING，POSTROUTING，INPUT，OUTPUT，FORWARD||
-|raw 表 | 关闭 nat 表上启用的连接追踪机制，确定是否对该数据包进行状态跟踪 | 包含两条规则链：OUTPUT，PREROUTING||
+|`filter` 表 | 负责过滤功能，防火墙 | 包含三个规则链：`INPUT`，`FORWARD`，`OUTPUT`||
+|`nat`（Network Address Translation）表 | 用于网络地址转换（IP、端口）| 包含三个规则链：`PREROUTING`，`POSTROUTING`，`OUTPUT`||
+|`mangle` 表 | 拆解报文，作出修改，封装报文 | 包含五个规则链：`PREROUTING`，`POSTROUTING`，`INPUT`，`OUTPUT`，`FORWARD`||
+|`raw` 表 | 关闭 `nat` 表上启用的连接追踪机制，确定是否对该数据包进行状态跟踪 | 包含两条规则链：`OUTPUT`，`PREROUTING`||
 
 注意：`raw` 表只使用在 `PREROUTING` 链和 `OUTPUT` 链上，因为其优先级最高，从而可以对收到的数据包在系统进行 `ip_conntrack`（连接跟踪）前进行处理。一但用户使用了 `raw` 表, 在某个链上，`raw` 表处理完后，将跳过 `NAT` 表和 `ip_conntrack` 处理，即不再做地址转换和数据包的链接跟踪处理了。`RAW` 表可以应用在那些不需要做 `nat` 的情况下，以提高性能
 
@@ -74,19 +77,47 @@ iptables 的位置：
 raw>mangle>nat>filter
 ```
 
+封包会依次经过相关的链，在每个链中，会根据表的优先级，依次遍历各个表中的规则。任何表中的规则都有机会拒绝封包
+
+####  表作用
+
+1、`mangle` 表
+
+用于修改封包，某些目标只能用在 `mangle` 表中，包括：
+-  `TOS`：此目标设置封包的 Type Of Servier 字段，以便影响封包的处理策略，例如如何进行路由
+-  `TTL`：设置封包的 Time To Live 字段
+-  `MARK`：给封包添加一个标记值（数字），`iproute2` 能够识别此 `mark` 并且进行特殊的路由处理。此外基于 `MARK` 还可以进行带宽限制、基于 Class 的排队
+
+`MARK` 特性结合策略路由，可以实现很灵活的机制，比如下面说到的透明代理技术
+
+2、`nat` 表
+
+应当仅仅用于网络地址转换。也就是使用以下目标：
+
+-  DNAT：用在你有一个公共地址，别人访问此地址时，你需要将访问重定向到防火墙背后的某个服务时
+-  SNAT：允许隐藏在防火墙背后的内网机器访问外部网络
+-  MASQUERADE：类似 SNAT，不同之处在于每次都需要动态计算使用什么作为转换后的源地址。用在主机地址不固定的情况下
+-  REDIRECT：类似于 DNAT，但是新的目的地址被锁定为接收封包的那个网卡地址，同时端口改为随机的或指定的值
+
+上面这些目标都会改变 IP 封包的首部（源 or 目的）
+
+3、`filter` 表
+
+用于过滤封包，使用 `ACCEPT`、`DROP` 之类的目标
+
 ####    链的作用
 
 当数据报文进入链之后，首先匹配第一条规则，如果第一条规则通过则访问，如果不匹配，则接着向下匹配，如果链中的所有规则都不匹配，那么就按照链的默认规则处理数据报文的动作，如下：
 
-![link]()
+![link](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/mitm/iptables/iptables-link-1.png)
 
 | 名称 | 功能（位置） | 表优先级顺序 | 典型场景（作用） |
 |  -------- |-------- |-------- |-------- |
-| PREROUTING | 数据包进入路由之前 | raw、mangle、nat|  |
-| INPUT | 数据包进入路由之前 | 	mangle、nat、filter |  |
-| OUTPUT | 原地址为本机，向外发送 | raw、mangle、Nat、filter |  |
-| FORWARD | 实现转发 | mangle、filter|  |
-| POSTROUTING | 发送到网卡之前 |mangle、nat |  |
+| `PREROUTING` | 数据包进入路由之前 | `raw`、`mangle`、`nat`|  |
+| `INPUT` | 数据包进入路由之前 | 	`mangle`、`nat`、`filter` |  |
+| `OUTPUT` | 原地址为本机，向外发送 | `raw`、`mangle`、`nat`、`filter` |  |
+| `FORWARD` | 实现转发 | `mangle`、`filter`|  |
+| `POSTROUTING` | 发送到网卡之前 |`mangle`、`nat` |  |
 
 
 ####    数据流向经过的表
@@ -109,11 +140,20 @@ iptables 的链就是因为在访问该链的时候会按照每个链对应的�
 
 当数据包抵达防火墙时，如上图所示，将依次应用 `raw`、`mangle`、`nat` 和 `filter` 表中对应链内的规则。
 
-##  0x0 典型配置
+再次注意，不是任何链上可以挂任何表：
 
-1.  当一个数据包进入网卡时，它首先进入 PREROUTING 链，内核根据数据包目的 IP 判断是否需要转送出去
-2.  如果数据包就是进入本机的，它就会沿着图向下移动，到达 INPUT 链。数据包到了 INPUT 链后，任何进程都会收到它。本机上运行的程序可以发送数据包，这些数据包会经过 OUTPUT 链，然后到达 POSTROUTING 链输出
-3.  如果数据包是要转发出去的，且内核允许转发，数据包就会如图所示向右移动，经过 FORWARD 链，然后到达 POSTROUTING 链输出
+-  `raw` 可以挂在 `PREROUTING`、`OUTPUT`
+-  `mangle` 可以挂在任何链上
+-  `nat（SNAT）` 可以挂在 `POSTROUTING`、`INPUT`
+-  `nat（DNAT）` 可以挂在 `PREROUTING`、`OUTPUT`
+-  `filter` 可以挂在 `FORWARD`、`INPUT`、`OUTPUT`
+-  `security` 可以挂在 `FORWARD`、`INPUT`、`OUTPUT`
+
+##  0x02 典型配置
+
+1.  当一个数据包进入网卡时，它首先进入 `PREROUTING` 链，内核根据数据包目的 IP 判断是否需要转送出去
+2.  如果数据包就是进入本机的，它就会沿着图向下移动，到达 `INPUT` 链。数据包到了 `INPUT` 链后，任何进程都会收到它。本机上运行的程序可以发送数据包，这些数据包会经过 `OUTPUT` 链，然后到达 `POSTROUTING` 链输出
+3.  如果数据包是要转发出去的，且内核允许转发，数据包就会如图所示向右移动，经过 `FORWARD` 链，然后到达 `POSTROUTING` 链输出
 
 那么，规则是如何命中这些报文的呢？
 
@@ -125,16 +165,16 @@ iptables 的链就是因为在访问该链的时候会按照每个链对应的�
 ####    iptables 规则命中
 
 1）规则概念
-规则（rules）其实就是网络管理员预定义的条件，规则一般的定义为 “如果数据包头符合这样的条件，就这样处理这个数据包”。规则存储在内核空间的信息 包过滤表中，这些规则分别指定了源地址、目的地址、传输协议（如 TCP、UDP、ICMP）和服务类型（如 HTTP、FTP 和 SMTP）等。
+规则其实就是网络管理员预定义的条件，规则一般的定义为如果数据包头符合这样的条件，就这样处理这个数据包。规则存储在内核空间的信息 包过滤表中，这些规则分别指定了源地址、目的地址、传输协议（如 TCP、UDP、ICMP）和服务类型（如 HTTP、FTP 和 SMTP）等。
 当数据包与规则匹配时，iptables 就根据规则所定义的方法来处理这些数据包，如放行 (accept), 拒绝 (reject) 和丢弃 (drop) 等。配置防火墙的主要工作是添加, 修改和删除等规则。
 其中：
-匹配（match）：符合指定的条件，比如指定的 IP 地址和端口。
-丢弃（drop）：当一个包到达时，简单地丢弃，不做其它任何处理。
-接受（accept）：和丢弃相反，接受这个包，让这个包通过。
-拒绝（reject）：和丢弃相似，但它还会向发送这个包的源主机发送错误消息。这个错误消息可以指定，也可以自动产生。
-目标（target）：指定的动作，说明如何处理一个包，比如：丢弃，接受，或拒绝。
-跳转（jump）：和目标类似，不过它指定的不是一个具体的动作，而是另一个链，表示要跳转到那个链上。
-规则（rule）：一个或多个匹配及其对应的目标。
+-  匹配（match）：符合指定的条件，比如指定的 IP 地址和端口
+-  丢弃（drop）：当一个包到达时，简单地丢弃，不做其它任何处理
+-  接受（accept）：和丢弃相反，接受这个包，让这个包通过
+-  拒绝（reject）：和丢弃相似，但它还会向发送这个包的源主机发送错误消息。这个错误消息可以指定，也可以自动产生
+-  目标（target）：指定的动作，说明如何处理一个包，比如：丢弃，接受，或拒绝
+-  跳转（jump）：和目标类似，不过它指定的不是一个具体的动作，而是另一个链，表示要跳转到那个链上
+-  规则（rule）：一个或多个匹配及其对应的目标
 
 重点关注的代理相关的处理动作：
 
@@ -142,7 +182,7 @@ iptables 的链就是因为在访问该链的时候会按照每个链对应的�
 将封包放行，进行完此处理动作后，将不再比对其它规则，直接跳往下一个规则炼（nat:postrouting）。
 
 2、REJECT<br>
-拦阻该封包，并传送封包通知对方，可以传送的封包有几个选择：ICMP port-unreachable、ICMP echo-reply 或是 tcp-reset（这个封包会要求对方关闭联机），进后，将不再比对其它规则，直接 中断过滤程序。 范例如下：
+拦阻该封包，并传送封包通知对方，可以传送的封包有几个选择：ICMP port-unreachable、ICMP echo-reply 或是 tcp-reset（这个封包会要求对方关闭联机），进后，将不再比对其它规则，直接 中断过滤程序。 如下：
 
  `iptables -A FORWARD -p TCP --dport 22 -j REJECT --reject-with tcp-reset`
 
@@ -150,53 +190,83 @@ iptables 的链就是因为在访问该链的时候会按照每个链对应的�
 丢弃封包不予处理，进行完此处理动作后，将不再比对其它规则，直接中断过滤程序。
 
 4、REDIRECT<br>
-将封包重新导向到另一个端口（PNAT），进行完此处理动作后，将 会继续比对其它规则。 这个功能可以用来实作通透式 porxy 或用来保护
-web 服务器。例如：
-
-iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-ports 8080
+将封包重新导向到另一个端口（PNAT），进行完此处理动作后，将 会继续比对其它规则。 这个功能可以用来实现透明代理
 
 5、MASQUERADE<br>
-改写封包来源 IP 为防火墙 NIC IP，可以指定 port 对应的范围，进行完此处理动作后，直接跳往下一个规则炼（mangle:postrouting）。这个功能与 SNAT 略有不同，当进行 IP 伪装时，不需指定要伪装成哪个 IP，IP 会从网卡直接读取，当使用拨接连线时，IP 通常是由 ISP 公司的 DHCP 服务器指派的，这个时候 MASQUERADE 特别有用。范例如下：
-
+改写封包来源 IP 为防火墙 NIC IP，可以指定 port 对应的范围，进行完此处理动作后，直接跳往下一个规则炼（mangle:postrouting）。这个功能与 SNAT 略有不同，当进行 IP 伪装时，不需指定要伪装成哪个 IP，IP 会从网卡直接读取，当使用拨接连线时，IP 通常是由 ISP 公司的 DHCP 服务器指派的，这个时候 `MASQUERADE` 特别有用。如下：
+```bash
 iptables -t nat -A POSTROUTING -p TCP -j MASQUERADE --to-ports 1024-31000
+```
+
 
 6、LOG<br>
-将封包相关讯息纪录在 /var/log 中，详细位置请查阅 /etc/syslog.conf 组态档，进行完此处理动作后，将会继续比对其它规则。例如：
-
+将封包相关讯息纪录在 `/var/log` 中，进行完此处理动作后，将会继续比对其它规则。例如：
+```bash
 iptables -A INPUT -p tcp -j LOG --log-prefix "INPUT packets"
+```
 
 7、SNAT<br>
-改写封包来源 IP 为某特定 IP 或 IP 范围，可以指定 port 对应的范围，进行完此处理动作后，将直接跳往下一个规则炼（mangle:postrouting）。范例如下：
+改写封包来源 IP 为某特定 IP 或 IP 范围，可以指定 port 对应的范围，进行完此处理动作后，将直接跳往下一个规则链（mangle:postrouting）。如下：
 
+```BASH
 iptables -t nat -A POSTROUTING -p tcp-o eth0 -j SNAT --to-source 194.236.50.155-194.236.50.160:1024-32000
+```
 
 8、DNAT<br>
-改写封包目的地 IP 为某特定 IP 或 IP 范围，可以指定 port 对应的范围，进行完此处理动作后，将会直接跳往下一个规则炼（filter:input 或 filter:forward）。范例如下：
-
+改写封包目的地 IP 为某特定 IP 或 IP 范围，可以指定 port 对应的范围，进行完此处理动作后，将会直接跳往下一个规则炼（filter:input 或 filter:forward）。如下：
+```BASH
 iptables -t nat -A PREROUTING -p tcp -d 15.45.23.67 --dport 80 -j DNAT --to-destination 192.168.1.1-192.168.1.10:80-100
+```
 
-9、MIRROR<br>
-镜像封包，也就是将来源 IP 与目的地 IP 对调后，将封包送回，进行完此处理动作后，将会中断过滤程序。
 
-10、QUEUE<br>
-中断过滤程序，将封包放入队列，交给其它程序处理。透过自行开发的处理程序，可以进行其它应用，例如：计算联机费用....... 等。
 
-11、RETURN<br>
-结束在目前规则炼中的过滤程序，返回主规则炼继续过滤，如果把自订规则炼看成是一个子程序，那么这个动作，就相当于提早结束子程序并返回到主程序中。
+9、RETURN<br>
+结束在目前规则炼中的过滤程序，返回主规则炼继续过滤，如果把自定义规则炼看成是一个子程序，那么这个动作，就相当于提早结束子程序并返回到主程序中，常见于透明代理中放通本地局域网网段流量
 
 12、MARK<br>
-将封包标上某个代号，以便提供作为后续过滤的条件判断依据，进行完此处理动作后，将会继续比对其它规则，举例如下：
+将封包标上某个代号，以便提供作为后续过滤的条件判断依据，进行完此处理动作后，将会继续比对其它规则
+
+####  小结：iptables
+
+![flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/iptables-link-table-flow.png)
+
+小结下，数据包从网卡要通过iptables，数据包流向如下：
+
+1. 数据包到达服务器的网络接口、NIC
+2. 进入`raw`表的 `PREROUTING` 链，该链的作用是决定数据包是否被状态跟踪
+   -  进入 `mangle` 表的 `PREROUTING` 链，在此可以修改数据包，比如 TOS 等
+   -  进入 `nat` 表的 `PREROUTING` 链，可以在此做DNAT
+3. 决定路由，查看目标地址是交给本地主机还是转发给其它主机
+4. 第一种情况是数据包要转发给其它主机（网关服务器），数据包会依次经过
+   -  进入 `mangle` 表的 `FORWARD` 链
+   -  进入 `filter` 表的 `FORWARD` 链，在这里可以对所有转发的数据包进行过滤
+5. 
+   -  进入 `mangle` 表的 `POSTROUTING` 链
+   -  进入 `nat` 表的 `POSTROUTING` 链，在这里一般都是用来做 `SNAT` 
+6. 数据包流出网络接口，发往网络，本分支流程结束
+7. 另外一种情况，数据包的目标地址就是发给本地主机的，它会依次经过：
+8. 
+   -  进入 `mangle` 表的 `INPUT` 链
+   -  进入 `filter` 表的 `INPUT` 链，在这里可以对流入的所有数据包进行过滤
+   -  数据包交给本地主机的应用程序进行处理
+10. 应用程序处理完毕后发送的数据包进行路由发送决定
+11. 
+   -  进入 `raw` 表的 `OUTPUT` 链
+   -  进入 `mangle` 表的 `OUTPUT` 链
+   -  进入 `nat` 表的 `OUTPUT` 链
+   -  进入 `filter` 表的 `OUTPUT` 链
+12. 
+   -  进入 `mangle` 表的 `POSTROUTING` 链
+   -  进入 `nat` 表的 `POSTROUTING` 链
+13. 进入出去的网络接口，发送往网络，本分支流程结束
 
 
+##  0x03 iptables 与 tun 网卡
 
 
+##  0x04 iptables 应用收发包流程
 
-##  0x0 iptables 与 tun 网卡
-
-
-##  0x0 iptables 应用收发包流程
-
-##  0x0 NAT 工作原理
+##  0x05 NAT 工作原理
 
 通常用 iptables 配置 SNAT 和 DNAT，如下图所示，网关进行一次 SNAT 转换，将来源 IP 换成出口公网 IP，这样发给服务器的数据服务器才能知道响应给谁。服务器收到数据后，会返回一个数据包，这里仍然会标记上来源 IP 为服务器的 IP。响应到网关的数据包，网关进行一个 DNAT 转换，将目标地址 IP 换成内网私有 IP，并将数据包发给设备
 
@@ -206,7 +276,10 @@ iptables -t nat -A PREROUTING -p tcp -d 15.45.23.67 --dport 80 -j DNAT --to-dest
 ####    NAT 的典型配置
 
 
-##  0x0  重点：使用 tproxy 实现透明代理
+####  conntrack 和 NAT
+
+
+##  0x06  重点：使用 tproxy 实现透明代理
 
 背景：
 1.  用户通过路由器访问某些站点（用户所有对外请求的数据都要经过路由器）
@@ -260,7 +333,7 @@ ip route add local 0.0.0.0/0 dev lo table 100
 -  操作 `3`：添加路由规则，发现有 `mark 1` 的数据包走 id 为 `100` 的路由表
 -  操作 `4`：给 id 为 `100` 的路由表添加一条路由，去往 `0.0.0.0/0` （任何数据）的数据送往 本地 `lo` 接口
 
-注意一个问题：上图也看到了 tproxy 工作在 `PREROUTING` 链的 `mangle` 表，而路由器本身发起的请求会走图中数据发出流向的方向，先走 `OUTPUT` 链再走 `POSTROUTING` 链直接离开本机。因此我们无法对路由本身发起的请求做透明代理（无法在路由器上直接 `CURL` 测试）
+注意一个问题：上图也看到了 tproxy 工作在 `PREROUTING` 链的 `mangle` 表，而路由器本身发起的请求会走图中数据发出流向的方向，先走 `OUTPUT` 链再走 `POSTROUTING` 链直接离开本机。因此无法对路由本身发起的请求做透明代理（无法在路由器上直接 `CURL` 测试）
 
 经过上述操作，数据包就会进入 `INPUT` 链，进而被之前替换好的 socket （socksv5 客户端）读取；最终回到 `INPUT` 链的原因是因为在最后修改之后，去到了 `lo` 接口被接收，需要监听在 `lo` 上的进程还需要额外的 socket 配置，否则包会被 tproxy 丢弃掉；但是这里有个疑问是，为啥这里 `lo` 上不受 iptables 影响了？
 
@@ -323,7 +396,7 @@ func (tproxy *Tproxy) onReceive(fd int32, c net.Conn, mainConn net.Conn) {
 }
 ```
 
-小结下，到这里我们已经实现了对所有客户端去往 `1.1.1.0/24` 地址的请求透明代理并发送到海外，不过还存在下面的问题：
+小结下，到这里已经实现了对所有客户端去往 `1.1.1.0/24` 地址的请求透明代理并发送到海外，不过还存在下面的问题：
 
 -  一个网段需要走特殊逻辑，多个网段如何配置？
 -  国内外流量分离
@@ -379,10 +452,6 @@ iptables -t mangle -A proxy -p udp -j TPROXY --on-port 1081 --on-ip 127.0.0.1 --
 
 ####  方案二：dns
 需要用到 `dnsmasq`，需要添加 [代理配置名单](https://raw.githubusercontent.com/phusbot/dnsmasq_gfwlist_ipset/master/dnsmasq_gfwlist_ipset.conf) 到 `dnsmasq` 配置中，只要 `dns` 解析了名单中的域名，在返回域名对应 ip 同时会把加入到叫 `xxxlist` 的 `ipset` 中。通过下面命令查看列表中的 ip：
-
-
-
-
 
 ```BASH
 root@X-WRT:~# ipset list xxxlist
@@ -453,15 +522,37 @@ iptables -t mangle -A proxy -p udp -j TPROXY --on-port 1081 --on-ip 127.0.0.1 --
 
 整个透明代理过程使用了 ipset、iptables、tproxy、ip rule、ip route 以及各种加密通讯技术。
 
-##  0x01 数据包的旅程
+##  0x07 数据包的旅程
 
+下面这张图描述了一个 `L3`IP 封包如何通过 iptables，有几个特别重要的点：
 
-##  0x  一些疑问
+-  iptables 是用户空间命令，通过 netlink 和内核的 netfilter 模块进行交互，在 L3/L4 操控封包
+-  iptables 和内核路由的关系：执行完 `PREROUTING` 链之后，会进行路由表的查询
+-  通过 `lo` 接口的封包，不走 `PREROUTING` 的 DNAT 表
+-  出站封包在 `OUTPUT` 链之前就进行了路由处理。但是如果 `OUTPUT` 进行了 DNAT，则会进行重新选路
+-  入站封包，如果使用了隧道，则会经由 `PREROUTING` - `INPUT` 链逐层的解除隧道
+-  出站封包，如果使用了隧道，则会经由 `OUTPUT` -`POSTROUTING` 链逐层的进行隧道封装
+
+![flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/packet_flow10.png)
+
+下面这张表明确了 iptables 进行路由判断的时机：
+
+![route](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/packet_flow11.jpg)
+
+##  0x08  一些疑问
 
 ####    如何理解 iptables 的转发条件：本机
 
+iptables 有五个链：`INPUT`、`OUTPUT`、`FORWARD`、`PREROUTING`、`POSTROUTING`
 
-##  0x0 参考
+其中，`PREROUTING` 和 `POSTROUTING` 链会查询路由表：
+-  `PREROUTING` 链在数据包进入网络接口后，在路由选择前被处理，因此需要查询路由表以确定数据包的下一跳
+-  `POSTROUTING` 链在数据包离开网络接口前，对数据包进行处理，也需要查询路由表以确定数据包的下一跳
+
+iptables 的 `FORWARD` 链是用于处理转发（forward）数据包的链，即当一台 Linux 路由器上收到一个数据包，需要将该数据包转发到另一台主机时，该数据包就会进入 `FORWARD` 链；在 Linux 系统中，当一个数据包到达时，会根据其目的 IP 地址进行路由选择，如果目的 IP 地址不是本机的 IP 地址，则该数据包会被认为是转发数据包，进入 `FORWARD` 链。因此，可以理解为，当数据包的目的 IP 地址不是本机的 IP 地址时，该数据包就会进入 `FORWARD` 链。需要注意的是，iptables 的 `FORWARD` 链只有在 Linux 系统作为路由器时才会被触发，如果 Linux 系统只是作为普通的主机使用，那么 `FORWARD` 链将不会被触发
+
+
+##  0x09 参考
 -   [深入浅出带你理解 iptables 原理](https://zhuanlan.zhihu.com/p/547257686)
 -   [iptables 的四表五链与 NAT 工作原理 _](https://tinychen.com/20200414-iptables-principle-introduction/)
 -   [Transparent proxy support](https://www.kernel.org/doc/html/latest/networking/tproxy.html#making-non-local-sockets-work)
@@ -472,3 +563,5 @@ iptables -t mangle -A proxy -p udp -j TPROXY --on-port 1081 --on-ip 127.0.0.1 --
 -   [Linux-iptables 防火墙、四表五链及 SNAT 与 DNAT 的原理与应用
 目录](https://dianqk.blog/2021/11/20/iptables-tproxy-and-home/)
 -   [iptables 网络防火墙、SNAT、DNAT 原理及端口重定向实战](https://www.cnblogs.com/struggle-1216/p/11994523.html)
+-   [深入理解 Linux TProxy](https://rook1e.com/p/linux-tproxy/)
+-   [iptables-extensions](https://ipset.netfilter.org/iptables-extensions.man.html#lbDW)
