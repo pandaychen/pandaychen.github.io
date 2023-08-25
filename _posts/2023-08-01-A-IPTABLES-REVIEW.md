@@ -337,7 +337,7 @@ ip route add local 0.0.0.0/0 dev lo table 100
 
 经过上述操作，数据包就会进入 `INPUT` 链，进而被之前替换好的 socket （socksv5 客户端）读取；最终回到 `INPUT` 链的原因是因为在最后修改之后，去到了 `lo` 接口被接收，需要监听在 `lo` 上的进程还需要额外的 socket 配置，否则包会被 tproxy 丢弃掉；但是这里有个疑问是，为啥这里 `lo` 上不受 iptables 影响了？
 
-最后强调一下，**Tproxy 确实没有改变数据包内容，而是在本地把对应的 socket 换了 **
+最后强调一下，**Tproxy 确实没有改变数据包内容，而是在本地把对应的 socket 换了**
 
 ####    代理程序 1：国内服务（socksv5 可客户端）
 在本地监听 `1081` 端口就可以获取到从 tproxy 过来的数据了，参考项目 [go-tproxy](https://github.com/KatelynHaworth/go-tproxy)，记得一定要设置 socket 的选项。支持接收非本地端口的请求，需要在 socket 上设置 `SOL_IP`、`IP_TRANSPARENT` 选项，否则的话会被 tproxy 丢弃
@@ -595,7 +595,41 @@ iptables 有五个链：`INPUT`、`OUTPUT`、`FORWARD`、`PREROUTING`、`POSTROU
 iptables 的 `FORWARD` 链是用于处理转发（forward）数据包的链，即当一台 Linux 路由器上收到一个数据包，需要将该数据包转发到另一台主机时，该数据包就会进入 `FORWARD` 链；在 Linux 系统中，当一个数据包到达时，会根据其目的 IP 地址进行路由选择，如果目的 IP 地址不是本机的 IP 地址，则该数据包会被认为是转发数据包，进入 `FORWARD` 链。因此，可以理解为，当数据包的目的 IP 地址不是本机的 IP 地址时，该数据包就会进入 `FORWARD` 链。需要注意的是，iptables 的 `FORWARD` 链只有在 Linux 系统作为路由器时才会被触发，如果 Linux 系统只是作为普通的主机使用，那么 `FORWARD` 链将不会被触发
 
 
-##  0x09 参考
+####  iptables与路由表
+看了tproxy的原理，让我产生了一个疑问，iptables的整个流程中，哪些分支会经过路由表查询？
+
+-  数据包到达本地网卡后，内核会进行路由表查询，判断数据包的目标IP地址是否为本地IP地址
+-  如果数据包的目标IP地址是本地IP地址，内核会将数据包传递给`lo`接口
+-  `lo`接口会将数据包发送到内核中进行处理。在处理过程中，内核会根据iptables规则进行匹配，找到与数据包匹配的规则
+-  如果iptables规则中设置了`REDIRECT`或`DNAT`目标，内核会将数据包重定向到指定的本地端口或者目标IP地址和端口号。重定向后，数据包会经过本地网卡和路由表，然后到达目标服务器
+-  如果iptables规则中设置了`MARK`目标，内核会将数据包打上标记，然后将数据包传递给下一个处理步骤
+-  如果iptables规则中设置了`ACCEPT`或`DROP`目标，内核会根据目标进行相应的处理，例如接受或者丢弃数据包
+
+这里有一个细节，当数据包的目标IP是本地IP地址时，数据包不需要通过网卡发送到物理网络上，而是直接传递给`lo`接口进行处理；当内核将数据包传递给`lo`接口时，数据包不会经过物理网络，而是直接进入内核进行处理
+
+
+## 0x09  总结
+
+再回顾下tproxy用于将数据包重定向到本地代理服务器进行处理的核心命令：
+```bash
+iptables -t mangle -A PREROUTING -d 1.1.1.0/24 -p tcp -j TPROXY --on-port 1081 --on-ip 127.0.0.1 --tproxy-mark 0x1/0x1
+```
+
+```text
+-t mangle：指定iptables表为mangle表，mangle表可以修改数据包的头部信息
+-A PREROUTING：将规则添加到PREROUTING链中，表示数据包在路由之前被处理
+-d 1.1.1.0/24：指定目标IP地址为1.1.1.0/24，表示匹配目标IP地址为1.1.1.0/24的数据包
+-p tcp：指定协议为TCP，表示匹配TCP协议的数据包
+-j TPROXY：指定目标为TPROXY，表示将匹配的数据包重定向到TPROXY处理
+--on-port 1081：指定重定向的目标端口为1081，表示将匹配的数据包重定向到本地端口1081
+--on-ip 127.0.0.1：指定重定向的目标IP地址为127.0.0.1，表示将匹配的数据包重定向到本地IP地址127.0.0.1
+--tproxy-mark 0x1/0x1：指定tproxy标记为0x1，表示标记需要经过tproxy处理的数据包
+```
+
+tproxy的数据流向如下图：
+![tproxy-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/tproxy-flow.png)
+
+##  0x0A 参考
 -   [深入浅出带你理解 iptables 原理](https://zhuanlan.zhihu.com/p/547257686)
 -   [iptables 的四表五链与 NAT 工作原理 _](https://tinychen.com/20200414-iptables-principle-introduction/)
 -   [Transparent proxy support](https://www.kernel.org/doc/html/latest/networking/tproxy.html#making-non-local-sockets-work)

@@ -45,6 +45,61 @@ iptables -t mangle -A PREROUTING -p tcp -j TPROXY --on-ip 127.0.0.1 --on-port 10
 
 用监听在 `:10000` 的 socket 替换数据包原 socket，同时打上 `0x233` 标记。设置策略路由，让所有带有 `0x233` 标记的数据包使用 `100` 号路由表。在 `100` 号表中设定默认路由走 `lo` 本地回环设备。而从本地回环设备发出的数据包都会被视作发向本机，也就避免了被转发出去
 
+####  典型配置举例
+
+1、clash（开源版）配合 tproxy
+
+具体配置可以参考：[a-clash-tproxy-gateway.md](https://gist.github.com/phlinhng/38a141862de775b10c613f7f2c6ade99)
+
+核心`3`步：
+
+1）开启转发配置，在网关机器上打开 ipv4 转发
+
+```BASH
+echo net.ipv4.ip_forward=1 >> /etc/sysctl.conf && sysctl -p
+```
+
+2）设置tproxy配置，将本地路由放通，不走clash
+
+```BASH
+# ROUTE RULES
+ip rule add fwmark 1 table 100
+ip route add local 0.0.0.0/0 dev lo table 100
+
+# CREATE TABLE
+iptables -t mangle -N clash
+
+# RETURN LOCAL AND LANS
+iptables -t mangle -A clash -d 0.0.0.0/8 -j RETURN
+iptables -t mangle -A clash -d 10.0.0.0/8 -j RETURN
+iptables -t mangle -A clash -d 127.0.0.0/8 -j RETURN
+iptables -t mangle -A clash -d 169.254.0.0/16 -j RETURN
+iptables -t mangle -A clash -d 172.16.0.0/12 -j RETURN
+iptables -t mangle -A clash -d 192.168.50.0/16 -j RETURN
+iptables -t mangle -A clash -d 192.168.9.0/16 -j RETURN
+
+iptables -t mangle -A clash -d 224.0.0.0/4 -j RETURN
+iptables -t mangle -A clash -d 240.0.0.0/4 -j RETURN
+
+# FORWARD ALL
+iptables -t mangle -A clash -p udp -j TPROXY --on-port 7893 --tproxy-mark 1
+iptables -t mangle -A clash -p tcp -j TPROXY --on-port 7893 --tproxy-mark 1
+
+# REDIRECT
+iptables -t mangle -A PREROUTING -j clash
+```
+
+3）开启clash，clash配置文件中需要打开tproxy配置
+
+```TEXT
+# Transparent proxy server port for Linux (TProxy TCP and TProxy UDP)
+tproxy-port: 7893
+```
+
+4）作为网关服务器的额外配置
+
+最后在局域网的 `DHCP` 服务器设置网关为该机器 IP 即可，也可以在希望走代理机器的网关设置为该机器 IP
+
 ##  0x02    v2ray
 [v2ray-core](https://github.com/v2fly/v2ray-core)
 
@@ -55,6 +110,7 @@ iptables -t mangle -A PREROUTING -p tcp -j TPROXY --on-ip 127.0.0.1 --on-port 10
 -   [Clash.Meta](https://github.com/MetaCubeX/Clash.Meta/tree/Meta) 这是 [clash](https://github.com/Dreamacro/clash) 的二次开发版本
 -   [clash-plus-pro](https://github.com/yaling888/clash)
 - [clashr：My Own Fork of Clash - Support RuleProviders、SSR(Add "chacha20" and "none" ciphers) 、 TCP/UDP Tunnel、MTProxy Inbound、MixEC(RESTful Api+Socks5+MTProxy) Inbound and Tun(from sing-tun or @yaling888 or @comzyh) Inbound](https://github.com/wwqgtxx/clashr)
+- [clash](https://github.com/comzyh/clash)：一个tun模式的实现
 
 
 ####    Clash.Meta
@@ -186,3 +242,7 @@ seeker 参考了 Surge 的实现原理，使用了fake-ip模式，基本如下�
 -   [GO Simple Tunnel](https://gost.run/)
 -   [Surge 官方中文指引：理解 Surge 原理](https://manual.nssurge.com/book/understanding-surge/cn/)
 -   [深入理解 Linux TProxy](https://rook1e.com/p/linux-tproxy/)
+- [用iptables/tproxy做透明代理](https://zhuanlan.zhihu.com/p/191601221)
+- [clash：Add TCP TPROXY support](https://github.com/Dreamacro/clash/pull/1049)
+- [Clash 作为网关的透明代理](https://www.wogong.net/blog/2020/11/clash-transparent-proxy)
+- [Clash 作为网关的透明代理](https://www.wogong.net/blog/2023/07/clash-gateway)
