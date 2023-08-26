@@ -626,7 +626,15 @@ iptables -t mangle -A PREROUTING -d 1.1.1.0/24 -p tcp -j TPROXY --on-port 1081 -
 --tproxy-mark 0x1/0x1：指定tproxy标记为0x1，表示标记需要经过tproxy处理的数据包
 ```
 
-tproxy的数据流向如下图：
+```BASH
+ip rule add fwmark 1 lookup 100     #数据包有标记 1，进入 100 号路由表
+ip route add local 0.0.0.0/0 dev lo table 100
+```
+
+另外，使用策略路由将`fwmark`路由到`lo`上，这样即使数据包的目的IP不是本机，内核不会把这个包送到`FORWARD`链上去（默认会被送到`FORWARD`链），这样数据包就能送到代理客户端进行后续处理了（策略路由将所有数据包的下一跳都指向 `lo`，默认`lo`接口的数据包就会直接送去本机进程）
+
+
+tproxy的数据流向如下图（蓝色->绿色->红色）：
 ![tproxy-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/tproxy-flow.png)
 
 ##  0x0A 参考
