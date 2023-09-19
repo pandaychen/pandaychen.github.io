@@ -1,0 +1,12 @@
+tcp-bad-flow
+
+Client->Gateway: tcp handshake with 1.1.1.1
+note right of Gateway: divert with route table
+Gateway->Gateway(TUN): 
+netstack(Core)->Gateway(TUN): fake tcp handshake
+Gateway(TUN)->Client: fake tcp handshake
+Gateway(TUN)->netstack(Core): Accept?
+Client->Gateway(TUN): Client Hello
+Client->Gateway(TUN): Client Hello
+Client->Gateway(TUN): Client Hello
+Client->Gateway(TUN): Client Hello

@@ -1,0 +1,22 @@
+http/https-flow
+
+Client->Gateway(DNS): DNS Request(www.bing.com)
+Gateway(DNS)->PublicDNS: real dns query(with Concurrency)
+PublicDNS->Gateway(DNS): send back A record
+note right of Gateway(DNS): mark maping  www.bing.com<->A
+note left of Gateway(DNS): alloc fakeip 10.19.0.2<->www.bing.com
+ Gateway(DNS)->Client: send back 10.19.0.2 with A record
+ Client->Gateway: tcp handshake with 10.19.0.2
+note right of Gateway: divert with route table
+Gateway->Gateway(TUN): 
+Gateway(TUN)->netstack(Core):
+netstack(Core)->Gateway(TUN): fake tcp handshake
+Gateway(TUN)->Client: fake tcp handshake
+note right of netstack(Core): get ip-domain relation(optional)
+netstack(Core)->WebProxy: http CONNECT dial www.bing.com:443
+WebProxy->www.bing.com: http dial(succ)
+WebProxy->netstack(Core): 200 OK
+Client->netstack(Core): send http flow
+netstack(Core)->www.bing.com: transmit http flow
+www.bing.com->netstack(Core): http(s) response
+netstack(Core)->Client: transmit http response
