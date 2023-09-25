@@ -1,0 +1,18 @@
+tcp-bad-flow
+
+Client->Gateway: udp packet send with destination 1.1.1.1:12345
+note right of Gateway: divert with route table
+Gateway->Gateway(TUN): 
+Gateway(TUN)->netstack(Core): udp packet recv
+netstack(Core)->socksTcpProxy: tcp handshake(modify socks)
+socksTcpProxy->netstack(Core): tcp handshake done
+netstack(Core)->socksTcpProxy: send udp tunnel info
+note left of socksTcpProxy: start udp listener
+socksTcpProxy->netstack(Core): send udp listener info
+note right of netstack(Core): hijack gvisor: 存储UDP-NAT映射关系
+netstack(Core)->socksTcpProxy: send udp packet
+socksTcpProxy->1.1.1.1: send udp
+1.1.1.1->socksTcpProxy: reply udp
+socksTcpProxy->netstack(Core): udp reply
+netstack(Core)->Gateway(TUN): modify udp packet[checksum]
+Gateway(TUN)->Client: udp reply
