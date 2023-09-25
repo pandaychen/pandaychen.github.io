@@ -15,20 +15,64 @@ tags:
 
 本文的关键词是：git over ssh authorized_keys with forced_command
 
-####  git 传输协议
+####  git 支持的传输协议
 git 目前主要支持的网络协议有如下三种：
 
 - `http(s)://`
 - `ssh://`
 - `git://`
 
-无论上述哪种协议，拉取实质上都是 `git-fetch-pack`/`git-upload-pack` 的数据交换，推送都是 `git-send-pack`/`git-receive-pack` 的数据交换。为简化，这里不介绍 Dump 哑协议。
+无论上述哪种协议，拉取实质上都是 `git-fetch-pack`/`git-upload-pack` 的数据交换，推送都是 `git-send-pack`/`git-receive-pack` 的数据交换。为简化，这里不介绍 Dump 哑协议。更详细的介绍可以参考：[传输协议](https://iissnan.com/progit/html/zh/ch9_6.html)
 
-#### HTTP(S) 传输（Smart 协议）
+#### 1、HTTP(S) 传输（Smart 智能协议）
+
+HTTP 智能协议与 [哑协议](https://xie.infoq.cn/article/ae4a65148cc85dd155011bead) 最大的区别在于：哑协议在获取数据时需自行指定文件资源的网络地址，并且通过多次下载操作来完成；而智能协议的则由服务端控制，服务端提供的 `info/refs` 可以动态更新，并且可以通过客户端传来的参数，决定本次交互客户端所需要的最小对象集，并打包压缩发给客户端，客户端会进行解压来拿到自己想要的数据。以 `git clone` 为例，整个交互过程如下（两次请求）：
 
 ![git-http](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/git/git-http-protocol.png)
 
-####  Git 传输协议
+1.	引用发现：`GET https://xxx.com/account/repo/info/refs?service=git-{upload|receive}-pack`
+2.	数据传输：`POST https://xxx.com/account/repo/git-{upload|receive}-pack`
+
+Git HTTP 协议要求操作前必须先执行引用发现（即需要知道服务端的各个引用的版本信息），这样的话才能让服务端或者客户端知道两方之间的差异以及需要什么样的数据。
+
+1、引用发现 <br>
+智能协议的的服务端是动态服务器，能够根据期望来提供相关的引用信息，通过抓包看到客户端请求的数据以及 git 服务端返回的引用信息格式，如下：
+
+```TEXT
+# 请求体
+GET http://git.xxxx.net/pandaychen/getingblog.git/info/refs?service=git-upload-pack HTTP/1.1
+Host: git.xxxx.net
+User-Agent: git/2.24.3 (Apple Git-128)
+Accept-Encoding: deflate, gzip
+Proxy-Connection: Keep-Alive
+Pragma: no-cache
+
+# GIT server 响应
+HTTP/1.1 200 OK
+Cache-Control: no-cache, max-age=0, must-revalidate
+Connection: keep-alive
+Content-Type: application/x-git-upload-pack-advertisement
+Expires: Fri, 01 Jan 1980 00:00:00 GMT
+Pragma: no-cache
+Server: nginx
+X-Frame-Options: DENY
+X-Git-Server: Brzox/3.2.3
+X-Request-Id: 96e0af82-dffe-4352-9fa5-92f652ed39c7
+Transfer-Encoding: chunked
+
+001e# service=git-upload-pack
+0000
+010fca6ce400113082241c1f45daa513fabacc66a20d HEADmulti_ack thin-pack side-band side-band-64k ofs-delta shallow deepen-since deepen-not deepen-relative no-progress include-tag multi_ack_detailed no-done symref=HEAD:refs/heads/testbody object-format=sha1 agent=git/2.29.2
+003c351bad7fdb498c9634442f0c3f60396e8b92f4fb refs/heads/dev
+004092ad3c48e627782980f82b0a8b05a1a5221d8b74 refs/heads/dev-pro
+0040ae747d0a0094af3d27ee86c33e645139728b2a9a refs/heads/develop
+0000
+```
+
+上面的协议字段有部分值得注意的细节：
+
+
+####  2、Git 传输协议
 Git 协议以及 SSH 协议都是四层的传输协议，而 HTTP 则是七层的传输协议，受限于 HTTP 协议的特点，HTTP 在 Git 相关的操作上存在传输限制、超时等问题，这个问题在大仓库的传输中尤为明显，相较与 HTTP 协议，Git 以及 SSH 协议在传输上更稳定
 
 ![git-git](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/git/git-git-protocol.png)
@@ -67,7 +111,7 @@ func exitSession(conn net.Conn, err error) {
 
 客户端接收到上述错误信息后，就会打印信息并关闭连接
 
-####  SSH 传输协议
+#### 3、SSH 传输协议
 与 Git 协议比较，SSH 协议传输的数据需要加密。除此外，SSH 协议的传输过程与 Git 协议一致，都是跟服务端的进程做数据交换：
 
 ![git-ssh](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/git/git-ssh-protocol.png)
@@ -122,7 +166,7 @@ _TPL_PUBLICK_KEY = `command="%s serv key-%d --config='%s'",no-port-forwarding,no
 
 ![serv](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/git/gogs/gogs_client_serv_1.png)
 
-#### [codefever](https://github.com/PGYER/codefever/tree/master)\
+#### [codefever](https://github.com/PGYER/codefever/tree/master)
 
 ```BASH
 command="PATH=$PATH:/usr/local/git/bin && /data/www/codefever-community/ssh-gateway/shell/main $SSH_ORIGINAL_COMMAND 00000000000000000000000000000000",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty <ssh public key>
@@ -149,3 +193,4 @@ command="PATH=$PATH:/usr/local/git/bin && /data/www/codefever-community/ssh-gate
 - [聊聊 Git 的三种传输协议及实现](https://xie.infoq.cn/article/ae4a65148cc85dd155011bead)
 - [构建恰当的 Git SSH Server](https://forcemz.net/git/2019/03/16/MakeAGitSSHServer/)
 - [代码托管从业者 Git 指南](https://ipvb.gitee.io/git/2021/01/21/GitGuideForCodeHostingPractitioners/)
+-	[传输协议](https://iissnan.com/progit/html/zh/ch9_6.html)
