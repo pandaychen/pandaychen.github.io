@@ -337,14 +337,51 @@ command="PATH=$PATH:/usr/local/git/bin && /data/www/codefever-community/ssh-gate
 ##  0x03  gogs ：git over sshd 分析
 
 
-##  0x0 补充：git over HTTP
+##	0x04	gitlab shell 原理
+参考 [GitLab Shell development guidelines](https://docs.gitlab.com/ee/development/gitlab_shell/)
+
+When you access the GitLab server over SSH, GitLab Shell then:
+
+1.	Limits you to predefined Git commands (git push, git pull, git fetch)
+2.	Calls the GitLab Rails API to check if you are authorized, and what Gitaly server your repository is on
+3.	Copies data back and forth between the SSH client and the Gitaly server
+
+####	git pull over SSH
+![gitlab-pull]()
+
+####	git push over SSH
+![gitlab-push]()
+
+####	 flow of gitlab-shell
+GitLab SSH 守护程序（gitlab-sshd）的运行流程如下：
+
+1.	用户通过 SSH 协议连接到 gitlab-sshd
+2.	gitlab-sshd 会验证用户的身份，并将用户的请求转发到 GitLab Rails 应用程序
+3.	GitLab Rails 应用程序会验证用户的权限，并根据请求的类型执行相应的操作。例如，如果用户请求克隆存储库，则 GitLab Rails 应用程序会调用 Gitaly，将存储库的数据发送回 gitlab-sshd，然后将其转发给用户
+4.	gitlab-sshd 将从 GitLab Rails 应用程序收到的响应发送回用户
+
+在整个过程中，gitlab-sshd 充当了中间人的角色，负责将用户请求转发到 GitLab Rails 应用程序，并将响应发送回用户。同时，gitlab-sshd 还负责管理 SSH 连接，包括验证用户身份和维护连接状态
+
+![gitlab-flow]()
+
+在上图中，包含了两个中间件：
+
+-	Rails：Rails 是一种 Web 应用程序框架，它为 GitLab 提供了一个基础架构，包括用户身份验证、API、Web 界面等。Rails 还提供了一些功能，例如存储库浏览器、问题跟踪器、CI/CD 等
+-	Gitaly：Gitaly 是 GitLab 的分布式版本控制系统，它负责处理 Git 存储库的所有操作。Gitaly 是在 GitLab 中实现高可用性和可扩展性的关键组件。它将 Git 操作转换为 gRPC 调用，并将它们路由到 Git 存储库的正确实例。Gitaly 还提供了许多其他功能，例如存储库克隆、提交、拉取请求等
+
+####	GitLab Shell architecture
+
+![gitlab-arch]()
+
+##  0x04 补充：git over HTTP
 
 
-##  0x0 总结
+##  0x05 总结
 关于 git 的使用 / 经验 / 原理或者更多细节，可以延伸阅读如下文章：
 - [代码托管从业者 Git 指南](https://ipvb.gitee.io/git/2021/01/21/GitGuideForCodeHostingPractitioners/)
 
-##  0x04 参考
+##  0x06 参考
+-	[git 使用与原理剖析及其私服搭建](https://xie.infoq.cn/article/38e92927b2ca83f0d29224e6e)
 - [GOGS：Gogs is a painless self-hosted Git service](https://github.com/gogs/gogs)
 - [几款开源 git server ssh 协议 forced command 参考格式](https://www.cnblogs.com/rongfengliang/p/15924984.html)
 - [10.6 Git 内部原理 - 传输协议](https://git-scm.com/book/zh/v2/Git-%E5%86%85%E9%83%A8%E5%8E%9F%E7%90%86-%E4%BC%A0%E8%BE%93%E5%8D%8F%E8%AE%AE)
@@ -354,3 +391,6 @@ command="PATH=$PATH:/usr/local/git/bin && /data/www/codefever-community/ssh-gate
 - [代码托管从业者 Git 指南](https://ipvb.gitee.io/git/2021/01/21/GitGuideForCodeHostingPractitioners/)
 -	[传输协议](https://iissnan.com/progit/html/zh/ch9_6.html)
 -	[一个 golang 模拟 git 服务端的实现](https://gitee.com/kesin/go-git-protocols/tree/master/http-smart)
+-	[Writing an SSH server in Go](https://blog.gopheracademy.com/advent-2015/ssh-server-in-go/)
+-	[自己开发 git 服务器，有哪些开源可以借用？](https://www.zhihu.com/question/283143882)
+-	[GitLab Shell development guidelines](https://docs.gitlab.com/ee/development/gitlab_shell/)
