@@ -22,9 +22,53 @@ git 目前主要支持的网络协议有如下三种：
 - `ssh://`
 - `git://`
 
-无论上述哪种协议，拉取实质上都是 `git-fetch-pack`/`git-upload-pack` 的数据交换，推送都是 `git-send-pack`/`git-receive-pack` 的数据交换。为简化，这里不介绍 Dump 哑协议。更详细的介绍可以参考：[传输协议](https://iissnan.com/progit/html/zh/ch9_6.html)
+无论上述哪种协议，拉取实质上都是 `git-fetch-pack`/`git-upload-pack` 的数据交换，推送都是 `git-send-pack`/`git-receive-pack` 的数据交换。更详细的介绍可以参考：[传输协议](https://iissnan.com/progit/html/zh/ch9_6.html)
 
-#### 1、HTTP(S) 传输（Smart 智能协议）
+#### 1、HTTP（Dump 哑协议）
+Git 哑协议仅需要一个标准的 HTTP 静态文件服务（能够提供文件的下载即可），Git 客户端会自动进行文件的遍历和拉取。无论是哑协议还是智能协议，Git 在使用 HTTP 协议进行 `Fetch` 操作的时候，总是要先获取 `info/refs` 文件（地址为 `.git/info/refs`，可通过 `git update-server-info` 生成）；可以配置 Git 服务端的 `post-receive` 钩子自动执行 `update-server-info` 更新
+
+```BASH
+[root@VM_120_245_centos /tmp/gogs/.git]# cat ./info/refs
+018337ddfbd33495a08ece1bc4ab639aba730142        refs/heads/main
+018337ddfbd33495a08ece1bc4ab639aba730142        refs/remotes/origin/HEAD
+4154f528c3d3c0d60e1919bda9eed6a500e49e81        refs/remotes/origin/jc/db-migrate-orgs
+b9266247a4701c20c0297e4a8c965bac9b888365        refs/remotes/origin/jc/exp/pack-release-archives-in-docker
+f1a4b8683b2338b198114786a0f4cba14e8d07e8        refs/remotes/origin/jc/exp/srcgraph-external-service
+018337ddfbd33495a08ece1bc4ab639aba730142        refs/remotes/origin/main
+c9fba3cb30af0789fcf89098dfcb8f2286ee7d3b        refs/remotes/origin/release/0.12
+8c21874c00b6100d46b662f65baeb40647442f42        refs/remotes/origin/release/0.13
+b3757e424ffc47f7ae07d8fecd9f2ecf98f20679        refs/tags/v0.10
+9d40b8a83cc3a13ec0859ad253de02c514e4403d        refs/tags/v0.10.1
+f54bcba3394bf856b77b674203ea0c80b926cd61        refs/tags/v0.10.18
+bb005f3f9a606a5e94da4fc274d3c21234d98090        refs/tags/v0.10.8
+.......
+```
+
+文件内容主要是服务端上每个引用的版本，客户端拿到这些引用之后，就可以跟本地的引用进行对比，对于缺失的对象文件，则通过 HTTP 的方式进行下载。一次通过哑协议 `Clone` 的过程如下：
+
+1.	用户：`git clone https://xxx.com/pandaychen/abc.git`
+2.	客户端：`GET https://xxx.com/pandaychen/abc.git/info/refs`
+3.	服务端：Response with `abc.git/info/refs`
+4.	客户端：`GET https://xxx.com/pandaychen/abc.git/HEAD` （默认分支）
+5.	服务端：Response with `abc.git/HEAD`
+6.	客户端：Get `https://xxx.com/pandaychen/abc.git/objects/ef/8021acf4c29eb35e3084b7dc543c173d67ad2a` 开始遍历对象，找出那些本地没有的，去服务端获取，如果服务端无法直接获取，则从 Pack 文件中进行抓取，直到全部拿到
+7.	客户端：根据 `HEAD` 中的默认分支执行 `checkout` 操作检出到本地
+
+可以通过 `http.FileServer` 直接构建一个 dump server（也可以直接以 nginx 文件服务器提供）：
+
+```GO
+func main() {
+	repo := flag.String("repo", "/root/repositories", "Specify a repositories root dir.")
+	port := flag.String("port", "8888", "Specify a port to start process.")
+	flag.Parse()
+
+	http.Handle("/", http.FileServer(http.Dir(*repo)))
+	fmt.Printf("Dumb http server start at port %s on dir %s \n", *port, *repo)
+	_ = http.ListenAndServe(fmt.Sprintf(":%s", *port), nil)
+}
+```
+
+#### 2、HTTP(S) 传输（Smart 智能协议）
 
 HTTP 智能协议与 [哑协议](https://xie.infoq.cn/article/ae4a65148cc85dd155011bead) 最大的区别在于：哑协议在获取数据时需自行指定文件资源的网络地址，并且通过多次下载操作来完成；而智能协议的则由服务端控制，服务端提供的 `info/refs` 可以动态更新，并且可以通过客户端传来的参数，决定本次交互客户端所需要的最小对象集，并打包压缩发给客户端，客户端会进行解压来拿到自己想要的数据。以 `git clone` 为例，整个交互过程如下（两次请求）：
 
@@ -40,7 +84,7 @@ Git HTTP 协议要求操作前必须先执行引用发现（即需要知道服�
 
 ```TEXT
 # 请求体
-GET http://git.xxxx.net/pandaychen/getingblog.git/info/refs?service=git-upload-pack HTTP/1.1
+GET http://git.xxxx.net/pandaychen/abc.git/info/refs?service=git-upload-pack HTTP/1.1
 Host: git.xxxx.net
 User-Agent: git/2.24.3 (Apple Git-128)
 Accept-Encoding: deflate, gzip
@@ -69,10 +113,125 @@ Transfer-Encoding: chunked
 0000
 ```
 
-上面的协议字段有部分值得注意的细节：
+上面的协议字段及响应有部分值得注意的细节：
+
+-	`Cache-Control`：必须禁止缓存，不然可能看不到最新的提交
+-	`Content-Type`：必须是 `application/x-$servicename-advertisement`，不然客户端会以哑协议的方式去处理
+-	客户端需要验证返回的状态码，如果是 `401` 那么就提示输入用户名密码
+-	智能协议响应 Response Body 格式跟哑协议所用的 `info/refs` 内容不一样，客户端需要根据这个来识别支持的属性和验证信息（`pkt-line` 格式）
+
+`pkt-line` 协议格式定义如下：
+
+1.	客户端需要验证第一首行的 `4` 个字符符合正则 `^[0-9a-f]{4}#`，这里的四个字符是代表后面内容的长度
+2.	客户端需要验证第一行是# `service=$servicename`
+3.	服务端得保证每一行结尾需要包含一个 `LF` 换行符
+4.	服务端需要以 `0000` 标识结束本次请求响应
+
+可以通过 git 命令行 `git upload-pack --stateless-rpc --advertise-refs .` 获取某个 repo 下面的 `info/refs` 的 `pkt-line` 格式 `：
+
+```txt
+[root@VM_120_245_centos /tmp/gogs]# git upload-pack --stateless-rpc --advertise-refs .
+00b5018337ddfbd33495a08ece1bc4ab639aba730142 HEADmulti_ack thin-pack side-band side-band-64k ofs-delta shallow no-progress include-tag multi_ack_detailed no-done agent=git/1.8.3.1
+003d018337ddfbd33495a08ece1bc4ab639aba730142 refs/heads/main
+0046018337ddfbd33495a08ece1bc4ab639aba730142 refs/remotes/origin/HEAD
+00544154f528c3d3c0d60e1919bda9eed6a500e49e81 refs/remotes/origin/jc/db-migrate-orgs
+0068b9266247a4701c20c0297e4a8c965bac9b888365 refs/remotes/origin/jc/exp/pack-release-archives-in-docker
+0062f1a4b8683b2338b198114786a0f4cba14e8d07e8 refs/remotes/origin/jc/exp/srcgraph-external-service
+0046018337ddfbd33495a08ece1bc4ab639aba730142 refs/remotes/origin/main
+004ec9fba3cb30af0789fcf89098dfcb8f2286ee7d3b refs/remotes/origin/release/0.12
+004e8c21874c00b6100d46b662f65baeb40647442f42 refs/remotes/origin/release/0.13
+003db3757e424ffc47f7ae07d8fecd9f2ecf98f20679 refs/tags/v0.10
+......
+0000 vv
+```
+
+`upload-pack` 是用来发送对象给客户端的一个远程调用模块，通过此指令，能够快速拿到当前的引用状态并退出，需要在服务端的裸仓库目录执行就可以直接拿到最新的引用信息，模拟实现的代码如下：
+
+```GO
+// 支持 upload-pack 和 receive-pack 两种操作引用发现的处理
+func handleRefs(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	repoName := vars["repo"]
+	repoPath := fmt.Sprintf("%s%s", *repoRoot, repoName)
+	service := r.FormValue("service")
+	pFirst := fmt.Sprintf("# service=%s\n", service) // 本示例仅处理 protocol v1
+
+	handleRefsHeader(&amp;w, service) // Headers 处理
+
+	//call git command
+	cmdRefs := exec.Command("git", service[4:], "--stateless-rpc", "--advertise-refs", repoPath)
+	refsBytes, _ := cmdRefs.Output() // 获取 pkt-line 数据
+	responseBody := fmt.Sprintf("%04x# service=%s\n0000%s", len(pFirst)+4, service, string(refsBytes)) // 拼接 Body
+
+	_, _ = w.Write([]byte(responseBody))
+}
+
+// 按要求设置 Headers
+func handleRefsHeader(w *http.ResponseWriter, service string) {
+	cType := fmt.Sprintf("application/x-%s-advertisement", service)
+	(*w).Header().Add("Content-Type", cType)
+	(*w).Header().Set("Expires", "Fri, 01 Jan 1980 00:00:00 GMT")
+	(*w).Header().Set("Pragma", "no-cache")
+	(*w).Header().Set("Cache-Control", "no-cache, max-age=0, must-revalidate")
+}
+```
+
+2、数据传输 <br>
+
+-	客户端向服务端传输（Push）：Push 操作获取到服务端的引用列表后，由客户端本地计算出客户端所缺失的数据，将这些数据打包，并 `POST` 给服务端，服务端接收到后进行解压和引用更新
+-	服务端向客户端传输（Fetch）：Fetch 操作在获取引用发现之后，由服务端计算出客户端想要的数据，并把数据以 `pkt-line` 格式 `POST` 给服务端，由服务端进行 Pack 的计算和打包，将包作为 `POST` 的响应发送给客户端，客户端进行解压和引用更新；Fetch 操作用到了 `upload-pack`，该指令是一个发送对象给客户端的远程调用模块，只需要在服务端启动 `git upload-pack --stateless-rpc` ，该命令阻塞的接收一串参数，而这串参数是客户端的第二次请求发送过来的，把它传递给这个命令，Git 就会自动的计算客户端所需要的最小对象集并打包，以流的形式返回这个包数据，最后只需要把这个包作为 `POST` 请求的响应发给客户端即可
 
 
-####  2、Git 传输协议
+在 Fetch 操作中，客户端第二次 `POST` 请求发过来的数据格式如下：
+
+```txt
+POST http://xxx.com/pandaychen/abc/git-upload-pack HTTP/1.1
+Host: xxx.com
+User-Agent: git/2.24.3 (Apple Git-128)
+Accept-Encoding: deflate, gzip
+Proxy-Connection: Keep-Alive
+Content-Type: application/x-git-upload-pack-request
+Accept: application/x-git-upload-pack-result
+Content-Length: 443
+
+00b4want bee4d57e3adaddf355315edf2c046db33aa299e8 multi_ack_detailed no-done side-band-64k thin-pack include-tag ofs-delta deepen-since deepen-not agent=git/2.24.3.(Apple.Git-128)
+00000032have 82a8768e7fd48f76772628d5a55475c51ea4fa2f
+0032have 4f7a2ea0920751a5501debbbc1debc403b46d7a0
+0032have 7c141974a30bd218d4257d4292890a9008d30111
+0032have f6bb00364bd5000a45185b9b16c028f485e842db
+0032have 47b7bd17fcb7de646cf49a26efb43c7b708498f3
+0009done
+```
+
+整个数据传输的过程无非就是客户端与服务端的 `upload-pack` 和 `receive-pack` 对规定格式的数据交换而已，第二步的处理的参考代码如下：
+
+```GO
+func processPack(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	repoName := vars["repo"]
+	// request repo not end with .git is supported with upload-pack
+	repoPath := fmt.Sprintf("%s%s", *repoRoot, repoName)
+	service := vars["service"]
+
+	handlePackHeader(&amp;w, service)
+
+	// 启动一个进程，通过标准输入输出进行数据交换
+	cmdPack := exec.Command("git", service[4:], "--stateless-rpc", repoPath)
+	cmdStdin, err := cmdPack.StdinPipe()
+	cmdStdout, err := cmdPack.StdoutPipe()
+	_ = cmdPack.Start()
+
+	// 客户端和服务端数据交换
+	go func() {
+		_, _ = io.Copy(cmdStdin, r.Body)
+		_ = cmdStdin.Close()
+	}()
+	_, _ = io.Copy(w, cmdStdout)
+	_ = cmdPack.Wait() // wait for std complete
+}
+```
+
+####  3、Git 传输协议
 Git 协议以及 SSH 协议都是四层的传输协议，而 HTTP 则是七层的传输协议，受限于 HTTP 协议的特点，HTTP 在 Git 相关的操作上存在传输限制、超时等问题，这个问题在大仓库的传输中尤为明显，相较与 HTTP 协议，Git 以及 SSH 协议在传输上更稳定
 
 ![git-git](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/git/git-git-protocol.png)
@@ -111,7 +270,7 @@ func exitSession(conn net.Conn, err error) {
 
 客户端接收到上述错误信息后，就会打印信息并关闭连接
 
-#### 3、SSH 传输协议
+#### 4、SSH 传输协议
 与 Git 协议比较，SSH 协议传输的数据需要加密。除此外，SSH 协议的传输过程与 Git 协议一致，都是跟服务端的进程做数据交换：
 
 ![git-ssh](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/git/git-ssh-protocol.png)
@@ -194,3 +353,4 @@ command="PATH=$PATH:/usr/local/git/bin && /data/www/codefever-community/ssh-gate
 - [构建恰当的 Git SSH Server](https://forcemz.net/git/2019/03/16/MakeAGitSSHServer/)
 - [代码托管从业者 Git 指南](https://ipvb.gitee.io/git/2021/01/21/GitGuideForCodeHostingPractitioners/)
 -	[传输协议](https://iissnan.com/progit/html/zh/ch9_6.html)
+-	[一个 golang 模拟 git 服务端的实现](https://gitee.com/kesin/go-git-protocols/tree/master/http-smart)
