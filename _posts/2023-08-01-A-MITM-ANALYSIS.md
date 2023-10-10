@@ -17,11 +17,29 @@ tags:
 
 
 ####    透明代理
+##
+
+
+GOOGLE/Martian 是一个开源的 HTTP/HTTPS 代理库，它可以在代理服务器上拦截和修改 HTTP/HTTPS 请求和响应，以实现一些高级功能，例如请求重定向、请求修改、响应修改、请求和响应记录等。Martian 的主要应用场景是在开发和测试过程中，帮助开发人员进行 HTTP/HTTPS 请求和响应的调试和测试。
+
+Martian 的实现原理是通过在代理服务器上设置 HTTP/HTTPS 代理，拦截和修改 HTTP/HTTPS 请求和响应。Martian 使用 Go 语言编写，支持多种代理服务器，例如 Go 自带的 net/http、goproxy、mitmproxy 等。Martian 还支持自定义规则和过滤器，可以根据用户需求进行扩展。
+
+Martian 的主要特点如下：
+
+支持 HTTP/HTTPS 代理：Martian 可以拦截和修改 HTTP/HTTPS 请求和响应，实现一些高级功能。
+
+支持多种代理服务器：Martian 支持多种代理服务器，例如 Go 自带的 net/http、goproxy、mitmproxy 等。
+
+支持自定义规则和过滤器：Martian 支持自定义规则和过滤器，可以根据用户需求进行扩展。
+
+支持请求重定向、请求修改、响应修改、请求和响应记录等高级功能：Martian 可以实现一些高级功能，例如请求重定向、请求修改、响应修改、请求和响应记录等。
+
+
+##  0x
 
 
 
-
-
+##  0x      MITM防护手段
 
 ##  参考
 -   [](https://docs.mitmproxy.org/stable/concepts-howmitmproxyworks/)
