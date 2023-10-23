@@ -139,7 +139,7 @@ func DoHttpGet2() error {
 
 1、入口 `rsp,err:=client.Do(req)`<br>
 
-2、`client.Do` 方法：调用 `c.send()` 方法发请求，参数 `req` 和 `deadline`（超时相关），不像导致短连接原因 < br>
+2、`client.Do` 方法：调用 `c.send()` 方法发请求，参数 `req` 和 `deadline`（超时相关），不像导致短连接原因 <br>
 ```GOLANG
 func (c *Client) do(req *Request) (retres *Response, reterr error) {
     // 调用 c.send()
@@ -149,7 +149,7 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 }
 ```
 
-3、`c.send()` 方法：调用 `send()` 方法发送，参数增加了 `c.transport()`，从实现看，是返回 `http.Transport` 结构 < br>
+3、`c.send()` 方法：调用 `send()` 方法发送，参数增加了 `c.transport()`，从实现看，是返回 `http.Transport` 结构 <br>
 ```GOLANG
 func (c *Client) send(req *Request, deadline time.Time) (resp *Response, didTimeout func() bool, err error) {
     //...
@@ -165,7 +165,7 @@ func (c *Client) transport() RoundTripper {
 }
 ```
 
-4、`send()` 方法，最终还是调用 `rt.RoundTrip(req)` 发送请求 < br>
+4、`send()` 方法，最终还是调用 `rt.RoundTrip(req)` 发送请求 <br>
 
 ```GOLANG
 func send(ireq *Request, rt RoundTripper, deadline time.Time) (resp *Response, didTimeout func() bool, err error) {

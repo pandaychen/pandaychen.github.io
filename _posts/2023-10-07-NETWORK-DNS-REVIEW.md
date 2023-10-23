@@ -25,11 +25,11 @@ tags:
 
 
 ##  0x02    Kubernetes 的 DNS
-温馨提示：特别注意域名结尾是否有一个点号`.`
+温馨提示：特别注意域名结尾是否有一个点号 `.`
 
-1 当`ndots`小于`options ndots`
+1、当 `ndots` 小于 `options ndots` 时
 
-`options ndots`的值默认是`1`，在K8S中为`5`，参考下面的例子，在一个namespace `demo-ns`中有两个`SVC`，分别为`demo-svc1`和`demo-svc2`，其`/etc/resolv.conf`内容大致如下：
+`options ndots` 的值默认是 `1`，在 K8S 中为 `5`，参考下面的例子，在一个 namespace `demo-ns` 中有两个 `SVC`，分别为 `demo-svc1` 和 `demo-svc2`，其 `/etc/resolv.conf` 内容大致如下：
 
 ```bash
 nameserver 10.32.0.10
@@ -37,18 +37,17 @@ search demo-ns.svc.cluster.local svc.cluster.local cluster.local
 options ndots:5
 ```
 
-当在`demo-svc1`中直接请求域名`demo-svc2`，此时`ndots`为`1`（小于配置中的`5`），因此会触发配置中的`search`规则，即第一个解析的域名是`demo-svc2.demo-ns.svc.cluster.local`，当解析不出来的时候继续下面的`demo-svc2.svc.cluster.local`、`demo-svc2.cluster.local`，最后才是直接去解析`demo-svc2.`；注意此规则适用于任何一个域名，如在pod中去访问一个外部域名如`github.io`时也会依次进行上述查询。
+当在 `demo-svc1` 中直接请求域名 `demo-svc2`，此时 `ndots` 为 `1`（小于配置中的 `5`），因此会触发配置中的 `search` 规则，即第一个解析的域名是 `demo-svc2.demo-ns.svc.cluster.local`，当解析不出来的时候继续下面的 `demo-svc2.svc.cluster.local`、`demo-svc2.cluster.local`，最后才是直接去解析 `demo-svc2.`；注意此规则适用于任何一个域名，如在 pod 中去访问一个外部域名如 `github.io` 时也会依次进行上述查询。
 
-2  当ndots大于等于options ndots
+2、当 `ndots` 大于等于 `options ndots` 时
 
-在`demo-svc1`中直接请求域名`demo-svc2.demo-ns.svc.cluster.local`，此时的`ndots`为`4`，依然会触发上面的`search`规则。而请求域名`demo-svc2.demo-ns.svc.cluster.local.`时，`ndots`为`5`，因此不会触发`search`规则，直接去解析`demo-svc2.demo-ns.svc.cluster.local.`这个域名并返回结果；又如请求更长的pod域名`pod-1.demo-svc2.demo-ns.svc.cluster.local.`，此时的`ndots`为`6`，亦不会触发`search`规则，会直接查询域名并返回解析
+在 `demo-svc1` 中直接请求域名 `demo-svc2.demo-ns.svc.cluster.local`，此时的 `ndots` 为 `4`，依然会触发上面的 `search` 规则。而请求域名 `demo-svc2.demo-ns.svc.cluster.local.` 时，`ndots` 为 `5`，因此不会触发 `search` 规则，直接去解析 `demo-svc2.demo-ns.svc.cluster.local.` 这个域名并返回结果；又如请求更长的 pod 域名 `pod-1.demo-svc2.demo-ns.svc.cluster.local.`，此时的 `ndots` 为 `6`，亦不会触发 `search` 规则，会直接查询域名并返回解析
 
 ####    小结
--   同命名空间（namespace）内的服务直接通过$service_name进行互相访问而不需要使用全域名（FQDN），此时DNS解析速度最快
--   跨命名空间（namespace）的服务，可以通过$service_name.$namespace_name进行互相访问，此时DNS解析第一次查询失败，第二次才会匹配到正确的域名
--   所有的服务之间通过全域名（FQDN）$service_name.$namespace_name.svc.$cluster_name.访问的时候DNS解析的速度最快
--   在K8S集群内访问大部分的常见外网域名（ndots小于5）都会触发search规则，因此在访问外部域名的时候可以使用FQDN，即在域名的结尾配置一个点号`.`
-
+-   同命名空间（namespace）内的服务直接通过 `$service_name` 进行互相访问而不需要使用全域名（FQDN），此时 DNS 解析速度最快
+-   跨命名空间（namespace）的服务，可以通过 `$service_name.$namespace_name` 进行互相访问，此时 DNS 解析第一次查询失败，第二次才会匹配到正确的域名
+-   所有的服务之间通过全域名（FQDN）`$service_name.$namespace_name.svc.$cluster_name.` 访问的时候 DNS 解析的速度最快
+-   在 K8S 集群内访问大部分的常见外网域名（ndots 小于 `5`）都会触发 `search` 规则，因此在访问外部域名的时候可以使用 FQDN，即在域名的结尾配置一个点号 `.`
 ####    DNS 解析流程
 
 

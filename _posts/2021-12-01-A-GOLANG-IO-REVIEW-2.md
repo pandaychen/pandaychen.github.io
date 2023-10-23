@@ -56,7 +56,7 @@ func CopyFile(...) (error){
 }
 ```
 
-3、使用 io 库的 `io.Copy()` 或者 `io.CopyBuffer()`，后者支持设置 BufferSize，这个是比较推荐的方法 < br>
+3、使用 io 库的 `io.Copy()` 或者 `io.CopyBuffer()`，后者支持设置 BufferSize，这个是比较推荐的方法 <br>
 ```golang
 func CopyFile(src, dst string) (int64, error) {
         source, err := os.Open(src)
