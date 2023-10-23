@@ -104,27 +104,17 @@ transparent 模式下的数据流程如下：
 
 
 ##  0x03    参考实现 1：GOOGLE/Martian
+[GOOGLE/Martian](https://github.com/google/martian) 是一个开源的 HTTP/HTTPS 代理库，它可以在代理服务器上拦截和修改 HTTP/HTTPS 请求和响应，以实现一些高级功能，例如请求重定向、请求修改、响应修改、请求和响应记录等。Martian 实现原理是通过在代理服务器上设置 HTTP/HTTPS 代理，拦截和修改 HTTP/HTTPS 请求和响应。Martian 支持多种代理服务器，如 net/http、goproxy、mitmproxy 等。Martian 还支持自定义规则和过滤器，可以根据用户需求进行扩展。
 
-GOOGLE/Martian 是一个开源的 HTTP/HTTPS 代理库，它可以在代理服务器上拦截和修改 HTTP/HTTPS 请求和响应，以实现一些高级功能，例如请求重定向、请求修改、响应修改、请求和响应记录等。Martian 的主要应用场景是在开发和测试过程中，帮助开发人员进行 HTTP/HTTPS 请求和响应的调试和测试。
+-	支持 HTTP/HTTPS 代理：Martian 可以拦截和修改 HTTP/HTTPS 请求和响应，实现一些高级功能
+-	支持多种代理服务器：Martian 支持多种代理服务器，例如 Go 自带的 `net/http`、goproxy、mitmproxy 
+-	支持自定义规则和过滤器：Martian 支持自定义规则和过滤器，可以根据用户需求进行扩展
+-	支持请求重定向、请求修改、响应修改、请求和响应记录等高级功能：Martian 可以实现一些高级功能，例如请求重定向、请求修改、响应修改、请求和响应记录等
 
-Martian 的实现原理是通过在代理服务器上设置 HTTP/HTTPS 代理，拦截和修改 HTTP/HTTPS 请求和响应。Martian 使用 Go 语言编写，支持多种代理服务器，例如 Go 自带的 net/http、goproxy、mitmproxy 等。Martian 还支持自定义规则和过滤器，可以根据用户需求进行扩展。
-
-Martian 的主要特点如下：
-
-支持 HTTP/HTTPS 代理：Martian 可以拦截和修改 HTTP/HTTPS 请求和响应，实现一些高级功能。
-
-支持多种代理服务器：Martian 支持多种代理服务器，例如 Go 自带的 net/http、goproxy、mitmproxy 等。
-
-支持自定义规则和过滤器：Martian 支持自定义规则和过滤器，可以根据用户需求进行扩展。
-
-支持请求重定向、请求修改、响应修改、请求和响应记录等高级功能：Martian 可以实现一些高级功能，例如请求重定向、请求修改、响应修改、请求和响应记录等。
-
+martian的主要代理逻辑实现[在此](https://github.com/google/martian/blob/master/proxy.go)
 
 ####    Explicit 模式：关键代码
-该模式，martian 实现的核心 [代码](https://github.com/google/martian/blob/master/proxy.go#L442C17-L442C23) 如下：
-
-
-核心结构如下：
+该模式，martian 实现的核心 [代码](https://github.com/google/martian/blob/master/proxy.go#L442C17-L442C23) ，核心结构如下：
 
 ```go
 // Proxy is an HTTP proxy with support for TLS MITM and customizable behavior.
@@ -453,8 +443,10 @@ func (c *Config) cert(hostname string) (*tls.Certificate, error) {
 
 ##  0x04 参考实现 2：adguard/mitm
 
+##	0x05	再看martian：代理核心流程走读
 
-##  0x05 思考：MITM 防护手段
+
+##  0x0 思考：MITM 防护手段
 
 
 ##  0x06    总结
