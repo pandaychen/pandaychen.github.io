@@ -453,6 +453,7 @@ func (c *Config) cert(hostname string) (*tls.Certificate, error) {
 类似的项目：
 
 -   [mitm - mitm is a SSL-capable man-in-the-middle proxy for use with golang net/http](https://github.com/kr/mitm)
+-	[About mitmproxy implemented with golang](https://github.com/lqqyt2423/go-mitmproxy)
 
 ##  0x06    参考
 -   [How mitmproxy works](https://docs.mitmproxy.org/stable/concepts-howmitmproxyworks/)
@@ -468,3 +469,4 @@ func (c *Config) cert(hostname string) (*tls.Certificate, error) {
 - [Martian is a library for building custom HTTP/S proxies](https://github.com/google/martian)
 - [Modifier Reference](https://github.com/google/martian/wiki/Modifier-Reference)
 -	[TLS 握手期间会发生什么？| SSL 握手](https://www.cloudflare-cn.com/learning/ssl/what-happens-in-a-tls-handshake/)
+-	[All MITM attacks in one place.](https://github.com/frostbits-security/MITM-cheatsheet)
