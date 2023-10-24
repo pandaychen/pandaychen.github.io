@@ -22,6 +22,13 @@ tags:
 ##  0x01    基础
 先回顾一下 DNS 解析的基础流程，如下图：
 
+![DNS-BASIC](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/dns/dns-query-basic.png)
+
+![DNS-BASIC-2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/dns/dns-query-question-1.png)
+
+####    DNS 报文格式
+
+![dns-packet](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/dns/dns-packet-format.jpg)
 
 
 ##  0x02    Kubernetes 的 DNS
@@ -48,8 +55,9 @@ options ndots:5
 -   跨命名空间（namespace）的服务，可以通过 `$service_name.$namespace_name` 进行互相访问，此时 DNS 解析第一次查询失败，第二次才会匹配到正确的域名
 -   所有的服务之间通过全域名（FQDN）`$service_name.$namespace_name.svc.$cluster_name.` 访问的时候 DNS 解析的速度最快
 -   在 K8S 集群内访问大部分的常见外网域名（ndots 小于 `5`）都会触发 `search` 规则，因此在访问外部域名的时候可以使用 FQDN，即在域名的结尾配置一个点号 `.`
-####    DNS 解析流程
 
+
+####    DNS 解析流程
 
 
 ##  0x02
@@ -63,11 +71,40 @@ options ndots:5
 
 ##  DNS 常用库 2：coredns
 
+##  0x0 透明代理中的 DNS
+笔者在网关项目中也实现了类似的 DNSproxy，大致功能如下：
 
-##  透明代理中的 DNS
+-   拦截所有经由网关的 DNS 请求（查询），由网关进行代理查询（或者丢弃）
+-   支持 TUN-fake-DNS 查询及伪造返回
+-   支持 DNS 分流，指定 DNS 选用指定的 `nameserver`
+-   支持 DNS 报文经过 `socks5` 代理服务端进行域名查询及返回
+-   支持 `/etc/hosts` 解析
+
+还有一些细节：
+
+1、转发并发解析：会同时向所有配置的 DNS 上游服务器进行 DNS 查询，并选取最快的返回结果，以提高性能。该特性和 dnsmasq 的实现一致。
+
+6.2 Optimistic DNS（DNS 乐观解析）
+由于现代网络的复杂性，大多数网站会将 DNS 的记录有效期（TTL）配置为很短的时间，如 30 秒。这样可以使得网络管理员修改 DNS 记录后迅速生效，不必再等待所有节点 TTL 超时，利于故障排除和维护。
+
+这是可以理解的，网站和 API 可用性是很多公司的重中之重，如果某个 IP 不可达，修改 DNS 记录后需要 24 小时才能完全生效，造成的损失不可估量，所以运维会选择很短的 TTL。
+
+但这带来了一个问题，客户端会严格按照 TTL 去进行查询，那么每隔很短的时间就会进行再次查询，一次 DNS 查询的时间开销短至几毫秒，然而最长可以要数秒。频繁重复查询会造成不必要的延迟。
+
+为此 Apple 在 WWDC 2018 提出了 Optimistic DNS 的优化方案，在建立新连接时，如果本地 DNS 缓存已经过期，那么也先继续使用旧的结果，同时进行 DNS 查询，如果连接建立失败，则用新的结果重试。
+
+绝大多数情况下，DNS 记录是不变的，这样的方案根本不会影响正常使用，当极小概率遇到 DNS 记录切换时，也只会耽误一两个请求，可以说是很完美的优化。
+
+不过受限于 POSIX 等限制，Apple 也并没有将这个优化应用到所有地方，Surge 则完全应用了这个优化方案，使得所有请求都可以享受到 Optimistic DNS 的优化。
+
+6.3 本地映射
+Surge 支持配置本地 DNS 映射，功能和 /etc/hosts 文件基本一致。除了直接指定主机名所对应的 IP 地址，还支持对特定域名自定义特定的 DNS 服务器。或者完全通过脚本去自定义解析逻辑。
+
+6.4 使用系统的解析
+Surge 支持配置部分域名回退到系统 DNS 解析（example.com = server:syslib），用于解决一些兼容性问题，比如一些 VPN 会利用 Split DNS 机制在系统中添加用于处理特定域名的 DNS 服务器，Surge 目前还不能支持这种复杂逻辑，可通过对 VPN 相关域名配置回退解决。
+
 
 ####    DNS：FAKE-IP
-
 
 
 ##  0x0 参考
