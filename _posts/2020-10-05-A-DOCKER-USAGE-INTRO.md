@@ -113,3 +113,33 @@ docker load -i /root/xxxx.tar               #导入镜像
 docker export -o /root/xxxx.tar  <name>   #容器打包
 docker import xxxx.tar <name>:latest  #导入容器
 ```
+
+
+
+####   Docker 的代理配置
+
+1、docker pull 代理 <br>
+
+在执行 `docker pull` 指令时，是由守护进程 `dockerd` 来执行。 因此，代理需要配在 `dockerd` 的环境中。 此环境受 `systemd` 所管控，因此实际是 `systemd` 的配置，如下：
+
+```bash
+mkdir -p /etc/systemd/system/docker.service.d
+touch /etc/systemd/system/docker.service.d/proxy.conf
+
+[Service]
+Environment="HTTP_PROXY=http://proxy.example.com:8080/"
+Environment="HTTPS_PROXY=http://proxy.example.com:8080/"
+Environment="NO_PROXY=localhost,127.0.0.1,.example.com"
+```
+
+需要重启 `systemd` 配置生效：
+
+```bash
+systemctl daemon-reload
+systemctl restart docker
+```
+
+
+
+##  0x02    参考
+-   [Docker 的三种网络代理配置](https://note.qidong.name/2020/05/docker-proxy/)
