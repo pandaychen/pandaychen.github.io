@@ -461,6 +461,8 @@ func (c *Config) cert(hostname string) (*tls.Certificate, error) {
 ##  0x04 参考实现 2：adguard/mitm
 
 ##	0x05	再看 martian：代理核心流程走读
+本小节，梳理下martian的[mitm](https://github.com/google/martian/blob/master/mitm/mitm.go)主要数据流程：
+
 
 
 ##  0x0 思考：MITM 防护手段

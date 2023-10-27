@@ -365,10 +365,10 @@ func (p *pipe) write(b []byte) (n int, err error) {
 在 `io.Pipe` 的实现中，每次 `Read` 需要等待 `Write` 写完，是串行的。即 `io.Pipe` 描述了这样一种场景，即产生了一条数据，紧接着就要处理掉这条数据的场景。此外，从其实现来看，在 `Write` 流程中，将参数 `b` 这个 slice 放到 `p.data` 中，这是一次引用赋值。然后在 `Read` 流程中，把 `p.data` copy 出去，本质上相当于 copy 了 write 的原始数据，并没有用占用临时 slice 存储，减少了内存使用量。
 
 
-##	0x04	使用io.copyN传输文件
+##	0x04	使用 `io.copyN` 传输文件
 
-####	下载/上传文件
-`CopyN`方法借用了`io.LimitReader`的能力，而`LimitReader(r Reader, n int64) Reader`返回一个内容长度受限的`Reader`，当从这个`Reader`中读取了`n`个字节一会就会遇到EOF。其实现如下：
+####	下载 / 上传文件
+`CopyN` 方法借用了 `io.LimitReader` 的能力，而 `LimitReader(r Reader, n int64) Reader` 返回一个内容长度受限的 `Reader`，当从这个 `Reader` 中读取了 `n` 个字节一会就会遇到 EOF。其实现如下：
 ```golang
 func CopyN(dst Writer, src Reader, n int64) (written int64, err error) {
 	written, err = Copy(dst, LimitReader(src, n))
@@ -383,11 +383,11 @@ func CopyN(dst Writer, src Reader, n int64) (written int64, err error) {
 }
 ```
 
-`CopyN`提供了一定的保护措施，可以传输指定size的文件后自行退出。就是提供了一个保护的功能，其它和普通的`Reader`无区别。那么使用`CopyN`传输文件：
+`CopyN` 提供了一定的保护措施，可以传输指定 `size` 的文件后自行退出。就是提供了一个保护的功能，其它和普通的 `Reader` 无区别。那么使用 `CopyN` 传输文件：
 
-1、上传文件：使用`os.Open`打开需要传输的文件，然后使用`os.Lstat`获取FileInfo，然后开始传输`io.CopyN(net.Conn, os.File,os.FileInfo.Size())`<br>
-2、下载文件：使用`os.Create`创建写入文件，然后实现`io.CopyN(os.File, net.Conn，os.FileInfo.Size())`<br>
-3、下载文件，还可以使用`ReadAtLeast`与`LimitReader`进行配合<br>
+1、上传文件：使用 `os.Open` 打开需要传输的文件，然后使用 `os.Lstat` 获取 FileInfo，然后开始传输 `io.CopyN(net.Conn, os.File,os.FileInfo.Size())`<br>
+2、下载文件：使用 `os.Create` 创建写入文件，然后实现 `io.CopyN(os.File, net.Conn，os.FileInfo.Size())`<br>
+3、下载文件，还可以使用 `ReadAtLeast` 与 `LimitReader` 进行配合 <br>
 
 ```golang
 func main() {
@@ -399,7 +399,7 @@ func main() {
 	defer conn.Close()
 	// 发送请求, http 1.0 协议
 	fmt.Fprintf(conn, "GET / HTTP/1.0\r\n\r\n")
-	// 读取response
+	// 读取 response
 	var sb strings.Builder
 	buf := make([]byte, 256)
 	rr := io.LimitReader(conn, 102400)
@@ -450,6 +450,7 @@ func copyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
 		}
 		buf = make([]byte, size)
 	}
+	//在连接关闭之前，一直都在 for 循环。而连接关闭时，读取到的就是 io.EOF
 	for {
 		nr, er := src.Read(buf)
 		if nr > 0 {
@@ -477,7 +478,7 @@ func copyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
 }
 ```
 
-上述优化可以在`frp`项目中找到，这里使用了 `io.CopyBuffer` 来把两个连接之间的流量转发：
+上述优化可以在 `frp` 项目中找到，这里使用了 `io.CopyBuffer` 来把两个连接之间的流量转发：
 ```golang
 // Join two io.ReadWriteCloser and do some operations.
 func Join(c1 io.ReadWriteCloser, c2 io.ReadWriteCloser) (inCount int64, outCount int64) {
@@ -500,7 +501,7 @@ func Join(c1 io.ReadWriteCloser, c2 io.ReadWriteCloser) (inCount int64, outCount
 }
 ```
 
-此外，golang的`httputil.reverseproxy`实现，也加入了此[机制](https://github.com/golang/go/commit/492a62e945555bbf94a6f9dd6d430f712738c5e0)：
+此外，golang 的 `httputil.reverseproxy` 实现，也加入了此 [机制](https://github.com/golang/go/commit/492a62e945555bbf94a6f9dd6d430f712738c5e0)：
 ```text
 net/http/httputil: add hook for managing io.Copy buffers per request
 Adds ReverseProxy.BufferPool for users with sensitive allocation
