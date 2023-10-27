@@ -1,7 +1,7 @@
 ---
 layout: post
-title: Golang网络编程：UDP的若干细节
-subtitle: 基于Golang Udp的高性能编程总结
+title: Golang 网络编程：UDP 的若干细节
+subtitle: 基于 Golang Udp 的高性能编程总结
 date: 2022-03-03
 header-img: img/super-mario.jpg
 author: pandaychen
@@ -13,22 +13,22 @@ tags:
 ---
 
 ##	0x00	前言
-内网UDP的好处：
--	内网的UDP丢包率极小（低于万分之三）
--	发送端和接收端约定好通信协议，为了避免分片，每个UDP包的最大字节数应该是`1500-20-8=1472`
+内网 UDP 的好处：
+-	内网的 UDP 丢包率极小（低于万分之三）
+-	发送端和接收端约定好通信协议，为了避免分片，每个 UDP 包的最大字节数应该是 `1500-20-8=1472`
 
-##	0x01	golang-UDP的连接性？
-当然，这里的连接性指的是Lib层面，golang中UDP分为已连接和未连接两种方式，二者在发送、接收消息行为模式上有重大区别
+##	0x01	golang-UDP 的连接性？
+当然，这里的连接性指的是 Lib 层面，golang 中 UDP 分为已连接和未连接两种方式，二者在发送、接收消息行为模式上有重大区别
 
-- 已连接状态：通过`DialUDP`创建的UDP为已连接状态，其会记录远端remote的ip及port信息，相当于在两者之间建立了持续通路，发送、接收函数为Write、Read，不需要填remote信息
+- 已连接状态：通过 `DialUDP` 创建的 UDP 为已连接状态，其会记录远端 remote 的 ip 及 port 信息，相当于在两者之间建立了持续通路，发送、接收函数为 Write、Read，不需要填 remote 信息
 
-- 未连接状态：通过`ListenUDP`建立的UDP为未连接形式，发送、接收函数为`WriteTo`、`ReadFrom`，需要填写remote信息
+- 未连接状态：通过 `ListenUDP` 建立的 UDP 为未连接形式，发送、接收函数为 `WriteTo`、`ReadFrom`，需要填写 remote 信息
 
-在实际应用中，如果需要在不同的<连接>上完成UDP收发，那么使用`DialUDP`就会有问题，如下面的场景：
+在实际应用中，如果需要在不同的连接上完成 UDP 收发，那么使用 `DialUDP` 就会有问题，如下面的场景：
 
-##	0x02	Golang中的实现细节
+##	0x02	Golang 中的实现细节
 
-####  DialUDP的实现
+####  DialUDP 的实现
 ```golang
 func DialUDP(network string, laddr, raddr *UDPAddr) (*UDPConn, error) {
 	switch network {
@@ -57,7 +57,7 @@ func (sd *sysDialer) dialUDP(ctx context.Context, laddr, raddr *UDPAddr) (*UDPCo
 }
 ```
 
-####  ListenUDP的实现
+####  ListenUDP 的实现
 ```golang
 func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 	switch network {
@@ -86,7 +86,7 @@ func (sl *sysListener) listenUDP(ctx context.Context, laddr *UDPAddr) (*UDPConn,
 ```
 
 ####  底层调用
-`sl.listenUDP`、`sd.dialUDP`都会调用底层的`internetSocket`，只是调用参数有去呗，`listenUDP`调用时`raddr`为`nil`，而`dialUDP`会传入此值；`internetSocket`内部会调用`socket`函数，如下：
+`sl.listenUDP`、`sd.dialUDP` 都会调用底层的 `internetSocket`，只是调用参数有去呗，`listenUDP` 调用时 `raddr` 为 `nil`，而 `dialUDP` 会传入此值；`internetSocket` 内部会调用 `socket` 函数，如下：
 
 
 ```golang
@@ -126,7 +126,7 @@ func socket(ctx context.Context, net string, family, sotype, proto int, ipv6only
 	// raddr is nil. Otherwise we assume it's just for dialers or
 	// the other connection holders.
 
-  //laddr不为nil，而raddr为nil，说明是监听socket（listenUDP）
+  //laddr 不为 nil，而 raddr 为 nil，说明是监听 socket（listenUDP）
 	if laddr != nil && raddr == nil {
 		switch sotype {
 		case syscall.SOCK_STREAM, syscall.SOCK_SEQPACKET:
@@ -154,11 +154,11 @@ func socket(ctx context.Context, net string, family, sotype, proto int, ipv6only
 ```
 
 ####  底层调用：dial
-`dial`方法解答了`ListenUDP`、`DialUDP`的行为差异的原因：
-- `laddr!=nil`时，调用`bind`方法，绑定本地ip及port
-- `raddr!=nil`时，调用`fd.connect`与remote建立连接（`raddr`的区别）
+`dial` 方法解答了 `ListenUDP`、`DialUDP` 的行为差异的原因：
+- `laddr!=nil` 时，调用 `bind` 方法，绑定本地 ip 及 port
+- `raddr!=nil` 时，调用 `fd.connect` 与 remote 建立连接（`raddr` 的区别）
 
-根据上小节的调用参数看，`ListenUDP`方法构造的UDPConn为未连接状态，而`DialUDP`方法构造的UDPConn为已连接状态，因而`DialUDP`方法构建的UDPConn只能从指定remote接收数据，而`ListenUDP`方法构建的UDPConn则可以从任何远端接收数据
+根据上小节的调用参数看，`ListenUDP` 方法构造的 UDPConn 为未连接状态，而 `DialUDP` 方法构造的 UDPConn 为已连接状态，因而 `DialUDP` 方法构建的 UDPConn 只能从指定 remote 接收数据，而 `ListenUDP` 方法构建的 UDPConn 则可以从任何远端接收数据
 
 ```golang
 func (fd *netFD) dial(ctx context.Context, laddr, raddr sockaddr, ctrlFn func(string, string, syscall.RawConn) error) error {
@@ -223,17 +223,17 @@ func (fd *netFD) dial(ctx context.Context, laddr, raddr sockaddr, ctrlFn func(st
 }
 ```
 
-##	0x03	UDP优化
+##	0x03	UDP 优化
 
 ####  服务端优化
 
 ####  客户端优化
-- 减少锁竞争：实例化多个 UDP 连接到一个slice中，在客户端代码里随机使用slice的UDP进行 连接
+- 减少锁竞争：实例化多个 UDP 连接到一个 slice 中，在客户端代码里随机使用 slice 的 UDP 进行 连接
 
 ##	0x04	总结
 
 
 ##	0x05	参考
-- [如何在Go中实现百万级UDP通信](https://zhuanlan.zhihu.com/p/357902432)
-- [几行代码为老板省百万-某高并发服务Go GC及UDP Pool优化](https://mp.weixin.qq.com/s/YAz5NyiNWJCMlGsJRTAaxw)
-- [golang中udp的连接性](https://zhuanlan.zhihu.com/p/94680036)
+- [如何在 Go 中实现百万级 UDP 通信](https://zhuanlan.zhihu.com/p/357902432)
+- [几行代码为老板省百万 - 某高并发服务 Go GC 及 UDP Pool 优化](https://mp.weixin.qq.com/s/YAz5NyiNWJCMlGsJRTAaxw)
+- [golang 中 udp 的连接性](https://zhuanlan.zhihu.com/p/94680036)
