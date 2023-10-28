@@ -17,6 +17,7 @@ tags:
 -   [Fix: tcp relay](https://github.com/xjasonlyu/tun2socks/pull/219)
 -   [[Bug] TCP relay is incorrect](https://github.com/xjasonlyu/tun2socks/issues/218)
 -   [Fix: wrap net.Conn to avoid using *net.TCPConn.(ReadFrom) #1209](https://github.com/Dreamacro/clash/pull/1209)
+-   [关于 tcp 流量的阻塞问题 #100](https://github.com/eycorsican/go-tun2socks/issues/100)
 
 上面的 issue 主要讨论在两个双向 conn 中，如何正确的处理关闭（读 / 写 / 全部）的问题，这里的 conn 可能是 `tcp.Conn`、`net.Conn` 等
 
@@ -247,17 +248,72 @@ func genericReadFrom(w io.Writer, r io.Reader) (n int64, err error) {
 5.  回退到常规复制 `genericReadFrom`，最终会使 `CopyBuffer` 使用的 来自 `pool` 的 `buffer` 失去意义
 
 
-##  0x02    透明代理的场景
+## 0x02 一些细节
+
+####  net.Conn 关闭连接的场景
+
+1、完全关闭读和写 <br>
+当完成了数据的发送和接收，并且不再需要使用这个连接时；或者当发生错误，如无法恢复的读写错误时，可以调用 `Close()` 方法，它会关闭整个连接，包括读和写
+
+2、单独关闭读或写 <br>
+
+-  `net.TcpConn` 提供了 `CloseWrite` 方法，当已经完成数据发送（写入），但仍然需要接收对方的响应时。当本端希望通过关闭写入来通知对方你已经完成了数据发送，但仍然希望接收剩余的响应数据时，可以调用该方法通知对端
+-  `CloseRead` 方法，当本端已经接收到所有需要的数据，但仍然需要向对方发送数据时；当本端希望通知对方不再接收数据，但仍然需要继续发送数据时，可以调用该方法
+
+##  0x03 业界的实现
+介绍几个典型的 pipe 转发实现：
+
+####    clash
+clash 的实现 [在此](https://github.com/Dreamacro/clash/blob/master/common/net/relay.go#L9-L24)：
+
+```golang
+type ReadOnlyReader struct {
+	io.Reader
+}
+
+type WriteOnlyWriter struct {
+	io.Writer
+}
+// Relay copies between left and right bidirectionally.
+func Relay(leftConn, rightConn net.Conn) {
+	ch := make(chan error)
+
+	go func() {
+		// Wrapping to avoid using *net.TCPConn.(ReadFrom)
+		// See also https://github.com/Dreamacro/clash/pull/1209
+
+                // 从 rightConn 读取，写入 leftConn
+		_, err := io.Copy(WriteOnlyWriter{Writer: leftConn}, ReadOnlyReader{Reader: rightConn})
+		leftConn.SetReadDeadline(time.Now())
+		ch <- err
+	}()
+
+	io.Copy(WriteOnlyWriter{Writer: rightConn}, ReadOnlyReader{Reader: leftConn})
+	rightConn.SetReadDeadline(time.Now())
+	<-ch
+}
+```
+
+注意，上面第一个 `io.Copy` 退出的时候，说明这段逻辑已经退出了，无法向 `leftConn` 继续写入了，这里合理的设置 `leftConn.SetReadDeadline(time.Now())` ，该方法设置了 `leftConn` 的读取截止时间为当前时间，这意味着在当前时间之后，`leftConn` 的任何读取操作都将立即返回错误。这里设置读取截止时间的目的是在 `io.Copy(WriteOnlyWriter{Writer: rightConn}, ReadOnlyReader{Reader: leftConn})` 完成后，不再继续读取 `leftConn` 的数据。这是因为 `Relay` 方法目的是在 `leftConn` 和 `rightConn` 之间双向复制数据，当其中一个连接关闭或者出现错误时，函数会返回；反之 `rightConn.SetReadDeadline(time.Now())` 的操作也是如此
+
+
+####    go-tun2socks
+[go-tun2socks](https://github.com/eycorsican/go-tun2socks/blob/master/proxy/socks/tcp.go)的实现如下：
+```go
+```
+
+####    
+
+##  0x04    透明代理的场景
 先描述下笔者项目的场景，如下：
 
-![arch-flow]()
+![arch-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/netstack/netstack-1.png)
 
-
-##  0x0 
-
-
-##  0x0 解决
+-  `LEFT`：左侧是一个 gvisor 构建的 [TCPConn](https://github.com/google/gvisor/blob/master/pkg/tcpip/adapters/gonet/gonet.go#L230)，实现了 `net.Conn`[接口](https://pkg.go.dev/net#Conn)
+-  `RIGHT`：右侧是一个 `net.Conn`（普通代理）
 
 
 
 ##  0x0 参考
+- [Why copyBuffer implements while loop](https://stackoverflow.com/questions/59014085/why-copybuffer-implements-while-loop)
+- [Fix: tcp relay #219](https://github.com/xjasonlyu/tun2socks/pull/219)

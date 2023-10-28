@@ -489,3 +489,4 @@ func (c *Config) cert(hostname string) (*tls.Certificate, error) {
 - [Modifier Reference](https://github.com/google/martian/wiki/Modifier-Reference)
 -	[TLS 握手期间会发生什么？| SSL 握手](https://www.cloudflare-cn.com/learning/ssl/what-happens-in-a-tls-handshake/)
 -	[All MITM attacks in one place.](https://github.com/frostbits-security/MITM-cheatsheet)
+-	[Does https prevent man in the middle attacks by proxy server?](https://security.stackexchange.com/questions/8145/does-https-prevent-man-in-the-middle-attacks-by-proxy-server)
