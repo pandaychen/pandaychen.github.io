@@ -263,7 +263,7 @@ func genericReadFrom(w io.Writer, r io.Reader) (n int64, err error) {
 ##  0x03 业界的实现
 介绍几个典型的 pipe 转发实现：
 
-####    clash
+####    clash的实现
 clash 的实现 [在此](https://github.com/Dreamacro/clash/blob/master/common/net/relay.go#L9-L24)：
 
 ```golang
@@ -297,12 +297,183 @@ func Relay(leftConn, rightConn net.Conn) {
 注意，上面第一个 `io.Copy` 退出的时候，说明这段逻辑已经退出了，无法向 `leftConn` 继续写入了，这里合理的设置 `leftConn.SetReadDeadline(time.Now())` ，该方法设置了 `leftConn` 的读取截止时间为当前时间，这意味着在当前时间之后，`leftConn` 的任何读取操作都将立即返回错误。这里设置读取截止时间的目的是在 `io.Copy(WriteOnlyWriter{Writer: rightConn}, ReadOnlyReader{Reader: leftConn})` 完成后，不再继续读取 `leftConn` 的数据。这是因为 `Relay` 方法目的是在 `leftConn` 和 `rightConn` 之间双向复制数据，当其中一个连接关闭或者出现错误时，函数会返回；反之 `rightConn.SetReadDeadline(time.Now())` 的操作也是如此
 
 
-####    go-tun2socks
+####    go-tun2socks的实现
 [go-tun2socks](https://github.com/eycorsican/go-tun2socks/blob/master/proxy/socks/tcp.go)的实现如下：
-```go
+```golang
+type duplexConn interface {
+	net.Conn
+	CloseRead() error       //单独关闭读取
+	CloseWrite() error      //单独关闭写入
+}
+
+func (h *tcpHandler) relay(lhs, rhs net.Conn) {
+	upCh := make(chan struct{})
+
+	cls := func(dir direction, interrupt bool) {
+		lhsDConn, lhsOk := lhs.(duplexConn)
+		rhsDConn, rhsOk := rhs.(duplexConn)
+		if !interrupt && lhsOk && rhsOk {
+			switch dir {
+			case dirUplink:
+				lhsDConn.CloseRead()
+				rhsDConn.CloseWrite()
+			case dirDownlink:
+				lhsDConn.CloseWrite()
+				rhsDConn.CloseRead()
+			default:
+				panic("unexpected direction")
+			}
+		} else {
+			lhs.Close()
+			rhs.Close()
+		}
+	}
+
+	// Uplink
+	go func() {
+		var err error
+		_, err = io.Copy(rhs, lhs)
+		if err != nil {
+			cls(dirUplink, true) // interrupt the conn if the error is not nil (not EOF)
+		} else {
+			cls(dirUplink, false) // half close uplink direction of the TCP conn if possible
+		}
+		upCh <- struct{}{}
+	}()
+
+	// Downlink
+	var err error
+	_, err = io.Copy(lhs, rhs)
+	if err != nil {
+		cls(dirDownlink, true)
+	} else {
+		cls(dirDownlink, false)
+	}
+
+	<-upCh // Wait for uplink done.
+}
 ```
 
-####    
+####   cloudflare/cloudflared的实现
+[cloudflared](https://github.com/cloudflare/cloudflared/blob/be64362fdb2a2da481f8e0414f75de3db2ccdf32/stream/stream.go#L43)
+
+```golang
+// Pipe copies copy data to & from provided io.ReadWriters.
+func Pipe(tunnelConn, originConn io.ReadWriter, log *zerolog.Logger) {
+	status := newBiStreamStatus()
+
+	go unidirectionalStream(tunnelConn, originConn, "origin->tunnel", status, log)
+	go unidirectionalStream(originConn, tunnelConn, "tunnel->origin", status, log)
+
+	// If one side is done, we are done.
+	status.waitAnyDone()
+}
+
+func unidirectionalStream(dst io.Writer, src io.Reader, dir string, status *bidirectionalStreamStatus, log *zerolog.Logger) {
+	defer func() {
+		// The bidirectional streaming spawns 2 goroutines to stream each direction.
+		// If any ends, the callstack returns, meaning the Tunnel request/stream (depending on http2 vs quic) will
+		// close. In such case, if the other direction did not stop (due to application level stopping, e.g., if a
+		// server/origin listens forever until closure), it may read/write from the underlying ReadWriter (backed by
+		// the Edge<->cloudflared transport) in an unexpected state.
+		// Because of this, we set this recover() logic.
+		if r := recover(); r != nil {
+			if status.isAnyDone() {
+				// We handle such unexpected errors only when we detect that one side of the streaming is done.
+				log.Debug().Msgf("Gracefully handled error %v in Streaming for %s, error %s", r, dir, debug.Stack())
+			} else {
+				// Otherwise, this is unexpected, but we prevent the program from crashing anyway.
+				log.Warn().Msgf("Gracefully handled unexpected error %v in Streaming for %s, error %s", r, dir, debug.Stack())
+
+				tags := make(map[string]string)
+				tags["root"] = "websocket.stream"
+				tags["dir"] = dir
+				switch rval := r.(type) {
+				case error:
+					raven.CaptureError(rval, tags)
+				default:
+					rvalStr := fmt.Sprint(rval)
+					raven.CaptureMessage(rvalStr, tags)
+				}
+			}
+		}
+	}()
+
+	_, err := copyData(dst, src, dir)
+	if err != nil {
+		log.Debug().Msgf("%s copy: %v", dir, err)
+	}
+	status.markUniStreamDone()
+}
+
+func copyData(dst io.Writer, src io.Reader, dir string) (written int64, err error) {
+	if debugCopy {
+		// copyBuffer is based on stdio Copy implementation but shows copied data
+		copyBuffer := func(dst io.Writer, src io.Reader, dir string) (written int64, err error) {
+			var buf []byte
+			size := 32 * 1024
+			buf = make([]byte, size)
+			for {
+				t := time.Now()
+				nr, er := src.Read(buf)
+				if nr > 0 {
+					fmt.Println(dir, t.UnixNano(), "\n"+hex.Dump(buf[0:nr]))
+					nw, ew := dst.Write(buf[0:nr])
+					if nw < 0 || nr < nw {
+						nw = 0
+						if ew == nil {
+							ew = errors.New("invalid write")
+						}
+					}
+					written += int64(nw)
+					if ew != nil {
+						err = ew
+						break
+					}
+					if nr != nw {
+						err = io.ErrShortWrite
+						break
+					}
+				}
+				if er != nil {
+					if er != io.EOF {
+						err = er
+					}
+					break
+				}
+			}
+			return written, err
+		}
+		return copyBuffer(dst, src, dir)
+	} else {
+		return cfio.Copy(dst, src)
+	}
+}
+
+const defaultBufferSize = 16 * 1024
+
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, defaultBufferSize)
+	},
+}
+
+// cfio.Copy实现
+func Copy(dst io.Writer, src io.Reader) (written int64, err error) {
+	_, okWriteTo := src.(io.WriterTo)
+	_, okReadFrom := dst.(io.ReaderFrom)
+	var buffer []byte = nil
+
+	if !(okWriteTo || okReadFrom) {
+		buffer = bufferPool.Get().([]byte)
+		defer bufferPool.Put(buffer)
+	}
+
+	return io.CopyBuffer(dst, src, buffer)
+}
+```
+
+
 
 ##  0x04    透明代理的场景
 先描述下笔者项目的场景，如下：
@@ -317,3 +488,5 @@ func Relay(leftConn, rightConn net.Conn) {
 ##  0x0 参考
 - [Why copyBuffer implements while loop](https://stackoverflow.com/questions/59014085/why-copybuffer-implements-while-loop)
 - [Fix: tcp relay #219](https://github.com/xjasonlyu/tun2socks/pull/219)
+- [TCP Half-Close: a cool feature that is now broken](https://www.excentis.com/blog/tcp-half-close-a-cool-feature-that-is-now-broken/)
+- [关于tcp流量的阻塞问题 #100](https://github.com/eycorsican/go-tun2socks/issues/100)

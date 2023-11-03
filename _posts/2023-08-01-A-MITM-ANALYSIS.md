@@ -464,6 +464,36 @@ func (c *Config) cert(hostname string) (*tls.Certificate, error) {
 本小节，梳理下martian的[mitm](https://github.com/google/martian/blob/master/mitm/mitm.go)主要数据流程：
 
 
+##	0x06	参考实现3：lqqyt2423/go-mitmproxy
+
+此项目实现比较巧妙，思路可借鉴，大致流程如下：
+
+![work-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/mitm/mitm-project/go-mitmproxy-workflow.png)
+
+核心结构：
+
+```GO
+type Proxy struct {
+	Opts    *Options
+	Version string
+	Addons  []Addon
+
+	client          *http.Client
+	server          *http.Server	
+	interceptor     *middle
+	shouldIntercept func(req *http.Request) bool              // req is received by proxy.server
+	upstreamProxy   func(req *http.Request) (*url.URL, error) // req is received by proxy.server, not client request
+}
+```
+
+核心代理逻辑入口[Proxy.ServeHTTP](https://github.com/lqqyt2423/go-mitmproxy/blob/main/proxy/proxy.go#L125)：
+
+
+
+##	0x0	：参考实现：ouqiang/goproxy
+
+
+
 
 ##  0x0 思考：MITM 防护手段
 

@@ -569,6 +569,9 @@ return server.Shutdown(ctx)
 
 ##  0x05    其他库的机制介绍
 
+####	tcp-graceful
+[tcp-graceful](https://github.com/pandaychen/tcp-graceful)是笔者生产项目使用的库，提供了`Accept`的回调[方法](https://github.com/pandaychen/tcp-graceful/blob/main/tcp_server.go#L82C21-L82C33)
+
 
 ##  0x06  总结
 endless的实现方式，可以保证已建立的连接不中断，新的服务进程也可以正常接受连接请求，项目中值得借鉴。

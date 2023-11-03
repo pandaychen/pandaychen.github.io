@@ -26,6 +26,14 @@ tags:
 
 ![DNS-BASIC-2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/dns/dns-query-question-1.png)
 
+####    常用的 public DNS
+
+-   `8.8.8.8` Google
+-   `1.1.1.1` Cloudflare
+-   `119.29.29.29`
+-   `114.114.114.114`
+-   `183.60.83.19`、`183.60.82.98` 腾讯云
+
 ####    DNS 报文格式
 
 ![dns-packet](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/dns/dns-packet-format.jpg)
@@ -60,14 +68,77 @@ options ndots:5
 ####    DNS 解析流程
 
 
-##  0x02
+##  0x02    golang 的 DNSCACHE
+通过 `net.Dial`/`net.DialContext` 创建连接时，或者使用 `Resolver` 解析 DNS 时，都是无缓存的；所以客户端并发场景下每创建一个连接，`Resolver` 都会去解析一次 DNS，如果遇到网络不好或 DNS 服务器问题，大概率会遇到类似错误 `dial tcp: lookup xxxx.com`，已有多个不错的 DNScache 库实现：
+
+-   [A DNS Cache for Go](https://github.com/viki-org/dnscache/)
+-   [Go package for caching DNS lookup results in memory.](https://github.com/mercari/go-dnscache)
+
+这里分析下 dnscache 的实现，核心是建立了一个本地 map，缓存 dns 查询结果，同时异步开启逻辑轮询查询缓存域名的 DNS 解析结果；缺点是没有过期机制，导致内存会被放大：
+
+```GO
+type Resolver struct {
+  lock sync.RWMutex
+  cache map[string][]net.IP // 域名对应多个地址
+}
+
+// 调用 net.LookupIP 查询，成功情况下缓存结果
+func (r *Resolver) Lookup(address string) ([]net.IP, error) {
+  ips, err := net.LookupIP(address)     //CALL net.LookupIP
+  if err != nil {return nil, err}
+
+  r.lock.Lock()
+  r.cache[address] = ips
+  r.lock.Unlock()
+  return ips, nil
+}
+
+
+func New(refreshRate time.Duration) *Resolver {
+  resolver := &Resolver {
+    cache: make(map[string][]net.IP, 64),
+  }
+  if refreshRate > 0 {
+    go resolver.autoRefresh(refreshRate)
+  }
+  return resolver
+}
+
+// 异步查询域名，并将正确的结果缓存
+func (r *Resolver) Refresh() {
+  i := 0
+  r.lock.RLock()
+  addresses := make([]string, len(r.cache))
+  for key, _ := range r.cache {
+    addresses[i] = key
+    i++
+  }
+  r.lock.RUnlock()
+
+  for _, address := range addresses {
+    r.Lookup(address)
+    time.Sleep(time.Second * 2)
+  }
+}
+```
+
+如果使用 `http.Transport`，可以在 `Dial` 中调用此包：
+
+```GO
+transport := &http.Transport {
+  MaxIdleConnsPerHost: 64,
+  Dial: func(network string, address string) (net.Conn, error) {
+    separator := strings.LastIndex(address, ":")
+    ip, _ := dnscache.FetchString(address[:separator])
+    return net.Dial("tcp", ip + address[separator:])
+  },
+}
+```
 
 
 ##  0x0 adguard 的 DNS
 
-
 ##  DNS 常用库 1：miekg/dns
-
 
 ##  DNS 常用库 2：coredns
 
@@ -78,30 +149,15 @@ options ndots:5
 -   支持 TUN-fake-DNS 查询及伪造返回
 -   支持 DNS 分流，指定 DNS 选用指定的 `nameserver`
 -   支持 DNS 报文经过 `socks5` 代理服务端进行域名查询及返回
--   支持 `/etc/hosts` 解析
+-   支持 `/etc/hosts` 本地解析（或是自定义 domain=>ip 的解析）
 
-还有一些细节：
+在实现中，DNSProxy 转发解析请求的时候会优化为并发查询：即会同时向所有配置的 DNS 上游服务器进行 DNS 查询，并选取最快的返回结果，以提高性能（参考 `dnsmasq` 实现）
 
-1、转发并发解析：会同时向所有配置的 DNS 上游服务器进行 DNS 查询，并选取最快的返回结果，以提高性能。该特性和 dnsmasq 的实现一致。
+##  0x0 一些细节
 
-6.2 Optimistic DNS（DNS 乐观解析）
-由于现代网络的复杂性，大多数网站会将 DNS 的记录有效期（TTL）配置为很短的时间，如 30 秒。这样可以使得网络管理员修改 DNS 记录后迅速生效，不必再等待所有节点 TTL 超时，利于故障排除和维护。
+1、Optimistic DNS（DNS 乐观解析）<br>
 
-这是可以理解的，网站和 API 可用性是很多公司的重中之重，如果某个 IP 不可达，修改 DNS 记录后需要 24 小时才能完全生效，造成的损失不可估量，所以运维会选择很短的 TTL。
-
-但这带来了一个问题，客户端会严格按照 TTL 去进行查询，那么每隔很短的时间就会进行再次查询，一次 DNS 查询的时间开销短至几毫秒，然而最长可以要数秒。频繁重复查询会造成不必要的延迟。
-
-为此 Apple 在 WWDC 2018 提出了 Optimistic DNS 的优化方案，在建立新连接时，如果本地 DNS 缓存已经过期，那么也先继续使用旧的结果，同时进行 DNS 查询，如果连接建立失败，则用新的结果重试。
-
-绝大多数情况下，DNS 记录是不变的，这样的方案根本不会影响正常使用，当极小概率遇到 DNS 记录切换时，也只会耽误一两个请求，可以说是很完美的优化。
-
-不过受限于 POSIX 等限制，Apple 也并没有将这个优化应用到所有地方，Surge 则完全应用了这个优化方案，使得所有请求都可以享受到 Optimistic DNS 的优化。
-
-6.3 本地映射
-Surge 支持配置本地 DNS 映射，功能和 /etc/hosts 文件基本一致。除了直接指定主机名所对应的 IP 地址，还支持对特定域名自定义特定的 DNS 服务器。或者完全通过脚本去自定义解析逻辑。
-
-6.4 使用系统的解析
-Surge 支持配置部分域名回退到系统 DNS 解析（example.com = server:syslib），用于解决一些兼容性问题，比如一些 VPN 会利用 Split DNS 机制在系统中添加用于处理特定域名的 DNS 服务器，Surge 目前还不能支持这种复杂逻辑，可通过对 VPN 相关域名配置回退解决。
+由于现代网络的复杂性，大多数网站会将 DNS 的记录有效期（TTL）配置为很短的时间，如 `30s`。这样可以使得网络管理员修改 DNS 记录后迅速生效，不必再等待所有节点 TTL 超时，利于故障排除和维护。但这带来了一个问题，客户端会严格按照 TTL 去进行查询，那么每隔很短的时间就会进行再次查询，一次 DNS 查询的时间开销短至几毫秒，然而最长可以要数秒。频繁重复查询会造成不必要的延迟。Optimistic DNS 的优化方案是在建立新连接时，如果本地 DNS 缓存已经过期，那么也先继续使用旧的结果，同时进行 DNS 查询，如果连接建立失败，则用新的结果重试。绝大多数情况下，DNS 记录是不变的，这样的方案根本不会影响正常使用，当极小概率遇到 DNS 记录切换时，也只会耽误一两个请求，可以极大的提升效率
 
 
 ####    DNS：FAKE-IP
@@ -116,3 +172,6 @@ Surge 支持配置部分域名回退到系统 DNS 解析（example.com = server:
 -   [Public DNS resolver that protects you from ad trackers](https://github.com/AdguardTeam/AdGuardDNS)
 -   [回顾与展望 AdGuard DNS](https://adguard-dns.io/zh_cn/blog/reimagining-adguard-dns.html)
 -   [DNS-over-QUIC](https://adguard-dns.io/zh_cn/blog/dns-over-quic-official-standard.html)
+-   [盘点国内外优秀公共 DNS](https://zhuanlan.zhihu.com/p/53958870)
+-   [Golang DNS 解析](https://zhuanlan.zhihu.com/p/54989059)
+-   [kubernetes 集群中夺命的 5 秒 DNS 延迟](https://typonotes.com/posts/2023/08/05/k8s-dns-5s-resolv/)
