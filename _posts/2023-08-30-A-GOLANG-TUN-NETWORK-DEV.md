@@ -15,7 +15,6 @@ tags:
 
 ##  0x00    前言
 
-
 ##  0x01  基础知识
 
 ####  iobased or fdbased
@@ -42,6 +41,7 @@ tags:
 ####  netstack 开发示例
 
 服务端代码参考：[tun_tcp_echo](https://github.com/google/netstack/blob/master/tcpip/sample/tun_tcp_connect/main.go)
+
 客户端代码参考：[tun_tcp_connect](https://github.com/google/netstack/blob/master/tcpip/sample/tun_tcp_connect/main.go)
 
 
@@ -49,6 +49,7 @@ tags:
 相比于 netstack，gvisor 稍微有些不同，如下：
 
 服务端代码参考：[tun_tcp_echo](https://github.com/google/gvisor/blob/master/pkg/tcpip/sample/tun_tcp_echo/main.go)
+
 客户端代码参考：[tun_tcp_connect](https://github.com/google/gvisor/blob/master/pkg/tcpip/sample/tun_tcp_connect/main.go)
 
 ##  0x04  配置基础
@@ -57,24 +58,24 @@ tags:
 
 ####  关闭
 
-1、关闭虚拟网卡`tun0`
+1、关闭虚拟网卡 `tun0`
 
 ```BASH
-ip link set tun0 down #将tun0网卡设为下线状态，停止其网络连接
+ip link set tun0 down #将 tun0 网卡设为下线状态，停止其网络连接
 ```
 
-2、删除虚拟网卡`tun0`
+2、删除虚拟网卡 `tun0`
 
 ```BASH
-ip link delete tun0 #该命令将删除tun0网卡，彻底关闭其网络连接。请注意，执行该命令后，tun0网卡的配置信息将被永久删除，无法恢复
+ip link delete tun0 #该命令将删除 tun0 网卡，彻底关闭其网络连接。请注意，执行该命令后，tun0 网卡的配置信息将被永久删除，无法恢复
 ```
 
 ####  删除指定的路由
 
-下述静态路由，通过`route del -net 192.168.10.0 netmask 255.255.255.0 dev eth0`指令进行删除：
+下述静态路由，通过 `route del -net 192.168.10.0 netmask 255.255.255.0 dev eth0` 指令进行删除：
 
 ```BASH
-192.168.10.0    0.0.0.0         255.255.255.0   U     100    0        0 eth0 
+192.168.10.0    0.0.0.0         255.255.255.0   U     100    0        0 eth0
 ```
 
 ##  0x05  TUN with DNS
