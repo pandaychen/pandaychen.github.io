@@ -88,3 +88,5 @@ NAPT 分类如下：
 ##  0x04 参考
 -   [NAT 原理以及 UDP 穿透](https://paper.seebug.org/1561/)
 -   [进阶必读：代理协议 UDP 全方位透彻解析](https://zhuanlan.zhihu.com/p/518088166)
+-   [一口气搞明白有点奇怪的 Socks 5 协议以及 HTTP 代理](https://www.txthinking.com/talks/articles/socks5-and-http-proxy.article)
+-   [Socks5 udp代理](https://www.jianshu.com/p/cf88c619ee5c)
