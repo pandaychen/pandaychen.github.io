@@ -43,27 +43,32 @@ NAPT 分类如下：
 -   端口受限锥
 -   对称型
 
-####    完全锥型
-从同一个内网地址端口 `192.168.1.1:7777` 发起的请求都由 NAT 转换成公网地址端口 `1.2.3.4:10000`；反方向，`192.168.1.1:7777` 可以收到任意外部主机发到 `1.2.3.4:10000` 的数据包
+![type](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/nat/nat-type.png)
 
-![]()
+####    完全锥型
+从同一个内网地址端口 `192.168.1.1:7777` 发起的请求都由 NAT 转换成公网地址端口 `1.2.3.4:10000`；反方向，`192.168.1.1:7777` 可以收到任意外部主机发到 `1.2.3.4:10000` 的数据包（注意，不关心目标的地址和端口）
+
+![full-cone-nat](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/nat/full-cone-nat.png)
 
 ####    受限锥型
 受限锥型也称地址受限锥型，在完全锥型的基础上，对 ip 地址进行了限制；从同一个内网地址端口 `192.168.1.1:7777` 发起的请求都由 NAT 转换成公网地址端口 `1.2.3.4:10000`，其访问的服务器为 `8.8.8.8:123`，只有当 `192.168.1.1:7777` 向 `8.8.8.8:123` 发送一个报文后，`192.168.1.1:7777` 才可以收到 `8.8.8.8` 发回 `1.2.3.4:10000` 的报文
 
-![]()
+![restrict](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/nat/restrict-nat.png)
 
 ####    端口受限锥型
 在受限锥型的基础上，对端口也进行了限制；从同一个内网地址端口 `192.168.1.1:7777` 发起的请求都由 NAT 转换成公网地址端口 `1.2.3.4:10000`，其访问的服务器为 `8.8.8.8:123`，只有当 `192.168.1.1:7777` 向 `8.8.8.8:123` 发送一个报文后，`192.168.1.1:7777` 才可以收到 `8.8.8.8:123` 发回 `1.2.3.4:10000` 的报文
 
-![]()
+![restrict-port](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/nat/restrict-port-nat.png)
 
-####    对称型
+####    对称型（symmetric）
 在对称型 NAT 中，只有来自于同一个内网地址端口 、且针对同一目标地址端口的请求才被 NAT 转换至同一个公网地址端口，否则的话，NAT 将为之分配一个新的公网地址端口。内网地址端口 `192.168.1.1:7777` 发起请求到 `8.8.8.8:123`，由 NAT 转换成公网地址端口 `1.2.3.4:10000`，随后内网地址端口 `192.168.1.1:7777` 又发起请求到 `9.9.9.9:456`，NAT 将分配新的公网地址端口 `1.2.3.4:10001`
 
 小结下：在 锥型 NAT 中，映射关系和目标地址端口无关，而在对称型 NAT 中则与目标地址端口有关。** 锥型 NAT 正因为其于目标地址端口无关，所以网络拓扑是圆锥型的 **
 
-![symmetric-nat]()
+![symmetric-nat](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/nat/symmetric-nat.png)
+
+####    锥型 NAT（cone-nat）
+[cone-nat](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/nat/cone-nat.png)
 
 
 ##  0x02 NAT 的工作流程
@@ -89,4 +94,4 @@ NAPT 分类如下：
 -   [NAT 原理以及 UDP 穿透](https://paper.seebug.org/1561/)
 -   [进阶必读：代理协议 UDP 全方位透彻解析](https://zhuanlan.zhihu.com/p/518088166)
 -   [一口气搞明白有点奇怪的 Socks 5 协议以及 HTTP 代理](https://www.txthinking.com/talks/articles/socks5-and-http-proxy.article)
--   [Socks5 udp代理](https://www.jianshu.com/p/cf88c619ee5c)
+-   [Socks5 udp 代理](https://www.jianshu.com/p/cf88c619ee5c)
