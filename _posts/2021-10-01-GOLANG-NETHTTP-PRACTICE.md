@@ -286,7 +286,35 @@ func main() {
 }
 ```
 
-##  0x07	参考
+##      0x07    使用net.http构建一个正向代理（http/https）
+
+![http-connect-proxy](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/http-connect-proxy.png)
+
+实现代码[在此](https://github.com/pandaychen/golang_in_action/blob/master/proxy/httpproxy/https_proxy.go)，摘一下核心逻辑：
+
+####    HTTP代理
+
+```GO
+func handleHttp(w http.ResponseWriter, r *http.Request) {
+	resp, err := http.DefaultTransport.RoundTrip(r)         //利用http.DefaultTransport.RoundTrip转发请求即可
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	defer resp.Body.Close()
+
+	copyHeader(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+
+        //把数据从 resp.Body（io.ReadCloser）copy 至 http.ResponseWriter
+	io.Copy(w, resp.Body)
+}
+```
+
+####    HTTPS代理
+
+
+##  0x08	参考
 -	[http.Client 的连接行为控制详解](https://tonybai.com/2021/04/02/go-http-client-connection-control/)
 -	[通过实例理解 Go 标准库 http 包是如何处理 keep-alive 连接的](https://mp.weixin.qq.com/s/uH4lmsMs-hq5B3Ivq2jR5w)
 -       [从 http.Transport 看连接池的设计](https://vearne.cc/archives/39913)
