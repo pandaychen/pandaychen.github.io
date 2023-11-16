@@ -286,7 +286,7 @@ func main() {
 }
 ```
 
-##      0x07    使用net.http构建一个正向代理（http/https）
+##      0x07    使用net.http构建正向代理（http/https）
 
 ![http-connect-proxy](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/http-connect-proxy.png)
 
@@ -311,8 +311,39 @@ func handleHttp(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
+![http](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/http-connect-proxy-for-http.png)
+
 ####    HTTPS代理
 
+```GO
+func handleHttps(w http.ResponseWriter, r *http.Request) {
+        // 创建CONNECT通道
+	destConn, err := net.DialTimeout("tcp", r.Host, 60*time.Second)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+
+        //通过hijack获取http.ResponseWriter（给客户端的响应）的底层连接
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
+		return
+	}
+
+	clientConn, _, err := hijacker.Hijack()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+	}
+
+        //在destConn与clientConn上双向收发数据
+	go transfer(destConn, clientConn)
+	go transfer(clientConn, destConn)
+}
+```
+
+![https](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/http-connect-proxy-for-https.png)
 
 ##  0x08	参考
 -	[http.Client 的连接行为控制详解](https://tonybai.com/2021/04/02/go-http-client-connection-control/)
