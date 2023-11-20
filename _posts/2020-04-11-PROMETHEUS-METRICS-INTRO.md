@@ -441,6 +441,7 @@ Histogram/Summary时间序列要如何进行查询呢？事实上，Prometheus �
 | 3 | 4 | 9 | 2.4, 2.6, 2.8, 2.9 |
 
 那么，可以得到这样的结果（注意 bucket 的结果向下包含）：
+
 ```text
 mymetric_bucket { le="1" } = 2
 mymetric_bucket { le="2" } = 5
@@ -453,7 +454,55 @@ mymetric_sum = 15.8
 Histogram 并没有存储数据采样点的值，只保留了总和和每一个区间的 counter。可以在 PromQL 中用 `histogram_quantile()` 函数来计算其值的分位数。
 
 ## 0x05  Grafana 可视化
-Grafana 里面的面板也是通过 PromQL 来进行数据查询的
+Grafana 里面的面板也是通过 PromQL 来进行数据查询的，本小节介绍下grafana的使用例子。下面的代码，定义了一个`CounterVec`，label为请求的参数，按照下面`3`种配置panel：
+
+- 不考虑label的请求总数：表达式为`sum(promdemo_demo_http_request_total)`
+- 基于label的原始counter
+- `5m`内的平均值（按标签）：表达式为`sum(rate(promdemo_demo_http_request_total[5m])) by(from)`，`[5m]` 代表`5`分钟之内的平均值，`by(from)`表示通过该指标中的`from`标签分组
+
+部署的架构如下：
+
+![BUSHU](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grafana/metrics-bushu-1.png)
+
+```GOLANG
+var (
+        MetricHttpRequestTotal = prometheus.NewCounterVec(
+                prometheus.CounterOpts{
+                        Namespace: "promdemo",
+                        Subsystem: "demo",
+                        Name:      "http_request_total",
+                        Help:      "http request total",
+                },
+                []string{"from"},
+        )
+)
+
+func init() {
+        prometheus.MustRegister(MetricHttpRequestTotal)
+}
+
+func main() {
+        go func() {
+                muxProm := http.NewServeMux()
+                muxProm.Handle("/metrics", promhttp.Handler())
+
+                http.ListenAndServe(":9527", muxProm)
+        }()
+        http.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+                values := req.URL.Query()
+                from := values.Get("from")
+                MetricHttpRequestTotal.WithLabelValues(from).Inc()
+                w.Write([]byte("Hello,from " + from))
+        })
+        http.ListenAndServe(":28080", nil)
+}
+```
+
+上面三种查询panel对应的图如下，注意到，虽然指标都是同一个，但是可以灵活的通过PromQL来实现我们想要观测的维度：
+
+![1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grafana/metrics-2-total.png)
+
+![2+3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grafana/metrics-1.png)
 
 ## 0x06  总结
 本文介绍了Prometheus/Merics的基础概念。Prometheus中存储的数据都为时间序列（time series），它是一串随着时间移动而产生的属于某个metric name和一系列标签（键值对）的数据。时间序列是由metric name和一系列的标签label（键值对）唯一标识的，不同的标签代表了不同的时间序列。
