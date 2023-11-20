@@ -81,7 +81,7 @@ type Room struct {
 
 
 ####    Channel
-`Channel`代表房间内的长连接，在同一个`Room`内，多个用户的长连接会话构建成一个doubleLinkList 
+`Channel`代表房间内的长连接，在同一个`Room`内，**多个用户的长连接会话构建成一个doubleLinkList（双向链表）**
 ```go
 //in fact, Channel it's a user Connect session
 type Channel struct {
@@ -96,6 +96,8 @@ type Channel struct {
 ```
 
 ![double](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/go-chat/double.png)
+
+注意：`Server`/`Room`/`Channel`/`Bucket`存在相互引用的关系，所以这四个结构定义在同一层级比较合适
 
 ####    各个子模块的关系
 
@@ -114,7 +116,9 @@ type Channel struct {
 ####    用户发送信息流程
 ![send-message](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/gochat/send-broadcast-message-flow.png)
 
+##	0x04	 核心代码分析
 
-##  0x04	参考
+
+##  0x05	参考
 -	[gochat](https://github.com/LockGit/gochat)
 -	[gochat 源码解析](https://blog.csdn.net/zhanglehes/article/details/115676339)
