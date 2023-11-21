@@ -21,8 +21,10 @@ tags:
 当然，这里的连接性指的是 Lib 层面，golang 中 UDP 分为已连接和未连接两种方式，二者在发送、接收消息行为模式上有重大区别
 
 - 已连接状态：通过 `DialUDP` 创建的 UDP 为已连接状态，其会记录远端 remote 的 ip 及 port 信息，相当于在两者之间建立了持续通路，发送、接收函数为 Write、Read，不需要填 remote 信息
-
 - 未连接状态：通过 `ListenUDP` 建立的 UDP 为未连接形式，发送、接收函数为 `WriteTo`、`ReadFrom`，需要填写 remote 信息
+
+![connected-udp](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/udp/connected_udp_socket.gif)
+
 
 在实际应用中，如果需要在不同的连接上完成 UDP 收发，那么使用 `DialUDP` 就会有问题，如下面的场景：
 
@@ -228,7 +230,8 @@ func (fd *netFD) dial(ctx context.Context, laddr, raddr sockaddr, ctrlFn func(st
 ####  服务端优化
 
 ####  客户端优化
-- 减少锁竞争：实例化多个 UDP 连接到一个 slice 中，在客户端代码里随机使用 slice 的 UDP 进行 连接
+
+- 减少锁竞争：实例化多个 UDP 连接到一个 slice 中，在客户端代码里随机使用 slice 的 UDP 进行连接
 
 ##	0x04	总结
 
