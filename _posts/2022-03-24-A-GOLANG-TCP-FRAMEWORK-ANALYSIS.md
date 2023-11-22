@@ -109,7 +109,7 @@ func newSession(session getty.Session) error {
 	}
 
 	if tcpConn, ok = session.Conn().(*net.TCPConn); !ok {
-		panic(fmt.Sprintf("%s, session.conn{%#v} is not tcp connection\n", session.Stat(), session.Conn()))
+		panic("bad connection type")
 	}
 
 	tcpConn.SetNoDelay(conf.GettySessionParam.TcpNoDelay)
@@ -195,13 +195,12 @@ func (h *EchoPackageHandler) Write(ss getty.Session, pkg interface{}) ([]byte, e
 
 	startTime = time.Now()
 	if echoPkg, ok = pkg.(*EchoPackage); !ok {
-		log.Error("illegal pkg:%+v\n", pkg)
+		//bad package
 		return nil, errors.New("invalid echo package!")
 	}
 
 	buf, err = echoPkg.Marshal()
 	if err != nil {
-		log.Warn("binary.Write(echoPkg{%#v}) = err{%#v}", echoPkg, err)
 		return nil, err
 	}
 
