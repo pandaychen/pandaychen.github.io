@@ -97,7 +97,7 @@ type EchoPackage struct {
 -	`session.SetPkgHandler(echoPkgHandler)`
 -	`session.SetEventListener(echoMsgHandler)`
 
-```GO
+```GOLANG
 func newSession(session getty.Session) error {
 	var (
 		ok      bool
@@ -129,7 +129,6 @@ func newSession(session getty.Session) error {
 	session.SetCronPeriod((int)(conf.sessionTimeout.Nanoseconds() / 1e6))
 	session.SetWaitTime(conf.GettySessionParam.waitTimeout)
 	// session.SetTaskPool(taskPool)
-	log.Debug("app accepts new session:%s\n", session.Stat())
 
 	return nil
 }
@@ -152,7 +151,7 @@ func initServer() {
 		server = getty.NewTCPServer(serverOpts...)
 		// run server
 		server.RunEventLoop(newSession)		//核心入口
-		log.Debug("server bind addr{%s} ok!", addr)
+		log.Debug("server bind addr ok")
 		serverList = append(serverList, server)
 	}
 }
@@ -286,14 +285,14 @@ func (h *EchoMessageHandler) OnOpen(session getty.Session) error {
 }
 
 func (h *EchoMessageHandler) OnError(session getty.Session, err error) {
-	log.Info("session{%s} got error{%v}, will be closed.", session.Stat(), err)
+	log.Info("session %s got error %v, will be closed.", session.Stat(), err)
 	h.rwlock.Lock()
 	delete(h.sessionMap, session)
 	h.rwlock.Unlock()
 }
 
 func (h *EchoMessageHandler) OnClose(session getty.Session) {
-	log.Info("session{%s} is closing......", session.Stat())
+	log.Info("session %s is closing......", session.Stat())
 	h.rwlock.Lock()
 	delete(h.sessionMap, session)
 	h.rwlock.Unlock()
@@ -308,7 +307,7 @@ func (h *EchoMessageHandler) OnMessage(session getty.Session, pkg interface{}) {
 
 	handler, ok := h.handlers[p.H.Command]
 	if !ok {
-		log.Error("illegal command{%d}", p.H.Command)
+		log.Error("illegal command %d", p.H.Command)
 		return
 	}
 	err := handler.Handle(session, p)
@@ -331,7 +330,7 @@ func (h *EchoMessageHandler) OnCron(session getty.Session) {
 		active = session.GetActive()
 		if conf.sessionTimeout.Nanoseconds() < time.Since(active).Nanoseconds() {
 			flag = true
-			log.Warn("session{%s} timeout{%s}, reqNum{%d}",
+			log.Warn("session %s timeout %s, reqNum %d",
 				session.Stat(), time.Since(active).String(), h.sessionMap[session].reqNum)
 		}
 	}
