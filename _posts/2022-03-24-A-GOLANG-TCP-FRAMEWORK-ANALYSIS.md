@@ -302,7 +302,7 @@ func (h *EchoMessageHandler) OnClose(session getty.Session) {
 func (h *EchoMessageHandler) OnMessage(session getty.Session, pkg interface{}) {
 	p, ok := pkg.(*EchoPackage)
 	if !ok {
-		log.Error("illegal packge{%#v}", pkg)
+		//illegal package
 		return
 	}
 
