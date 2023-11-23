@@ -18,9 +18,7 @@ tags:
 
 -   `ip route`（即 `route -n`），`iproute2` 提供的命令
 -   `ip rule`：策略路由（最重要），定义了数据包路由查询的规则
--   `iptables`：基于netfilter的工具，主要用于对数据包进行过滤、转发、NAT（网络地址转换）等操作；iptables可以控制网络数据包的流向和处理方式，从而实现对网络访问的限制和保护
-
-简言之，`iptables` 负责对数据包进行过滤和处理，`ip rule` 负责根据策略选择正确的路由，而 `ip route` 负责实现数据包的转发
+-   `iptables`
 
 ```bash
 [root@VM-16-10-tencentos ~]# ip rule
@@ -380,8 +378,7 @@ default dev utun proto static
 
 上面的`uidrange`的意义如下：`uidrange` 是 iptables 中用来匹配用户 ID（UID）范围的一个匹配条件。它可以用于过滤特定用户或用户组的网络流量。UID 为 `0`是`root`用户；`uidrange` 可以用于匹配指定 UID 范围内的用户发起的网络流量。例如，`uidrange 1000-2000` 可以匹配 UID 在 `1000` 到 `2000` 范围内的用户发起的网络流量。可以将这个匹配条件与其他条件结合使用，例如源 IP 地址、目的端口等，以实现更精细的流量过滤和控制
 
-
-
+不过，clash premium的`ip rule`设置为 `uidrange 0-4294967294`，表示所有用户的流量都会被代理到 Clash
 
 ##  0x04 参考
 -   [详解 ip rule，ip route，iptables 三者之间的关系](https://www.toutiao.com/article/6662630661838340621/?wid=1692243899353)
