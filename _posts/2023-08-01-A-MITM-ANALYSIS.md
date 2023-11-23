@@ -487,8 +487,23 @@ type Proxy struct {
 
 
 ##	0x0	：参考实现：ouqiang/goproxy
+[中间人代理, 解密HTTPS](https://github.com/ouqiang/goproxy#%E4%B8%AD%E9%97%B4%E4%BA%BA%E4%BB%A3%E7%90%86-%E8%A7%A3%E5%AF%86https)
 
+####	核心结构
 
+```GO
+// Proxy 实现了http.Handler接口
+type Proxy struct {
+	delegate           Delegate
+	clientConnNum      int32
+	decryptHTTPS       bool
+	websocketIntercept bool
+	cert               *cert.Certificate
+	transport          *http.Transport
+	clientTrace        *httptrace.ClientTrace
+	dnsCache           *dnscache.Resolver
+}
+```
 
 
 ##  0x0 思考：MITM 防护手段
