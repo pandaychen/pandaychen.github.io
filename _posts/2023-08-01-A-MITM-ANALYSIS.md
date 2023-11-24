@@ -765,7 +765,7 @@ func (p *Proxy) DoRequest(ctx *Context, responseFunc func(*http.Response, error)
 }
 ```
 
-核心需要理解`err = resp.Write(tlsClientConn)`这段逻辑是如何实现的
+核心需要理解`err = resp.Write(tlsClientConn)`这段逻辑是如何[实现](https://cs.opensource.google/go/go/+/refs/tags/go1.21.4:src/net/http/response.go;l=245)的
 
 ##  0x0 思考：MITM 防护手段
 

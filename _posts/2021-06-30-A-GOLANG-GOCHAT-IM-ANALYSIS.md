@@ -29,9 +29,9 @@ gochat的架构图如下：
 -   消息队列：
 -   内部业务Task：独立工作进程
 
-核心模块：
+[核心模块](https://github.com/pandaychen/gochat-note/blob/master/main.go#L27)：
 -   api模块
--   connect模块
+-   connect模块：支持tcp/websocket
 -   logic模块：处理业务逻辑，分发用户的msg
 -   task模块
 
