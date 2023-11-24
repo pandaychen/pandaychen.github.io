@@ -486,25 +486,286 @@ type Proxy struct {
 
 
 
-##	0x0	：参考实现：ouqiang/goproxy
-[中间人代理, 解密HTTPS](https://github.com/ouqiang/goproxy#%E4%B8%AD%E9%97%B4%E4%BA%BA%E4%BB%A3%E7%90%86-%E8%A7%A3%E5%AF%86https)
+##	0x07	：参考实现：ouqiang/goproxy（MITM实现）
+[中间人代理, 解密HTTPS](https://github.com/ouqiang/goproxy#%E4%B8%AD%E9%97%B4%E4%BA%BA%E4%BB%A3%E7%90%86-%E8%A7%A3%E5%AF%86https)，用户可以自行实现`Delegate`结构，用于在mitm中实现自定义的[逻辑](https://github.com/ouqiang/goproxy)
+
+```go
+type Delegate interface {
+	// Connect 收到客户端连接
+	Connect(ctx *Context, rw http.ResponseWriter)
+	// Auth 代理身份认证
+	Auth(ctx *Context, rw http.ResponseWriter)
+	// BeforeRequest HTTP请求前 设置X-Forwarded-For, 修改Header、Body
+	BeforeRequest(ctx *Context)
+	// BeforeResponse 响应发送到客户端前, 修改Header、Body、Status Code
+	BeforeResponse(ctx *Context, resp *http.Response, err error)
+	// ParentProxy 上级代理
+	ParentProxy(*http.Request) (*url.URL, error)
+	// Finish 本次请求结束
+	Finish(ctx *Context)
+	// 记录错误信息
+	ErrorLog(err error)
+}
+```
+
+此外，用户需要实现证书的缓存接口[`Cache`](https://github.com/ouqiang/goproxy/blob/master/cert/cache.go#L21C6-L21C12)，该方法用于把mitm的域名生成的fake-certificate存储，存储可选内存/redis等
+
+```go
+// 实现证书缓存接口
+type Cache struct {
+	m sync.Map
+}
+
+func (c *Cache) Set(host string, cert *tls.Certificate) {
+	c.m.Store(host, cert)
+}
+func (c *Cache) Get(host string) *tls.Certificate {
+	v, ok := c.m.Load(host)
+	if !ok {
+		return nil
+	}
+
+	return v.(*tls.Certificate)
+}
+```
 
 ####	核心结构
 
+1、`Context`：封装`http.Request`，用于保存最原始的http请求
+
 ```GO
-// Proxy 实现了http.Handler接口
+// Context 代理上下文
+type Context struct {
+	Req         *http.Request
+	Data        map[interface{}]interface{}
+	TunnelProxy bool
+	abort       bool
+}
+
+```
+
+2、`Proxy`：代理核心结构
+
+```GO
 type Proxy struct {
 	delegate           Delegate
 	clientConnNum      int32
 	decryptHTTPS       bool
 	websocketIntercept bool
 	cert               *cert.Certificate
-	transport          *http.Transport
+	transport          *http.Transport		//用于向真实服务器发送https请求
 	clientTrace        *httptrace.ClientTrace
 	dnsCache           *dnscache.Resolver
 }
+
+// Proxy 实现了http.Handler接口
+func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request){
+	//...
+}
 ```
 
+####	MITM：核心流程
+从`ServeHTTP`[方法](https://github.com/ouqiang/goproxy/blob/master/proxy.go#L259)入手
+
+1、`CONNECT`隧道代理
+
+```go
+// ServeHTTP 实现了http.Handler接口
+func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	if req.URL.Host == "" {
+		req.URL.Host = req.Host
+	}
+	atomic.AddInt32(&p.clientConnNum, 1)
+
+	//sync.Pool的典型使用
+	ctx := ctxPool.Get().(*Context)
+	ctx.Reset(req)
+
+	defer func() {
+		p.delegate.Finish(ctx)
+		ctxPool.Put(ctx)
+		atomic.AddInt32(&p.clientConnNum, -1)
+	}()
+	p.delegate.Connect(ctx, rw)
+	if ctx.abort {
+		return
+	}
+	p.delegate.Auth(ctx, rw)
+	if ctx.abort {
+		return
+	}
+
+	switch {
+	case ctx.Req.Method == http.MethodConnect:
+		//https隧道代理
+		p.tunnelProxy(ctx, rw)
+	case websocket.IsWebSocketUpgrade(ctx.Req):
+		p.tunnelProxy(ctx, rw)
+	default:
+		p.httpProxy(ctx, rw)
+	}
+}
+```
+
+2、`tunnelProxy`：隧道代理的完整实现，支持websocket（核心实现见注释），有几个方法需要特别注意：
+
+-	[`ReadRequest`](https://cs.opensource.google/go/go/+/refs/tags/go1.21.4:src/net/http/request.go;l=1023)
+
+```go
+// 隧道代理
+func (p *Proxy) tunnelProxy(ctx *Context, rw http.ResponseWriter) {
+	clientConn, err := hijacker(rw)
+	if err != nil {
+		p.delegate.ErrorLog(err)
+		rw.WriteHeader(http.StatusBadGateway)
+		return
+	}
+	defer func() {
+		_ = clientConn.Close()
+	}()
+
+	// ......
+	
+	//下面是核心的MITM代理流程
+	var tlsClientConn *tls.Conn
+	if p.decryptHTTPS {
+		// 为待解密的域名生成临时证书
+		tlsConfig, err := p.cert.GenerateTlsConfig(ctx.Req.URL.Host)
+		if err != nil {
+			p.tunnelConnected(ctx, err)
+			p.delegate.ErrorLog(fmt.Errorf("%s - HTTPS解密, 生成证书失败: %s", ctx.Req.URL.Host, err))
+			return
+		}
+
+		// 构造一个fake-tls-server与客户端完成TLS握手
+		tlsClientConn = tls.Server(clientConn, tlsConfig)
+		defer func() {
+			_ = tlsClientConn.Close()
+		}()
+		if err := tlsClientConn.Handshake(); err != nil {
+			p.tunnelConnected(ctx, err)
+			p.delegate.ErrorLog(fmt.Errorf("%s - HTTPS解密, 握手失败: %s", ctx.Req.URL.Host, err))
+			return
+		}
+
+		// 
+		buf := bufio.NewReader(tlsClientConn)
+		tlsReq, err := http.ReadRequest(buf)
+		if err != nil {
+			if err != io.EOF {
+				p.tunnelConnected(ctx, err)
+				p.delegate.ErrorLog(fmt.Errorf("%s - HTTPS解密, 读取客户端请求失败: %s", ctx.Req.URL.Host, err))
+			}
+			return
+		}
+		tlsReq.RemoteAddr = ctx.Req.RemoteAddr
+		tlsReq.URL.Scheme = "https"
+		tlsReq.URL.Host = tlsReq.Host
+		ctx.Req = tlsReq
+	}
+
+	targetAddr := ctx.Req.URL.Host
+	if parentProxyURL != nil {
+		targetAddr = parentProxyURL.Host
+	}
+	if !strings.Contains(targetAddr, ":") {
+		targetAddr += ":443"
+	}
+
+	//向真实的server拨号
+	targetConn, err := net.DialTimeout("tcp", targetAddr, defaultTargetConnectTimeout)
+	if err != nil {
+		p.tunnelConnected(ctx, err)
+		p.delegate.ErrorLog(fmt.Errorf("%s - 隧道转发连接目标服务器失败: %s", ctx.Req.URL.Host, err))
+		return
+	}
+	defer func() {
+		_ = targetConn.Close()
+	}()
+	if parentProxyURL != nil {
+		tunnelRequestLine := makeTunnelRequestLine(ctx.Req.URL.Host)
+		_, _ = targetConn.Write([]byte(tunnelRequestLine))
+	}
+
+	if p.decryptHTTPS {
+		// https代理
+		p.httpsProxy(ctx, tlsClientConn)
+	} else {
+		p.tunnelConnected(ctx, nil)
+		p.transfer(clientConn, targetConn)
+	}
+}
+```
+
+3、`httpsProxy`方法：执行HTTP请求，并调用`responseFunc`处理真正的服务器响应，这里最关键的代码是
+
+-	通过`resp, err := p.transport.RoundTrip(newReq)`获取到服务端真实的响应
+-	再通过`err = resp.Write(tlsClientConn)`将响应返回给原始的客户端
+
+```go
+// HTTPS代理
+func (p *Proxy) httpsProxy(ctx *Context, tlsClientConn *tls.Conn) {
+	if websocket.IsWebSocketUpgrade(ctx.Req) {
+		p.websocketProxy(ctx, NewConnBuffer(tlsClientConn, nil))
+		return
+	}
+	p.DoRequest(ctx, func(resp *http.Response, err error) {
+		if err != nil {
+			p.delegate.ErrorLog(fmt.Errorf("%s - HTTPS解密, 请求错误: %s", ctx.Req.URL, err))
+			_, _ = tlsClientConn.Write(badGateway)
+			return
+		}
+		//最关键的方法
+		err = resp.Write(tlsClientConn)
+		if err != nil {
+			p.delegate.ErrorLog(fmt.Errorf("%s - HTTPS解密, response写入客户端失败, %s", ctx.Req.URL, err))
+		}
+		_ = resp.Body.Close()
+	})
+}
+
+// DoRequest 
+func (p *Proxy) DoRequest(ctx *Context, responseFunc func(*http.Response, error)) {
+	if ctx.Data == nil {
+		ctx.Data = make(map[interface{}]interface{})
+	}
+	p.delegate.BeforeRequest(ctx)
+	if ctx.abort {
+		return
+	}
+	newReq := requestPool.Get()
+	*newReq = *ctx.Req
+	newHeader := headerPool.Get()
+
+	//注意：必须要重新复制一份
+	CloneHeader(newReq.Header, newHeader)
+	newReq.Header = newHeader
+	for _, item := range hopHeaders {
+		if newReq.Header.Get(item) != "" {
+			newReq.Header.Del(item)
+		}
+	}
+	if p.clientTrace != nil {
+		newReq = newReq.WithContext(httptrace.WithClientTrace(newReq.Context(), p.clientTrace))
+	}
+
+	resp, err := p.transport.RoundTrip(newReq)
+	p.delegate.BeforeResponse(ctx, resp, err)
+	if ctx.abort {
+		return
+	}
+	if err == nil {
+		for _, h := range hopHeaders {
+			resp.Header.Del(h)
+		}
+	}
+	responseFunc(resp, err)	// 调用上面httpsProxy方法中的P.DoRequest参数
+	headerPool.Put(newHeader)
+	requestPool.Put(newReq)
+}
+```
+
+核心需要理解`err = resp.Write(tlsClientConn)`这段逻辑是如何实现的
 
 ##  0x0 思考：MITM 防护手段
 
