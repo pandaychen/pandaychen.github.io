@@ -1,0 +1,22 @@
+title https-mitm
+
+Client->HttpConnectProxy(1): Send CONNECT method(www.google.com)
+HttpConnectProxy(1)->Client: 200 OK
+note right of Client: client can use this proxy
+Client->HttpConnectProxy(1): TLS-handshanke 0x16 0x0301
+HttpConnectProxy(1)->HttpConnectProxy(1): net.Pipe 
+HttpConnectProxy(1)->HttpConnectProxy(1): clientConn ServerConn
+HttpConnectProxy(1)->Client: return clientConn
+HttpConnectProxy(1)->FakeTLSServer(2): ServerConn
+FakeTLSServer(2)->HttpConnectProxy(1): ServerConn accepted
+HttpConnectProxy(1)->Client: accepted
+note left of FakeTLSServer(2): generate fake certificate for www.google.com
+Client->FakeTLSServer(2): TLS handshake
+FakeTLSServer(2)->Client: TLS handshake
+Client->FakeTLSServer(2): GET www.google.com /
+FakeTLSServer(2)->HttpConnectProxy(1): GET www.google.com /
+HttpConnectProxy(1)->RealServer: dial and send https request(1): GET https://www.google.com /
+RealServer->HttpConnectProxy(1): reply response
+HttpConnectProxy(1)->FakeTLSServer(2): copy response
+FakeTLSServer(2)->Client: encrypted traffic with ServerConn(TLS tunnel)
+Client<->FakeTLSServer(2): io.Copy on ServerConn and clientConn[MARK]
