@@ -462,11 +462,46 @@ func (c *Config) cert(hostname string) (*tls.Certificate, error) {
 
 ##	0x06	参考实现3：lqqyt2423/go-mitmproxy
 
-此项目实现比较巧妙，思路可借鉴，大致流程如下：
+此项目基于`net.http`实现比较巧妙，思路可借鉴，大致流程如下：
 
 ![work-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/mitm/mitm-project/go-mitmproxy-workflow.png)
 
 核心结构：
+
+客户端：
+
+```GO
+// client connection
+type ClientConn struct {
+	Id           uuid.UUID
+	Conn         net.Conn
+	Tls          bool
+	UpstreamCert bool // Connect to upstream server to look up certificate details. Default: True
+	clientHello  *tls.ClientHelloInfo
+}
+```
+
+2、ServerConn：
+
+```go
+// server connection
+type ServerConn struct {
+	Id      uuid.UUID
+	Address string
+	Conn    net.Conn
+
+	tlsHandshaked   chan struct{}
+	tlsHandshakeErr error
+	tlsConn         *tls.Conn
+	tlsState        *tls.ConnectionState
+	client          *http.Client
+}
+```
+
+3、管理结构proxy，可分为三块：
+-	客户端
+-	服务端（本地代理）、
+-	mitm（middle）
 
 ```GO
 type Proxy struct {
@@ -474,7 +509,7 @@ type Proxy struct {
 	Version string
 	Addons  []Addon
 
-	client          *http.Client
+	client          *http.Client	//用于请求真实域名的客户端
 	server          *http.Server	
 	interceptor     *middle
 	shouldIntercept func(req *http.Request) bool              // req is received by proxy.server
@@ -482,8 +517,246 @@ type Proxy struct {
 }
 ```
 
+####	中间人实现：middle
+模拟了标准库中 server 运行，目的是仅通过当前进程内存转发 socket 数据，不需要经过 tcp 或 unix socket
+
+
+```GO
+// middle: man-in-the-middle server
+type middle struct {
+	proxy    *Proxy
+	ca       *cert.CA
+	listener *middleListener
+	server   *http.Server
+}
+```
+
+```go
+// mock net.Listener
+type middleListener struct {
+	connChan chan net.Conn
+	doneChan chan struct{}
+}
+
+func (l *middleListener) Accept() (net.Conn, error) {
+	select {
+	case c := <-l.connChan:
+		return c, nil
+	case <-l.doneChan:
+		return nil, http.ErrServerClosed
+	}
+}
+func (l *middleListener) Close() error   { return nil }
+func (l *middleListener) Addr() net.Addr { return nil }
+```
+
+1、client与server成员初始化
+
+```go
+proxy.client = &http.Client{
+		Transport: &http.Transport{
+			Proxy:              proxy.realUpstreamProxy(),
+			ForceAttemptHTTP2:  false, // disable http2
+			DisableCompression: true,  // To get the original response from the server, set Transport.DisableCompression to true.
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: opts.SslInsecure,
+				KeyLogWriter:       getTlsKeyLogWriter(),
+			},
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// 禁止自动重定向
+			return http.ErrUseLastResponse
+		},
+	}
+
+proxy.server = &http.Server{
+		Addr:    opts.Addr,
+		Handler: proxy,
+		//注意context的用法
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			connCtx := newConnContext(c, proxy)
+			for _, addon := range proxy.Addons {
+				addon.ClientConnected(connCtx.ClientConn)
+			}
+			c.(*wrapClientConn).connCtx = connCtx
+			return context.WithValue(ctx, connContextKey, connCtx)
+		},
+	}
+```
+
+
+####	核心流程分析
+
+1、服务启动
+-	启动https[代理](https://github.com/lqqyt2423/go-mitmproxy/blob/main/proxy/proxy.go#L110C9-L110C32)：`proxy.server.Serve(pln)`
+-	启动mitm-fake-server：`go proxy.interceptor.start()`
+
+
+```go
+func (m *middle) start() error {
+	//注意：这里的listener是自定义实现的
+	return m.server.ServeTLS(m.listener, "", "")
+}
+```
+
+
 核心代理逻辑入口[Proxy.ServeHTTP](https://github.com/lqqyt2423/go-mitmproxy/blob/main/proxy/proxy.go#L125)：
 
+2、handleConnect：基于标准协议处理https隧道连接，注意到最后`transfer(log, conn, cconn)`数据流双向转发
+
+-	`conn`：mitm下由`proxy.interceptor.dial(req)`生成
+-	`cconn`：
+
+```go
+func (proxy *Proxy) handleConnect(res http.ResponseWriter, req *http.Request) {
+	shouldIntercept := proxy.shouldIntercept == nil || proxy.shouldIntercept(req)
+	f := newFlow()
+	f.Request = newRequest(req)
+	f.ConnContext = req.Context().Value(connContextKey).(*ConnContext)
+	f.ConnContext.Intercept = shouldIntercept
+	defer f.finish()
+
+	// trigger addon event Requestheaders
+	for _, addon := range proxy.Addons {
+		addon.Requestheaders(f)
+	}
+
+	var conn net.Conn
+	var err error
+	if shouldIntercept {
+		log.Debugf("begin intercept %v", req.Host)
+		conn, err = proxy.interceptor.dial(req)  //下一步看看dial做了什么
+	} else {
+		log.Debugf("begin transpond %v", req.Host)
+		conn, err = proxy.getUpstreamConn(req)
+	}
+	if err != nil {
+		log.Error(err)
+		res.WriteHeader(502)
+		return
+	}
+	defer conn.Close()
+
+	cconn, _, err := res.(http.Hijacker).Hijack()
+	if err != nil {
+		log.Error(err)
+		res.WriteHeader(502)
+		return
+	}
+
+	// cconn.(*net.TCPConn).SetLinger(0) // send RST other than FIN when finished, to avoid TIME_WAIT state
+	// cconn.(*net.TCPConn).SetKeepAlive(false)
+	defer cconn.Close()
+
+	_, err = io.WriteString(cconn, "HTTP/1.1 200 Connection Established\r\n\r\n")
+	if err != nil {
+		log.Error(err)
+		return
+	}
+
+	f.Response = &Response{
+		StatusCode: 200,
+		Header:     make(http.Header),
+	}
+
+	// trigger addon event Responseheaders
+	for _, addon := range proxy.Addons {
+		addon.Responseheaders(f)
+	}
+	defer func(f *Flow) {
+		// trigger addon event Response
+		for _, addon := range proxy.Addons {
+			addon.Response(f)
+		}
+	}(f)
+
+	transfer(log, conn, cconn)
+}
+```
+
+3、proxy.interceptor.dial(req)
+
+-	使用newPipes构建管道，分为读端与写端
+-	单独异步处理`pipeServerConn`，把`pipeClientConn`返回
+-	`m.listener.connChan <- pipeServerConn`
+
+```go
+func (m *middle) dial(req *http.Request) (net.Conn, error) {
+	pipeClientConn, pipeServerConn := newPipes(req)
+
+	if pipeServerConn.connContext.ClientConn.UpstreamCert {
+		err := pipeServerConn.connContext.initServerTcpConn(req)
+		if err != nil {
+			pipeClientConn.Close()
+			pipeServerConn.Close()
+			return nil, err
+		}
+	}
+
+	go m.intercept(pipeServerConn)
+	return pipeClientConn, nil
+}
+
+// 解析 connect 流量
+// 如果是 tls 流量，则进入 listener.Accept => Middle.ServeHTTP
+// 否则很可能是 ws 流量
+func (m *middle) intercept(pipeServerConn *pipeConn) {
+	buf, err := pipeServerConn.Peek(3)
+	if err != nil {
+		log.Errorf("Peek error: %v\n", err)
+		pipeServerConn.Close()
+		return
+	}
+
+	// https://github.com/mitmproxy/mitmproxy/blob/main/mitmproxy/net/tls.py is_tls_record_magic
+	if buf[0] == 0x16 && buf[1] == 0x03 && buf[2] <= 0x03 {
+		// tls
+		pipeServerConn.connContext.ClientConn.Tls = true
+		pipeServerConn.connContext.initHttpsServerConn()
+		m.listener.connChan <- pipeServerConn
+	} else {
+		// ws
+		defaultWebSocket.ws(pipeServerConn, pipeServerConn.host)
+	}
+}
+```
+
+4、
+
+```go
+func (l *middleListener) Accept() (net.Conn, error) {
+	select {
+	case c := <-l.connChan:
+		return c, nil
+	case <-l.doneChan:
+		return nil, http.ErrServerClosed
+	}
+}
+
+func (m *middle) ServeHTTP(res http.ResponseWriter, req *http.Request) {
+	if strings.EqualFold(req.Header.Get("Connection"), "Upgrade") && strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
+		// wss
+		defaultWebSocket.wss(res, req)
+		return
+	}
+
+	if req.URL.Scheme == "" {
+		req.URL.Scheme = "https"
+	}
+	if req.URL.Host == "" {
+		req.URL.Host = req.Host
+	}
+
+	//
+	m.proxy.ServeHTTP(res, req)
+}
+```
+
+/*
+		req res
+				 &{GET / HTTP/1.1 1 1 map[Accept:[] User-Agent:[curl/7.29.0]] {} <nil> 0 [] false www.baidu.com map[] map[] <nil> map[] 9.13.4.dev.cloud:57683 / 0xc000510000 <nil> <nil> 0xc000512050}
+		res &{0xc000118000 0xc00023a200 {} 0x4d1560 false false false false {{} 0} {0 0} 0xc00002a100 {0xc00051c000 map[] false false} map[] false 0 -1 0 false false [] {{} 0} [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0] [0 0 0 0 0 0 0 0 0 0] [0 0 0] 0xc000026070 {{} 0}}
+	*/
 
 
 ##	0x07	：参考实现：ouqiang/goproxy（MITM实现）
