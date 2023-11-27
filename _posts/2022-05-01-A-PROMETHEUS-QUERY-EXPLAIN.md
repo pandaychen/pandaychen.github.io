@@ -8,6 +8,7 @@ author: pandaychen
 catalog: true
 tags:
   - Prometheus
+  - Metrics
 ---
 
 ##  0x00    前言
@@ -58,8 +59,102 @@ Y
 
 在 Prometheus 中，样本的值必须为 `float64` 类型；此外，建议标签值不要使用一个数量非常多的值，否则会造成时间序列数量的极度膨胀。标签的值应该越简单越好
 
-##  0x0 参考
+##  0x02  指标计算
+
+####  常用函数整理
+一个常用技巧是遇到`counter`数据类型，在做任何操作之前，先套上一个`rate()`或`increase()`函数
+
+1、`rate`函数是专门搭配`counter`数据类型使用函数，功能是取`counter`在这个时间段中平均每秒的增量，例如获取`eth0`网卡`1m`内每秒流量的平均值，指标名是`node_network_receive_bytes_total`，label选择`eth0`
+
+```BASH
+rate(node_network_receive_bytes_total{device="eth0"}[1m])
+```
+
+2、`increase`函数表示某段时间内数据的增量，而`rate()` 函数则表示某段时间内数据的平均值；那么这两个函数如何选取使用呢？当获取数据比较精细的时候，类似于`1m`取样推荐使用`rate()`函数；当获取数据比较粗糙的时候类似于`5m`/`10m`甚至更长时间取样推荐使用`increase()`函数；例如获取`eth0`网卡`1m`内流量的增量
+
+```BASH
+increase(node_network_receive_bytes_total{device="eth0"}[1m])
+```
+
+3、`sum`函数是求和函数,注意点是使用`sum`后是**将所有的监控的服务器的值进行取和**，所以只看某一台服务器指标时需要使用`by increase()`进行拆分。例如获取所有主机`eth0`网卡`1m`内每秒流量的平均值的和
+
+```BASH
+sum(rate(node_network_receive_bytes_total{device="eth0"}[1m]))
+```
+
+4、`topk`函数取前面`N`位的最高值（即topN），当有很多服务器我们想要获取某个key的数据排在前`3`位的服务器，可使用如下：
+
+```BASH
+topk(3,key) #FOR GUAGE
+topk(3,rate(key[1m])) #FOR COUNTER
+```
+
+5、`count`函数是找出当前或者历史数据中某个key的数值大于或小于某个值的统计，例如：
+
+```BASH
+count(node_netstat_Tcp_CurrEstab >50)
+```
+
+6、`irate`函数
+
+
+##  0x  实战：CPU使用率的计算
+CPU模式，CPU要通过分时复用的方式运行于不同的模式中，使用`top`命令查看，通过`curl http://localhost:9100/metrics`拿到CPU的具体指标数据如下：
+
+- `us`：用户进程使用cpu的时间
+- `sy`：内核进程使用cpu的时间
+- `ni`：用户进程空间内改变过优先级的进程使用的cpu时间
+- `id`：空闲cpu时间
+- `wa`：等待io的cpu时间
+- `hi`：硬中断的cpu时间
+- `si`：软中断的cpu时间
+- `st`：虚拟机管理程序使用的cpu时间
+
+某个时间点指标如下：
+
+```TEXT
+# HELP node_cpu_seconds_total Seconds the cpus spent in each mode.
+# TYPE node_cpu_seconds_total counter
+node_cpu_seconds_total{cpu="0",mode="idle"} 26659.41
+node_cpu_seconds_total{cpu="0",mode="iowait"} 4.79
+node_cpu_seconds_total{cpu="0",mode="irq"} 0
+node_cpu_seconds_total{cpu="0",mode="nice"} 0
+node_cpu_seconds_total{cpu="0",mode="softirq"} 2.69
+node_cpu_seconds_total{cpu="0",mode="steal"} 0
+node_cpu_seconds_total{cpu="0",mode="system"} 31.65
+node_cpu_seconds_total{cpu="0",mode="user"} 8.67
+node_cpu_seconds_total{cpu="1",mode="idle"} 26634.43
+node_cpu_seconds_total{cpu="1",mode="iowait"} 54.14
+node_cpu_seconds_total{cpu="1",mode="irq"} 0
+node_cpu_seconds_total{cpu="1",mode="nice"} 0.02
+node_cpu_seconds_total{cpu="1",mode="softirq"} 1.23
+node_cpu_seconds_total{cpu="1",mode="steal"} 0
+node_cpu_seconds_total{cpu="1",mode="system"} 34.07
+node_cpu_seconds_total{cpu="1",mode="user"} 9
+node_cpu_seconds_total{cpu="2",mode="idle"} 26629.89
+node_cpu_seconds_total{cpu="2",mode="iowait"} 6.57
+node_cpu_seconds_total{cpu="2",mode="irq"} 0
+node_cpu_seconds_total{cpu="2",mode="nice"} 0
+node_cpu_seconds_total{cpu="2",mode="softirq"} 1.95
+node_cpu_seconds_total{cpu="2",mode="steal"} 0
+node_cpu_seconds_total{cpu="2",mode="system"} 24.66
+node_cpu_seconds_total{cpu="2",mode="user"} 7.2
+node_cpu_seconds_total{cpu="3",mode="idle"} 26699.96
+node_cpu_seconds_total{cpu="3",mode="iowait"} 5.72
+node_cpu_seconds_total{cpu="3",mode="irq"} 0
+node_cpu_seconds_total{cpu="3",mode="nice"} 0.01
+node_cpu_seconds_total{cpu="3",mode="softirq"} 1.27
+node_cpu_seconds_total{cpu="3",mode="steal"} 0
+node_cpu_seconds_total{cpu="3",mode="system"} 22.32
+node_cpu_seconds_total{cpu="3",mode="user"} 7.33
+```
+
+##  0x03 参考
 -   [彻底理解 Prometheus 查询语法](https://blog.csdn.net/zhouwenjun0820/article/details/105823389)
 -   [Prometheus 操作指南](https://github.com/yunlzheng/prometheus-book)
 -   [理解时间序列](https://github.com/yunlzheng/prometheus-book/blob/master/promql/what-is-prometheus-metrics-and-labels.md)
 -   [Prometheus Metrics 设计的最佳实践和应用实例，看这篇够了](https://cloud.tencent.com/developer/article/1639138)
+- [PromQL 简明教程](https://www.kawabangga.com/posts/4408)
+- [Prometheus技术分享——prometheus的函数与计算公式详解](https://zhuanlan.zhihu.com/p/595103670)
+- [Prometheus的函数和计算公式](https://blog.csdn.net/wc1695040842/article/details/107013799)
+- [监控metrics系列---- Prometheus入门](https://kingjcy.github.io/post/monitor/metrics/prometheus/prometheus/)
