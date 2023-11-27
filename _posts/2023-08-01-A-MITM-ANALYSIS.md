@@ -466,9 +466,10 @@ func (c *Config) cert(hostname string) (*tls.Certificate, error) {
 
 ![work-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/mitm/mitm-project/go-mitmproxy-workflow.png)
 
-核心结构：
+####	核心结构
+本项目封装了较多的结构，理清这些对了解项目的实现非常有用
 
-客户端：
+1、客户端连接`ClientConn`
 
 ```GO
 // client connection
@@ -481,7 +482,7 @@ type ClientConn struct {
 }
 ```
 
-2、ServerConn：
+2、`ServerConn`
 
 ```go
 // server connection
@@ -498,10 +499,10 @@ type ServerConn struct {
 }
 ```
 
-3、管理结构proxy，可分为三块：
--	客户端
--	服务端（本地代理）、
--	mitm（middle）
+3、管理结构`Proxy`，主要包含下面三个成员
+-	客户端：`http.Client`
+-	服务端（本地代理）：`http.Server`
+-	mitm（middle）：`middle`核心[结构](https://github.com/lqqyt2423/go-mitmproxy/blob/main/proxy/interceptor.go#L83)
 
 ```GO
 type Proxy struct {
@@ -518,7 +519,7 @@ type Proxy struct {
 ```
 
 ####	中间人实现：middle
-模拟了标准库中 server 运行，目的是仅通过当前进程内存转发 socket 数据，不需要经过 tcp 或 unix socket
+这个也是本项目的[核心代码](https://github.com/lqqyt2423/go-mitmproxy/blob/main/proxy/interceptor.go#L83)实现，模拟了标准库中 server 运行，目的是仅通过当前进程内存转发 socket 数据，不需要经过 tcp 或 unix socket
 
 
 ```GO
@@ -553,36 +554,72 @@ func (l *middleListener) Addr() net.Addr { return nil }
 1、client与server成员初始化
 
 ```go
-proxy.client = &http.Client{
-		Transport: &http.Transport{
-			Proxy:              proxy.realUpstreamProxy(),
-			ForceAttemptHTTP2:  false, // disable http2
-			DisableCompression: true,  // To get the original response from the server, set Transport.DisableCompression to true.
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: opts.SslInsecure,
-				KeyLogWriter:       getTlsKeyLogWriter(),
-			},
-		},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			// 禁止自动重定向
-			return http.ErrUseLastResponse
+func newMiddle(proxy *Proxy) (*middle, error) {
+	ca, err := cert.NewCA(proxy.Opts.CaRootPath)
+	if err != nil {
+		return nil, err
+	}
+
+	m := &middle{
+		proxy: proxy,
+		ca:    ca,
+		listener: &middleListener{
+			connChan: make(chan net.Conn),
+			doneChan: make(chan struct{}),
 		},
 	}
 
-proxy.server = &http.Server{
-		Addr:    opts.Addr,
-		Handler: proxy,
-		//注意context的用法
+	server := &http.Server{
+		Handler: m,	 // HTTP 请求处理器，用于处理所有传入的 HTTP 请求
 		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
-			connCtx := newConnContext(c, proxy)
-			for _, addon := range proxy.Addons {
-				addon.ClientConnected(connCtx.ClientConn)
-			}
-			c.(*wrapClientConn).connCtx = connCtx
-			return context.WithValue(ctx, connContextKey, connCtx)
+			return context.WithValue(ctx, connContextKey, c.(*tls.Conn).NetConn().(*pipeConn).connContext)
+		},
+		TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)), // disable http2,，禁用 HTTP/2 协议。这将强制服务器仅使用 HTTP/1.1 协议
+		TLSConfig: &tls.Config{
+			SessionTicketsDisabled: true, // 设置此值为 true ，确保每次都会调用下面的 GetCertificate 方法
+			GetCertificate: func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+				//注意context的用法
+				connCtx := clientHello.Context().Value(connContextKey).(*ConnContext)
+				connCtx.ClientConn.clientHello = clientHello
+
+				if connCtx.ClientConn.UpstreamCert {
+					if err := connCtx.tlsHandshake(clientHello); err != nil {
+						return nil, err
+					}
+
+					for _, addon := range connCtx.proxy.Addons {
+						addon.TlsEstablishedServer(connCtx)
+					}
+				}
+
+				return ca.GetCert(clientHello.ServerName)
+			},
 		},
 	}
+	m.server = server
+	return m, nil
+}
+
+// 启动middle.server
+func (m *middle) start() error {
+	//注意：这里的listener是自定义实现的
+	return m.server.ServeTLS(m.listener, "", "")
+}
 ```
+
+`middle`初始化的代码中，有几个细节需要注意：
+
+-	`http.Server`的`ConnContext`成员的用途？
+-	`http.TLSConfig.GetCertificate`的用途？
+-	`m.server.ServeTLS(m.listener, "", "")`：tls的证书路径均为空，是什么用途？
+
+首先看下`ConnContext`成员，其定义了一个函数，用于将 `net.Conn` 类型的连接转换为 `context.Context`，首先将连接类型转换为 `*tls.Conn`，然后获取其底层的 `*pipeConn`，并从中提取 `connContext`，允许在处理 HTTP 请求时访问与连接相关的上下文信息
+
+`TLSConfig`是自定义的 TLS 配置，包括以下设置：
+-	`SessionTicketsDisabled`为`true`禁用 TLS 会话票证，以确保每次都会调用 `GetCertificate` 方法
+-	`GetCertificate` 用于在 TLS 握手过程中为给定的服务器名称（`SNI`）生成证书。该方法首先从 `ClientHello` 消息中提取与连接相关的上下文信息（`connContext`），然后根据 `UpstreamCert` 的值决定是否执行 TLS 握手。如果 `UpstreamCert` 为 `true`，则执行 TLS 握手并调用所有已注册的插件的 `TlsEstablishedServer` 方法。最后，使用 `ca.GetCert` 方法为服务器名称生成fakeTLS握手证书
+
+所以，`m.server.ServeTLS`调用的参数为空时，证书和私钥将由 `GetCertificate` 方法动态提供，这也是常用的SNI代理的实现细节
 
 
 ####	核心流程分析
@@ -602,7 +639,7 @@ func (m *middle) start() error {
 
 核心代理逻辑入口[Proxy.ServeHTTP](https://github.com/lqqyt2423/go-mitmproxy/blob/main/proxy/proxy.go#L125)：
 
-2、handleConnect：基于标准协议处理https隧道连接，注意到最后`transfer(log, conn, cconn)`数据流双向转发
+2、`handleConnect`方法：基于标准协议处理https隧道连接，注意到最后的逻辑`transfer(log, conn, cconn)`数据流双向转发
 
 -	`conn`：mitm下由`proxy.interceptor.dial(req)`生成
 -	`cconn`：
@@ -713,6 +750,8 @@ func (m *middle) intercept(pipeServerConn *pipeConn) {
 		// tls
 		pipeServerConn.connContext.ClientConn.Tls = true
 		pipeServerConn.connContext.initHttpsServerConn()
+
+		//这里首先如果是TLS协议，
 		m.listener.connChan <- pipeServerConn
 	} else {
 		// ws
@@ -721,7 +760,13 @@ func (m *middle) intercept(pipeServerConn *pipeConn) {
 }
 ```
 
-4、
+4、在step `3`中把该conn递交给`middle.server`处理，这段代码比较晦涩，整体流程如下：
+
+-	首先，`middle.dial`中，构建pipe连接，然后通过`go m.intercept(pipeServerConn)`开启异步处理tls连接
+-	第二步，`middle.intercept`中`m.listener.connChan <- pipeServerConn`，将连接`pipeServerConn`异步丢给`m.listener`
+-	第三步，`middleListener.Accept`中收到此连接`pipeServerConn`，会触发`middle.server.GetCertificate`的逻辑，进行TLS握手，这中间会调用[`connCtx.tlsHandshake`](https://github.com/lqqyt2423/go-mitmproxy/blob/main/proxy/connection.go#L247)方法（TLS握手，证书兼容性协商等操作）
+-	TLS握手完成后，然后流程到达`middle.ServeHTTP`，这里可以捕获到客户端https的真正的请求（`req`）
+-	最后，`middle.ServeHTTP`方法中，在对`req`设置真实的请求后，会调用`m.proxy.ServeHTTP(res, req)`，完成最后的逻辑
 
 ```go
 func (l *middleListener) Accept() (net.Conn, error) {
@@ -747,16 +792,223 @@ func (m *middle) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		req.URL.Host = req.Host
 	}
 
-	//
+	// 完成最后的逻辑
+	// 这里可以获取到客户端原始的请求信息
+	// GET / HTTP/1.1 1 1 map[Accept:[] User-Agent:[curl/7.29.0]]
 	m.proxy.ServeHTTP(res, req)
 }
 ```
 
-/*
-		req res
-				 &{GET / HTTP/1.1 1 1 map[Accept:[] User-Agent:[curl/7.29.0]] {} <nil> 0 [] false www.baidu.com map[] map[] <nil> map[] 9.13.4.dev.cloud:57683 / 0xc000510000 <nil> <nil> 0xc000512050}
-		res &{0xc000118000 0xc00023a200 {} 0x4d1560 false false false false {{} 0} {0 0} 0xc00002a100 {0xc00051c000 map[] false false} map[] false 0 -1 0 false false [] {{} 0} [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0] [0 0 0 0 0 0 0 0 0 0] [0 0 0] 0xc000026070 {{} 0}}
-	*/
+5、最后一步，`m.proxy.ServeHTTP(res, req)`，完成对目的域名的请求，并把响应转发回真正的客户端，完成MITM过程
+
+本质上，就是先利用参数`req`中的数据向目标域名发送https（TLS）请求，然后获取结果之后，利用`reply`自定义方法，把相关的数据写入到`res http.ResponseWriter`中，最终会通过下面这条路线完成数据转发到客户端的过程
+
+-	[`newPipes(req *http.Request) (net.Conn, *pipeConn)`](https://github.com/lqqyt2423/go-mitmproxy/blob/main/proxy/interceptor.go#L59)
+-	[`conn, err = proxy.interceptor.dial(req)`](https://github.com/lqqyt2423/go-mitmproxy/blob/main/proxy/proxy.go#L348C3-L348C42)
+-	[`transfer(log, conn, cconn)`](https://github.com/lqqyt2423/go-mitmproxy/blob/main/proxy/proxy.go#L393)
+
+
+```GO
+func (proxy *Proxy) ServeHTTP(res http.ResponseWriter, req *http.Request) {
+	if req.Method == "CONNECT" {
+		proxy.handleConnect(res, req)
+		return
+	}
+
+	if !req.URL.IsAbs() || req.URL.Host == "" {
+		if len(proxy.Addons) == 0 {
+			res.WriteHeader(400)
+			io.WriteString(res, "此为代理服务器，不能直接发起请求")
+			return
+		}
+		for _, addon := range proxy.Addons {
+			addon.AccessProxyServer(req, res)
+		}
+		return
+	}
+
+	reply := func(response *Response, body io.Reader) {
+		if response.Header != nil {
+			for key, value := range response.Header {
+				for _, v := range value {
+					res.Header().Add(key, v)
+				}
+			}
+		}
+		if response.close {
+			res.Header().Add("Connection", "close")
+		}
+		res.WriteHeader(response.StatusCode)
+
+		if body != nil {
+			_, err := io.Copy(res, body)
+			if err != nil {
+				logErr(log, err)
+			}
+		}
+		if response.BodyReader != nil {
+			_, err := io.Copy(res, response.BodyReader)
+			if err != nil {
+				logErr(log, err)
+			}
+		}
+		if response.Body != nil && len(response.Body) > 0 {
+			_, err := res.Write(response.Body)
+			if err != nil {
+				logErr(log, err)
+			}
+		}
+	}
+
+	// when addons panic
+	defer func() {
+		if err := recover(); err != nil {
+			log.Warnf("Recovered: %v\n", err)
+		}
+	}()
+
+	f := newFlow()
+	f.Request = newRequest(req)
+	f.ConnContext = req.Context().Value(connContextKey).(*ConnContext)
+	defer f.finish()
+
+	f.ConnContext.FlowCount = f.ConnContext.FlowCount + 1
+
+	rawReqUrlHost := f.Request.URL.Host
+	rawReqUrlScheme := f.Request.URL.Scheme
+
+	// trigger addon event Requestheaders
+	for _, addon := range proxy.Addons {
+		addon.Requestheaders(f)
+		if f.Response != nil {
+			reply(f.Response, nil)
+			return
+		}
+	}
+
+	// Read request body
+	var reqBody io.Reader = req.Body
+	if !f.Stream {
+		reqBuf, r, err := readerToBuffer(req.Body, proxy.Opts.StreamLargeBodies)
+		reqBody = r
+		if err != nil {
+			log.Error(err)
+			res.WriteHeader(502)
+			return
+		}
+
+		if reqBuf == nil {
+			log.Warnf("request body size >= %v\n", proxy.Opts.StreamLargeBodies)
+			f.Stream = true
+		} else {
+			f.Request.Body = reqBuf
+
+			// trigger addon event Request
+			for _, addon := range proxy.Addons {
+				addon.Request(f)
+				if f.Response != nil {
+					reply(f.Response, nil)
+					return
+				}
+			}
+			reqBody = bytes.NewReader(f.Request.Body)
+		}
+	}
+
+	for _, addon := range proxy.Addons {
+		reqBody = addon.StreamRequestModifier(f, reqBody)
+	}
+
+	proxyReqCtx := context.WithValue(context.Background(), proxyReqCtxKey, req)
+	proxyReq, err := http.NewRequestWithContext(proxyReqCtx, f.Request.Method, f.Request.URL.String(), reqBody)
+	if err != nil {
+		log.Error(err)
+		res.WriteHeader(502)
+		return
+	}
+
+	for key, value := range f.Request.Header {
+		for _, v := range value {
+			proxyReq.Header.Add(key, v)
+		}
+	}
+
+	f.ConnContext.initHttpServerConn()
+
+	useSeparateClient := f.UseSeparateClient
+	if !useSeparateClient {
+		if rawReqUrlHost != f.Request.URL.Host || rawReqUrlScheme != f.Request.URL.Scheme {
+			useSeparateClient = true
+		}
+	}
+
+	var proxyRes *http.Response
+	if useSeparateClient {
+		proxyRes, err = proxy.client.Do(proxyReq)
+	} else {
+		proxyRes, err = f.ConnContext.ServerConn.client.Do(proxyReq)
+	}
+	if err != nil {
+		logErr(log, err)
+		res.WriteHeader(502)
+		return
+	}
+
+	if proxyRes.Close {
+		f.ConnContext.closeAfterResponse = true
+	}
+
+	defer proxyRes.Body.Close()
+
+	f.Response = &Response{
+		StatusCode: proxyRes.StatusCode,
+		Header:     proxyRes.Header,
+		close:      proxyRes.Close,
+	}
+
+	// trigger addon event Responseheaders
+	for _, addon := range proxy.Addons {
+		addon.Responseheaders(f)
+		if f.Response.Body != nil {
+			reply(f.Response, nil)
+			return
+		}
+	}
+
+	// Read response body
+	var resBody io.Reader = proxyRes.Body
+	if !f.Stream {
+		resBuf, r, err := readerToBuffer(proxyRes.Body, proxy.Opts.StreamLargeBodies)
+		resBody = r
+		if err != nil {
+			log.Error(err)
+			res.WriteHeader(502)
+			return
+		}
+		if resBuf == nil {
+			log.Warnf("response body size >= %v\n", proxy.Opts.StreamLargeBodies)
+			f.Stream = true
+		} else {
+			f.Response.Body = resBuf
+
+			// trigger addon event Response
+			for _, addon := range proxy.Addons {
+				addon.Response(f)
+			}
+		}
+	}
+	for _, addon := range proxy.Addons {
+		resBody = addon.StreamResponseModifier(f, resBody)
+	}
+
+	reply(f.Response, resBody)
+}
+```
+
+####	小结
+最后，汇总下mitm的数据流程：
+
+![mitm](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/mitm/mitm-project/https-mitm.png)
 
 
 ##	0x07	：参考实现：ouqiang/goproxy（MITM实现）
