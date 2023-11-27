@@ -611,6 +611,7 @@ func worker(stopCh <-chan struct{}) {
 ```
 
 ##  0x06        参考
+-       [The Behavior Of Channels](https://www.ardanlabs.com/blog/2017/10/the-behavior-of-channels.html)
 -       [聊一聊 Go 中 channel 的行为](https://www.infoq.cn/article/wZ1kKQLlsY1N7gigvpHo)
 -       [Concurrency in Go 中文笔记](https://www.kancloud.cn/mutouzhang/go/596835)
 -       [go 并发编程范式](https://www.jianshu.com/p/3e1837860575)
