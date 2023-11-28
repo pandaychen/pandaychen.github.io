@@ -12,7 +12,7 @@ tags:
 ---
 
 ##  0x00    前言
-本文梳理下 prometheus 查询及指标应用的最佳实践以及Promql使用等
+前文[理解 Prometheus 的基本数据类型及应用（基础篇）](https://pandaychen.github.io/2020/04/11/PROMETHEUS-METRICS-INTRO/)梳理了Prometheus的应用基础，本文梳理下 prometheus 查询及指标应用的最佳实践以及Promql使用等
 
 ##  0x01    相关概念回顾
 
