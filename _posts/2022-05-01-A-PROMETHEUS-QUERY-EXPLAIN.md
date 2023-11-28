@@ -1,7 +1,7 @@
 ---
 layout: post
 title: prometheus 查询 && 应用实践（进阶篇）
-subtitle: 如何更好的使用 prometheus
+subtitle: 如何更好的使用 prometheus（With Promql）
 date: 2022-05-01
 header-img: img/super-mario.jpg
 author: pandaychen
@@ -12,7 +12,7 @@ tags:
 ---
 
 ##  0x00    前言
-本文梳理下 prometheus 查询及指标应用的最佳实践。
+本文梳理下 prometheus 查询及指标应用的最佳实践以及Promql使用等
 
 ##  0x01    相关概念回顾
 
@@ -44,7 +44,7 @@ Y
   │
   │     . B (2, 1)
   |
-  v------------------> X
+    v------------------> X
 ```
 
 
@@ -158,3 +158,5 @@ node_cpu_seconds_total{cpu="3",mode="user"} 7.33
 - [Prometheus技术分享——prometheus的函数与计算公式详解](https://zhuanlan.zhihu.com/p/595103670)
 - [Prometheus的函数和计算公式](https://blog.csdn.net/wc1695040842/article/details/107013799)
 - [监控metrics系列---- Prometheus入门](https://kingjcy.github.io/post/monitor/metrics/prometheus/prometheus/)
+-   [PromQL 基本使用](https://songjiayang.gitbooks.io/prometheus/content/promql/summary.html)
+-   [Prometheus 实战](https://songjiayang.gitbooks.io/prometheus/content/)
