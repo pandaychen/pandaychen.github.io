@@ -16,7 +16,7 @@ Envoy 是一个开源的边缘服务代理，也是 Istio Service Mesh 默认的
 ####    envoy 架构
 Envoy 进程中运行着一系列 Inbound/Outbound 监听器（Listener），其中 Inbound 代理入站流量，Outbound 代理出站流量。Listener 的核心就是过滤器链（FilterChain），链中每个过滤器都能够控制流量的处理流程。Envoy 接收到请求后，会先走 FilterChain，通过各种 L3/L4/L7 Filter 对请求进行处理，然后再路由到指定的集群（Cluster），并通过负载均衡获取一个目标地址，最后再转发出去。其中每一个环节可以静态配置，也可以动态服务发现（即 xDS，包含了LDS/RDS/CDS/EDS/SDS等）
 
-![ARCH1](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/envoy/envoy-proxy-architecture-diagram.png)
+![ARCH1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/envoy/envoy-proxy-architecture-diagram.png)
 
 笔者理解，可以通过envoy配置出想要的转发模型
 
@@ -168,6 +168,8 @@ docker logs -f  --tail=200 cfb4ba22c969
 -   `filter`: 过滤器：在 Envoy 中指的是一些可插拔和可组合的逻辑处理层，是 Envoy 核心逻辑处理单元
 -   `route_config`：路由规则配置，即将请求路由到后端的哪个集群
 -   `cluster`：服务提供方集群，Envoy 通过服务发现定位集群成员并获取服务，具体路由到哪个集群成员由负载均衡策略决定
+
+![flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/envoy/envoy-config-flow.jpg)
 
 
 
