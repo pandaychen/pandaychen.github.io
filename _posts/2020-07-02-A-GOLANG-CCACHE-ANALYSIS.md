@@ -12,7 +12,7 @@ tags:
 
 
 ##  0x00    开篇
-[ccache](https://github.com/karlseguin/ccache) 是笔者在项目中使用过的一款 Local-Cache 的高性能组件，作为常用的性能优化手段，选择此库是因为它有如下的特点：
+[ccache](https://github.com/karlseguin/ccache) 是笔者在项目中经常使用的一款 Local-Cache 的高性能组件，作为常用的性能优化手段，选择此库是因为它有如下的特点：
 1.  Value 是 `interface{}` 类型，支持结构化存储
 2.  支持 LRU 算法的 Key 淘汰机制，LRU链记录访问时间顺序，通常使用`list.List`实现
 3.  支持多级 Cache，如 LayeredCache 和 SecondaryCache
@@ -21,7 +21,7 @@ tags:
 在项目，用此库来缓存那些不经常改动且有大量读请求的数据场景。
 
 ##  0x01  CCache 的使用
-使用方法见 [文档](https://github.com/karlseguin/ccache/blob/master/readme.md)，需要注意的一点是，当使用 `Get()` 方法获取值时，需要使用 `Expired()` 方法来判断设置的 key 是否到期，到期后需要调用 `cache.Delete()` 方法进行删除。
+使用方法见 [文档](https://github.com/karlseguin/ccache/blob/master/readme.md)，需要注意的一点是，当使用 `Get()` 方法获取值时，需要使用 `Expired()` 方法来判断设置的 key 是否到期，到期后需要调用 `cache.Delete()` 方法进行删除，开发者可以视场景使用或丢弃过期的 value 值
 
 ##  0x02  CCache 的优化
 
