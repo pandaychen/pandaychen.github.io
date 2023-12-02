@@ -16,33 +16,33 @@ tags:
 -   点对面的消息发送（用户在房间里广播消息）
 
 涉及到业务流程：
--   用户注册&& 用户登录
+-   用户注册 && 用户登录
 -   用户发送消息
 -   用户退出登录
 
-gochat的架构图如下：
+gochat 的架构图如下：
 ![gochat](https://raw.githubusercontent.com/LockGit/gochat/master/architecture/gochat.png)
 
 层级结构如下：
--   对外接口层，主要包含API模块和connect模块，API模块主要给用户提供发送消息（指定人、广播等）的接口，connect模块主要用于长连接的消息推送（注意：用户主动发送消息是不直接通过connect模块的，该模块仅为了生成长连接推送消息用）
+-   对外接口层，主要包含 API 模块和 connect 模块，API 模块主要给用户提供发送消息（指定人、广播等）的接口，connect 模块主要用于长连接的消息推送（注意：用户主动发送消息是不直接通过 connect 模块的，该模块仅为了生成长连接推送消息用）
 -   内部业务逻辑：
 -   消息队列：
--   内部业务Task：独立工作进程
+-   内部业务 Task：独立工作进程
 
 [核心模块](https://github.com/pandaychen/gochat-note/blob/master/main.go#L27)：
--   api模块
--   connect模块：支持tcp/websocket
--   logic模块：处理业务逻辑，分发用户的msg
--   task模块
+-   api 模块
+-   connect 模块：支持 tcp/websocket
+-   logic 模块：处理业务逻辑，分发用户的 msg
+-   task 模块
 
 
 ##  0x01    核心数据结构
-核心数据结构，[代码](https://github.com/LockGit/gochat/tree/master/connect)如下：
+核心数据结构，[代码](https://github.com/LockGit/gochat/tree/master/connect) 如下：
 
 ####    Server
 ```GO
 type Server struct {
-	Buckets   []*Bucket     //包含一个bucket数组
+	Buckets   []*Bucket     // 包含一个 bucket 数组
 	Options   ServerOptions
 	bucketIdx uint32
 	operator  Operator
@@ -50,17 +50,17 @@ type Server struct {
 ```
 
 ####   Bucket
-一个`Bucket`包括了如下重要成员：
--   管理多个`Room`
--   管理多个`Channel`
+一个 `Bucket` 包括了如下重要成员：
+-   管理多个 `Room`
+-   管理多个 `Channel`
 
 ```GO
 type Bucket struct {
 	cLock         sync.RWMutex     // protect the channels for chs
-	chs           map[int]*Channel // map sub key to a channel      //包含一个映射Channel结构的map
+	chs           map[int]*Channel // map sub key to a channel      // 包含一个映射 Channel 结构的 map
 	bucketOptions BucketOptions
-	rooms         map[int]*Room // bucket room channels             //包含一个映射Room结构的map
-	routines      []chan *proto.PushRoomMsgRequest          //包含一个chan *PushRoomMsgRequest的数组（用于向channel异步放入msg）
+	rooms         map[int]*Room // bucket room channels             // 包含一个映射 Room 结构的 map
+	routines      []chan *proto.PushRoomMsgRequest          // 包含一个 chan *PushRoomMsgRequest 的数组（用于向 channel 异步放入 msg）
 	routinesNum   uint64
 	broadcast     chan []byte
 }
@@ -68,24 +68,24 @@ type Bucket struct {
 
 
 ####    Room
-[`Room`](https://github.com/LockGit/gochat/blob/master/connect/room.go#L17)代表某个房间，房间必然有`N`个用户（长连接）
+[`Room`](https://github.com/LockGit/gochat/blob/master/connect/room.go#L17) 代表某个房间，房间必然有 `N` 个用户（长连接）
 ```GOLANG
 type Room struct {
 	Id          int
 	OnlineCount int // room online user count
 	rLock       sync.RWMutex
 	drop        bool // make room is live
-	next        *Channel        //room用来管理channel
+	next        *Channel        //room 用来管理 channel
 }
 ```
 
 
 ####    Channel
-`Channel`代表房间内的长连接，在同一个`Room`内，**多个用户的长连接会话构建成一个doubleLinkList（双向链表）**
+`Channel` 代表房间内的长连接，在同一个 `Room` 内，**多个用户的长连接会话构建成一个 doubleLinkList（双向链表）**
 ```go
 //in fact, Channel it's a user Connect session
 type Channel struct {
-	Room      *Room         //属于哪个room
+	Room      *Room         // 属于哪个 room
 	Next      *Channel      //linklist
 	Prev      *Channel      //linklist
 	broadcast chan *proto.Msg
@@ -97,15 +97,15 @@ type Channel struct {
 
 ![double](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/go-chat/double.png)
 
-注意：`Server`/`Room`/`Channel`/`Bucket`存在相互引用的关系，所以这四个结构定义在同一层级比较合适
+注意：`Server`/`Room`/`Channel`/`Bucket` 存在相互引用的关系，所以这四个结构定义在同一层级比较合适
 
 ####    各个子模块的关系
 
-各个数据结构之前的关系如下图所示，需要注意的是channel（会话）本质上是属于`Bucket`
+各个数据结构之前的关系如下图所示，需要注意的是 channel（会话）本质上是属于 `Bucket`
 ![struct](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/go-chat/gochat-struct.png)
 
 ##	0x02	系统架构
-笔者整理了下gochat的模块调用架构：
+笔者整理了下 gochat 的模块调用架构：
 ![architecture](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/go-chat/gochat.png)
 
 ##	0x03	数据流程
@@ -113,10 +113,30 @@ type Channel struct {
 
 ![timing](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/go-chat/timing.png)
 
+####	用户注册 / 登录流程
+
+![registry](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/go-chat/flow_registry_and_login.png)
+
+####	用户点对点发送消息流程
+
+注意，CONNECT模块是TCP/websocket服务端（用来支持长连接），API是CGI层，LOGIC是RPC实现的服务端
+
+![msg-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/go-chat/flow(C2C).png)
+
 ####    用户发送信息流程
 ![send-message](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/gochat/send-broadcast-message-flow.png)
 
+####	用户注销流程
+
+特别注意的是，在用户从 room 中退出时（此时用户还在 room 里）还需要广播此用户退出的消息给 room 内的所有用户（参考用户发送消息流程）
+
+![logout](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/go-chat/flow_Client_logout.png)
+
 ##	0x04	 核心代码分析
+
+####	CONNECT 模块
+支持 [TCP](https://github.com/pandaychen/gochat-note/blob/master/connect/server_tcp.go#L89)、[websocket 长连接](https://github.com/pandaychen/gochat-note/blob/master/connect/websocket.go#L23)
+
 
 
 ##  0x05	参考

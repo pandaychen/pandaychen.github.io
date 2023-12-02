@@ -194,3 +194,5 @@ docker logs -f  --tail=200 cfb4ba22c969
 -   [Envoy Gateway 指南：架构设计与开源贡献](https://mp.weixin.qq.com/s/XPgP47eb40JJD96cN_gyWQ)
 -   [Envoy Gateway 首个正式开源版本介绍](https://jimmysong.io/blog/envoy-gateway-release/)
 -   [Envoy Gateway 指南：架构设计与开源贡献](https://mp.weixin.qq.com/s/XPgP47eb40JJD96cN_gyWQ)
+-   [HCM upstream/downstream 事件驱动协作下的 HTTP 反向代理流程](https://istio-insider.mygraphql.com/zh-cn/latest/ch2-envoy/arch/http/http-connection-manager/hcm-event-process.html#hcm-upstream-downstream-http)
+- [动态转发代理](https://cloudnative.to/envoy/configuration/http/http_filters/dynamic_forward_proxy_filter.html)
