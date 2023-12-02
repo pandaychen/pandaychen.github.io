@@ -30,10 +30,10 @@ gochat 的架构图如下：
 -   内部业务 Task：独立工作进程
 
 [核心模块](https://github.com/pandaychen/gochat-note/blob/master/main.go#L27)：
--   api 模块
--   connect 模块：支持 tcp/websocket
+-   api 模块：若干外部接口，以CGI方式提供
+-   connect 模块：支持 tcp/websocket的长连接服务端，用来处理上行/下行用户数据
 -   logic 模块：处理业务逻辑，分发用户的 msg
--   task 模块
+-   task 模块：消息队列的消费端，用来异步处理非实时场景下的业务逻辑
 
 
 ##  0x01    核心数据结构
@@ -134,10 +134,16 @@ type Channel struct {
 
 ##	0x04	 核心代码分析
 
-####	CONNECT 模块
-支持 [TCP](https://github.com/pandaychen/gochat-note/blob/master/connect/server_tcp.go#L89)、[websocket 长连接](https://github.com/pandaychen/gochat-note/blob/master/connect/websocket.go#L23)
+代码分析见[gochat-note](https://github.com/pandaychen/gochat-note)，主要是理清了数据走向之后代码就比较简单易懂了，摘录几个要点：
 
-
+-	几个模块的作用，各司其职
+-	Etcd服务发现（客户端）
+-	用户到用户的消息发送/接受流程
+-	用户向房间广播消息的流程
+-	Server（CONNECT）->->Bucket->Room->Channel的结构关联
+-	消息队列，项目中的redis可以扩展为其他的队列类型
+-	除了CONNECT模块，其他的模块都是无状态，可以并发扩展的（得益于服务发现能力）
+-	服务端模块可以考虑加入metrics指标数据监控
 
 ##  0x05	参考
 -	[gochat](https://github.com/LockGit/gochat)
