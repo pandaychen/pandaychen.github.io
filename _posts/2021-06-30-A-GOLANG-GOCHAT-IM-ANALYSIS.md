@@ -145,6 +145,16 @@ type Channel struct {
 -	除了CONNECT模块，其他的模块都是无状态，可以并发扩展的（得益于服务发现能力）
 -	服务端模块可以考虑加入metrics指标数据监控
 
+####	CONNECT模块
+本项目CONNECT模块主要的功能是：
+1.	作为长连接的数据传输
+2.	客户端携带认证票据`authtoken`到CONNECT模块，然后认证成功在CONNECT模块上创建长连接、关联`bucket`、`room`关系
+	-	websocket模块仅处理创建长连接
+	-	tcp模块除了创建长连接之外，还额外加入了[`OpRoomSend`](https://github.com/pandaychen/gochat-note/blob/master/connect/server_tcp.go#L188)广播数据
+
+
+####	LOGIC模块
+
 ##  0x05	参考
 -	[gochat](https://github.com/LockGit/gochat)
 -	[gochat 源码解析](https://blog.csdn.net/zhanglehes/article/details/115676339)
