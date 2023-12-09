@@ -155,6 +155,11 @@ type Channel struct {
 
 ####	LOGIC模块
 
+
+####	TASK 模块
+TASK模块的整体流程如下图：
+![task-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/go-chat/gochat-taskmodule-workflow.png)
+
 ##  0x05	参考
 -	[gochat](https://github.com/LockGit/gochat)
 -	[gochat 源码解析](https://blog.csdn.net/zhanglehes/article/details/115676339)
