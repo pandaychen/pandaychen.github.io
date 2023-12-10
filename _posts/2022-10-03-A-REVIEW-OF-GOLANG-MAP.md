@@ -94,4 +94,5 @@ func main() {
 }
 ```
 
-##	0x	参考
+##	0x03	参考
+-	[应用双缓冲技术完美解决资源数据优雅无损的热加载问题](http://blog.codeg.cn/2016/01/27/double-buffering/)

@@ -68,7 +68,7 @@ func handleSignals(){
 }
 ```
 
-3、重载后，在程序的路径中使用配置<br>
+3、重载后，在程序的路径中使用配置，注意需要调用上面的`Config`方法去获取全局配置（并发安全）<br>
 
 示例代码参见[这里](https://github.com/pandaychen/golang_in_action/tree/master/hotreload)
 
@@ -358,8 +358,6 @@ fmt.Println(os.Readlink("symlink/test.txt.link"))
 -	Apollo
 -	Etcd + viper
 
-
-####	
 
 ##	0x05	参考
 -	[Go 每日一库之 viper](https://juejin.cn/post/6844904051369312264)
