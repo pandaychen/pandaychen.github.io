@@ -10,7 +10,11 @@ tags:
 ---
 
 ## 0x00 前言
+几个概念：
 
+- CRD（Custom Resource Definition）：
+- Controller：
+- 
 
 
 ##  0x0 参考
@@ -18,3 +22,5 @@ tags:
 - [Kubernetes CRD 开发实践](https://lihaoquan.me/posts/k8s-crd-develop/)
 - [如何从零开始编写一个 Kubernetes CRD](https://cloudnative.to/blog/kubernetes-crd-quick-start/)
 - [CRD 就像 Kubernetes 中的一张表](https://zhuanlan.zhihu.com/p/260797410)
+- [KUBERNETES CRD&CONTROLLER入门实践](https://davidlovezoe.club/wordpress/archives/690)
+- [Repository for sample controller. Complements sample-apiserver](https://github.com/kubernetes/sample-controller)
