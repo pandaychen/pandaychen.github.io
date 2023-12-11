@@ -13,8 +13,10 @@ tags:
 ## 0x00 前言
 [go-redis/cache](https://github.com/go-redis/cache) 是一个小而精悍的项目，实现了本地缓存配合 redis（远端缓存）的高性能 cache，可借鉴的地方两点（以 `V8` 版本分析）：
 
-1.  缓存的操作语义（本地 / 远程）
+1.  缓存CRUD的操作语义（本地 / 远程）
 2.  singleflight 机制的应用
+3.	如果value比较大, 可以考虑启用[压缩](https://github.com/go-redis/cache/blob/v8/cache.go#L350)
+4.	如果缓存数据量比较大, 并且对性能有要求的场景, 可以尝试[使用](https://github.com/go-redis/cache/blob/v8/cache.go#L332)msgpack代替json
 
 
 ##  0x01  结构
@@ -49,6 +51,8 @@ type LocalCache interface {
 	Del(key string)
 }
 ```
+
+注意，如果[初始化](https://github.com/go-redis/cache/blob/v8/cache.go#L125)的时候没有传入`LocalCache`相关配置的话，那么这里就退化为Redis的KV操作了，参考[此项目](https://github.com/TencentBlueKing/bk-iam/blob/master/pkg/cache/redis/redis.go#L81)
 
 
 ####	Item 结构
@@ -219,6 +223,31 @@ func (cd *Cache) getSetItemBytesOnce(item *Item) (b []byte, cached bool, err err
 		return nil, false, err
 	}
 	return v.([]byte), cached, nil
+}
+```
+
+
+####	Del方法
+`Delete`的逻辑就比较简单了：
+
+-	如果指定了`LocalCache`，就删除本地缓存的key
+-	再删除Redis的Key
+
+```GO
+func (cd *Cache) Delete(ctx context.Context, key string) error {
+	if cd.opt.LocalCache != nil {
+		cd.opt.LocalCache.Del(key)
+	}
+
+	if cd.opt.Redis == nil {
+		if cd.opt.LocalCache == nil {
+			return errRedisLocalCacheNil
+		}
+		return nil
+	}
+
+	_, err := cd.opt.Redis.Del(ctx, key).Result()
+	return err
 }
 ```
 

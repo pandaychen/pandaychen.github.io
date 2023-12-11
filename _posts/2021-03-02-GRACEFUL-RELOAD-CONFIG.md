@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      Golang如何实现配置文件优雅的热更新
+title:      Hot Reload：Golang如何实现配置文件优雅的热更新
 subtitle:   配置文件的优雅热加载实现以及viper库的机制分析
 date:       2021-03-02
 author:     pandaychen

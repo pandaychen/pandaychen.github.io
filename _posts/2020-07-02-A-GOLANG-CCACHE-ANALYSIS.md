@@ -18,7 +18,7 @@ tags:
 3.  支持多级 Cache，如 LayeredCache 和 SecondaryCache
 4.  采用分段锁及其他一些优化策略来降低锁冲突（Competition）
 
-在项目，用此库来缓存那些不经常改动且有大量读请求的数据场景。
+在项目，用此库来缓存那些不经常改动且有大量读请求的数据场景。本文代码分析基于[V2](https://github.com/karlseguin/ccache/releases/tag/v2.0.8)版本
 
 ##  0x01  CCache 的使用
 使用方法见 [文档](https://github.com/karlseguin/ccache/blob/master/readme.md)，需要注意的一点是，当使用 `Get()` 方法获取值时，需要使用 `Expired()` 方法来判断设置的 key 是否到期，到期后需要调用 `cache.Delete()` 方法进行删除，开发者可以视场景使用或丢弃过期的 value 值

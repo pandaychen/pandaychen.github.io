@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      一个 Http(s) 网关的实现分析
+title:      一个 Http(s) 反向代理（网关）的实现分析
 subtitle:   如何使用几百行代码实现一个高可用的反向代理服务
 date:       2020-03-22
 author:     pandaychen

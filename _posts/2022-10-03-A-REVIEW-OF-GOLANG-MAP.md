@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      内存缓存使用的一些技巧
-subtitle:
+subtitle:	记录项目中遇到的问题及解决方案
 date:       2022-10-03
 author:     pandaychen
 catalog:    true
@@ -93,6 +93,9 @@ func main() {
 	}
 }
 ```
+
+##	0x02	go-cache的使用
+前面文章介绍了不少实用的内存hashtable结构实现，不过如果项目对性能要求不高，可以考虑使用[go-cache](https://github.com/patrickmn/go-cache)，该项目的特点就是足够简单，存取不需要序列化/反序列化
 
 ##	0x03	参考
 -	[应用双缓冲技术完美解决资源数据优雅无损的热加载问题](http://blog.codeg.cn/2016/01/27/double-buffering/)
