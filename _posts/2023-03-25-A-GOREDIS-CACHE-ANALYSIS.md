@@ -142,9 +142,9 @@ func (cd *Cache) set(item *Item) ([]byte, bool, error) {
 }
 ```
 
-####	getBytes 方法
-`getBytes` 方法描述了缓存的 Get 方法的语义，即：
-1.	如果本地缓存有效，那么先查本地缓存，查询命中直接返回
+####	`getBytes` 方法
+`getBytes` 方法描述了缓存的 `Get` 方法的语义，即：
+1.	如果本地缓存有效，那么先查本地缓存，查询命中直接返回（`cd.opt.LocalCache.Get(key)`）
 2.	如 `1` 未命中，则查询 Redis；同时标记 cacheMiss
 3.	如果 Redis 查询命中，那么返回前优先设置本地缓存
 
@@ -165,6 +165,7 @@ func (cd *Cache) getBytes(ctx context.Context, key string, skipLocalCache bool) 
 		return nil, ErrCacheMiss
 	}
 
+	//本地miss，查询redis
 	b, err := cd.opt.Redis.Get(ctx, key).Bytes()
 	if err != nil {
 		if cd.opt.StatsEnabled {
@@ -180,6 +181,7 @@ func (cd *Cache) getBytes(ctx context.Context, key string, skipLocalCache bool) 
 		atomic.AddUint64(&cd.hits, 1)
 	}
 
+	// 本地miss，redis取出成功后，再设置到本地缓存
 	if !skipLocalCache && cd.opt.LocalCache != nil {
 		cd.opt.LocalCache.Set(key, b)
 	}
@@ -195,7 +197,10 @@ func (cd *Cache) getBytes(ctx context.Context, key string, skipLocalCache bool) 
 	-	当 Redis 查询**未命中时**，调用 `set` 方法设置缓存，设置完成返回（succ/failed）
 3.	返回 singleflight 的结果
 
-通过singleflight机制保证，当本地Cache Miss时，并发的请求不会大量透传到Redis，从而保障Redis的可用性
+通过singleflight机制保证，当本地Cache Miss时，并发的请求不会大量透传到Redis，从而保障Redis的可用性；另外注意一点singleflight中包含了两个逻辑：
+1.	取数据`getBytes`
+2.	当上面`1` cache miss时，走`set`逻辑
+3.	返回`set` value结果（正常情况下）
 
 ```golang
 func (cd *Cache) getSetItemBytesOnce(item *Item) (b []byte, cached bool, err error) {
@@ -206,6 +211,7 @@ func (cd *Cache) getSetItemBytesOnce(item *Item) (b []byte, cached bool, err err
 		}
 	}
 
+	//被singleflight包含的逻辑
 	v, err, _ := cd.group.Do(item.Key, func() (interface{}, error) {
 		b, err := cd.getBytes(item.Context(), item.Key, item.SkipLocalCache)
 		if err == nil {
@@ -213,6 +219,7 @@ func (cd *Cache) getSetItemBytesOnce(item *Item) (b []byte, cached bool, err err
 			return b, nil
 		}
 
+		// 正常的错误会走到此：正常情况下大概率是ErrCacheMiss，即本地缓存miss，redis也miss
 		b, ok, err := cd.set(item)
 		if ok {
 			return b, nil

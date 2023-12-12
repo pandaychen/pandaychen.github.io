@@ -97,6 +97,30 @@ func (a *Account) AfterInsert() {
 ##  0x04    Xorm 常用函数及方法
 参考[官方文档](https://gobook.io/read/gitea.com/xorm/manual-zh-CN/)
 
+####    在同一会话（Session）执行
+可以使用xorm 的会话机制（Session）来批量执行SQL，`Session.Exec` 用于执行原始 SQL 命令，并返回受影响的行数以及在操作过程中遇到的错误，如下：
+
+```golang
+session := xorm.NewSession()
+defer session.Close()
+
+sqlStmt := "INSERT INTO users (name, age) VALUES ('userA', 25)"
+affected, err := session.Exec(sqlStmt)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("Inserted %d rows\n", affected)
+
+//more SQLS
+sqlStmt = "UPDATE users SET age = ? WHERE name = ?"
+affected, err = session.Exec(sqlStmt, 30, "userA")
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("Updated %d rows\n", affected)
+```
+
+
 ##  0x05    基于 Xorm 的自动分表
 本小节简单介绍下如何利用 Xorm 实现 Mysql 分表
 -   分表的优点：避免单表数据量过大带来的操作性能瓶颈
