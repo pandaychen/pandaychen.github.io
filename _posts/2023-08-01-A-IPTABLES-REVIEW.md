@@ -262,7 +262,22 @@ iptables -t nat -A PREROUTING -p tcp -d 15.45.23.67 --dport 80 -j DNAT --to-dest
 
 
 ##  0x03 iptables 与 tun 网卡
+笔者使用TUN网卡构建的代理程序，提供的fake-DNS模式会使用到iptables，通常有下面这一条核心配置：
 
+```BASH
+iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 53
+```
+
+上面这条命令的作用是将所有入方向且目标端口为`53`的UDP（DNS请求）数据包重定向到本地的`53`端口，这样做的目的通常是为了在本地搭建一个DNS服务（DNS透明代理程序）来处理所有的DNS请求，参数解释如下：
+
+```text
+-t nat：指定要操作的表为nat表，主要用于网络地址转换
+-A PREROUTING：在PREROUTING链中添加一条新的规则，PREROUTING链用于处理进入本地系统之前的数据包
+-p udp：指定要匹配的数据包协议为UDP
+--dport 53：指定要匹配的数据包的目标端口为53
+-j REDIRECT：指定对匹配的数据包执行REDIRECT动作，REDIRECT动作会将数据包重定向到本地的一个端口
+--to-ports 53：指定重定向的目标端口为53
+```
 
 ##  0x04 iptables 应用收发包流程
 
@@ -318,6 +333,17 @@ ip route add local 0.0.0.0/0 dev lo table 100
 4.  在 `100` 号路由表中添加一条本地路由，将所有数据报文都路由到 `lo` 接口上
 
 所以，上述配置的作用是实现数据报文的透明代理。当数据报文的目的 IP 地址为 `1.1.1.0/24` 时，内核会根据第一条 iptables 规则将数据报文的标记设置为 `1`，并根据第二条 iptables 规则将数据报文重定向到本地的 `1081` 端口上。然后，根据第三条规则，内核将数据报文路由到 `100` 号路由表中，并根据第四条规则将数据报文路由到 `lo` 接口上，从而实现数据报文的透明代理
+现网配置如下，`mangle`链：
+
+![mangle](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/transparentproxy/tproxy/tproxy-mangle-1.png)
+
+`100`号路由表配置：
+
+![router](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/transparentproxy/tproxy/tproxy-router-100.png)
+
+ip rule规则配置：
+
+![rule](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/transparentproxy/tproxy/tproxy-ip-rule-2.png)
 
 
 ####    配置原理：路由辅助
