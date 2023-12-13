@@ -84,6 +84,16 @@ viperInstance.OnConfigChange(func(e fsnotify.Event) {
 })
 ```
 
+更进一步，通常项目中是这样使用viper的：
+
+1.	定义配置文件指针为全局变量（配置lock）
+2.	子goroutine通过全局指针读配置，通过读锁保护
+3.	当`OnConfigChange`触发时，写锁保护重新加载配置
+
+![dev](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/viper/dev.png)
+
+代码示例[在此](https://github.com/pandaychen/golang_in_action/blob/master/viper/viper1.go)
+
 
 ####    viper结构
 viper结构[定义](https://github.com/spf13/viper/blob/v1.13.0/viper.go#L218)如下，注意有个`onConfigChange`成员：
@@ -367,3 +377,4 @@ fmt.Println(os.Readlink("symlink/test.txt.link"))
 -	[Kubernetes ConfigMap hot-reload in action with Viper](https://medium.com/@xcoulon/kubernetes-configmap-hot-reload-in-action-with-viper-d413128a1c9a)
 -	[记录Viper加载远程配置填坑过程](https://blog.huoding.com/2020/08/10/832)
 -	[Kubernetes Pod 中的 ConfigMap 配置更新](https://aleiwu.com/post/configmap-hotreload/)
+-	[viper usage](https://github.com/darjun/go-daily-lib/tree/master/viper)
