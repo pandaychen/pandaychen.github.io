@@ -92,7 +92,7 @@ viperInstance.OnConfigChange(func(e fsnotify.Event) {
 
 ![dev](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/viper/dev.png)
 
-代码示例[在此](https://github.com/pandaychen/golang_in_action/blob/master/viper/viper1.go)
+代码示例[在此](https://github.com/pandaychen/golang_in_action/blob/master/viper/viper1.go)，特别注意，在viper进行动态热更新的时候是否是goroutine安全的
 
 
 ####    viper结构
@@ -368,6 +368,35 @@ fmt.Println(os.Readlink("symlink/test.txt.link"))
 -	Apollo
 -	Etcd + viper
 
+##	0x05	小结
+还有另外一种基于`atomic.Value`[实现](https://pkg.go.dev/sync/atomic#Value)的热更方法，如下：
+
+```GO
+//利用原子操作动态更新配置文件
+var config Value // holds current server configuration
+// Create initial config value and store into config.
+config.Store(loadConfig())	//loadConfig从文件读取配置
+go func() {
+        // Reload config every 10 seconds
+        // and update config value with the new version.
+        for {
+                time.Sleep(10 * time.Second)
+                config.Store(loadConfig())
+        }
+}()
+// Create worker goroutines that handle incoming requests
+// using the latest config value.
+for i := 0; i < 10; i++ {
+        go func() {
+                for r := range requests() {
+                        c := config.Load()
+                        // Handle request r using config c.
+                        _, _ = r, c
+                }
+        }()
+}
+```
+
 
 ##	0x05	参考
 -	[Go 每日一库之 viper](https://juejin.cn/post/6844904051369312264)
@@ -378,3 +407,4 @@ fmt.Println(os.Readlink("symlink/test.txt.link"))
 -	[记录Viper加载远程配置填坑过程](https://blog.huoding.com/2020/08/10/832)
 -	[Kubernetes Pod 中的 ConfigMap 配置更新](https://aleiwu.com/post/configmap-hotreload/)
 -	[viper usage](https://github.com/darjun/go-daily-lib/tree/master/viper)
+-   [golang配置文件热更新](https://www.jianshu.com/p/34f2c8eaa10a)
