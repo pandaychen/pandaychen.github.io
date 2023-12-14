@@ -1,0 +1,81 @@
+---
+layout:     post
+title:      Pprof 调试经验汇总
+subtitle:
+date:       2023-10-03
+author:     pandaychen
+catalog:    true
+tags:
+    - Pprof
+---
+
+
+##  0x00    前言
+
+
+##  0x01    DEBUG 汇总
+
+####    调用图
+
+1.  安装 `yum install graphviz`
+2.  `go tool pprof main http://localhost:8000/debug/pprof/heap` 或者 goroutine，进入命令行
+3.  输入 `svg` 命令即可保存
+
+![]()
+
+
+####    火焰图
+
+1.  安装 `FlameGraph`，如下
+2.  安装 `go-torch`，拿到 `bin` 文件
+3.  使用命令 `go-torch -u http://localhost:6060 -t 30` 生成火焰图
+
+```bash
+git clone https://github.com/brendangregg/FlameGraph.git
+cp FlameGraph/flamegraph.pl /usr/local/bin
+```
+
+##  0x02    一些经验之谈
+
+####    关于调用图
+一般调用图中高亮的部分就能告诉开发者是哪里发生了内存泄漏了（除非内存是预设的 size，如代码中本地初始化一块缓存）
+
+####    部署与编译机器分开
+比如，需要调试 goroutine，部署机器上通过 `curl http://localhost:6060/debug/pprof/goroutine -o goroutine.pprof` 保存运行时配置，然后将 `goroutine.pprof` 传输到编译机器上，通过 `go tool pprof goroutine.pprof` 即可进行调试
+
+
+####    对比前后时间差异
+导出时间点 A 的文件：
+
+```bash
+curl http://localhost:6060/debug/pprof/heap > heap.timeA
+curl http://localhost1:6060/debug/pprof/goroutine> goroutine.timeA
+```
+
+导出时间点 B 的文件：
+
+```BASH
+curl http://localhost:6060/debug/pprof/heap > heap.timeB
+curl http://localhost1:6060/debug/pprof/goroutine> goroutine.timeB
+```
+对比两个时间点的堆栈差异：
+
+```BASH
+go tool pprof --base heap.timeA heap.timeB
+go tool pprof --http :8080 --base heap.timeA heap.timeB
+```
+
+####    `runtime.gopark` 方法的启示
+若查看 goroutine 文件使用 `traces` 命令，发现大量的 `runtime.gopark` 函数调用，那么可以初步认定为程序存在 goroutine 泄漏。`gopark` 函数主要作用就是将当前的 goroutine 放入等待状态，这就意味着 goroutine 被暂时被搁置，也就是被运行时调度器暂停了
+
+-   调用 `acquirem` 函数
+-   获取当前 goroutine 所绑定的 `m`，设置各类所需数据
+-   调用 `releasem` 函数将当前 goroutine 和其 `m` 的绑定关系解除
+-   调用 `park_m` 函数
+-   将当前 goroutine 的状态从 `_Grunning` 切换为 `_Gwaiting` ，也就是等待状态
+-   删除 `m` 和当前 goroutine `m->curg`（简称 `gp`）之间的关联
+-   调用 `mcall` 函数，仅会在需要进行 goroutiine 切换时会被调用
+-   切换当前线程的堆栈，从 `g` 的堆栈切换到 `g0`的堆栈并调用 `fn(g)` 函数
+-   将 `g` 的当前 PC/SP 保存在 `g->sched` 中，以便后续调用 `goready` 函数时可以恢复运行现场
+
+##  参考
