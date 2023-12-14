@@ -14,6 +14,8 @@ tags:
 ##  0x00    前言
 本文探讨下 HTTPS 劫持这个话题，一些常见的网络调试工具 fiddler、charles、surge、wireshark 等，或多或少都是利用了 HTTPS 的 MITM 攻击来实现的。HTTPS 劫持的核心原理是不安全的 CA（或者是非权威 CA） 可以给任何网站 or 域名进行 CA 签名，TLS 服务端解密需要服务端私钥和服务段证书，然而这个不安全的 CA 可以提供用户暂时信任的服务端私钥和证书，通过 TLS-MITM 技术，可以劫持到客户端的明文流量
 
+常用的客户端抓包工具fidder 就是通过客户端信任自建根证书来代理请求
+
 
 ####	基础回顾：TLS 握手
 
@@ -96,6 +98,20 @@ TLS `1.3` 握手的基本步骤为：
 这里，要注意一个细节，在 `CONNECT 10.1.1.1:443 HTTP/1.1` 中，使用 IP 地址是完全合法的（并没有使用域名 / 远程主机名），这里 Mitmproxy 实现特殊的机制，可以平滑过度上游的证书嗅探。一旦发现 `CONNECT` 请求，就会暂停会话的客户端部分，并同时启动与服务器的连接。完成与服务器的 TLS 握手，并检查它使用的证书。然后使用上游证书中的 Common Name 为客户端生成虚拟证书。现在就有了正确的主机名呈现给客户端，即使它从未指定。
 
 参考 [Complication 1: What’s the remote hostname?](https://docs.mitmproxy.org/stable/concepts-howmitmproxyworks/#complication-1-whats-the-remote-hostname)
+####	Explicit模式：开发思路
+根据上面描述的流程，至少需要如下子模块（以Linux客户端为例）：
+
+1.	一个伪造的CA根证书以及对应的fake证书池，为每个域名都单独生成一个fake证书
+1.	一个普通的HTTPS CONNECT代理，客户端设置`export https_proxy="http://x.x.x.x:8080"`，把 https 请求代理到该服务
+2.	代理服务收到此 https 请求的 Method 是 `CONNECT`，需要再开启一个伪造的TLS服务，第一层的代理把请求转发到这个伪造的服务中，因为这个伪造的TLS服务使用了上面`1`中信任的自签根证书去签发伪造的证书，所以目标请求就会认为当前伪造的服务就是真实的服务地址，可以 Mock 到对应的 https 请求
+
+####	证书存储（重要）
+通常在项目中的做法是，先由系统生成一个 CA 证书，然后导入到将要被代理的客户端（Windows/Linux等）中，让其信任，随后再针对将要代理的请求动态生成 HTTPS 证书，通常是针对每个被代理的域名都生成一个唯一的TLS证书，该证书一般如下：
+
+```text
+
+```
+
 
 ##  0x02    MTTM 介绍：Transparent 模式（透明劫持）
 该模式即透明代理劫持 HTTPS，区别于依赖 HTTP Proxy 协议 / 功能的代理劫持，自然就是不需要设置代理，通常在路由器把流量设置到目标服务器上，目标服务器来进行 HTTPS 劫持。
@@ -1011,8 +1027,27 @@ func (proxy *Proxy) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 ![mitm](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/mitm/mitm-project/https-mitm.png)
 
 
-##	0x07	：参考实现：ouqiang/goproxy（MITM实现）
+##	0x07	参考实现：ouqiang/goproxy（MITM实现）
 [中间人代理, 解密HTTPS](https://github.com/ouqiang/goproxy#%E4%B8%AD%E9%97%B4%E4%BA%BA%E4%BB%A3%E7%90%86-%E8%A7%A3%E5%AF%86https)，用户可以自行实现`Delegate`结构，用于在mitm中实现自定义的[逻辑](https://github.com/ouqiang/goproxy)
+
+使用方法如下，初始化中需要传入[`WithDecryptHTTPS`](https://github.com/ouqiang/goproxy/blob/master/proxy.go#L191)方法，用于开启HTTPS解密以及fake证书存储
+
+```GO
+func main() {
+	//cache需要开发者自行实现
+	proxy := goproxy.New(goproxy.WithDecryptHTTPS(&Cache{}))
+	server := &http.Server{
+		Addr:         ":8080",
+		Handler:      proxy,
+		ReadTimeout:  1 * time.Minute,
+		WriteTimeout: 1 * time.Minute,
+	}
+	err := server.ListenAndServe()
+	if err != nil {
+		panic(err)
+	}
+}
+```
 
 ```go
 type Delegate interface {
@@ -1301,6 +1336,10 @@ func (p *Proxy) DoRequest(ctx *Context, responseFunc func(*http.Response, error)
 -   [mitm - mitm is a SSL-capable man-in-the-middle proxy for use with golang net/http](https://github.com/kr/mitm)
 -	[About mitmproxy implemented with golang](https://github.com/lqqyt2423/go-mitmproxy)
 
+
+##	0x07	
+核心原理：不安全的CA导致信任链崩坏
+
 ##  0x06    参考
 -   [How mitmproxy works](https://docs.mitmproxy.org/stable/concepts-howmitmproxyworks/)
 -   [mitmproxy docs](https://docs.mitmproxy.org/stable/)
@@ -1317,3 +1356,4 @@ func (p *Proxy) DoRequest(ctx *Context, responseFunc func(*http.Response, error)
 - [TLS 握手期间会发生什么？SSL 握手](https://www.cloudflare-cn.com/learning/ssl/what-happens-in-a-tls-handshake/)
 - [All MITM attacks in one place.](https://github.com/frostbits-security/MITM-cheatsheet)
 - [Does https prevent man in the middle attacks by proxy server?](https://security.stackexchange.com/questions/8145/does-https-prevent-man-in-the-middle-attacks-by-proxy-server)
+- [使用 cert-manager 签发免费证书](https://cloud.tencent.com/document/product/457/49368)
