@@ -966,7 +966,7 @@ func (m *middle) intercept(pipeServerConn *pipeConn) {
 
 -	首先，`middle.dial`中，构建pipe连接，然后通过`go m.intercept(pipeServerConn)`开启异步处理tls连接
 -	第二步，`middle.intercept`中`m.listener.connChan <- pipeServerConn`，将连接`pipeServerConn`异步丢给`m.listener`
--	第三步，`middleListener.Accept`中收到此连接`pipeServerConn`，会触发`middle.server.GetCertificate`的逻辑，进行TLS握手，这中间会调用[`connCtx.tlsHandshake`](https://github.com/lqqyt2423/go-mitmproxy/blob/main/proxy/connection.go#L247)方法（TLS握手，证书兼容性协商等操作）
+-	第三步，`middleListener.Accept`中收到此连接`pipeServerConn`，会触发`middle.server.TLSConfig.GetCertificate`的逻辑，进行TLS握手，这中间会调用[`connCtx.tlsHandshake`](https://github.com/lqqyt2423/go-mitmproxy/blob/main/proxy/connection.go#L247)方法（TLS握手，证书兼容性协商等操作）--- 这一步比较隐晦，比较关键
 -	TLS握手完成后，然后流程到达`middle.ServeHTTP`，这里可以捕获到客户端https的真正的请求（`req`）
 -	最后，`middle.ServeHTTP`方法中，在对`req`设置真实的请求后，会调用`m.proxy.ServeHTTP(res, req)`，完成最后的逻辑
 
