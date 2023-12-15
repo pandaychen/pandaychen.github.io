@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      中间人机制 review
+title:      MITM：中间人机制 review
 subtitle:   如何优雅的实现 https mitm（透明劫持）
 date:       2023-08-01
 author:     pandaychen
@@ -246,6 +246,53 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 	//这段代码比较有意思
 	http.Serve(&oneShotListener{wc}, p.Wrap(rp))
 	<-ch
+}
+```
+
+简单看下`oneShotDialer`、`oneShotListener`的实现，`oneShotListener`是一个很常用的技巧
+
+```go
+// A oneShotListener implements net.Listener whos Accept only returns a
+// net.Conn as specified by c followed by an error for each subsequent Accept.
+type oneShotListener struct {
+	c net.Conn
+}
+
+func (l *oneShotListener) Accept() (net.Conn, error) {
+	if l.c == nil {
+		return nil, errors.New("closed")
+	}
+	c := l.c
+	l.c = nil
+	return c, nil
+}
+
+func (l *oneShotListener) Close() error {
+	return nil
+}
+
+func (l *oneShotListener) Addr() net.Addr {
+	return l.c.LocalAddr()
+}
+```
+
+```GO
+// A oneShotDialer implements net.Dialer whos Dial only returns a
+// net.Conn as specified by c followed by an error for each subsequent Dial.
+type oneShotDialer struct {
+	c  net.Conn
+	mu sync.Mutex
+}
+
+func (d *oneShotDialer) Dial(network, addr string) (net.Conn, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.c == nil {
+		return nil, errors.New("closed")
+	}
+	c := d.c
+	d.c = nil
+	return c, nil
 }
 ```
 
