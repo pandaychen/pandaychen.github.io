@@ -106,11 +106,150 @@ TLS `1.3` 握手的基本步骤为：
 2.	代理服务收到此 https 请求的 Method 是 `CONNECT`，需要再开启一个伪造的TLS服务，第一层的代理把请求转发到这个伪造的服务中，因为这个伪造的TLS服务使用了上面`1`中信任的自签根证书去签发伪造的证书，所以目标请求就会认为当前伪造的服务就是真实的服务地址，可以 Mock 到对应的 https 请求
 
 ####	证书存储（重要）
-通常在项目中的做法是，先由系统生成一个 CA 证书，然后导入到将要被代理的客户端（Windows/Linux等）中，让其信任，随后再针对将要代理的请求动态生成 HTTPS 证书，通常是针对每个被代理的域名都生成一个唯一的TLS证书，该证书一般如下：
+通常在项目中的做法是，先由系统生成一个 CA 证书，然后导入到将要被代理的客户端（Windows/Linux等）中，让其信任，随后再针对将要代理的请求动态生成 HTTPS 证书，通常是针对每个被代理的域名都生成一个唯一的TLS证书，该证书（`www.baidu.com`）一般如下：
 
 ```text
-
+-----BEGIN CERTIFICATE-----
+MIIDMDCCAhigAwIBAgIGD3wwj1UAMA0GCSqGSIb3DQEBCwUAMCgxEjAQBgNVBAoT
+CW1pdG1wcm94eTESMBAGA1UEAxMJbWl0bXByb3h5MB4XDTIzMTIxMzAyMTUwNloX
+DTI0MTIxNDAyMTUwNlowLDESMBAGA1UEChMJbWl0bXByb3h5MRYwFAYDVQQDEw13
+d3cuYmFpZHUuY29tMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzGEg
+1ZW7oJtmhQ2wrr7TsiuyWxgUBfqmRGRmMeHstioDPAkgKcuYCLD7O5a3qdJDo34A
+t4WhfI1/i4lLFIv7QrPMFH4jMDMG+723hnNfQdVw4bvY7lh3HRMF6a2K0L4zHryn
+YUhmiM5dsHJPSy+wkvZ85pKEhlq1cDU3sjlEfXNk+qWcXmTnuu5yNk2eVoksIYz4
+OR0TwelQ1xSlbTdz15+steLtqxTz1KrCiZYBzxOxX0WCo7NJasMZAPkmEOZLGcMS
+iIlxQ8HMG9uNmhzDsmxGLPcvM0ei7jUOfEAdQcRRarJle4YAY5iMkZRoEBngamxn
+I7mq5NDoVe/gBsc1eQIDAQABo1wwWjAdBgNVHSUEFjAUBggrBgEFBQcDAQYIKwYB
+BQUHAwIwHwYDVR0jBBgwFoAUIKS/1e9D1LrbGFEWA5T95XsPnbcwGAYDVR0RBBEw
+D4INd3d3LmJhaWR1LmNvbTANBgkqhkiG9w0BAQsFAAOCAQEAu8NtTW/cClYII6PL
+NOhRJdloIU6CGqgoQT7JNIxhSBm3CVaTJsVZvdBJn3QQnXh0x/3M3x5+jtagK219
+SxEkPCljj4HXOA7PKN50z7TwmoTmFkdNFMkSSFCVzqPBQRpsqcDGrKD0lj8xPf5d
+qjPfXCZZ9q4achCV6jXz8OEkrCpivU0dva753TkG+C+MnsX9D0s2FbeJYutqEbxn
+s24S/1aqGtV9CbADJTflxOtmyKYKS1E0fDDXbvTGfsIVkALU4S33TybkaD5WpRoT
+/j8KcZXDqx9OrJYNDRwP6J2Zh29fBsVpqEFpqYH+CitxihtlVk6hFOeAkNq1jie9
+FeJkWA==
+-----END CERTIFICATE-----
 ```
+
+证书存储模块的设计也很重要，要考虑下面几个关键点：
+1.	证书存储使用的中间件，线上系统可以考虑使用redis/[cert-manager](https://cert-manager.io/)
+2.	自动fake证书的签发时间？根证书的有效时间？从实践看，这个时间还是有些讲究，比如此issue[根证书最长时间不能大于18个月](https://github.com/ouqiang/goproxy/pull/22/files)
+3.	通过根证书签发伪造的证书（SNI）的方法
+
+
+####	fake-TLS-service构建
+从MITM原理可知，针对每个客户端的HTTPS请求（唯一一个域名），代理都需要开启一个fake-tls-service来代理该HTTPS请求，所以这里如何高性能托管客户端的HTTPS访问？一个连接开启一个带端口的tls-server肯定是不现实的，肯定有更优雅的处理方式
+
+其次，在代理中fake-tls-server如何与客户端进行TLS握手？以[kr/mitm](https://github.com/kr/mitm)项目为例：
+
+看[`serveConnect`](https://github.com/kr/mitm/blob/master/mitm.go#L53C17-L53C29)方法的实现：
+
+1.  正常 CONNECT 代理（等待客户端的第一个HTTP `CONNECT xxxx`代理请求过来）
+2.  构建fake-tls-server需要的`tls.Config`，证书的选择一般采用SNI动态方式来获取（创建）
+3.	使用上一步的fake-tls-server与客户端进行TLS握手，参考`handshake`代码，注意其中的`tls.Server(raw, config)`
+4.	至此构建了两个conn：`sconn`和`cconn`，接下来通过`oneShotDialer`、`oneShotListener`配合`httputil.ReverseProxy`实现原始请求代理
+
+```go
+// handshake hijacks w's underlying net.Conn, responds to the CONNECT request
+// and manually performs the TLS handshake. It returns the net.Conn or and
+// error if any.
+func handshake(w http.ResponseWriter, config *tls.Config) (net.Conn, error) {
+	// 提取客户端的原始TCP连接
+	raw, _, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		http.Error(w, "no upstream", 503)
+		return nil, err
+	}
+	if _, err = raw.Write(okHeader); err != nil {
+		raw.Close()
+		return nil, err
+	}
+
+	// 利用tls.Server
+	conn := tls.Server(raw, config)
+	err = conn.Handshake()
+	if err != nil {
+		conn.Close()
+		raw.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+func httpsDirector(r *http.Request) {
+	r.URL.Host = r.Host
+	r.URL.Scheme = "https"
+}
+
+func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
+	var (
+		err   error
+		sconn *tls.Conn
+		name  = dnsName(r.Host)
+	)
+
+	if name == "" {
+		log.Println("cannot determine cert name for " + r.Host)
+		http.Error(w, "no upstream", 503)
+		return
+	}
+
+	provisionalCert, err := p.cert(name)
+	if err != nil {
+		log.Println("cert", err)
+		http.Error(w, "no upstream", 503)
+		return
+	}
+
+	sConfig := new(tls.Config)
+	if p.TLSServerConfig != nil {
+		*sConfig = *p.TLSServerConfig
+	}
+	sConfig.Certificates = []tls.Certificate{*provisionalCert}
+	sConfig.GetCertificate = func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		cConfig := new(tls.Config)
+		if p.TLSClientConfig != nil {
+			*cConfig = *p.TLSClientConfig
+		}
+		cConfig.ServerName = hello.ServerName
+		sconn, err = tls.Dial("tcp", r.Host, cConfig)
+		if err != nil {
+			log.Println("dial", r.Host, err)
+
+			return nil, err
+		}
+		return p.cert(hello.ServerName)
+	}
+
+	cconn, err := handshake(w, sConfig)
+	if err != nil {
+		log.Println("handshake", r.Host, err)
+		return
+	}
+	defer cconn.Close()
+	if sconn == nil {
+		log.Println("could not determine cert name for " + r.Host)
+		return
+	}
+	defer sconn.Close()
+
+	od := &oneShotDialer{c: sconn}
+	rp := &httputil.ReverseProxy{
+		Director:      httpsDirector,
+		Transport:     &http.Transport{DialTLS: od.Dial},
+		FlushInterval: p.FlushInterval,
+	}
+
+	ch := make(chan int)
+	wc := &onCloseConn{cconn, func() { ch <- 0 }}
+
+	//这段代码比较有意思
+	http.Serve(&oneShotListener{wc}, p.Wrap(rp))
+	<-ch
+}
+```
+
+####	安装（信任）根证书
 
 
 ##  0x02    MTTM 介绍：Transparent 模式（透明劫持）
