@@ -218,7 +218,7 @@ gc 39 @64.199s 02010.046+29024+0.32 ms clock, 1.1+0/18/3195+7.7 ms cpu, 15532->1
 
 ####    工具5：压测工具wrk
 
-####    工具6：番外
+####    工具6：番外（实用）
 摘自[Hi, 使用多年的go pprof检查内存泄漏的方法居然是错的](https://colobu.com/2019/08/20/use-pprof-to-compare-go-memory-usage/)一文，是一个不错的思路。
 
 pprof也可以比较两个时间点的分配的内存的差值，通过比较差值，就容易看到哪些地方产生的内存残留的比较多，没有被内存释放，极有可能是内存泄漏的点。通过下面的方式产生两个时间点的堆的profile,之后使用pprof工具进行分析。
@@ -234,7 +234,8 @@ pprof也可以比较两个时间点的分配的内存的差值，通过比较差
 ##  0x02    pprof 实战
 
 ####    prepare
-需要准备如下工具：
+需要准备如下工具：<br>
+
 1、FlameGraph 脚本 <br>
 ```bash
 git clone https://github.com/brendangregg/FlameGraph.git
@@ -606,4 +607,4 @@ func (b *Buffer) grow(n int) int {
 -   [内存泄漏（增长）火焰图](https://heapdump.cn/article/1661654)
 -   [go tool pprof](https://github.com/hyper0x/go_command_tutorial/blob/master/0.12.md)
 -   [Hi, 使用多年的go pprof检查内存泄漏的方法居然是错的?!](https://colobu.com/2019/08/20/use-pprof-to-compare-go-memory-usage/)
--   [Go语言实战笔记（二十二）| Go 基准测试](https://www.flysnow.org/2017/05/21/go-in-action-go-benchmark-test.html)
+-   [Go语言实战笔记（二十二）：Go 基准测试](https://www.flysnow.org/2017/05/21/go-in-action-go-benchmark-test.html)
