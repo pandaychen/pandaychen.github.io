@@ -18,11 +18,21 @@ tags:
 prometheus 的整体架构如下：
 ![architecture](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/architecture.png)
 
+Prometheus 的基本原理是通过 HTTP 协议周期性抓取被监控组件的状态，任意组件只要提供对应的 HTTP 接口就可以接入监控。不需要任何 SDK 或者其他的集成过程，非常适合做虚拟化环境监控系统，比如 Docker、Kubernetes 等；输出被监控组件信息的 HTTP 接口通常称为 Exporter
+
+- 支持多维数据模型：由度量名和键值对组成的时间序列数据
+- 内置时间序列数据库 TSDB
+- 支持 PromQL 查询语言，可以完成非常复杂的查询和分析，对图表展示和告警非常有意义
+- 支持 HTTP 的 Pull 方式采集时间序列数据
+- 支持 PushGateway 采集瞬时任务的数据
+- 支持服务发现和静态配置两种方式发现目标
+- 支持接入 Grafana
+
 ##  0x01  Prometheus 介绍
 
-为何要使用Prometheus？
+为何要使用 Prometheus？
 
-传统监控依赖实时指标，通过采集的日志流处理写入时序数据库，一般流程较长，任何一环出问题会导致监控不可用；其次存储成本和查询速度也需要考虑，假设每次的请求耗时都需要保存，那么这个记录量级可能非常大，影响查询时性能。Prometheus直接采集服务暴露的指标，简化中间流程，通过提供client在采集端做了预聚合，**虽然这样损失了精确度，但大大减少数据量以及提升查询速度**
+传统监控依赖实时指标，通过采集的日志流处理写入时序数据库，一般流程较长，任何一环出问题会导致监控不可用；其次存储成本和查询速度也需要考虑，假设每次的请求耗时都需要保存，那么这个记录量级可能非常大，影响查询时性能。Prometheus 直接采集服务暴露的指标，简化中间流程，通过提供 client 在采集端做了预聚合，** 虽然这样损失了精确度，但大大减少数据量以及提升查询速度 **
 
 ####  指标暴露
 对应于监控系统的两种方式，针对服务端而言：
@@ -57,7 +67,7 @@ Prometheus 的从被监控服务的注册到指标抓取到指标查询的流程
 -  静态注册：配置文件配置采集指标的 IP + 端口，配合 Prometheus 提供的 `reload` API 以及 `--web.enable-lifecycle` 参数实现热更新
 -  动态注册：配置文件配置 endpoint 地址，类似于服务发现（支持 Consul/DNS / 文件 / K8S 等多种服务发现机制）
 
-通过声明Prometheus配置文件中的`scrape_configs`选项，指定Prometheus在运行时要拉取指标的目标，目标实例需要实现一个可以被Prometheus进行轮询的endpoint，而要实现如此接口，可以用来给Prometheus提供监控样本数据的独立程序一般被称作为Exporter，比如用来拉取操作系统指标的Node Exporter，它会从os收集硬件指标，提供Prometheus来拉取。配置示例如下：
+通过声明 Prometheus 配置文件中的 `scrape_configs` 选项，指定 Prometheus 在运行时要拉取指标的目标，目标实例需要实现一个可以被 Prometheus 进行轮询的 endpoint，而要实现如此接口，可以用来给 Prometheus 提供监控样本数据的独立程序一般被称作为 Exporter，比如用来拉取操作系统指标的 Node Exporter，它会从 os 收集硬件指标，提供 Prometheus 来拉取。配置示例如下：
 
 ```yaml
 # A scrape configuration containing exactly one endpoint to scrape.
@@ -103,7 +113,7 @@ scrape_configs:
 Prometheus 对指标的抓取采取主动 PULL 方式，即周期性的请求被监控服务暴露的 metrics 接口或者是 PushGateway，从而获取到 Metrics 指标，默认时间是 `15s` 抓取一次；抓取到的指标会被以时间序列的形式保存在内存中，并且定时刷到磁盘上（默认 `2h`）
 
 ####  0x02  基础：Metrics
-在 Prometheus 内部，所有采样样本都是以时间序列的形式保存在时序数据库中，本小节详细介绍下`4`种指标类型已经使用场景。
+在 Prometheus 内部，所有采样样本都是以时间序列的形式保存在时序数据库中，本小节详细介绍下 `4` 种指标类型已经使用场景。
 
 #### 数据模型
 Prometheus 采集的所有指标都是以时间序列的形式进行存储，每一个时间序列有三部分组成：
@@ -116,7 +126,7 @@ Prometheus 采集的所有指标都是以时间序列的形式进行存储，每
 -  时间戳：描述当前时间序列的时间（ms）
 -  样本值：当前监控指标的具体数值，比如 `http_request_total` 的值就代表请求数是多少
 
-标签label是使同一个时间序列有了不同维度的识别。例如`http_requests_total{method="GET"}` 表示所有HTTP 请求中的GET 请求。当`method="post"` 时，则为新的一个metric，表示POST请求
+标签 label 是使同一个时间序列有了不同维度的识别。例如 `http_requests_total{method="GET"}` 表示所有 HTTP 请求中的 GET 请求。当 `method="post"` 时，则为新的一个 metric，表示 POST 请求
 
 ####  指标的格式
 格式如下：
@@ -135,14 +145,14 @@ Prometheus 采集的所有指标都是以时间序列的形式进行存储，每
 ####  指标类型
 Prometheus 底层存储上其实并没有对指标做类型的区分，都是以时间序列的形式存储，但是为了方便用户的使用和理解不同监控指标之间的差异，Prometheus 定义计数器 counter / 仪表盘 gauge / 直方图 histogram 以及摘要 summary 这四种 Metrics 类型。
 
-**Gauge/Counter 是数值指标，代表数据的变化情况，Histogram/Summary 是统计类型的指标，表示数据的分布情况**
+**Gauge/Counter 是数值指标，代表数据的变化情况，Histogram/Summary 是统计类型的指标，表示数据的分布情况 **
 
 ![four](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/four-metrics-type.png)
 
 下面分别介绍指标类型，部分配图来源于 [一文带你了解 Prometheus](https://cloud.tencent.com/developer/article/1999843)。
 
 #### Gauge
-Gauge 理解为（待监控的）瞬时状态，如当前时刻 CPU 的使用率、内存的使用量、硬盘的容量以及 GC 次数等等。因为此类型的特点是随着时间的推移不断，值（相对而言）没有规则的变化。在 Kratos 框架中，针对 RPC 每次请求的延迟（latency）就是一个 Gauge，一段时间内的 Gauge 就组合成了一个 [RollingGauges](https://github.com/go-kratos/kratos/blob/master/pkg/stat/metric/rolling_gauge.go#L10)；此外，Gauge 可增可减，与 Counter 不一样，在 Prometheus 上通过 Gauge，**可以不用经过内置函数直观的反映数据的变化情况**
+Gauge 理解为（待监控的）瞬时状态，如当前时刻 CPU 的使用率、内存的使用量、硬盘的容量以及 GC 次数等等。因为此类型的特点是随着时间的推移不断，值（相对而言）没有规则的变化。在 Kratos 框架中，针对 RPC 每次请求的延迟（latency）就是一个 Gauge，一段时间内的 Gauge 就组合成了一个 [RollingGauges](https://github.com/go-kratos/kratos/blob/master/pkg/stat/metric/rolling_gauge.go#L10)；此外，Gauge 可增可减，与 Counter 不一样，在 Prometheus 上通过 Gauge，** 可以不用经过内置函数直观的反映数据的变化情况 **
 ![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/gauges-1.png)
 下图表示堆可分配的空间大小：
 ![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/gauges-3.png)
@@ -153,7 +163,7 @@ Gauge 理解为（待监控的）瞬时状态，如当前时刻 CPU 的使用率
 ![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/guage-2.png)
 
 
-Gauge 的定义如下，对比 Counter 的定义，增加了 `Dec` 和 `Sub` 这样的减少数值的接口，同时提供了 `Set` 和 `SetToCurrentTime` 这样的直接设置数值的接口，可以用来监控goroutine 的数量、CPU 使用率、内存使用率（量）等可增可减的指标：
+Gauge 的定义如下，对比 Counter 的定义，增加了 `Dec` 和 `Sub` 这样的减少数值的接口，同时提供了 `Set` 和 `SetToCurrentTime` 这样的直接设置数值的接口，可以用来监控 goroutine 的数量、CPU 使用率、内存使用率（量）等可增可减的指标：
 
 ```golang
 type Gauge interface {
@@ -216,14 +226,14 @@ httpReqs := prometheus.NewCounterVec(
     []string{"code", "method"},
 )
 prometheus.MustRegister(httpReqs)
-//以打标签的方式上报
+// 以打标签的方式上报
 httpReqs.WithLabelValues("404", "POST").Add(10)
 ```
 
 指定的 metric_name 是 `http_requests_total`，分成两个维度（`code` / `method`），在 `(404, POST)` 维度上上报了一个数据值为 `10`
 
 ####  Histograms
-尽管能够通过 gauge 监控可增可减的值，并可以在查询时求出其一段时间内的平均值，但是对于一些典型的场景是请求时延、响应数据量大小等，平均值可能并不能很好地反映问题（此类场景，对于开发者更关注的或许是P90/P95/P99等）。Histogram 可以解决这个问题，它并不是记录一个值的变化情况，而是将被观测到的值划分进某一个区间中，称为桶（Bucket）。
+尽管能够通过 gauge 监控可增可减的值，并可以在查询时求出其一段时间内的平均值，但是对于一些典型的场景是请求时延、响应数据量大小等，平均值可能并不能很好地反映问题（此类场景，对于开发者更关注的或许是 P90/P95/P99 等）。Histogram 可以解决这个问题，它并不是记录一个值的变化情况，而是将被观测到的值划分进某一个区间中，称为桶（Bucket）。
 
 Histograms 意为直方图，Histogram 会在一段时间范围内对数据进行采样（通常是请求持续时间或响应大小等），并将其计入可配置的存储桶（Bucket）中。可以观察到指标在各个不同的区间范围的分布情况，可以观察到请求耗时在各个桶的分布。如下图：
 
@@ -236,7 +246,7 @@ Histograms 意为直方图，Histogram 会在一段时间范围内对数据进�
 
 此外，在直方图中，还可以通过 `histogram_quantile` 函数求出百分位数，比如 `P50`/`P90`/`P99` 等数据
 
-Histogram的定义如下，可以看到 Histogram 只有一个 `Observe` 方法：
+Histogram 的定义如下，可以看到 Histogram 只有一个 `Observe` 方法：
 ```GOLANG
 type Histogram interface {
     Metric
@@ -247,7 +257,7 @@ type Histogram interface {
 }
 ```
 
-Histogram和Counter/Gauge的上报模型不同，在 Counter 中，一个 Counter 对应了一个时间序列，当创建一个 Counter 然后上报数据，它影响的时间序列是确定的。而 **Histogram 则会帮我们创建多个时间序列，当调用 `Observe` 方法时，被观测到的值会被放进预先划分好的桶中，每一个桶中并不记录被观测的值，而是对其进行计数**。代码示例如下：
+Histogram 和 Counter/Gauge 的上报模型不同，在 Counter 中，一个 Counter 对应了一个时间序列，当创建一个 Counter 然后上报数据，它影响的时间序列是确定的。而 **Histogram 则会帮我们创建多个时间序列，当调用 `Observe` 方法时，被观测到的值会被放进预先划分好的桶中，每一个桶中并不记录被观测的值，而是对其进行计数 **。代码示例如下：
 
 ```GOLANG
 temps := prometheus.NewHistogram(prometheus.HistogramOpts{
@@ -269,7 +279,7 @@ temps.Write(metric)
 fmt.Println(proto.MarshalTextString(metric))
 ```
 
-桶的指定可以直接指定，如` Buckets: []float64{0,2.5,5,7.5,10}`，但是**务必注意，只有设定了合适的桶大小（分布），Histogram的指标才更有意义**，如果桶的设定不合理，那么结果就不一定靠谱。那假设开发者对一个数据没有什么先验知识，那么是否有更准确的方式计算出这个数据呢？Prometheus 给出的方案就是用 Summary。
+桶的指定可以直接指定，如 ` Buckets: []float64{0,2.5,5,7.5,10}`，但是 ** 务必注意，只有设定了合适的桶大小（分布），Histogram 的指标才更有意义 **，如果桶的设定不合理，那么结果就不一定靠谱。那假设开发者对一个数据没有什么先验知识，那么是否有更准确的方式计算出这个数据呢？Prometheus 给出的方案就是用 Summary。
 
 ####  Summary
 Summary 也是用来做统计分析的，和 Histogram 区别在于，Summary 直接存储的就是百分位数，如下所示：可以直观的观察到样本的中位数，如 `P90` 和 `P99`：
@@ -314,11 +324,11 @@ fmt.Println(proto.MarshalTextString(metric))
 在大多数情况下人们都倾向于使用某些量化指标的平均值，例如 CPU 的平均使用率、页面的平均响应时间。这种方式的问题很明显，以系统 API 调用的平均响应时间为例：如果大多数 API 请求都维持在 100ms 的响应时间范围内，而个别请求的响应时间需要 `5s`，那么就会导致某些 WEB 页面的响应时间落到中位数的情况，而这种现象被称为长尾问题。为了区分是平均的慢还是长尾的慢，最简单的方式就是按照请求延迟的范围进行分组。例如，统计延迟在 `0~10ms` 之间的请求数、延迟在 `10~20ms` 之间的请求数等等。通过这种方式可以快速分析系统慢的原因。Histogram 和 Summary 都是为了能够解决这样问题的存在，通过 Histogram 和 Summary 类型的监控指标，可以快速了解监控样本的分布情况。
 ####  小结
 - `Counter`（计数器）：表示一个单调递增的值，如请求总数、错误总数等。它只能增加，不能减少（除非系统重启）
-- `Gauge`（仪表盘）：表示一个可以任意增减的值，如当前内存使用量、CPU利用率等
-- `Histogram`（直方图）：表示一组数据的分布情况，如请求延迟的分布。它包含多个bucket（桶），每个bucket对应一个值范围，以及落入该范围的样本数量
-- `Summary`（摘要）：与直方图类似，也表示一组数据的分布情况，但它提供了更精确的分位数（如中位数、95%分位数等）计算
+- `Gauge`（仪表盘）：表示一个可以任意增减的值，如当前内存使用量、CPU 利用率等
+- `Histogram`（直方图）：表示一组数据的分布情况，如请求延迟的分布。它包含多个 bucket（桶），每个 bucket 对应一个值范围，以及落入该范围的样本数量
+- `Summary`（摘要）：与直方图类似，也表示一组数据的分布情况，但它提供了更精确的分位数（如中位数、95% 分位数等）计算
 
-当Prometheus采集这些指标时，会获取这些指标在当前时间点的瞬时值
+当 Prometheus 采集这些指标时，会获取这些指标在当前时间点的瞬时值
 
 ## 0x03  指标操作 / 开发
 
@@ -357,7 +367,7 @@ go_gc_duration_seconds_count{}[5m] offset 1d #查询一天前此刻 5 分钟前�
 
 ![ql-range-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/promql-range-1.png)
 
-注意：需要用内置的函数将Range Vector换为一个瞬时向量后才能被绘制。例如每 `1` 分钟的 HTTP 请求量（查看一分钟范围内的变化量），那么以用 `increase` 函数：
+注意：需要用内置的函数将 Range Vector 换为一个瞬时向量后才能被绘制。例如每 `1` 分钟的 HTTP 请求量（查看一分钟范围内的变化量），那么以用 `increase` 函数：
 
 ```text
 increase(http_requests_total [1m])
@@ -418,14 +428,14 @@ sum(rate(demo_api_request_duration_seconds_count{job="demo", method="GET", statu
 ![sum-4](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/sum-4.png)
 再列举例子：
 ```text
-http_requests_total { code=200, method=GET }
-http_requests_total { code=200, method=GET }
-http_requests_total { code=404, method=POST }
-http_requests_total { code=404, method=POST }
+http_requests_total {code=200, method=GET}
+http_requests_total {code=200, method=GET}
+http_requests_total {code=404, method=POST}
+http_requests_total {code=404, method=POST}
 
 sum(increase(http_requests_total [1m]))   #查看每分钟的请求总量，将数据聚合起来
 
-sum by (code) (increase(http_requests_total [1m])) #按照code 筛选
+sum by (code) (increase(http_requests_total [1m])) #按照 code 筛选
 #上面等价于
 sum (increase(http_requests_total [1m])) by (code)
 #上面等价于
@@ -442,8 +452,8 @@ histogram_quantile(0.5,go_gc_pauses_seconds_total_bucket)
 ![quantile-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/quantile-1.png)
 
 
-####  关于promql的一些细节
-Histogram/Summary时间序列要如何进行查询呢？事实上，Prometheus 会根据一定的规则来给这些时间序列命名。假设监控指标 mymetric，设置了 `1`/`2`/`3` bucket ，且采集到了如下数据：
+####  关于 promql 的一些细节
+Histogram/Summary 时间序列要如何进行查询呢？事实上，Prometheus 会根据一定的规则来给这些时间序列命名。假设监控指标 mymetric，设置了 `1`/`2`/`3` bucket ，且采集到了如下数据：
 
 | buckets | observe | write | values |
 | :-----:| :----: | :----: | :----: |
@@ -454,10 +464,10 @@ Histogram/Summary时间序列要如何进行查询呢？事实上，Prometheus �
 那么，可以得到这样的结果（注意 bucket 的结果向下包含）：
 
 ```text
-mymetric_bucket { le="1" } = 2
-mymetric_bucket { le="2" } = 5
-mymetric_bucket { le="3" } = 9
-mymetric_bucket { le="+Inf" } = 9
+mymetric_bucket {le="1"} = 2
+mymetric_bucket {le="2"} = 5
+mymetric_bucket {le="3"} = 9
+mymetric_bucket {le="+Inf"} = 9
 mymetric_count = 9
 mymetric_sum = 15.8
 ```
@@ -465,11 +475,11 @@ mymetric_sum = 15.8
 Histogram 并没有存储数据采样点的值，只保留了总和和每一个区间的 counter。可以在 PromQL 中用 `histogram_quantile()` 函数来计算其值的分位数。
 
 ## 0x05  Grafana 可视化
-Grafana 里面的面板也是通过 PromQL 来进行数据查询的，本小节介绍下grafana的使用例子。下面的代码，定义了一个`CounterVec`，label为请求的参数，按照下面`3`种配置panel：
+Grafana 里面的面板也是通过 PromQL 来进行数据查询的，本小节介绍下 grafana 的使用例子。下面的代码，定义了一个 `CounterVec`，label 为请求的参数，按照下面 `3` 种配置 panel：
 
-- 不考虑label的请求总数：表达式为`sum(promdemo_demo_http_request_total)`
-- 基于label的原始counter
-- `5m`内的平均值（按标签）：表达式为`sum(rate(promdemo_demo_http_request_total[5m])) by(from)`，`[5m]` 代表`5`分钟之内的平均值，`by(from)`表示通过该指标中的`from`标签分组
+- 不考虑 label 的请求总数：表达式为 `sum(promdemo_demo_http_request_total)`
+- 基于 label 的原始 counter
+- `5m` 内的平均值（按标签）：表达式为 `sum(rate(promdemo_demo_http_request_total[5m])) by(from)`，`[5m]` 代表 `5` 分钟之内的平均值，`by(from)` 表示通过该指标中的 `from` 标签分组
 
 部署的架构如下：
 
@@ -503,32 +513,32 @@ func main() {
                 values := req.URL.Query()
                 from := values.Get("from")
                 MetricHttpRequestTotal.WithLabelValues(from).Inc()
-                w.Write([]byte("Hello,from " + from))
+                w.Write([]byte("Hello,from" + from))
         })
         http.ListenAndServe(":28080", nil)
 }
 ```
 
-上面三种查询panel对应的图如下，注意到，虽然指标都是同一个，但是可以灵活的通过PromQL来实现我们想要观测的维度：
+上面三种查询 panel 对应的图如下，注意到，虽然指标都是同一个，但是可以灵活的通过 PromQL 来实现我们想要观测的维度：
 
 ![1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grafana/metrics-2-total.png)
 
 ![2+3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grafana/metrics-1.png)
 
 ## 0x06  总结
-本文介绍了Prometheus/Merics的基础概念。Prometheus中存储的数据都为时间序列（time series），它是一串随着时间移动而产生的属于某个metric name和一系列标签（键值对）的数据。时间序列是由metric name和一系列的标签label（键值对）唯一标识的，不同的标签代表了不同的时间序列。最后，再罗列几个问题：
+本文介绍了 Prometheus/Merics 的基础概念。Prometheus 中存储的数据都为时间序列（time series），它是一串随着时间移动而产生的属于某个 metric name 和一系列标签（键值对）的数据。时间序列是由 metric name 和一系列的标签 label（键值对）唯一标识的，不同的标签代表了不同的时间序列。最后，再罗列几个问题：
 
-1、Prometheus每次采集的数据到底是什么，是否为瞬时值？采集周期对Prometheus的影响？
+1、Prometheus 每次采集的数据到底是什么，是否为瞬时值？采集周期对 Prometheus 的影响？
 
-Prometheus每次采集数据时，会收集目标（应用程序等）暴露的指标在当前时间点的值，通常被认为是瞬时值，因为它们表示在某个特定时间点的度量值。例如，对于`Counter`类型的指标，每次采集时，Prometheus会获取当前的计数值。然后，Prometheus会将这些瞬时值存储在其时间序列数据库中，以便后续进行查询、聚合和分析。此外，Prometheus是基于拉取（pull）模式的监控系统，它会定期从目标处获取指标数据。因此，采集到的数据会受到采集周期（scrape interval）的影响，较长的采集周期可能导致数据粒度较低，从而影响数据的准确性和监控的实时性
+Prometheus 每次采集数据时，会收集目标（应用程序等）暴露的指标在当前时间点的值，通常被认为是瞬时值，因为它们表示在某个特定时间点的度量值。例如，对于 `Counter` 类型的指标，每次采集时，Prometheus 会获取当前的计数值。然后，Prometheus 会将这些瞬时值存储在其时间序列数据库中，以便后续进行查询、聚合和分析。此外，Prometheus 是基于拉取（pull）模式的监控系统，它会定期从目标处获取指标数据。因此，采集到的数据会受到采集周期（scrape interval）的影响，较长的采集周期可能导致数据粒度较低，从而影响数据的准确性和监控的实时性
 
 2、每调用一次 `/metrics`，数据是否会重置？
 
-答案是不会重置数据。Prometheus的`/metrics`接口是用来暴露和收集指标数据的，当Prometheus服务器调用`/metrics`接口时，它会获取当前的指标数据，但这并不会导致数据重置。这些数据会持续更新，并在Prometheus服务器中进行聚合和存储。因此，多次调用`/metrics`接口只会获取不同时间点的指标数据，但并不会导致数据重置
+答案是不会重置数据。Prometheus 的 `/metrics` 接口是用来暴露和收集指标数据的，当 Prometheus 服务器调用 `/metrics` 接口时，它会获取当前的指标数据，但这并不会导致数据重置。这些数据会持续更新，并在 Prometheus 服务器中进行聚合和存储。因此，多次调用 `/metrics` 接口只会获取不同时间点的指标数据，但并不会导致数据重置
 
 3、采集周期的影响，采集周期的选择
 
-假设采集周期设置为`5`分钟，那么在这`5`分钟内发生的任何事件或性能波动都可能被忽略，因为Prometheus只会每`5`分钟收集一次数据。这可能会导致对系统性能问题或故障的检测和响应变慢；为了获得更精确的数据，可以缩短采集周期。但请注意，缩短采集周期会增加Prometheus的负载和存储需求，因为需要处理和存储更多的数据点
+假设采集周期设置为 `5` 分钟，那么在这 `5` 分钟内发生的任何事件或性能波动都可能被忽略，因为 Prometheus 只会每 `5` 分钟收集一次数据。这可能会导致对系统性能问题或故障的检测和响应变慢；为了获得更精确的数据，可以缩短采集周期。但请注意，缩短采集周期会增加 Prometheus 的负载和存储需求，因为需要处理和存储更多的数据点
 
 ## 0x07 参考
 
@@ -539,6 +549,6 @@ Prometheus每次采集数据时，会收集目标（应用程序等）暴露的�
 - [Lock-free Observations for Prometheus Histograms](https://grafana.com/blog/2020/01/08/lock-free-observations-for-prometheus-histograms/)
 - [golang API](https://godoc.org/github.com/prometheus/client_golang/prometheus)
 -  [HISTOGRAMS AND SUMMARIES](https://prometheus.io/docs/practices/histograms/)
--  [prometheus的内置函数](https://prometheus.io/docs/prometheus/latest/querying/functions/)
+-  [prometheus 的内置函数](https://prometheus.io/docs/prometheus/latest/querying/functions/)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
