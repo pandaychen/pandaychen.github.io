@@ -32,7 +32,7 @@ Prometheus 的基本原理是通过 HTTP 协议周期性抓取被监控组件的
 
 为何要使用 Prometheus？
 
-传统监控依赖实时指标，通过采集的日志流处理写入时序数据库，一般流程较长，任何一环出问题会导致监控不可用；其次存储成本和查询速度也需要考虑，假设每次的请求耗时都需要保存，那么这个记录量级可能非常大，影响查询时性能。Prometheus 直接采集服务暴露的指标，简化中间流程，通过提供 client 在采集端做了预聚合，** 虽然这样损失了精确度，但大大减少数据量以及提升查询速度 **
+传统监控依赖实时指标，通过采集的日志流处理写入时序数据库，一般流程较长，任何一环出问题会导致监控不可用；其次存储成本和查询速度也需要考虑，假设每次的请求耗时都需要保存，那么这个记录量级可能非常大，影响查询时性能。Prometheus 直接采集服务暴露的指标，简化中间流程，通过提供 client 在采集端做了预聚合，**虽然这样损失了精确度，但大大减少数据量以及提升查询速度**
 
 ####  指标暴露
 对应于监控系统的两种方式，针对服务端而言：
@@ -145,14 +145,14 @@ Prometheus 采集的所有指标都是以时间序列的形式进行存储，每
 ####  指标类型
 Prometheus 底层存储上其实并没有对指标做类型的区分，都是以时间序列的形式存储，但是为了方便用户的使用和理解不同监控指标之间的差异，Prometheus 定义计数器 counter / 仪表盘 gauge / 直方图 histogram 以及摘要 summary 这四种 Metrics 类型。
 
-**Gauge/Counter 是数值指标，代表数据的变化情况，Histogram/Summary 是统计类型的指标，表示数据的分布情况 **
+**Gauge/Counter 是数值指标，代表数据的变化情况，Histogram/Summary 是统计类型的指标，表示数据的分布情况**
 
 ![four](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/four-metrics-type.png)
 
 下面分别介绍指标类型，部分配图来源于 [一文带你了解 Prometheus](https://cloud.tencent.com/developer/article/1999843)。
 
 #### Gauge
-Gauge 理解为（待监控的）瞬时状态，如当前时刻 CPU 的使用率、内存的使用量、硬盘的容量以及 GC 次数等等。因为此类型的特点是随着时间的推移不断，值（相对而言）没有规则的变化。在 Kratos 框架中，针对 RPC 每次请求的延迟（latency）就是一个 Gauge，一段时间内的 Gauge 就组合成了一个 [RollingGauges](https://github.com/go-kratos/kratos/blob/master/pkg/stat/metric/rolling_gauge.go#L10)；此外，Gauge 可增可减，与 Counter 不一样，在 Prometheus 上通过 Gauge，** 可以不用经过内置函数直观的反映数据的变化情况 **
+Gauge 理解为（待监控的）瞬时状态，如当前时刻 CPU 的使用率、内存的使用量、硬盘的容量以及 GC 次数等等。因为此类型的特点是随着时间的推移不断，值（相对而言）没有规则的变化。在 Kratos 框架中，针对 RPC 每次请求的延迟（latency）就是一个 Gauge，一段时间内的 Gauge 就组合成了一个 [RollingGauges](https://github.com/go-kratos/kratos/blob/master/pkg/stat/metric/rolling_gauge.go#L10)；此外，Gauge 可增可减，与 Counter 不一样，在 Prometheus 上通过 Gauge，**可以不用经过内置函数直观的反映数据的变化情况**
 ![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/gauges-1.png)
 下图表示堆可分配的空间大小：
 ![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/gauges-3.png)
@@ -257,7 +257,7 @@ type Histogram interface {
 }
 ```
 
-Histogram 和 Counter/Gauge 的上报模型不同，在 Counter 中，一个 Counter 对应了一个时间序列，当创建一个 Counter 然后上报数据，它影响的时间序列是确定的。而 **Histogram 则会帮我们创建多个时间序列，当调用 `Observe` 方法时，被观测到的值会被放进预先划分好的桶中，每一个桶中并不记录被观测的值，而是对其进行计数 **。代码示例如下：
+Histogram 和 Counter/Gauge 的上报模型不同，在 Counter 中，一个 Counter 对应了一个时间序列，当创建一个 Counter 然后上报数据，它影响的时间序列是确定的。而 **Histogram 则会帮我们创建多个时间序列，当调用 `Observe` 方法时，被观测到的值会被放进预先划分好的桶中，每一个桶中并不记录被观测的值，而是对其进行计数**。代码示例如下：
 
 ```GOLANG
 temps := prometheus.NewHistogram(prometheus.HistogramOpts{
@@ -279,7 +279,7 @@ temps.Write(metric)
 fmt.Println(proto.MarshalTextString(metric))
 ```
 
-桶的指定可以直接指定，如 ` Buckets: []float64{0,2.5,5,7.5,10}`，但是 ** 务必注意，只有设定了合适的桶大小（分布），Histogram 的指标才更有意义 **，如果桶的设定不合理，那么结果就不一定靠谱。那假设开发者对一个数据没有什么先验知识，那么是否有更准确的方式计算出这个数据呢？Prometheus 给出的方案就是用 Summary。
+桶的指定可以直接指定，如 ` Buckets: []float64{0,2.5,5,7.5,10}`，但是 **务必注意，只有设定了合适的桶大小（分布），Histogram 的指标才更有意义**，如果桶的设定不合理，那么结果就不一定靠谱。那假设开发者对一个数据没有什么先验知识，那么是否有更准确的方式计算出这个数据呢？Prometheus 给出的方案就是用 Summary。
 
 ####  Summary
 Summary 也是用来做统计分析的，和 Histogram 区别在于，Summary 直接存储的就是百分位数，如下所示：可以直观的观察到样本的中位数，如 `P90` 和 `P99`：
