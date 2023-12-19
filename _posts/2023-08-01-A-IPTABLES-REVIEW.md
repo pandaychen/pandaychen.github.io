@@ -294,6 +294,27 @@ iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 53
 ####  conntrack 和 NAT
 
 
+####  REDIRECT VS DNAT
+`REDIRECT`和`DNAT`都是用来修改数据包的目标地址的，区别如下：
+
+1、`REDIRECT`主要用于在本地机器上重定向数据包，当一个数据包匹配到某个`REDIRECT`规则时，iptables会将数据包的目标地址修改为本地机器的地址，并将目标端口修改为指定的端口；这样，数据包会被发送到本地机器上的另一个服务。`REDIRECT`通常用于透明代理。例如，当想要将所有HTTP流量通过本地的代理服务器进行处理时，可参考下面命令
+
+```BASH
+#这条规则会将所有目标端口为80的TCP数据包重定向到本地的3128端口
+iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 3128
+```
+
+2、`DNAT`（Destination Network Address Translation） 用于将数据包的目标地址或端口修改为另一个地址或端口。DNAT通常用于端口转发和负载均衡等场景
+与REDIRECT不同，DNAT可以将数据包转发到本地机器之外的其他机器
+
+```BASH
+#这条规则会将所有目标端口为80的TCP数据包的目标地址和端口修改为192.168.1.2:8080
+iptables -t nat -A PREROUTING -p tcp --dport 80 -j DNAT --to-destination 192.168.1.2:8080
+```
+
+-  `REDIRECT`用于在本地机器上重定向数据包，常用于透明代理等场景
+-  `DNAT`用于修改数据包的目标地址或端口，可以将数据包转发到本地机器之外的其他机器，常用于端口转发和负载均衡等场景
+
 ##  0x06  重点：使用 tproxy 实现透明代理
 
 背景：
