@@ -216,3 +216,4 @@ Internal Listener 需要和一个 Cluster 一起使用，配置在 Cluster 中�
 - [动态转发代理](https://cloudnative.to/envoy/configuration/http/http_filters/dynamic_forward_proxy_filter.html)
 - [TLS bumping in Envoy](https://docs.google.com/document/d/1B6TaqkwjlUqIOYTLqcprwtsQsg8TXitLQQnvXg2WIbU/edit#heading=h.2q2jzkqaceu1)
 - [Istio Ambient 模式流量管理实现机制详解（一）](https://cloud.tencent.com/developer/article/2134251)
+- [req-resp-flow-timeline.drawio](https://istio-insider.mygraphql.com/en/latest/_images/req-resp-flow-timeline.drawio.svg)
