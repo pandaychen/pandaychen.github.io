@@ -18,6 +18,7 @@ tags:
 
 1.  分布式一致的缓存系统
 2.  gRPC的基于一致性算法的loadbalance实现，某些业务场景下，需要尽可能使指定客户端的请求经由consistent-hash算法到达指定的服务器进行处理
+3.	分布式crontab中，如何实现多机运行独占性任务
 
 ####    consistent-hash 的应用场景
 consistent-hash 算法主要的应用场景是：当服务是一个有状态服务等时候，需要根据特定的 key 路由到相同的目标服务机器进行处理的场景。
@@ -203,10 +204,19 @@ func (k *KetamaConsistent) GetSrvNode(client_key string) (string, bool) {
 ##  0x03    其他consistent-hash
 
 ####     Jump Consistent Hash
-可以参考此文：[一致性哈希算法（三）- 跳跃一致性哈希法](https://writings.sh/post/consistent-hashing-algorithms-part-3-jump-consistent-hash)，根据[论文]()中的测试结果， Jump Consistent Hash在执行速度、内存消耗、映射均匀性上比ketama要好。
+可以参考此文：[一致性哈希算法（三）- 跳跃一致性哈希法](https://writings.sh/post/consistent-hashing-algorithms-part-3-jump-consistent-hash)，根据[论文](https://arxiv.org/abs/1406.2294)中的测试结果， Jump Consistent Hash在执行速度、内存消耗、映射均匀性上比ketama要好
 
 
-##  0x04 参考
+##	0x04	总结
+此外，一致性hash还可以用来解决分布式场景下的定时任务问题，要求如下：
+1.	要求高一致可靠性，保证任务不能被多个节点重复执行，在单个节点宕机时能迅速转移任务至正常节点
+2.	支持Redis/etcd等一致性存储系统
+
+利用一致性算法解决的思路如下：即将所有节点（server）存入公共存储（即一致性算法中的hashring，同时进行虚拟化节点处理）后**使用一致性hash算法来选举出执行单个任务的节点来保证运行节点的唯一性**，所有节点上部署的cron运行程序都按照写入的crontab预执行（即到时间每个节点都会触发执行，但是利用一致性算法进行排斥），在任务执行入口处**再根据一致性hash算法来判断该任务是否应该由当前节点执行**。
+
+上述思路利用了分布式一致性哈希算法每次取出的节点都是唯一的这个特性来解决的
+
+##  0x05 参考
 -   [一致性 hash 算法 - consistent hashing](https://blog.csdn.net/sparkliang/article/details/5279393)
 -   [一致性哈希 （Consistent Hashing）的前世今生](https://candicexiao.com/consistenthashing/)
 -   [一致性哈希算法（二）- 哈希环法](https://writings.sh/post/consistent-hashing-algorithms-part-2-consistent-hash-ring)
