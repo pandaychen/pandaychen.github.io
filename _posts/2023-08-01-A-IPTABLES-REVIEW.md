@@ -312,6 +312,7 @@ iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 3128
 iptables -t nat -A PREROUTING -p tcp --dport 80 -j DNAT --to-destination 192.168.1.2:8080
 ```
 
+
 -  `REDIRECT`用于在本地机器上重定向数据包，常用于透明代理等场景
 -  `DNAT`用于修改数据包的目标地址或端口，可以将数据包转发到本地机器之外的其他机器，常用于端口转发和负载均衡等场景
 
