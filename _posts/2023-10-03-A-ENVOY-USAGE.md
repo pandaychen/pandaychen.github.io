@@ -173,6 +173,10 @@ docker logs -f  --tail=200 cfb4ba22c969
 -   `route_config`：路由规则配置，即将请求路由到后端的哪个集群
 -   `cluster`：服务提供方集群，Envoy 通过服务发现定位集群成员并获取服务，具体路由到哪个集群成员由负载均衡策略决定
 
+比如下图，规则的应用顺序是（HTTP）：
+
+`listeners`-->`filter_chains`-->`http_connection_manager`-->`http_filters`-->`route_config`-->`cluster`-->`clusters`
+
 ![flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/envoy/envoy-config-flow.jpg)
 
 
@@ -182,9 +186,21 @@ docker logs -f  --tail=200 cfb4ba22c969
 
 ##  0x04  第三个例子：Nginx 迁移到 Envoy
 
+##  Flow：Life of a Request
+[Life of a Request](https://www.envoyproxy.io/docs/envoy/v1.27.2/intro/life_of_a_request.html)
+
+
+##  0x05  构建一个简单的XDS
+本小节详细介绍下XDS机制
+
+有关XDS的基础，可以参考此文[XDS学习笔记](https://skyao.io/learning-xds/docs/introduction/overview.html)
+
+##  0x05  HTTP dynamic forward proxy
+[HTTP dynamic forward proxy](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/http/http_proxy)
+
 
 ##  0x05  Envoy 的 Internal Listener 机制
-socket 在操作系统内核接收网络数据，但 Envoy还支持一种**用户空间 socket**，即Internal Listener ，用于从该**用户空间 socket**接收数据包。
+socket 在操作系统内核接收网络数据，但 Envoy还支持一种**用户空间 socket**，即Internal Listener ，用于从该**用户空间 socket**接收数据包，envoy 叫做[Internal Listener](https://www.envoyproxy.io/docs/envoy/latest/configuration/other_features/internal_listener)
 
 Internal Listener 需要和一个 Cluster 一起使用，配置在 Cluster 中作为接收流量的 endpoint。如下所示：
 
@@ -217,3 +233,7 @@ Internal Listener 需要和一个 Cluster 一起使用，配置在 Cluster 中�
 - [TLS bumping in Envoy](https://docs.google.com/document/d/1B6TaqkwjlUqIOYTLqcprwtsQsg8TXitLQQnvXg2WIbU/edit#heading=h.2q2jzkqaceu1)
 - [Istio Ambient 模式流量管理实现机制详解（一）](https://cloud.tencent.com/developer/article/2134251)
 - [req-resp-flow-timeline.drawio](https://istio-insider.mygraphql.com/en/latest/_images/req-resp-flow-timeline.drawio.svg)
+- [Envoy Proxy as Explicit proxy](https://stackoverflow.com/questions/63492778/envoy-proxy-as-explicit-proxy)
+- [XDS核心概念](https://skyao.io/learning-xds/docs/introduction/concept/concept.html)
+- [XDS学习笔记](https://skyao.io/learning-xds/docs/introduction/overview.html)
+- [Envoy xDS示例](https://www.jianshu.com/p/0d09558e7672)
