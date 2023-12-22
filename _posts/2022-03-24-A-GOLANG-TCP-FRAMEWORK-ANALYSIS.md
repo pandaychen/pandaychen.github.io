@@ -354,3 +354,4 @@ func (h *EchoMessageHandler) OnCron(session getty.Session) {
 - [getty 开发日志](https://alexstocks.github.io/html/getty.html)
 - [Go 网络库 getty 的那些事](https://cloud.tencent.com/developer/article/1877651)
 - [dubbo-go 的开发、设计与功能介绍](https://dubbogo.github.io/zh-cn/docs/md/arch/dubbo-go-design-implement-and-featrues.html)
+- [基于 getty 的 seata-golang 通信模型详解](https://seata.io/zh-cn/blog/seata-golang-communication-mode.html)
