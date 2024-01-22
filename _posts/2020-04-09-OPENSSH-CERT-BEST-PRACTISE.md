@@ -100,7 +100,7 @@ ssh_host_ecdsa_key-cert.pub:
 ####    其他安全特性
 由于证书的不可伪造性（Unforgeability），我们可以利用证书的内置字段或结构来提升证书使用的安全性。此外，OpenSSH 还支持多个 CA （公钥）共用（虽然不推荐这样配置）
 
-##      0x03   OpenSSH Certificate 和 SSO 的结合（零信任方案）
+##      0x03   OpenSSH Certificate With SSO（零信任方案）
 CloudFlare 的 OpenSSH 实践：[Public keys are not enough for SSH security](https://blog.cloudflare.com/public-keys-are-not-enough-for-ssh-security/)，文中给出了一个非常值得借鉴的 OpenSSH 证书架构与 SSO 结合的安全登录体系。整体架构图如下：
 
 ![img](https://blog-cloudflare-com-assets.storage.googleapis.com/2019/10/Short-lived-Cert@2x.png)

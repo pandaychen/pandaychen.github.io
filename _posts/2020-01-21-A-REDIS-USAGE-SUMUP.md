@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      Redis 应用梳理篇（一）
-subtitle:   如何在实战项目中灵活使用 Redis 及排坑
+subtitle:   如何在实战项目中灵活使用 Redis（go-redis） 及排坑
 date:       2020-01-21
 author:     pandaychen
 header-img:
@@ -11,6 +11,7 @@ tags:
     - Redis
     - 分布式
     - 限流
+    - go-redis
 ---
 
 ##	0x00	前言
