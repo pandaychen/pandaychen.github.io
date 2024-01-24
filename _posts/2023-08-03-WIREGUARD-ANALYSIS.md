@@ -11,7 +11,7 @@ tags:
 ---
 
 
-##  Ox00    前言
+##  0x00    前言
 WireGuard（简称 wg）是一种快速、现代、安全的 VPN 协议，基于 golang 的开源地址 [在此](https://git.zx2c4.com/wireguard-go)，本文探讨其 linux 下的配置和实现等细节
 
 ##  0x01   工作原理

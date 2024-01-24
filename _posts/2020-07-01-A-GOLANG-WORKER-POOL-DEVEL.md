@@ -16,7 +16,7 @@ tags:
 -   fasthttp 的 [协程池实现](https://github.com/valyala/fasthttp/blob/master/workerpool.go)
 -   [Goroutine 并发调度模型深度解析之手撸一个高性能 goroutine 池](https://taohuawu.club/high-performance-implementation-of-goroutine-pool)
 
-本文介绍如何实现 goroutine`+`Channel 机制实现一套通用的协程池，用来控制并发执行的安全性，同时提升效率。
+本文介绍如何实现 goroutine 与 Channel 机制实现一套通用的协程池，用来控制并发执行的安全性，同时提升效率。
 
 ##  0x01    Goroutine 高并发的问题
 Golang 原生支持 goroutine 并发，可以同时启动多个 goroutine。如何管理这些 goroutine 的启动停止就是一个问题，事实上，goroutine 并非越多越好。从目前工作中遇到的问题来看，有以下几点需要特别注意的：

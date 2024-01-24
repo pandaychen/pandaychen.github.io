@@ -11,7 +11,7 @@ tags:
 ---
 
 
-##  Ox00    前言
+##  0x00    前言
 不要把路由表和 `iptables` 混淆，路由表决定如何传输数据包，而 `iptables` 决定是否传输数据包，他俩的职责不一样；最近印象较深的一句话
 
 ##  0x01    iptables/router/ip rule 区别
