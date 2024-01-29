@@ -35,8 +35,13 @@ x, ok = <- c  // 从 Channel 接收一个值，如果 channel 关闭（close）�
 有缓冲 channel 和无缓冲 channel：
 ```go
 c1 := make(chan []byte)                // 无缓冲
-c2 := male(chan []byte, 1024)           // 有缓冲
+c2 := make(chan []byte, 1024)           // 有缓冲
+c3 := make(chan []byte, 1)              // 注意，这是有缓冲
 ```
+
+[channel-type](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/goroutine/channel-type.png)
+
+下文再讨论这两种类型的channel在并发语义上的不同
 
 ###     Channel 的类型
 默认情况下，通信是同步且无缓冲的：在有接受者接收数据之前，发送不会结束。可以想象一个无缓冲的通道在没有空间来保存数据的时候：必须要一个接收者准备好接收通道的数据然后发送者可以直接把数据发送给接收者。所以通道的发送 / 接收操作在对方准备好之前是阻塞的：
@@ -610,7 +615,70 @@ func worker(stopCh <-chan struct{}) {
 }
 ```
 
-##  0x06        参考
+##  0x06        Review：channel的行为
+[The Behavior Of Channels](https://www.ardanlabs.com/blog/2017/10/the-behavior-of-channels.html)一文给出了channel的可靠性交付语义描述，本小节汇总下
+
+把Channel行为与信号机制（将 channel 视为信号机制）联系起来：一个channel允许一个 goroutine 向另一个 goroutine 发出特定事件的信号，包含三个属性：
+
+-       交付保证（Guarantee Of Delivery）
+-       状态（State）
+-       有数据或无数据（With or Without Data）
+
+####    交付保证
+针对下述代码，执行发送的 goroutine （Send）是否需要保证，在继续执行之前，被Receive 所在的goroutine 接收到了？参考下图，无缓冲和有缓冲在交付保证时提供的行为是不同的
+```GO
+go func() {
+     p := <-ch // Receive
+}()
+
+ch <- "paper" // Send
+```
+
+![1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/goroutine/86_guarantee_of_delivery-1.png)
+
+####    状态
+channel 的行为直接受其当前状态的影响。channel 的状态可以为 `nil`，`open` 或 `closed`
+
+```GO
+// ** nil channel
+// 如果声明为零值的话，将会是nil状态
+var ch chan string
+// 显式的赋值为nil，设置为nil状态
+ch = nil
+
+// ** open channel
+// 使用内部函数make创建的channel，为open状态
+ch := make(chan string)    // ** closed channel
+
+// 使用close函数的，为closed状态
+close(ch)
+```
+
+
+状态决定了发送和接收操作的行为。信号通过一个 channel 发送和接收；当一个 channel 为 `nil` 状态时，channel 上的任何发送或接收都将被阻塞。当为 `open` 状态时，信号可以被发送和接收。如果被置为 `closed` 状态的话，信号不能再被发送，但仍有可能接收到信号
+
+![2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/goroutine/86_state-2.png)
+
+####    信号有无数据
+-  有数据：通过在 channel 上执行发送带有数据的信号，如`ch <- "paper"`
+-  无数据：通过关闭一个 channel 来发送没有数据的信号，如`close(ch)`
+
+他们的语义如下：
+
+有数据，当用数据发出信号时，通常是因为：
+- goroutine 被要求开始一项新任务
+- goroutine 报告了一个结果
+
+而无数据的场景是：
+-  goroutine 被告知要停止他们正在做的事情
+-  goroutine 报告说已经完成，没有结果
+-  goroutine 报告说它已经完成了处理，并且关闭
+
+当要使用数据进行信号传输时，可以根据需要的担保类型选择三种 channel 配置选项：
+
+![3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/goroutine/86_signaling_with_data-3.png)
+
+##  0x07        参考
 -       [The Behavior Of Channels](https://www.ardanlabs.com/blog/2017/10/the-behavior-of-channels.html)
 -       [聊一聊 Go 中 channel 的行为](https://www.infoq.cn/article/wZ1kKQLlsY1N7gigvpHo)
 -       [Concurrency in Go 中文笔记](https://www.kancloud.cn/mutouzhang/go/596835)
