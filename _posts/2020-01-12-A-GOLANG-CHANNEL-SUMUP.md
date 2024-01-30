@@ -39,7 +39,7 @@ c2 := make(chan []byte, 1024)           // 有缓冲
 c3 := make(chan []byte, 1)              // 注意，这是有缓冲
 ```
 
-[channel-type](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/goroutine/channel-type.png)
+![channel-type](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/goroutine/channel-type.png)
 
 下文再讨论这两种类型的 channel 在并发语义上的不同
 
@@ -561,7 +561,7 @@ go func() {
 ```
 
 
-2、如果某个 channel 关闭了，不再处理该 channel，而是需要继续处理其他 `case`，退出是等待所有的可读 channel 关闭。这里就 ** 需要使用 `select` 的一个特性：`select` 不会在 `nil` 的 channel 上进行等待。把只读 channel 设置为 `nil` 即可解决 **
+2、如果某个 channel 关闭了，不再处理该 channel，而是需要继续处理其他 `case`，退出是等待所有的可读 channel 关闭。这里就 **需要使用 `select` 的一个特性：`select` 不会在 `nil` 的 channel 上进行等待。把只读 channel 设置为 `nil` 即可解决**
 
 ```GO
 go func() {

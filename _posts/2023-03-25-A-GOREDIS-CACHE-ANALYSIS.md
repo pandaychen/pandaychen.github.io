@@ -52,7 +52,7 @@ type LocalCache interface {
 }
 ```
 
-注意，如果[初始化](https://github.com/go-redis/cache/blob/v8/cache.go#L125)的时候没有传入`LocalCache`相关配置的话，那么这里就退化为Redis的KV操作了，参考[此项目](https://github.com/TencentBlueKing/bk-iam/blob/master/pkg/cache/redis/redis.go#L81)
+注意，**如果[初始化](https://github.com/go-redis/cache/blob/v8/cache.go#L125)的时候没有传入`LocalCache`相关配置的话，那么这里就退化为Redis的KV操作了，参考[此项目](https://github.com/TencentBlueKing/bk-iam/blob/master/pkg/cache/redis/redis.go#L81)**
 
 
 ####	Item 结构
@@ -260,4 +260,4 @@ func (cd *Cache) Delete(ctx context.Context, key string) error {
 
 
 ## 0x03 参考
-[go-redis/cache](https://github.com/go-redis/cache)
+-	[go-redis/cache源码](https://github.com/go-redis/cache)
