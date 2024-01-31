@@ -149,7 +149,22 @@ ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29
 | 1.17| 1.17| sshd8.8p1| succ| 无 |
 
 
-##  0x03    总结
+##  0x03    补充
+
+####    其他一些不兼容的场景收集
+
+1、不兼容case1：
+
+客户端版本为golang `1.11`、编译方式为 `GOPATH`的二进制，服务端版本为`OpensSH 9.0p1.OpenssL 3.0.5 5 Ju1 2022`，报错如下
+
+```text
+VM-65-77-tencentos sshd[3899236]: userauth_pubkey: signature algorithm ssh-rsa-cert-v01@openssh.com not in PubkeyAcceptedAlgorithms [preauth]
+```
+
+####    一些可能的尝试
+
+1、自行维护[crypto](https://github.com/gravitational/crypto)库
+
 
 ##  0x04    参考
 -   [Use RSA CA Certificates with OpenSSH 8.2](https://ibug.io/blog/2020/04/ssh-8.2-rsa-ca/)
@@ -157,5 +172,9 @@ ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29
 -   [How to secure your SSH server with public key Ed25519 Elliptic Curve Cryptography](https://cryptsus.com/blog/how-to-secure-your-ssh-server-with-public-key-elliptic-curve-ed25519-crypto.html)
 -   [Hashicorp Vault SSH secret engine with OpenSSH 8.2 and later](https://sarunas-krisciukaitis.medium.com/hashicorp-vault-ssh-secret-engine-with-openssh-8-2-and-later-f7405ee55d19)
 -   [Sign SSH keys using rsa-sha2-256 algorithm](https://github.com/hashicorp/vault/pull/8383)
+-   [Switch golang.org/x/crypto to gravitational fork #19579](https://github.com/gravitational/teleport/pull/19579)
+-   [Newer OpenSSH clients are dropping support for ssh-rsa-cert-v01 #10918](https://github.com/gravitational/teleport/issues/10918)
+-   [OpenSSH server compatibility issues #17197](https://github.com/gravitational/teleport/issues/17197)
+-   [RSA public keys cannot authenticate against internal SSH if the client has a recent ssh version (which disables ssh-rsa algorithm) #17798](https://github.com/go-gitea/gitea/issues/17798?ref=ikarus.sg)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
