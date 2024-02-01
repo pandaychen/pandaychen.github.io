@@ -361,9 +361,112 @@ func (d systemCacheDeleter) Execute(key cache.Key) (err error) {
 }
 ```
 
-##	0x03	参考
+##	0x03	go-zero 的本地 Cache 实现
+go-zero 的 [Local Cache](https://github.com/zeromicro/go-zero/blob/master/core/collection/cache.go) 也是一个不错的选择，它提供了 LRU 的功能（借助于 timewheel），[使用参考](https://go-zero.dev/docs/tasks/memory-cache)。缓存实质是一个存储有限热点数据的介质，面临如下问题：
+
+-	有限容量，选择何种淘汰策略
+-	热点数据统计
+-	并发 goroutine 存 / 取
+
+![arch](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/gozero-tech/local_cache.png)
+
+####	有限容量：过期及删除策略
+有限就意味着满了要淘汰，这个就涉及到淘汰策略。淘汰如何触发呢？这里有几种常用方法：
+
+-	方法 1：主动删除，异步开一个定时器，不断循环所有 key，超过预设过期时间，执行回调函数（如删除 map 中过期的 key）
+-	方法 2：惰性删除，访问时判断该 key 是否被删除。缺点是：如果未访问的话，会加重空间浪费
+
+本实现采用方法 1，主动删除中遇到最大的问题是不断循环，空消耗 CPU 资源（并且加锁会加剧并发竞争），优化为采取时间轮 timingwheel 记录额外过期通知，等过期 channel 中有通知时，然后触发删除回调。
+
+####	热数据统计
+对于缓存来说，开发者需要知道这个缓存在使用额外空间和代码的情况下是否有价值，以及想知道需不需要进一步优化过期时间或者缓存大小，所有这些就依赖统计能力，相关代码如下：
+
+```GO
+func (c *Cache) Get(key string) (interface{}, bool) {
+  value, ok := c.doGet(key)
+  if ok {
+    // 命中 hit+1
+    c.stats.IncrementHit()
+  } else {
+    // 未命中 miss+1
+    c.stats.IncrementMiss()
+  }
+
+  return value, ok
+}
+```
+
+####	并发存取安全
+当多个协程并发存取的时候，对于缓存来说，涉及的问题以下几个：
+
+-	写 - 写冲突
+-	LRU 中元素的移动过程冲突
+-	并发执行写入缓存时，造成流量冲击或者无效流量
+
+写冲突最简单的方法就是加锁（应加尽加），如下
+
+```GO
+// Set(key, value)
+func (c *Cache) Set(key string, value interface{}) {
+  // 加锁，然后将 <key, value> 作为键值对写入 cache 中的 map
+  c.lock.Lock()
+  _, ok := c.data[key]
+  c.data[key] = value
+  // lru add key
+  c.lruCache.add(key)
+  c.lock.Unlock()
+  //...
+}
+
+// 在操作 LRU 的地方时：Get()，也需要加锁
+func (c *Cache) doGet(key string) (interface{}, bool) {
+  c.lock.Lock()
+  defer c.lock.Unlock()
+  // 当 key 存在时，则调整 LRU item 中的位置，这个过程也是加锁的
+  value, ok := c.data[key]
+  if ok {
+    c.lruCache.add(key)
+  }
+
+  return value, ok
+}
+```
+
+而并发执行写入逻辑，这个逻辑主要是开发者自己传入的。而这个过程通过使用 `sharedCalls` 即 singleflight 机制来减少多次执行方法：
+
+```GO
+func (c *Cache) Take(key string, fetch func() (interface{}, error)) (interface{}, error) {
+  // 1. 先获取 doGet() 中的值
+  if val, ok := c.doGet(key); ok {
+    c.stats.IncrementHit()
+    return val, nil
+  }
+
+  var fresh bool
+  // 2. 多协程中通过 sharedCalls 去获取，一个协程获取多个协程共享结果
+  val, err := c.barrier.Do(key, func() (interface{}, error) {
+    // double check，防止多次读取
+    if val, ok := c.doGet(key); ok {
+      return val, nil
+    }
+    ...
+    // 重点是执行了传入的缓存设置函数
+    val, err := fetch()
+    ...
+    c.Set(key, val)
+  })
+  if err != nil {
+    return nil, err
+  }
+  ...
+  return val, nil
+}
+```
+
+##	0x04	参考
 -	[应用双缓冲技术完美解决资源数据优雅无损的热加载问题](http://blog.codeg.cn/2016/01/27/double-buffering/)
 -	[一次错误使用 go-cache 导致出现的线上问题](https://www.cnblogs.com/457220157-FTD/p/14707868.html)
 -	[go-cache](https://github.com/patrickmn/go-cache)
 -	[如何打造高性能的 Go 缓存库](https://www.cnblogs.com/luozhiyun/p/14869125.html)
 -	[cacheimpls](https://github.com/TencentBlueKing/bk-iam/tree/master/pkg/cacheimpls)
+-	[进程内缓存助你提高并发能力](https://talkgo.org/t/topic/2263)
