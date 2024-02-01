@@ -11,7 +11,7 @@ tags:
 ---
 
 
-##  Ox00    前言
+##  0x00    前言
 本文是项目中的 DNS 相关开发工作记录
 
 1.  如何合适的实现 DNS 查询缓存？
@@ -22,17 +22,23 @@ tags:
 ##  0x01    基础
 先回顾一下 DNS 解析的基础流程，如下图：
 
-![DNS-BASIC](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/dns/dns-query-basic.png)
-
 ![DNS-BASIC-2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/dns/dns-query-question-1.png)
 
-####    常用的 public DNS
+####    DNS 解析流程
+![dns-query-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/dns/dns-query-flow-2.png)
 
--   `8.8.8.8` Google
--   `1.1.1.1` Cloudflare
--   `119.29.29.29`
--   `114.114.114.114`
--   `183.60.83.19`、`183.60.82.98` 腾讯云
+####    常用的 public DNS（UDP）
+
+-   `8.8.8.8`：Google
+-   `1.1.1.1`：Cloudflare
+-   `119.29.29.29`：阿里云
+-   `114.114.114.114`：电信
+-   `183.60.83.19`/`183.60.82.98`：腾讯云
+
+####  DNS-over-HTTPS/TLS
+
+- DOH：参考 [DNS over HTTPs(DoH)](https://help.aliyun.com/document_detail/171664.html)
+- DOT：参考 [DNS over HTTPs(DoT)](https://help.aliyun.com/document_detail/171667.html?spm=a2c4g.171664.0.0.788a3b248PvThQ)
 
 ####    DNS 报文格式
 
@@ -65,10 +71,8 @@ options ndots:5
 -   在 K8S 集群内访问大部分的常见外网域名（ndots 小于 `5`）都会触发 `search` 规则，因此在访问外部域名的时候可以使用 FQDN，即在域名的结尾配置一个点号 `.`
 
 
-####    DNS 解析流程
 
-
-##  0x02    golang 的 DNSCACHE
+##  0x03    golang 的 DNSCACHE
 通过 `net.Dial`/`net.DialContext` 创建连接时，或者使用 `Resolver` 解析 DNS 时，都是无缓存的；所以客户端并发场景下每创建一个连接，`Resolver` 都会去解析一次 DNS，如果遇到网络不好或 DNS 服务器问题，大概率会遇到类似错误 `dial tcp: lookup xxxx.com`，已有多个不错的 DNScache 库实现：
 
 -   [A DNS Cache for Go](https://github.com/viki-org/dnscache/)
@@ -136,24 +140,41 @@ transport := &http.Transport {
 ```
 
 
-##  0x0 adguard 的 DNS
+##  0x04 常用的 DNS 库
 
-##  DNS 常用库 1：miekg/dns
+####  DNS 常用库 1：miekg/dns
+用例可以参考：[Go DNS example programs](https://github.com/miekg/exdns)
 
-##  DNS 常用库 2：coredns
+####  DNS 常用库 2：coredns
 
-##  0x0 透明代理中的 DNS
+
+##  0x05 DNS 代理实现：smartDNS
+[smartDNS](https://github.com/pymumu/smartdns) 是本地的 DNS 代理服务器，接受本地客户端的 DNS 查询请求，然后从多个上游 DNS 服务器获取 DNS 查询结果，并将访问速度最快的结果返回给客户端，以此提高网络访问速度。与 DNSmasq 的 all-servers 机制不同，SmartDNS 返回的是访问速度最快的解析结果
+
+![smart-dns](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/dns/smartdns-arch.png)
+
+主要工作流程如下：
+1.  SmartDNS 接收本地网络设备的 DNS 查询请求
+2.  然后将查询请求发送到多个上游 DNS 服务器，可支持 UDP 标准端口或非标准端口查询，以及 TCP 查询
+3.  上游 DNS 服务器返回域名对应的服务器 IP 地址列表，SmartDNS 则会检测从本地网络访问速度最快的服务器 IP
+4.  最后将访问速度最快的服务器 IP 返回给本地客户端
+
+##  0x06 透明代理中的 DNS
 笔者在网关项目中也实现了类似的 DNSproxy，大致功能如下：
 
 -   拦截所有经由网关的 DNS 请求（查询），由网关进行代理查询（或者丢弃）
--   支持 TUN-fake-DNS 查询及伪造返回
+-   支持 TUN-fake-DNS 查询及伪造 A 记录返回；不开启 fake 模式，则作为 DNS 代理，直接转发 DNS 请求到上游查询
 -   支持 DNS 分流，指定 DNS 选用指定的 `nameserver`
 -   支持 DNS 报文经过 `socks5` 代理服务端进行域名查询及返回
 -   支持 `/etc/hosts` 本地解析（或是自定义 domain=>ip 的解析）
 
 在实现中，DNSProxy 转发解析请求的时候会优化为并发查询：即会同时向所有配置的 DNS 上游服务器进行 DNS 查询，并选取最快的返回结果，以提高性能（参考 `dnsmasq` 实现）
 
-##  0x0 一些细节
+通过在物理网卡上启动混杂模式，同时设置 `iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 53`，将所有 UDP 目的端口为 `53` 的流量重定向到本地端口 `53`（本地 `53` 启动的正式 DNSproxy）实现了 DNS 透明代理功能
+
+####    DNS-FAKE-IP的实现思路
+
+##  0x07 关于 DNS 的一些细节
 
 1、Optimistic DNS（DNS 乐观解析）<br>
 
@@ -163,11 +184,17 @@ transport := &http.Transport {
 
 DNS 泄漏（DNS leaking）是指使用 VPN 连接时，计算机设备仍然使用 ISP 提供的 DNS 服务器，而不是 VPN 提供的 DNS 服务器。这意味着此网络活动可能会暴露给 ISP 或其他第三方，因为他们可以访问 DNS 查询历史记录。这可能会导致隐私受到威胁
 
+3、DNSSEC && TC<br>
 
-####    DNS：FAKE-IP
+由于 DNSSEC 会导致返回的数据包变大，一旦超出 UDP 所允许的大小，那么数据包会被截断，DNS 服务器返回一个 `TC=1` 的标志位，用户接到 `TC` 的标识后，会改为用 TCP 方式传输
 
+##  0x08  DNS 性能压测
+笔者在开发 DNS 代理中使用到的 DNS 客户端性能压测库，推荐使用 dnstrace：
 
-##  0x0 参考
+- [dnspyre](https://github.com/Tantalor93/dnspyre)：CLI tool for a high QPS DNS benchmark
+- [dnstrace](https://github.com/redsift/dnstrace)：Command-line DNS benchmark
+
+##  0x09 参考
 -   [Examples made with Go DNS](https://github.com/miekg/exdns)
 -   [CoreDNS 篇 10 - 分流与重定向](https://tinychen.com/20221120-dns-13-coredns-10-dnsredir-and-alternate/)
 -   [CoreDNS 篇 9-kubernetes 插件](https://tinychen.com/20221107-dns-12-coredns-09-kubernetes/)
