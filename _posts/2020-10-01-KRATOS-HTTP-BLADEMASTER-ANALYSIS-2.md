@@ -186,7 +186,7 @@ func (c *Context) Next() {
 2.  然后通过 `Next()` 方法一个个执行下去，部分 `middleware` 可能想要在过程中中断整个流程，此时可以使用 `Abort()` 方法提前结束处理（重要！）
 3.  有些 `middleware` 还想在所有 `Handler` 执行完后再执行部分逻辑，此时可以在自身 `Handler` 中显式调用 `Next()` 方法，并将这些逻辑放在调用了 `Next()` 方法之后
 
-![handler](https://github.com/go-kratos/kratos/blob/master/doc/img/bm-handlers.png)
+![handler](https://raw.githubusercontent.com/pandaychen/mini-kratos/main/docs/img/bm-handlers.png)
 
 
 ##  0x03    注册中间件 Handlers
