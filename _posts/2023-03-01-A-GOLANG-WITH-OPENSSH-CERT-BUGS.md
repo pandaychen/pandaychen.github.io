@@ -29,7 +29,7 @@ tags:
 2.  Openssh：sshd 版本（服务器），对算法、证书类型有兼容性要求
 3.  Openssh：ssh 版本（客户端），包括 `ssh-keygen` 工具的兼容性问题
 
-##      0x01    RSA证书：兼容性测试
+##      0x01    RSA 证书：兼容性测试
 现网使用的 go 版本主要是：`go1.11` 以及 `go.17`，主要选择两种用户证书类型：`RSA-2048`、`ED25519`，CA 根证书的类型为 `RSA-2048`，sshd 版本选择三种：
 -   `OpenSSH_6.0p1, OpenSSL 1.0.0-fips 29 Mar 2010`
 -   `OpenSSH_7.4p1, OpenSSL 1.0.2k-fips  26 Jan 2017`
@@ -60,52 +60,56 @@ ssh-rsa-cert-v01@openssh.com AAAAHHNzaC1yc2EtY2VydC12MDFAb3BlbnNzaC5jb20AAAAgi/K
 | 1.11 | 1.17 | sshd7.4p1| succ | 无 |
 | 1.17| 1.11| sshd7.4p1|  failed | 见图 1.3 |
 | 1.17| 1.17| sshd7.4p1| failed| 见图 1.4 |
-| 1.11 | 1.11 | sshd8.8p1|failed | 见图1.7 |
-| 1.11 | 1.17 | sshd8.8p1| failed | 见图1.8 |
+| 1.11 | 1.11 | sshd8.8p1|failed | 见图 1.7 |
+| 1.11 | 1.17 | sshd8.8p1| failed | 见图 1.8 |
 | 1.17| 1.11| sshd8.8p1|  failed | 见图 1.9（可解决） |
 | 1.17| 1.17| sshd8.8p1| succ| 无 |
 
-不过，图1.9的错误，可以通过修改sshd_config配置来解决：
+不过，图 1.9 的错误，可以通过修改 `sshd_config` 配置来解决：
 ```TEXT
 CASignatureAlgorithms ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,ssh-ed25519,rsa-sha2-512,rsa-sha2-256,ssh-rsa
 ```
 
 
-图1.7/1.8的客户端的报错如下，这个暂时无解：
+图 1.7/1.8 的客户端的报错如下，这个暂时无解：
 ```text
 [root@VM_130_14_centos ~]# ./client -addr x.x.x.x:36000
 2023/03/31 13:08:15 dial error: ssh: handshake failed: ssh: no common algorithm for host key; client offered: [ssh-rsa-cert-v01@openssh.com ssh-dss-cert-v01@openssh.com ecdsa-sha2-nistp256-cert-v01@openssh.com ecdsa-sha2-nistp384-cert-v01@openssh.com ecdsa-sha2-nistp521-cert-v01@openssh.com ssh-ed25519-cert-v01@openssh.com ecdsa-sha2-nistp256 ecdsa-sha2-nistp384 ecdsa-sha2-nistp521 ssh-rsa ssh-dss ssh-ed25519], server offered: [rsa-sha2-512 rsa-sha2-256]
 ```
 
-####    错误1.1
+####    错误 1.1
 ![PIC1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.1.png)
 
-####    错误1.2
+####    错误 1.2
 ![PIC2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.2.png)
 
-####    错误1.3
+####    错误 1.3
 ![PIC3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.3.png)
 
-####    错误1.4
+####    错误 1.4
 ![PIC4](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.4.png)
 
-####    错误1.7
+####    错误 1.7
 ![PIC7](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.7.png)
 
-####    错误1.8
+####    错误 1.8
 ![PIC8](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.8.png)
 
-####    错误1.9
+####    错误 1.9
 ![PIC9](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/cert-bugs/pic1.9.png)
 
 
 所以，结论是当用户证书使用 `RSA-2048` 时，`go1.11` 版本的兼容性是最好的
 
 ####    不兼容的原因
+因为 `SHA-1` 签名算法不安全，所以 OpenSSH 在 `8.8` 版本默认移除了此算法支持，改用 `rsa-sha2-256` (RSA signatures with SHA-256) 或 `rsa-sha2-512` (RSA signatures with SHA-512)
 
+[OpenSSH disables the ssh-rsa signature algorithm since version 8.8](https://security.stackexchange.com/questions/270349/understanding-ssh-rsa-not-in-pubkeyacceptedalgorithms)
 
-##      0x02    ED25519证书：兼容性测试
-[ED25519](https://ed25519.cr.yp.to/)证书的使用版本要求SSHD>=6.5[来源](http://www.openssh.com/txt/release-6.5)；Ed25519 的安全性在 RSA 2048 与 RSA 4096 之间，且性能在数十倍以上
+但是 Golang 的基础库更新并未适配此库
+
+##      0x02    ED25519 证书：兼容性测试
+[ED25519](https://ed25519.cr.yp.to/) 证书的使用版本要求 SSHD Version>=6.5[来源](http://www.openssh.com/txt/release-6.5)；ED25519 的安全性在 RSA 2048 与 RSA 4096 之间，且性能在数十倍以上
 
 PS：在 Go 1.13 之前，`crypto/ed25519` 包不是 Go 语言标准库，导入方式为：
 ```GO
@@ -123,14 +127,14 @@ import "crypto/ed25519"
 `ED25519` 用户证书（1.11 版本服务端签发）：
 
 ```bash
-ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAIAFIKJh9OoK9DH5DZo3bQWJPIy905pqcw3mwxvCFtYHiAAAAINKD1QyP6+ocmCZE6UTGNFDnqW0QPhDZvHCFRlPpTcGlAAAAAAAAAAEAAAABAAAADm1lQGV4YW1wbGUuY29tAAAACAAAAARyb290AAAAAGRBMowAAAAAZEPVjAAAAAAAAACCAAAAFXBlcm1pdC1YMTEtZm9yd2FyZGluZwAAAAAAAAAXcGVybWl0LWFnZW50LWZvcndhcmRpbmcAAAAAAAAAFnBlcm1pdC1wb3J0LWZvcndhcmRpbmcAAAAAAAAACnBlcm1pdC1wdHkAAAAAAAAADnBlcm1pdC11c2VyLXJjAAAAAAAAAAAAAAEXAAAAB3NzaC1yc2EAAAADAQABAAABAQDBzOZVYg9fUyWGCJBLvWRMaW3BWexjNcPoQ1sOY2zHNliEnI9Ui87XpTTmxltbkToeBBZarBrNXlaFJsY1ZZ9WUh8HWo8T54iY8odNKzCS9MIuZkgT8l/LJzt54zI+XXXcwqEm0QvmRmnEsLmBC1Td7n2q0f87nFoTCFXHNd6EPdAi3G8IU2uxldbswu/xCp8yQw1OqjzSzt9jpuTyr10PQmV8uDu3H06IeUfQiFgCSI7kwumV9alIIP4rhhqz4nySF+mC83Y5r/AoKAD3rEPu/rfmVN5V6jt1wz3WMLWbIDI7FByDupCAcK8Tr901bAlh8mTBD5Y2VTB/luczebm1AAABDwAAAAdzc2gtcnNhAAABAHixVxHblCxKRxinG9w4ocQtpqrgn9BgjA3HarjPiwV6b1G/39YRFpMOlgiY9+bNpBWBxNPuUKIRzYR9g37prlmowsb7Hk2US8GQf+UJYMVS8RhCMWDt7Bh0F45kBw4ClHMTLCHILvCWx6JpcuKc8/OEetzhL48y296Z4uWIpiDJyOI28l1GhiROdbRZH8OOx10YzvM1Nj/CRnAP0HAcGXa1r050h7tY/X/C/8beQk4guYdH7xPUTq6Xnkanccx3cwlcyZy7V1wDCwRXwGec8VFbEZDSDL0kC0supU5kBPTe/zvxm1WAL2cuxNPx3wjdrdaPy1OLygTosAVN2DRsqj0= 
+ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAIAFIKJh9OoK9DH5DZo3bQWJPIy905pqcw3mwxvCFtYHiAAAAINKD1QyP6+ocmCZE6UTGNFDnqW0QPhDZvHCFRlPpTcGlAAAAAAAAAAEAAAABAAAADm1lQGV4YW1wbGUuY29tAAAACAAAAARyb290AAAAAGRBMowAAAAAZEPVjAAAAAAAAACCAAAAFXBlcm1pdC1YMTEtZm9yd2FyZGluZwAAAAAAAAAXcGVybWl0LWFnZW50LWZvcndhcmRpbmcAAAAAAAAAFnBlcm1pdC1wb3J0LWZvcndhcmRpbmcAAAAAAAAACnBlcm1pdC1wdHkAAAAAAAAADnBlcm1pdC11c2VyLXJjAAAAAAAAAAAAAAEXAAAAB3NzaC1yc2EAAAADAQABAAABAQDBzOZVYg9fUyWGCJBLvWRMaW3BWexjNcPoQ1sOY2zHNliEnI9Ui87XpTTmxltbkToeBBZarBrNXlaFJsY1ZZ9WUh8HWo8T54iY8odNKzCS9MIuZkgT8l/LJzt54zI+XXXcwqEm0QvmRmnEsLmBC1Td7n2q0f87nFoTCFXHNd6EPdAi3G8IU2uxldbswu/xCp8yQw1OqjzSzt9jpuTyr10PQmV8uDu3H06IeUfQiFgCSI7kwumV9alIIP4rhhqz4nySF+mC83Y5r/AoKAD3rEPu/rfmVN5V6jt1wz3WMLWbIDI7FByDupCAcK8Tr901bAlh8mTBD5Y2VTB/luczebm1AAABDwAAAAdzc2gtcnNhAAABAHixVxHblCxKRxinG9w4ocQtpqrgn9BgjA3HarjPiwV6b1G/39YRFpMOlgiY9+bNpBWBxNPuUKIRzYR9g37prlmowsb7Hk2US8GQf+UJYMVS8RhCMWDt7Bh0F45kBw4ClHMTLCHILvCWx6JpcuKc8/OEetzhL48y296Z4uWIpiDJyOI28l1GhiROdbRZH8OOx10YzvM1Nj/CRnAP0HAcGXa1r050h7tY/X/C/8beQk4guYdH7xPUTq6Xnkanccx3cwlcyZy7V1wDCwRXwGec8VFbEZDSDL0kC0supU5kBPTe/zvxm1WAL2cuxNPx3wjdrdaPy1OLygTosAVN2DRsqj0=
 ```
 
 
 `ED25519` 用户证书（1.17 版本服务端签发）：
 
 ```bash
-ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAIG0DBY0vjF53ufNKHsSVSU9IV0a6KAOunlyn+YEB82RxAAAAINKD1QyP6+ocmCZE6UTGNFDnqW0QPhDZvHCFRlPpTcGlAAAAAAAAAAEAAAABAAAADm1lQGV4YW1wbGUuY29tAAAACAAAAARyb290AAAAAGRBNJAAAAAAZEPXkAAAAAAAAACCAAAAFXBlcm1pdC1YMTEtZm9yd2FyZGluZwAAAAAAAAAXcGVybWl0LWFnZW50LWZvcndhcmRpbmcAAAAAAAAAFnBlcm1pdC1wb3J0LWZvcndhcmRpbmcAAAAAAAAACnBlcm1pdC1wdHkAAAAAAAAADnBlcm1pdC11c2VyLXJjAAAAAAAAAAAAAAEXAAAAB3NzaC1yc2EAAAADAQABAAABAQDBzOZVYg9fUyWGCJBLvWRMaW3BWexjNcPoQ1sOY2zHNliEnI9Ui87XpTTmxltbkToeBBZarBrNXlaFJsY1ZZ9WUh8HWo8T54iY8odNKzCS9MIuZkgT8l/LJzt54zI+XXXcwqEm0QvmRmnEsLmBC1Td7n2q0f87nFoTCFXHNd6EPdAi3G8IU2uxldbswu/xCp8yQw1OqjzSzt9jpuTyr10PQmV8uDu3H06IeUfQiFgCSI7kwumV9alIIP4rhhqz4nySF+mC83Y5r/AoKAD3rEPu/rfmVN5V6jt1wz3WMLWbIDI7FByDupCAcK8Tr901bAlh8mTBD5Y2VTB/luczebm1AAABFAAAAAxyc2Etc2hhMi01MTIAAAEAKHWJmja0TnuD1NmdPbWSZciYj5j40sBPDXZimtMAMblFe2CVIZOQYZIzbRH9Zl9Uo2Kgp6xFCsJvo28ZnE3F/eoyNprx3T5pRFCGHNp0Keo8LGAC9jn5iqSegeLTxA8eF2nxP1g6PMzGiyz01n3Kp6ocQqPaMiAEJY5gnd6UvhPfV9MlSgZCTbqjxL1Pl/JivE4RbQRpQtly2xjParuhubH7P8kZvHbF6PLRbJf6mKdCp7yYLfNKJO5ujeOVct447TgiPXfP85zS4OMNEFhYD253wrn0LCBqiiTvNh2mlfO0GiZ+bC0BTwRh61CK05XsLedZnjlviZ6+gSbNwkmgmg== 
+ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAIG0DBY0vjF53ufNKHsSVSU9IV0a6KAOunlyn+YEB82RxAAAAINKD1QyP6+ocmCZE6UTGNFDnqW0QPhDZvHCFRlPpTcGlAAAAAAAAAAEAAAABAAAADm1lQGV4YW1wbGUuY29tAAAACAAAAARyb290AAAAAGRBNJAAAAAAZEPXkAAAAAAAAACCAAAAFXBlcm1pdC1YMTEtZm9yd2FyZGluZwAAAAAAAAAXcGVybWl0LWFnZW50LWZvcndhcmRpbmcAAAAAAAAAFnBlcm1pdC1wb3J0LWZvcndhcmRpbmcAAAAAAAAACnBlcm1pdC1wdHkAAAAAAAAADnBlcm1pdC11c2VyLXJjAAAAAAAAAAAAAAEXAAAAB3NzaC1yc2EAAAADAQABAAABAQDBzOZVYg9fUyWGCJBLvWRMaW3BWexjNcPoQ1sOY2zHNliEnI9Ui87XpTTmxltbkToeBBZarBrNXlaFJsY1ZZ9WUh8HWo8T54iY8odNKzCS9MIuZkgT8l/LJzt54zI+XXXcwqEm0QvmRmnEsLmBC1Td7n2q0f87nFoTCFXHNd6EPdAi3G8IU2uxldbswu/xCp8yQw1OqjzSzt9jpuTyr10PQmV8uDu3H06IeUfQiFgCSI7kwumV9alIIP4rhhqz4nySF+mC83Y5r/AoKAD3rEPu/rfmVN5V6jt1wz3WMLWbIDI7FByDupCAcK8Tr901bAlh8mTBD5Y2VTB/luczebm1AAABFAAAAAxyc2Etc2hhMi01MTIAAAEAKHWJmja0TnuD1NmdPbWSZciYj5j40sBPDXZimtMAMblFe2CVIZOQYZIzbRH9Zl9Uo2Kgp6xFCsJvo28ZnE3F/eoyNprx3T5pRFCGHNp0Keo8LGAC9jn5iqSegeLTxA8eF2nxP1g6PMzGiyz01n3Kp6ocQqPaMiAEJY5gnd6UvhPfV9MlSgZCTbqjxL1Pl/JivE4RbQRpQtly2xjParuhubH7P8kZvHbF6PLRbJf6mKdCp7yYLfNKJO5ujeOVct447TgiPXfP85zS4OMNEFhYD253wrn0LCBqiiTvNh2mlfO0GiZ+bC0BTwRh61CK05XsLedZnjlviZ6+gSbNwkmgmg==
 ```
 
 | go 客户端版本 | go 证书服务版本（证书版本） | SSHD 版本 | 登录成功 | 报错 |
@@ -145,7 +149,7 @@ ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29
 | 1.17| 1.17| sshd7.4p1| succ|  |
 | 1.11 | 1.11 | sshd8.8p1|failed | |
 | 1.11 | 1.17 | sshd8.8p1| failed |  |
-| 1.17| 1.11| sshd8.8p1|  failed | 见图 1.9（同RSA） |
+| 1.17| 1.11| sshd8.8p1|  failed | 见图 1.9（同 RSA） |
 | 1.17| 1.17| sshd8.8p1| succ| 无 |
 
 
@@ -153,9 +157,9 @@ ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29
 
 ####    其他一些不兼容的场景收集
 
-1、不兼容case1：
+1、不兼容 case1：
 
-客户端版本为golang `1.11`、编译方式为 `GOPATH`的二进制，服务端版本为`OpensSH 9.0p1.OpenssL 3.0.5 5 Ju1 2022`，报错如下
+客户端版本为 golang `1.11`、编译方式为 `GOPATH` 的二进制，服务端版本为 `OpensSH 9.0p1.OpenssL 3.0.5 5 Ju1 2022`，报错如下
 
 ```text
 VM-65-77-tencentos sshd[3899236]: userauth_pubkey: signature algorithm ssh-rsa-cert-v01@openssh.com not in PubkeyAcceptedAlgorithms [preauth]
@@ -163,7 +167,7 @@ VM-65-77-tencentos sshd[3899236]: userauth_pubkey: signature algorithm ssh-rsa-c
 
 ####    一些可能的尝试
 
-1、自行维护[crypto](https://github.com/gravitational/crypto)库
+1、自行维护 [crypto](https://github.com/gravitational/crypto) 库
 
 
 ##  0x04    参考
