@@ -1,7 +1,7 @@
 ---
 layout:     post
-title:      GOST 应用与分析
-subtitle:
+title:      GOST 应用与分析（一）
+subtitle:   GOST 项目的介绍及 TUNNEL 实现分析
 date:       2024-01-21
 author:     pandaychen
 catalog:    true
@@ -18,8 +18,11 @@ gost 是一个非常有意思的项目，在笔者看来，像是积木一样的
 -   `Hop`：Hop 是指在 GOST 中数据传输过程中，从一个 node 到另一个 node 的跳转。每个 hop 都有一个特定的转发规则，例如从一个 HTTP 代理跳转到一个 SOCKS5 代理
 -   `Chain`：Chain 是指一个网络服务链路。一个 chain 可以包含多个 hop，数据在这些 hop 之间按照特定的顺序进行转发。通过 chain，GOST 可以实现数据的多次转发，从而实现复杂的网络代理功能
 
+本文分析版本基于 `gost-2.11.5`，地址 [gost-2.11.5](https://github.com/pandaychen/gost-v3.0.0-nightly.20240201)
 
-####    支持 tunnel 场景
+![ARCH](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/gost/arch-1.png)
+
+##  0x01    支持 tunnel 场景
 GOST 作为隧道有三种主要使用方式：
 
 ####    正向代理
@@ -212,13 +215,13 @@ chains:
 ```
 
 
-##  0x01    tunnel 实现
+##  0x02    tunnel 实现
 本小节分析下 [gost 项目](https://github.com/go-gost/gost?tab=readme-ov-file) 的 tunnel 实现，所谓 tunnel，就是通过此传输一些其他协议的数据（变换协议）或者加速访问（和 frp 功能类似）
 
 本文分析版本基于 [v3.0.0-nightly.20240201](https://github.com/go-gost/gost/releases/tag/v3.0.0-nightly.20240201)
 
 
-##  0x0 参考
+##  0x03 参考
 -   [GOSTV3](https://github.com/go-gost/gost)
 -   [GOSTV2](https://github.com/ginuerzh/gost)
 -   [GOST 官方文档](https://gost.run/en/)
