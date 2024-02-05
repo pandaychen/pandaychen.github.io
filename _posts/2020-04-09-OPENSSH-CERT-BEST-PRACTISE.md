@@ -27,6 +27,16 @@ $$ 证书（Certificate） = 公钥（PublicKey） + 元数据 (公钥指纹 / �
 
 ![pubkeyVScert](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/sshkeyVScert.png)
 
+####    certificate的优点
+
+-  Certificates are tied to user identity
+-  Certificates automatically expire
+-  Certificates can contain SSH restrictions, e.g. forbidding PTY allocation or port forwarding
+-  SSH certificates can be synchronized with Kubernetes certificates
+-  **Certificates include metadata. This enables role-based access control**（teleport的这个实现蛮有意思）
+-  Certificates solve TOFU (trust on first use) problems. The user and host certificates signed by the same CA establish trust and eliminate the need for TOFU
+
+
 ####    算法安全
 常用的 SSH 登录秘钥生成算法有如下四种：
 -   `DSA`
@@ -97,6 +107,13 @@ ssh_host_ecdsa_key-cert.pub:
                 permit-user-rc
 ```
 
+####    Comparing X.509 properties with OpenSSH certificate
+OpenSSH 证书与`X.509`是两种不同的证书体系，二者的区别如下图：
+
+![diff](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/openssh/sshcert-vs-x509.png)
+
+
+
 ####    其他安全特性
 由于证书的不可伪造性（Unforgeability），我们可以利用证书的内置字段或结构来提升证书使用的安全性。此外，OpenSSH 还支持多个 CA （公钥）共用（虽然不推荐这样配置）
 
@@ -148,5 +165,10 @@ CloudFlare 的 OpenSSH 实践：[Public keys are not enough for SSH security](ht
 -   [Netflix-bless](https://github.com/Netflix/bless)
 -   [HashiCorp Vault SSH CA and Sentinel](https://medium.com/hashicorp-engineering/hashicorp-vault-ssh-ca-and-sentinel-79ea6a6960e5)
 -   [Signed SSH Certificates](https://www.vaultproject.io/docs/secrets/ssh/signed-ssh-certificates.html#known-issues)
+-   [SSH Certificate Authentication](https://docs.banyansecurity.io/docs/securing-private-resources/ssh-servers/cert-auth/)
+-   [SSH Certificates: How Do OpenSSH Certificates Compare to X.509?](https://goteleport.com/blog/x509-vs-openssh-certificates/)
+-   [SSH Certificates Security](https://goteleport.com/blog/ssh-certificates/)
+-   [Comparing SSH Keys - RSA, DSA, ECDSA, or EdDSA?](https://goteleport.com/blog/comparing-ssh-keys/)
+-   [SSH Handshake Explained](https://goteleport.com/blog/ssh-handshake-explained/)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
