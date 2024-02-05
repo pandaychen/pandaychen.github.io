@@ -1,7 +1,7 @@
 ---
 layout:     post
-title:      Transparent Proxy All In One
-subtitle:
+title:      透明代理汇总：Transparent Proxy All In One
+subtitle:   记录项目预研 / 开发的若干细节
 date:       2023-08-18
 author:     pandaychen
 catalog:    true
@@ -10,25 +10,38 @@ tags:
 ---
 
 
-##  Ox00    前言
-本文汇总下笔者在调研透明代理的一些分享（Linux 下的全流量代理网关）
+##  0x00    前言
+本文汇总下笔者在调研透明代理（Linux 下的全流量代理网关）的一些技术学习与分享
 
-##  0x01    tproxy VS tun
+##  0x01    代理的技术方案比较
 
-前文分别介绍了 tun/tproxy 如何实现透明代理技术，那么它们实现透明代理的区别是什么？主要实现方式和应用场景有所不同：
+####  TProxy
+TProxy 是一种 Linux 内核模块，可以在 Linux 内核层面拦截网络数据并进行处理，从而实现透明代理。TProxy 可以在不改变源 IP 地址和端口的情况下，将数据包重定向到代理服务器（通常是监听在本机`lo`网卡上的进程）进行处理。TProxy 适用于 HTTP、HTTPS 等基于 TCP 协议的应用，但不支持 UDP 协议，TProxy 主要通过修改 iptables 和路由规则实现
 
--   TProxy 是一种 Linux 内核模块，可以在 Linux 内核层面拦截网络数据并进行处理，从而实现透明代理。TProxy 可以在不改变源 IP 地址和端口的情况下，将数据包重定向到代理服务器进行处理。TProxy 适用于 HTTP、HTTPS 等基于 TCP 协议的应用，但不支持 UDP 协议
--   TUN 是一种虚拟网络设备，可以将网络数据包通过用户空间程序进行处理，然后再发送到网络中。通过创建 TUN 设备，可以将网络数据包从内核层面转移到用户空间，从而实现透明代理。TUN 可以处理任何协议的数据包，包括 TCP、UDP 等。但是，TUN 需要在用户空间编写代理程序，相对比较复杂。
-
-因此，TProxy 适用于基于 TCP 协议的应用，使用相对简单；而 TUN 适用于任何协议的应用，但需要在用户空间编写代理程序，使用相对复杂
-
-
-从笔者个人经验上来说，基于 tproxy 与 tun 部署的应用的差别如下图：
+####  Tun：虚拟网卡技术
+TUN 是一种虚拟网络设备，可以将网络数据包通过用户空间程序进行处理，然后再发送到网络中。通过创建 TUN 设备，可以将网络数据包从内核层面转移到用户空间，从而实现透明代理。TUN 可以处理任何协议的数据包，包括 TCP/UDP 等。但是，TUN 需要在用户空间编写代理程序，相对比较复杂
 
 
-##  0x02    iptables 构建透明代理
+####  NFQUEUE ：网络过滤器队列技术
+NFQUEUE 是一种 iptables 和 ip6tables 的目标（an iptables and ip6tables target），将网络包处理决定委托给用户态软件。作为一种在 Linux 内核中实现的机制，允许用户空间程序与内核空间的网络堆栈进行交互。nfqueue 的主要目的是在用户空间中对网络数据包进行处理和过滤，然后决定是否允许数据包通过或者丢弃；nfqueue 的工作原理如下：
 
-TProxy（Transparent Proxy）是内核支持的一种透明代理方式，于 Linux 2.6.28 引入。不同于 NAT 修改数据包目的地址实现重定向，**TProxy 仅替换数据包的 skb 原本持有的 socket**，不需要修改数据包标头，TPROXY 是一个 iptables 扩展的名称。
+- 注册：用户空间程序通过 `libnetfilter_queue` 库注册一个队列，该队列与内核中的一个特定 nfqueue 实例相关联。程序可以指定队列的编号和回调函数
+- 数据包捕获：内核中的 iptables（网络过滤器）或者 nftables（新一代网络过滤器）根据预先定义的规则将数据包发送到指定的 nfqueue 实例。这些规则可以基于数据包的来源、目的、协议等属性进行匹配
+- 用户空间处理：当数据包进入 nfqueue 时，内核将它们发送到关联的用户空间程序。程序可以对数据包进行任意处理，例如修改、丢弃或者允许通过
+- 决策：用户空间程序根据自己的逻辑做出决策，将对数据包的处理结果（允许通过、丢弃等）返回给内核。内核根据这个决策来处理数据包
+- 注销：当用户空间程序不再需要处理数据包时，它可以通过 `libnetfilter_queue` 库注销队列
+
+
+####  iptables REDIRECT 重定向
+iptables redirect 是一种基于 iptables 的透明代理技术。它通过更改数据包的目标地址，将数据包重定向到本地的代理服务器。代理服务器收到数据包后，需要进行 NAT（网络地址转换）操作，才能找到原始目标地址。这种方法会导致一定程度的性能损失
+
+####  对比
+- nfqueue 提供了一种灵活的机制，允许用户空间程序对网络数据包进行深度检查和处理。这对于实现防火墙、入侵检测系统、网络监控工具等应用非常有用。
+- TProxy 适用于基于 TCP 协议的应用，使用相对简单
+- TUN 适用于任何协议的应用，但需要在用户空间编写代理程序，使用相对复杂
+##  0x02    Review：iptables 构建透明代理（TPROXY）
+
+TProxy（Transparent Proxy）是内核支持的一种透明代理方式，于 Linux `2.6.28` 引入。不同于 NAT 修改数据包目的地址实现重定向，**TProxy 仅替换数据包的 skb 原本持有的 socket**，不需要修改数据包标头，TPROXY 是一个 iptables 扩展的名称。
 
 ####  使用方式
 
@@ -100,16 +113,16 @@ tproxy-port: 7893
 
 最后在局域网的 `DHCP` 服务器设置网关为该机器 IP 即可，也可以在希望走代理机器的网关设置为该机器 IP
 
-##  0x02    v2ray
+##  0x03    v2ray
 [v2ray-core](https://github.com/v2fly/v2ray-core)
 
-####  非tun模式
-同样使用tproxy进行，完整的配置过程，可以参考此文[透明代理入门](https://xtls.github.io/document/level-2/transparent_proxy/transparent_proxy.html#iptables-%E5%AE%9E%E7%8E%B0%E9%80%8F%E6%98%8E%E4%BB%A3%E7%90%86%E5%8E%9F%E7%90%86)
+####  非 tun 模式
+同样使用 tproxy 进行，完整的配置过程，可以参考此文 [透明代理入门](https://xtls.github.io/document/level-2/transparent_proxy/transparent_proxy.html#iptables-%E5%AE%9E%E7%8E%B0%E9%80%8F%E6%98%8E%E4%BB%A3%E7%90%86%E5%8E%9F%E7%90%86)
 
-####  tun模式
+####  tun 模式
 
 
-##  0x03    Clash.Meta && clash-plus-pro [Clash 二次开发]
+##  0x04    Clash.Meta && clash-plus-pro [Clash 二次开发]
 
 鉴于 clash premium 不开源（开源版本不支持 tun 虚拟网卡功能），有如下二次开发版本：
 
@@ -124,7 +137,7 @@ tproxy-port: 7893
 
 1、代理模块
 
--   支持出站传输协议 VLESS Reality, Vision 流控
+-   支持出站传输协议 VLESS Reality/Vision 流控
 -   支持出站传输协议 Trojan XTLS
 -   支持出站传输协议 Hysteria
 -   支持出站传输协议 TUIC
@@ -210,9 +223,9 @@ rules:  #这里默认只使用一个代理
   - MATCH,http
 ```
 
-##  0x04    Gost
+##  0x05    Gost
 
-##  0x05    tun2socks
+##  0x06    tun2socks
 Tun2socks 的原理是通过创建 TUN/TAP 设备，将本地应用程序的网络流量发送到用户空间进行处理，并通过代理服务器将数据包转发到目标服务器。通过设置转发规则，可以实现对不同应用程序的网络流量进行不同的处理，其核心过程如下：
 
 ![tun2socks.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/tun2socks.png)
@@ -223,7 +236,7 @@ Tun2socks 的原理是通过创建 TUN/TAP 设备，将本地应用程序的网�
 - 转发规则：Tun2socks 可以根据用户的需求设置转发规则，将指定的应用程序的网络流量转发到指定的代理服务器。如可以将浏览器的网络流量转发到 HTTP 代理服务器，将其他应用程序的网络流量转发到 Shadowsocks 代理服务器
 
 
-##  0x06    seeker
+##  0x07    seeker
 [seeker](https://github.com/gfreezy/seeker) 是基于 rust 实现的，通过使用 tun 来实现透明代理，实现了类似 surge 增强模式与网关模式
 
 ####    实现原理
@@ -241,12 +254,10 @@ seeker 参考了 Surge 的实现原理，使用了 fake-ip 模式，基本如下
 
 6.  如果需要走代理，将 TCP/UDP 数据转发到 `SS` 服务器 / `socks5` 代理，从代理接收到数据后，再返回给应用；如果直连，则本地建立直接将数据发送到目标地址
 
-##  0x07    surge（MAC）
+##  0x08    surge（MAC）
 
 
-##  0x08  基于uid（用户ID）的路由策略技巧
-
-##  0x  参考
+##  0x09  参考
 -   [透明代理入门](https://xtls.github.io/document/level-2/transparent_proxy/transparent_proxy.html#iptables-%E5%AE%9E%E7%8E%B0%E9%80%8F%E6%98%8E%E4%BB%A3%E7%90%86%E5%8E%9F%E7%90%86)
 -   [Clash.Meta Docs](https://wiki.metacubex.one/)
 -   [Meta Kernel](https://github.com/MetaCubeX/Clash.Meta/tree/Meta)
@@ -265,3 +276,5 @@ seeker 参考了 Surge 的实现原理，使用了 fake-ip 模式，基本如下
 - [记录 Tun 透明代理的多种实现方式，以及如何避免 routing loop](https://chaochaogege.com/2021/08/01/57/)
 - [Mellow is a rule-based global transparent proxy client for Windows, macOS and Linux. Also a Proxifier alternative.](https://github.com/mellow-io/mellow)
 - [透明代理入门](https://xtls.github.io/document/level-2/transparent_proxy/transparent_proxy.html#iptables-nftables)
+- [go-nfqueue](https://github.com/florianl/go-nfqueue)
+- [OpenGFW](https://github.com/apernet/OpenGFW)
