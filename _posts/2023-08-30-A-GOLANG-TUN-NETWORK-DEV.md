@@ -59,12 +59,10 @@ tags:
 
 客户端代码参考：[tun_tcp_connect](https://github.com/google/gvisor/blob/master/pkg/tcpip/sample/tun_tcp_connect/main.go)
 
-##  0x04 TUN 配置基础
+##  0x04 配置基础
 以 [tun2socks](https://github.com/xjasonlyu/tun2socks/wiki/Examples#linux) 为例
 
-
-####  关闭
-
+####  TUN虚拟网卡配置
 1、关闭虚拟网卡 `tun0`
 
 ```BASH
@@ -77,9 +75,9 @@ ip link set tun0 down #将 tun0 网卡设为下线状态，停止其网络连接
 ip link delete tun0 #该命令将删除 tun0 网卡，彻底关闭其网络连接。请注意，执行该命令后，tun0 网卡的配置信息将被永久删除，无法恢复
 ```
 
-####  删除指定的路由
+####  路由配置
 
-下述静态路由，通过 `route del -net 192.168.10.0 netmask 255.255.255.0 dev eth0` 指令进行删除：
+1、删除指定的路由，下述静态路由，通过 `route del -net 192.168.10.0 netmask 255.255.255.0 dev eth0` 指令进行删除：
 
 ```BASH
 192.168.10.0    0.0.0.0         255.255.255.0   U     100    0        0 eth0
@@ -87,15 +85,15 @@ ip link delete tun0 #该命令将删除 tun0 网卡，彻底关闭其网络连�
 
 
 ####  内核参数配置
-
 1、内核参数 `rp_filter` 可能引发的问题
 
-`rp_filter` 是 Linux 的安全功能，`rp_filter` 会在计算路由决策的时候，计算包的反向路由，也就是将包的源地址和目的地址对调再查找路由表。由本机或者其他设备流向 clash0 的 IP Packet 一般不会有问题，但是当 rp_filter 检查 clash0 流出的包时，由于这些包不会带有 fwmark，检查反向路由时不会走刚才定义的策略路由，导致 rp_filter 检查失败，包被丢弃。
-解决方法时关闭 clash0 NIC 的 rp_filter 功能。
+`rp_filter` 是 Linux 的安全功能，`rp_filter` 会在计算路由决策的时候，计算包的反向路由，也就是将包的源地址和目的地址对调再查找路由表。由本机或者其他设备流向 `clash0` 的 IP Packet 一般不会有问题，但是当 `rp_filter` 检查 `clash0` 流出的包时，由于这些包不会带有 `fwmark`，检查反向路由时不会走刚才定义的策略路由，导致 `rp_filter` 检查失败，包被丢弃；通常解决方法时关闭 clash0 NIC 的 rp_filter 功能，如下：
+```bash
 sysctl -w net.ipv4.conf.clash0.rp_filter=0
 sysctl -w net.ipv4.conf.all.rp_filter=0
-将 all.rp_filter 设置为 0 是必须的。
-将 all.rp_filter 设置为 0 并不会将所有其他网卡的 rp_filter 一并关闭。此时其他网卡的 rp_filter 由它们各自的 rp_filter 控制。
+```
+
+一般而言，将 `all.rp_filter` 设置为 `0` 是必须的；将 `all.rp_filter` 设置为 `0` 并不会将所有其他网卡的 `rp_filter` 一并关闭。此时其他网卡的 `rp_filter` 由它们各自的 `rp_filter` 控制
 
 
 ##  0x05  一些细节
@@ -154,14 +152,13 @@ Overriding The Default Route
 
 ##  0x05  TUN with DNS
 
-[](https://dreamacro.github.io/clash/)
 
 ##  0x0 参考
 -   [网络编程学习：vpn 实现](https://www.jianshu.com/p/e74374a9c473)
 -   [Listener and Dialer using a TUN and netstack.](https://github.com/costinm/tungate)
 -   [tungate.go](https://github.com/costinm/tungate/blob/main/gvisor/cmd/tungate.go)
 -   [在 Linux 上开 clash tun 模式 clash 是怎么劫持 dns 的](https://www.v2ex.com/t/880652)
-- [How does a socket know which network interface controller to use?](https://stackoverflow.com/questions/4297356/how-does-a-socket-know-which-network-interface-controller-to-use/4297381#4297381)
-- [基于TUN/TAP实现多个局域网设备之间的通讯](https://blog.csdn.net/qq_63445283/article/details/123779498)
-- [iOS network extension packet parsing](https://stackoverflow.com/questions/69260852/ios-network-extension-packet-parsing/69487795#69487795)
+-   [How does a socket know which network interface controller to use?](https://stackoverflow.com/questions/4297356/how-does-a-socket-know-which-network-interface-controller-to-use/4297381#4297381)
+-   [基于TUN/TAP实现多个局域网设备之间的通讯](https://blog.csdn.net/qq_63445283/article/details/123779498)
+-   [iOS network extension packet parsing](https://stackoverflow.com/questions/69260852/ios-network-extension-packet-parsing/69487795#69487795)
 -   [网络协议之:haproxy的Proxy Protocol代理协议](https://developer.aliyun.com/article/938138)
