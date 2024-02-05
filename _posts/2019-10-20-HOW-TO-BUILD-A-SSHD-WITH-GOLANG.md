@@ -797,3 +797,4 @@ func (s *Session) Setenv(name, value string) error {
 -   [SSH Agent Explained](https://smallstep.com/blog/ssh-agent-explained/)
 -   [SSH Agent Forwarding 原理](https://blog.csdn.net/sdcxyz/article/details/41487897)
 -   [ssh命令之ProxyCommand选项](https://dslztx.github.io/blog/2017/05/19/ssh%E5%91%BD%E4%BB%A4%E4%B9%8BProxyCommand%E9%80%89%E9%A1%B9/)
+-   [SSH port forwarding with Go](https://eli.thegreenplace.net/2022/ssh-port-forwarding-with-go/)

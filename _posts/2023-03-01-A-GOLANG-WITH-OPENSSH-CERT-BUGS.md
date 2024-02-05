@@ -21,6 +21,8 @@ tags:
 -   [x/crypto/ssh: rsa-sha2-256/rsa-sha2-512 tracking issue](https://github.com/golang/go/issues/49952#issuecomment-1314152075)
 -   [OpenSSH server compatibility issues #17197](https://github.com/gravitational/teleport/issues/17197)
 -   [x/crypto/ssh: support RSA SHA-2 host key signatures #37278](https://github.com/golang/go/issues/37278)
+-   [Drop support for SHA1 #15149](https://github.com/gravitational/teleport/issues/15149)
+-   [Newer OpenSSH clients are dropping support for ssh-rsa-cert-v01 #10918](https://github.com/gravitational/teleport/issues/10918)
 
 以上的问题核心点是兼容性问题，主要涉及到三方的兼容性问题：
 1.  golang（`golang.org/x/crypto/ssh`）版本（也有可能是二进制版本），主要影响两块：
@@ -180,5 +182,6 @@ VM-65-77-tencentos sshd[3899236]: userauth_pubkey: signature algorithm ssh-rsa-c
 -   [Newer OpenSSH clients are dropping support for ssh-rsa-cert-v01 #10918](https://github.com/gravitational/teleport/issues/10918)
 -   [OpenSSH server compatibility issues #17197](https://github.com/gravitational/teleport/issues/17197)
 -   [RSA public keys cannot authenticate against internal SSH if the client has a recent ssh version (which disables ssh-rsa algorithm) #17798](https://github.com/go-gitea/gitea/issues/17798?ref=ikarus.sg)
+-   [Understanding ssh-rsa not in PubkeyAcceptedAlgorithms](https://security.stackexchange.com/questions/270349/understanding-ssh-rsa-not-in-pubkeyacceptedalgorithms)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
