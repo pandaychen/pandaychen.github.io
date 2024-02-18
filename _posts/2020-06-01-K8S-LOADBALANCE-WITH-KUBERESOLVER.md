@@ -302,3 +302,4 @@ spec:
 -   [A Kubernetes Service Mesh (Part 9): gRPC for Fun and Profit](https://dzone.com/articles/a-service-mesh-for-kubernetes-part-ix-grpc-for-fun)
 -   [必读！Istio Service Mesh 中的流量管理概念解析](https://juejin.im/post/5b7fc952f265da4358368734)
 -   [Kubernetes 应用改造（六）：使用原生 API 实现 gRPC 负载均衡](https://pandaychen.github.io/2020/10/13/K8S-LOAD-BALANCER-KUBERESOLVER-ANALYSIS/)
+-   [Envoy 中文指南](https://icloudnative.io/envoy-handbook/)

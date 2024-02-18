@@ -39,8 +39,9 @@ iptables redirect 是一种基于 iptables 的透明代理技术。它通过更�
 - nfqueue 提供了一种灵活的机制，允许用户空间程序对网络数据包进行深度检查和处理。这对于实现防火墙、入侵检测系统、网络监控工具等应用非常有用。
 - TProxy 适用于基于 TCP 协议的应用，使用相对简单
 - TUN 适用于任何协议的应用，但需要在用户空间编写代理程序，使用相对复杂
-##  0x02    Review：iptables 构建透明代理（TPROXY）
 
+
+##  0x02    Review：Tproxy 构建透明代理
 TProxy（Transparent Proxy）是内核支持的一种透明代理方式，于 Linux `2.6.28` 引入。不同于 NAT 修改数据包目的地址实现重定向，**TProxy 仅替换数据包的 skb 原本持有的 socket**，不需要修改数据包标头，TPROXY 是一个 iptables 扩展的名称。
 
 ####  使用方式
