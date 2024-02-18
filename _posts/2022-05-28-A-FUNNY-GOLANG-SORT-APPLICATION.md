@@ -1,6 +1,6 @@
 ---
 layout: post
-title: 数据结构与算法回顾（八）：海量整数排序的分治式解决思路
+title: 数据结构与算法回顾（八）：海量整数排序的分治式解决思路（未完待续）
 subtitle: 一道 pingcap 的算法题目
 date: 2022-05-28
 header-img: img/super-mario.jpg

@@ -32,6 +32,8 @@ tags:
 
 图源自 [Etcd 存储的实现](https://www.codedump.info/post/20181125-etcd-server/)
 
+##  0x02    Etcd 存储实现
+
 ##  0x0 参考
 -   [Etcd Raft 库的工程化实现](https://www.codedump.info/post/20210515-raft/)
 -   [ETCD 连载](https://www.lixueduan.com/categories/etcd/)

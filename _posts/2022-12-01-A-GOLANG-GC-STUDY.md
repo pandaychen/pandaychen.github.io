@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      Golang 中的GC小结
+title:      Golang 中的GC小结（未完待续）
 subtitle:   
 date:       2022-12-01
 author:     pandaychen

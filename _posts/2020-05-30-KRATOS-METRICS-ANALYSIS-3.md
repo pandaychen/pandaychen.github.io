@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      理解 Kratos 的数据统计类型 Metrics（三）-- 计划中
+title:      理解 Kratos 的数据统计类型 Metrics（三）-- 未完待续
 subtitle:   Metrics 的实战应用
 date:       2020-05-30
 author:     pandaychen
