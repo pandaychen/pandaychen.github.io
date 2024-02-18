@@ -36,19 +36,25 @@ executors 包实现了这几个 executor ：大部分都是 `executor` 配合 `c
 
 ##  0x02    源码分析
 
+####   依赖关系
+-   `bulkexecutor`：`periodicalexecutor` + `bulkContainer`
+-   `chunkexecutor`：`periodicalexecutor` + `chunkContainer`
 
 ####   基础定义
 
-1、`TaskContainer`：实例化为 `bulkContainer`、`chunkContainer`，可以理解为一个任务缓冲队列，`AddTask` 用来提示添加任务后是否超过了队列的最大值
+1、`TaskContainer`（是一个 `interface`）：实例化为 `bulkContainer`、`chunkContainer`，可以理解为一个任务缓冲队列，`AddTask` 用来提示添加任务后是否超过了队列的最大值
 
 ```GO
 type TaskContainer interface {
 		// AddTask adds the task into the container.
 		// Returns true if the container needs to be flushed after the addition.
+        // 把 task 加入 container
 		AddTask(task any) bool
 		// Execute handles the collected tasks by the container when flushing.
+        // 实际上是去执行传入的 execute func()
 		Execute(tasks any)
 		// RemoveAll removes the contained tasks, and return them.
+        // 达到临界值，移除 container 中全部的 task，通过 channel 传递到 execute func() 执行
 		RemoveAll() any
 }
 ```
@@ -111,7 +117,7 @@ type chunk struct {
 ```
 
 
-####    PeriodicalExecutor 的实现
+####    核心：PeriodicalExecutor 的实现
 `PeriodicalExecutor`[定义](https://github.com/zeromicro/go-zero/blob/master/core/executors/periodicalexecutor.go#L32) 如下：
 ```GO
 // A PeriodicalExecutor is an executor that periodically execute tasks.
@@ -128,7 +134,70 @@ type PeriodicalExecutor struct {
     newTicker   func(duration time.Duration) timex.Ticker
     lock        sync.Mutex
 }
+
+// 初始化
+func New...(interval time.Duration, container TaskContainer) *PeriodicalExecutor {
+    executor := &PeriodicalExecutor{
+        commander:   make(chan interface{}, 1),
+        interval:    interval,
+        container:   container,
+        confirmChan: make(chan lang.PlaceholderType),
+        newTicker: func(d time.Duration) timex.Ticker {
+            return timex.NewTicker(interval)
+        },
+    }
+    //...
+    return executor
+}
 ```
+
+`PeriodicalExecutor` 结构的重要成员定义如下：
+-   `commander`：异步传递 `tasks` 的 channel（从 `container` 加入的 tasks）
+-   `container`：暂存 `Add()` 增加的 task
+-   `confirmChan`：阻塞 `Add()` ，在开始本次的 `executeTasks()` 会放开阻塞
+-   `ticker`：定时器，防止 `Add()` 阻塞时（未达批量处理上限），会有一个定时执行的机会，及时释放暂存的 task
+
+####    `PeriodicalExecutor.Add`方法
+
+-   `Add`
+-   `Flush`
+-   `Sync`
+-   `Wait`
+
+```GO
+// Add adds tasks into pe.
+func (pe *PeriodicalExecutor) Add(task any) {
+	if vals, ok := pe.addAndCheck(task); ok {
+		pe.commander <- vals
+		<-pe.confirmChan
+	}
+}
+
+func (pe *PeriodicalExecutor) addAndCheck(task interface{}) (interface{}, bool) {
+    pe.lock.Lock()
+    defer func() {
+        // 一开始为 false
+        var start bool
+        if !pe.guarded {
+            // backgroundFlush() 会将 guarded 重新置反
+            pe.guarded = true
+            start = true
+        }
+        pe.lock.Unlock()
+        // 在第一条 task 加入的时候就会执行 if 中的 backgroundFlush()。后台协程刷 task
+        if start {
+            pe.backgroundFlush()
+        }
+    }()
+    // 控制 maxTask，>=maxTask 将 container 中 tasks pop, return
+    if pe.container.AddTask(task) {
+        return pe.container.RemoveAll(), true
+    }
+    return nil, false
+}
+```
+
+`addAndCheck()` 中 `AddTask()` 就是在控制最大 `tasks` 数，如果超过就执行 `RemoveAll()` ，将暂存 `container` 的 tasks pop，传递给 `commander` ，后面有 goroutine 循环读取，然后去执行 `tasks`
 
 `backgroundFlush`：
 
@@ -158,7 +227,7 @@ func (pe *PeriodicalExecutor) backgroundFlush() {
 				} else if pe.Flush() {
 					last = timex.Now()
 				} else if pe.shallQuit(last) {
-                    // 特别注意这里，如果检查满足退出条件，则backgroundFlush就自行退出
+                    // 特别注意这里，如果检查满足退出条件，则 backgroundFlush 就自行退出
 					return
 				}
 			}
@@ -179,13 +248,42 @@ func (pe *PeriodicalExecutor) shallQuit(last time.Duration) (stop bool) {
 	// checking pe.inflight and setting pe.guarded should be locked together
 	pe.lock.Lock()
 	if atomic.LoadInt32(&pe.inflight) == 0 {
-        // 如果超过了空闲时间且当前不存在活动groutine，就退出
+        // 如果超过了空闲时间且当前不存在活动 groutine，就退出
 		pe.guarded = false
 		stop = true
 	}
 	pe.lock.Unlock()
 
 	return
+}
+```
+
+
+
+```GO
+// Flush forces pe to execute tasks.
+func (pe *PeriodicalExecutor) Flush() bool {
+	pe.enterExecution()
+	return pe.executeTasks(func() any {
+		pe.lock.Lock()
+		defer pe.lock.Unlock()
+		return pe.container.RemoveAll()
+	}())
+}
+
+// Sync lets caller run fn thread-safe with pe, especially for the underlying container.
+func (pe *PeriodicalExecutor) Sync(fn func()) {
+	pe.lock.Lock()
+	defer pe.lock.Unlock()
+	fn()
+}
+
+// Wait waits the execution to be done.
+func (pe *PeriodicalExecutor) Wait() {
+	pe.Flush()
+	pe.wgBarrier.Guard(func() {
+		pe.waitGroup.Wait()
+	})
 }
 ```
 
@@ -224,6 +322,8 @@ func NewBulkExecutor(execute Execute, opts ...BulkOption) *BulkExecutor {
 ```
 
 ##  0x03   应用举例
+这里引用原文的一个例子，定时同步任务
+
 
 
 ##  0x04 参考
