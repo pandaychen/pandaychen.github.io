@@ -116,7 +116,7 @@ type chunk struct {
 ```GO
 // A PeriodicalExecutor is an executor that periodically execute tasks.
 type PeriodicalExecutor struct {
-    commander chan any
+    commander chan any          // 异步执行
     interval  time.Duration
     container TaskContainer
     waitGroup sync.WaitGroup
@@ -130,6 +130,98 @@ type PeriodicalExecutor struct {
 }
 ```
 
+`backgroundFlush`：
+
+```GO
+func (pe *PeriodicalExecutor) backgroundFlush() {
+	go func() {
+		// flush before quit goroutine to avoid missing tasks
+		defer pe.Flush()
+
+		ticker := pe.newTicker(pe.interval)
+		defer ticker.Stop()
+
+		var commanded bool
+		last := timex.Now()
+		for {
+			select {
+			case vals := <-pe.commander:
+				commanded = true
+				atomic.AddInt32(&pe.inflight, -1)
+				pe.enterExecution()
+				pe.confirmChan <- lang.Placeholder
+				pe.executeTasks(vals)
+				last = timex.Now()
+			case <-ticker.Chan():
+				if commanded {
+					commanded = false
+				} else if pe.Flush() {
+					last = timex.Now()
+				} else if pe.shallQuit(last) {
+                    // 特别注意这里，如果检查满足退出条件，则backgroundFlush就自行退出
+					return
+				}
+			}
+		}
+	}()
+}
+```
+
+
+`PeriodicalExecutor` 的实现有点意思，它的这个 `backgroundFlush` 任务执行监听 goroutine 不是常驻的，而是过一段时间，会自行检查当前是否存在任务执行的 goroutine（`atomic.LoadInt32(&pe.inflight) == 0`），如果不存在就退出，如下面的代码：
+
+```go
+func (pe *PeriodicalExecutor) shallQuit(last time.Duration) (stop bool) {
+	if timex.Since(last) <= pe.interval*idleRound {
+		return
+	}
+
+	// checking pe.inflight and setting pe.guarded should be locked together
+	pe.lock.Lock()
+	if atomic.LoadInt32(&pe.inflight) == 0 {
+        // 如果超过了空闲时间且当前不存在活动groutine，就退出
+		pe.guarded = false
+		stop = true
+	}
+	pe.lock.Unlock()
+
+	return
+}
+```
+
+
+####    BulkExecutor 实现
+如前文描述，`BulkExecutor` 依赖于 `PeriodicalExecutor` 及 `bulkContainer`
+
+```GO
+// A BulkExecutor is an executor that can execute tasks on either requirement meets:
+	// 1. up to given size of tasks
+	// 2. flush interval time elapsed
+type BulkExecutor struct {
+		executor  *PeriodicalExecutor
+		container *bulkContainer
+}
+
+func NewBulkExecutor(execute Execute, opts ...BulkOption) *BulkExecutor {
+    // 选项模式：在 go-zero 中多处出现。在多配置下，比较好的设计思路
+    // https://halls-of-valhalla.org/beta/articles/functional-options-pattern-in-go,54/
+    options := newBulkOptions()
+    for _, opt := range opts {
+        opt(&options)
+    }
+    // 1. task container: [execute 真正做执行的函数] [maxTasks 执行临界点]
+    container := &bulkContainer{
+        execute:  execute,
+        maxTasks: options.cachedTasks,
+    }
+    // 2. 可以看出 bulkexecutor 底层依赖 periodicalexecutor
+    executor := &BulkExecutor{
+        executor:  NewPeriodicalExecutor(options.flushInterval, container),
+        container: container,
+    }
+    return executor
+}
+```
 
 ##  0x03   应用举例
 
@@ -137,4 +229,4 @@ type PeriodicalExecutor struct {
 ##  0x04 参考
 -   [组件 - executors](https://www.bookstack.cn/read/go-zero-1.1.8-zh/executors.md?wd=%E9%98%BB%E5%A1%9E)
 -   [一招让 Kafka 达到最佳吞吐量](https://talkgo.org/t/topic/1945)
--   []()
+-   [core/executors 有数据丢失的风险](https://github.com/zeromicro/go-zero/issues/186)
