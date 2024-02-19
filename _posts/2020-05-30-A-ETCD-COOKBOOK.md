@@ -81,7 +81,7 @@ type KeyValue struct {
 > the Revision is the current revision of etcd. It is incremented every time the v3 backed is modified (e.g., Put, Delete, Txn). ModRevision is the etcd revision of the last update to a key. Version is the number of times the key has been modified since it was created. Get(..., WithRev(rev)) will perform a Get as if the etcd store is still at revision rev.
 
 验证一下上面的结论：
-```json
+```bash
 [root@VM_0_7_centos etcd_tools]# etcdctl get key1 --write-out=json
 {"header":{"cluster_id":14841639068965178418,"member_id":10276657743932975437,"revision":51,"raft_term":2},"kvs":[{"key":"a2V5MQ==","create_revision":47,"mod_revision":51,"version":5,"value":"dmFsdWUx"}],"count":1}
 
@@ -130,7 +130,7 @@ key1 -> value1, create revsion=47, head revision=53
 ```
 
 再次删掉 `key1`，查询一个不存在的 `Revision`，会得到 `len(resp.Kvs)==0` 的结果，符合我们的预期。
-```json
+```bash
 [root@VM_0_7_centos etcd_tools]# etcdctl del key1
 1
 [root@VM_0_7_centos etcd_tools]# etcdctl get key1 --write-out=json

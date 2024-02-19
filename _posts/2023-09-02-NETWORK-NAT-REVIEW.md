@@ -108,7 +108,8 @@ NAPT 分类如下：
 NAT 穿透的思想在于：如何复用 NAT 中的映射关系。在锥型 NAT 中，同一个内网地址端口访问不同的目标只会建立一条映射关系，所以可复用，而对称型 NAT 不行。同时由于 TCP 工作比较复杂，在 NAT 穿透中存在一些局限性，所以在实际场景中 UDP 穿透应用更广泛，本小节先描述下 UDP 穿透的原理和流程：
 这里以 Restricted-Port NAT 类型作为例子，因为其使用得最为广泛，同时权限也是最为严格的
 
-![udp](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/network/nat/udp-frp.png)
+![udp](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/nat/udp-frp.png)
+
 参考上图，有 PC1，Router1，PC2，Router2，Server 五台设备；公网服务器（Server）用于获取客户端实际的出口地址端口，UDP 穿透的流程如下：
 1.  PC（`192.168.1.1:7777`） 发送 UDP 请求到 Server（`9.9.9.9:1024`），此时 Server 可以获取到 PC1 的出口地址端口 (也就是 Router1 的出口地址端口) `1.2.3.4:10000`，同时 Router1 添加一条映射 `192.168.1.1:7777` <=> `1.2.3.4:10000` <=> `9.9.9.9:1024`
 2.  PC2（`192.168.2.1:8888`） 同样发送 UDP 请求到 Server，Router2 添加一条映射 `192.168.2.1:8888` <=> `5.6.7.8:20000` <=> `9.9.9.9:1024`
