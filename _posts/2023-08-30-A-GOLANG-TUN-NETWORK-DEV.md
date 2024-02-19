@@ -450,74 +450,44 @@ sysctl -w net.ipv4.conf.all.rp_filter=0
 一般而言，将 `all.rp_filter` 设置为 `0` 是必须的；将 `all.rp_filter` 设置为 `0` 并不会将所有其他网卡的 `rp_filter` 一并关闭。此时其他网卡的 `rp_filter` 由它们各自的 `rp_filter` 控制
 
 
-##  0x05  一些细节
-构建基于 TUN 的包处理项目一定要注意防止路由回环，什么是路由回环呢？简言之，一个 packet 从 TUN 读出来后再写入 TUN，下次读还会将自己刚写入的 packet 读出来，如果设置默认路由是 TUN 网卡，会导致死循环。这篇文章：[记录 Tun 透明代理的多种实现方式，以及如何避免 routing loop](https://chaochaogege.com/2021/08/01/57/) 给出了防止路由回环的常用方法，可以结合自己的项目场景使用
+##  0x05  细节 1：避免路由回环
+构建基于 TUN 的包处理项目一定要注意防止路由回环。什么是路由回环呢？简言之，一个 packet 从 TUN 读出来后再写入 TUN，下次读还会将自己刚写入的 packet 读出来，如果设置默认路由（目的 IP）是 TUN 网卡，会导致死循环。这篇文章：[记录 Tun 透明代理的多种实现方式，以及如何避免 routing loop](https://chaochaogege.com/2021/08/01/57/) 给出了防止路由回环的常用方法，可以结合自己的项目场景使用
 
 笔者项目中使用了如下几种方式：
 
 #### bind before connect
-bind 之后 connect，routing 不会起作用，这样就能解决设置默认网关后导致的 routing loop，参考[How does a socket know which network interface controller to use?](https://stackoverflow.com/questions/4297356/how-does-a-socket-know-which-network-interface-controller-to-use/4297381#4297381)，通俗点说，listen 之前需要 bind，决定 listen 到哪个网卡。如果作为 client 去 connect，在调用 connect 时 bind 会隐式发生，也可以主动 bind before connect，绕过路由选择，强迫出流量使用某个 network interface
+bind 之后 connect，routing 不会起作用，这样就能解决设置默认网关后导致的 routing loop，参考 [How does a socket know which network interface controller to use?](https://stackoverflow.com/questions/4297356/how-does-a-socket-know-which-network-interface-controller-to-use/4297381#4297381)，通俗点说，listen 之前需要 bind，决定 listen 到哪个网卡。如果作为 client 去 connect，在调用 connect 时 bind 会隐式发生，也可以主动 bind before connect，绕过路由选择，强迫出流量使用某个 network interface
 
 ```text
-
 If I bind an interface before to connect, Does that mean the connect for outgoing traffic will use that interface I bind without follow the routing decision?
-
 @nuclear yes, if you bind() to an interface before connect()'ing, the connection will go out through that interface. That is the whole point.
 ```
 
+可以参考 golang 的 `net.Dialer` 实现
 
-####  为需直连的ip设置单独路由（删除掉默认路由）
+####  为需直连的 ip 设置单独路由（删除掉默认路由）
+这个也是很常用的方法，假设有若干个 ip/CIDR（`A/24`、`B/32`、`C/32`）需要放通，其他的系统所有流量都要转发到 TUN 设备 `wg0`，默认网关为 `192.168.1.1`，默认物理网卡为 `eth0`，那么可以这样设置：
 
-学，我又来了[无辜笑]。我看seal的全局模式可以转发整个系统的流量，最近自己在搞一个类似的透明代理工具，有个问题想请教下
-
-如果自己设置默认路由全部流量都发到tun设备，自己read出来后交给userspace网络栈处理，再将处理后的数据包写入tun，之后的read会不会重新read出来自己刚写入的包呢
-⁣
-⁣我理解会，内核根据默认路由会重新送给tun，但那样死循环了呀
-⁣
-⁣但我看seal的全局模式transparent proxy从未遇到过这问题，这是怎么做到的呢
-
-回复： read出来不会直接写入tun，是重新封包发给VPN server
-
-vpn server是单独加了一条路由，而且发送包不是直接写tun包，是直接通过tcp/udp发出，socket可以绑定指定网卡发送
-
+```BASH
+ip route add A/24 via 192.168.1.1 dev eth0
+ip route add B/32 via 192.168.1.1 dev eth0
+ip route add C/32 via 192.168.1.1 dev eth0
 ip route del default
 ip route add default dev wg0
-ip route add 163.172.161.0/32 via 192.168.1.1 dev eth0
-The Classic Solutions
+```
 
-为需要直连的 ip 设置单独的路由 (删除掉默认路由)
-同学，我又来了 [无辜笑]。我看 seal 的全局模式可以转发整个系统的流量，最近自己在搞一个类似的透明代理工具，有个问题想请教下
+上面的设置还有一种不删除默认路由 `default` 的做法，那就是利用 `0/1 128/1 trick`，如下
 
-如果自己设置默认路由全部流量都发到 tun 设备，自己 read 出来后交给 userspace 网络栈处理，再将处理后的数据包写入 tun，之后的 read 会不会重新 read 出来自己刚写入的包呢
-⁣
-⁣我理解会，内核根据默认路由会重新送给 tun，但那样死循环了呀
-⁣
-⁣但我看 seal 的全局模式 transparent proxy 从未遇到过这问题，这是怎么做到的呢
+####    为直连 ip 设置单独路由（不删除默认路由，只覆盖）
+默认路由的作用是没有匹配到时走 `default`，通过设置 `0.0.0.0/1`，让这条路由总是先于 `default` 命中。再对要直连的 ip（这里是 `163.172.161.0`） 设置单独的路由，不需要删除原来的默认路由
 
-回复： read 出来不会直接写入 tun，是重新封包发给 VPN server
-
-vpn server 是单独加了一条路由，而且发送包不是直接写 tun 包，是直接通过 tcp/udp 发出，socket 可以绑定指定网卡发送
-
-ip route del default
-ip route add default dev wg0
-ip route add 163.172.161.0/32 via 192.168.1.1 dev eth0
-The Classic Solutions
-
-为直连 ip 设置单独路由（不删除默认路由，只覆盖）
-默认路由的作用是没有匹配到时走 default，通过设置 0.0.0.0/1，让这条路由总是先于 default 命中。
-再对要直连的 ip（这里是 163.172.161.0） 设置单独的路由，不需要删除原来的默认路由
-
+```BASH
 ip route add 0.0.0.0/1 dev wg0
 ip route add 128.0.0.0/1 dev wg0
 ip route add 163.172.161.0/32 via 192.168.1.1 dev eth0
+```
 
-这种也叫做 0/1 128/1 trick。
-
-但这 trick 有局限搜 0/1
-
-推荐阅读
-
-Overriding The Default Route
+该trick也可以参考[Routing & Network Namespace Integration](https://www.wireguard.com/netns/#routing-all-your-traffic)
 
 ##  0x06  TUN with DNS
 
@@ -532,3 +502,5 @@ Overriding The Default Route
 -   [iOS network extension packet parsing](https://stackoverflow.com/questions/69260852/ios-network-extension-packet-parsing/69487795#69487795)
 -   [网络协议之: haproxy 的 Proxy Protocol 代理协议](https://developer.aliyun.com/article/938138)
 -   [记录 Tun 透明代理的多种实现方式，以及如何避免 routing loop](https://chaochaogege.com/2021/08/01/57/)
+-   [Tun device: How to avoid routing dead loop when write a transparent proxy?](https://superuser.com/questions/1664065/tun-device-how-to-avoid-routing-dead-loop-when-write-a-transparent-proxy)
+-   [Tag Routing with TOS and fwmark](https://flylib.com/books/en/2.783.1.50/1/)

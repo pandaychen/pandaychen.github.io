@@ -61,6 +61,8 @@ $$ 证书（Certificate） = 公钥（PublicKey） + 元数据 (公钥指纹 / �
 
 ✅ Ed25519: It’s the most recommended public-key algorithm available today!
 
+关于安全性可以参考此文[Comparing SSH Keys - RSA, DSA, ECDSA, or EdDSA?](https://goteleport.com/blog/comparing-ssh-keys/)
+
 ##      0x02    Certificate 的优化及改造实践
 基于 OpenSSH 证书签发 CA, 与我们所熟知的 HTTPS 证书的签发使用的 `X.509` 体系不同, 它不支持证书链（Certificate Chain） 和可信商业 CA。在项目实践中，我们基于 OpenSSH 证书做了大量的安全性提升的工作。如下，OpenSSH证书存在两种类型，用户证书（User Certificate）和主机证书（Host Certificate）：
 
