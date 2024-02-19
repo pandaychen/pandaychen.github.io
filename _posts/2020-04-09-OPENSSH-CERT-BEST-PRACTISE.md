@@ -27,6 +27,11 @@ $$ 证书（Certificate） = 公钥（PublicKey） + 元数据 (公钥指纹 / �
 
 ![pubkeyVScert](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/sshkeyVScert.png)
 
+####    公钥认证
+![pub-auth](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/openssh/ssh-certs-public-key-auth.png)
+
+####    证书认证
+
 ####    certificate的优点
 
 -  Certificates are tied to user identity
