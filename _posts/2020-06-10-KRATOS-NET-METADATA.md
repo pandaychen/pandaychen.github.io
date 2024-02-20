@@ -64,7 +64,7 @@ func process(ctx context.Context) {
 }
 ```
 
-![img](https://wx2.	.cn/2020/06/08/golang-context-withvalue.png)
+![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kratos/golang-context-withvalue.png)
 
 
 ##      0x02 Metadata 结构
@@ -154,7 +154,7 @@ func Pairs(kv ...interface{}) MD {
 
 `NewContext` 方法，传入参数为 `ctx  context.Context` 及 `md MD`，返回一个子 context，如下图所示：
 
-![image](https://wx2.sbimg.cn/2020/06/08/_20200608234813.png)
+![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kratos/NewContext.png)
 
 ```golang
 // NewContext creates a new context with md attached.
