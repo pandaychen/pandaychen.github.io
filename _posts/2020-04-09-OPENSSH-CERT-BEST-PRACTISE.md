@@ -28,17 +28,21 @@ $$ 证书（Certificate） = 公钥（PublicKey） + 元数据 (公钥指纹 / �
 ![pubkeyVScert](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/sshkeyVScert.png)
 
 ####    公钥认证
+SSH 公钥认证流程如下图所示，SSH 公钥是公开分发的，任何持有它的人都可以使用公钥验证使用其私钥副本签名的消息（signature），SSH 服务器生成一个随机字符串（Challenge），并要求 SSH 客户端对其进行签名。服务器使用 SSH 公钥验证客户端的签名，以证明客户端拥有与可信公钥关联的私钥。
+
 ![pub-auth](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/openssh/ssh-certs-public-key-auth.png)
+
+![pub-auth-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/openssh/ssh-certs-public-key-protocol.png)
 
 ####    证书认证
 
-####    certificate的优点
+####    certificate 的优点
 
 -  Certificates are tied to user identity
 -  Certificates automatically expire
 -  Certificates can contain SSH restrictions, e.g. forbidding PTY allocation or port forwarding
 -  SSH certificates can be synchronized with Kubernetes certificates
--  **Certificates include metadata. This enables role-based access control**（teleport的这个实现蛮有意思）
+-  **Certificates include metadata. This enables role-based access control**（teleport 的这个实现蛮有意思）
 -  Certificates solve TOFU (trust on first use) problems. The user and host certificates signed by the same CA establish trust and eliminate the need for TOFU
 
 
@@ -61,10 +65,10 @@ $$ 证书（Certificate） = 公钥（PublicKey） + 元数据 (公钥指纹 / �
 
 ✅ Ed25519: It’s the most recommended public-key algorithm available today!
 
-关于安全性可以参考此文[Comparing SSH Keys - RSA, DSA, ECDSA, or EdDSA?](https://goteleport.com/blog/comparing-ssh-keys/)
+关于安全性可以参考此文 [Comparing SSH Keys - RSA, DSA, ECDSA, or EdDSA?](https://goteleport.com/blog/comparing-ssh-keys/)
 
 ##      0x02    Certificate 的优化及改造实践
-基于 OpenSSH 证书签发 CA, 与我们所熟知的 HTTPS 证书的签发使用的 `X.509` 体系不同, 它不支持证书链（Certificate Chain） 和可信商业 CA。在项目实践中，我们基于 OpenSSH 证书做了大量的安全性提升的工作。如下，OpenSSH证书存在两种类型，用户证书（User Certificate）和主机证书（Host Certificate）：
+基于 OpenSSH 证书签发 CA, 与我们所熟知的 HTTPS 证书的签发使用的 `X.509` 体系不同, 它不支持证书链（Certificate Chain） 和可信商业 CA。在项目实践中，我们基于 OpenSSH 证书做了大量的安全性提升的工作。如下，OpenSSH 证书存在两种类型，用户证书（User Certificate）和主机证书（Host Certificate）：
 
 ####    用户认证
 基于 CA 签发的用户证书主要用于 SSH 登录，如下面这个用户证书，我们可以基于 `key ID` 或者 `Critical Options` 这个字段做些额外的工作。
@@ -115,7 +119,7 @@ ssh_host_ecdsa_key-cert.pub:
 ```
 
 ####    Comparing X.509 properties with OpenSSH certificate
-OpenSSH 证书与`X.509`是两种不同的证书体系，二者的区别如下图：
+OpenSSH 证书与 `X.509` 是两种不同的证书体系，二者的区别如下图：
 
 ![diff](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/openssh/sshcert-vs-x509.png)
 
@@ -147,7 +151,7 @@ CloudFlare 的 OpenSSH 实践：[Public keys are not enough for SSH security](ht
 2.      CA 私钥的定期轮换机制
 
 ####    CA 证书安全
-对CA证书的管理，在项目应用中主要还是加强对用户证书（User Certificate）的管理，一般我们是按照下面的维度来实施：
+对 CA 证书的管理，在项目应用中主要还是加强对用户证书（User Certificate）的管理，一般我们是按照下面的维度来实施：
 1.      证书签发的生效时间区间尽量缩短（快速过期）
 2.      证书的登录用户唯一（最小化签发）
 3.      一次一签
@@ -155,6 +159,16 @@ CloudFlare 的 OpenSSH 实践：[Public keys are not enough for SSH security](ht
 5.      证书尽可能保存在内存中，如必须落盘在本地，建议登录后立即删除
 
 ##      0x05    Certificate 的其他知识点
+
+
+####    Trust On First Use
+首次建立 SSH 连接时，SSH 服务器会发送其公钥以向用户标识自己的身份。用户可以接受 SSH 服务器提供的公钥，并且如果用户第一次连接到该主机，则认​​为该主机是可信的，该方案也称为 Trust On First Use 问题（与此对应的是 man in the middle 问题）
+
+![tofu](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/openssh/ssh-certs-host-auth.png)
+
+证书如何解决 TOFU 问题呢？参考下图流程
+
+![tofu-cert](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/openssh/ssh-certs-host-certs.png)
 
 ####    OpenSSH Certificate With Ldap
 [HashiCorp Vault SSH CA and Sentinel](https://medium.com/hashicorp-engineering/hashicorp-vault-ssh-ca-and-sentinel-79ea6a6960e5)
