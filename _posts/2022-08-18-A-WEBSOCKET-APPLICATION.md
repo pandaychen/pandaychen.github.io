@@ -14,7 +14,8 @@ tags:
 本文汇总下 WebSocket 的应用及概念。笔者接触过的 websocket 有如下场景：
 -   GoIm 的 [websocket Server](https://github.com/Terry-Mao/goim/blob/master/internal/comet/server_websocket.go)
 -   支持 webconsole 登录到 SSH/docker 的转发层
--   长连接服务端
+-   长连接服务端（消息推送）
+-	利用 websocket 构建正向代理
 
 ##  0x01   Websocket 基础及用法
 
