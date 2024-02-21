@@ -191,5 +191,6 @@ CloudFlare 的 OpenSSH 实践：[Public keys are not enough for SSH security](ht
 -   [SSH Certificates Security](https://goteleport.com/blog/ssh-certificates/)
 -   [Comparing SSH Keys - RSA, DSA, ECDSA, or EdDSA?](https://goteleport.com/blog/comparing-ssh-keys/)
 -   [SSH Handshake Explained](https://goteleport.com/blog/ssh-handshake-explained/)
+-   [Teleport Authentication with Certificates](https://goteleport.com/docs/architecture/authentication/)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
