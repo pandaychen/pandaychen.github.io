@@ -25,6 +25,9 @@ tags:
 -   伪造数据包发送
 -   离线 pcap 文件的读取和写入
 
+####    libpcap原理
+![libpcap](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/libpcap/arch.png)
+
 ##  TCP 流重组
 TCP 流重组的代码在 [此](https://github.com/google/gopacket/blob/master/reassembly/tcpassembly.go)
 
@@ -34,3 +37,5 @@ TCP 流重组的代码在 [此](https://github.com/google/gopacket/blob/master/r
 -   [[译] 利用 gopackage 进行包的捕获、注入和分析](https://colobu.com/2019/06/01/packet-capture-injection-and-analysis-gopacket/)
 -   [tcp 重组](https://github.com/google/gopacket/blob/master/reassembly/tcpassembly.go)
 -   [tcp 重组 - 实现（推荐）](https://github.com/google/gopacket/blob/master/reassembly/)
+-   [网络流量抓包库 gopacket介绍](https://blog.csdn.net/RA681t58CJxsgCkJ31/article/details/115152820)
+-   [gopacket-GODOC](https://pkg.go.dev/github.com/google/gopacket#section-readme)
