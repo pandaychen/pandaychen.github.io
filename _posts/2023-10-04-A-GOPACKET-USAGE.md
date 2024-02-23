@@ -25,6 +25,9 @@ tags:
 -   伪造数据包发送
 -   离线 pcap 文件的读取和写入
 
+1.	从网络接口收集数据包（tcpdump）
+2.	重新组装 TCP 流（Wireshark）
+
 ####    libpcap 原理
 ![libpcap](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/libpcap/arch.png)
 
@@ -40,18 +43,18 @@ libpcap 主要由网络分接头（Network Tap）和数据过滤器（Packet Fil
 -   协议（报文）格式，比如 IP 层的 protocol 字段标识了其上层是何种协议，从而实现解析报文
 -   TCP 会话重组：由于 TCP 是流式协议，完整的解析 TCP 需要实现重组功能
 
-gopacket的子包（主要）功能如下：
+gopacket 的子包（主要）功能如下：
 
 -   layers：包含内置于 gopacket 的用于解码数据包协议的逻辑，常用
--   pcap：使用 libpcap 从网络读取数据包的 C 绑定，可以用来读取/写入pcap数据包
+-   pcap：使用 libpcap 从网络读取数据包的 C 绑定，可以用来读取 / 写入 pcap 数据包
 -   pfring：使用 `PF_RING` 从网络读取数据包的 C 绑定
 -   afpacket：从网络上读取数据包的 Linux `AF_PACKET` 的 C 绑定
--   tcpassembly：TCP 流重组，建议使用[reassembly](https://github.com/google/gopacket/tree/master/reassembly)，这个库较新
+-   tcpassembly：TCP 流重组，建议使用 [reassembly](https://github.com/google/gopacket/tree/master/reassembly)，这个库较新
 
 ####    基础示例
-基础使用可以参考 [Basic_Usage](https://pkg.go.dev/github.com/google/gopacket@v1.1.19#hdr-Basic_Usage)、[examples](https://github.com/google/gopacket/tree/master/examples)下面的代码
+基础使用可以参考 [Basic_Usage](https://pkg.go.dev/github.com/google/gopacket@v1.1.19#hdr-Basic_Usage)、[examples](https://github.com/google/gopacket/tree/master/examples) 下面的代码
 
-例子1：设置过滤器`tcp and port 80`抓包
+例子 1：设置过滤器 `tcp and port 80` 抓包
 
 ```go
 var (
@@ -88,7 +91,7 @@ for packet := range packetSource.Packets() {
 }
 ```
 
-例子2：调用`layers`解码，作者已经提供了诸如LayerTypeEthernet/IP/UDP/TCP 等众多layer创建了相应类型，参考[layers](https://github.com/google/gopacket/tree/master/layers)；以dns协议为例，其格式定义[为](https://github.com/google/gopacket/blob/master/layers/dns.go)
+例子 2：调用 `layers` 解码，作者已经提供了诸如 LayerTypeEthernet/IP/UDP/TCP 等众多 layer 创建了相应类型，参考 [layers](https://github.com/google/gopacket/tree/master/layers)；以 dns 协议为例，其格式定义 [为](https://github.com/google/gopacket/blob/master/layers/dns.go)
 
 ```GO
 // BaseLayer is a convenience struct which implements the LayerData and
@@ -167,7 +170,7 @@ type DNS struct {
 }
 ```
 
-数据包解码的代码如下，其中的核心是`packet.Layer`[方法](https://github.com/google/gopacket/blob/master/packet.go#L72)：
+数据包解码的代码如下，其中的核心是 `packet.Layer`[方法](https://github.com/google/gopacket/blob/master/packet.go#L72)：
 
 ```go
 var (
@@ -187,11 +190,11 @@ func main() {
         log.Fatal(err)
     }
 
-	//需要关闭
+	// 需要关闭
     defer handle.Close()
-	
+
     packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
-	// packetSource.Packets返回一个channel
+	// packetSource.Packets 返回一个 channel
     for packet := range packetSource.Packets() {
         printPacketInfo(packet)
     }
@@ -203,10 +206,10 @@ func printPacketInfo(packet gopacket.Packet) {
     if ethernetLayer != nil {
         fmt.Println("Ethernet layer detected.")
         ethernetPacket, _ := ethernetLayer.(*layers.Ethernet)
-        fmt.Println("Source MAC: ", ethernetPacket.SrcMAC)
-        fmt.Println("Destination MAC: ", ethernetPacket.DstMAC)
+        fmt.Println("Source MAC:", ethernetPacket.SrcMAC)
+        fmt.Println("Destination MAC:", ethernetPacket.DstMAC)
         // Ethernet type is typically IPv4 but could be ARP or other
-        fmt.Println("Ethernet type: ", ethernetPacket.EthernetType)
+        fmt.Println("Ethernet type:", ethernetPacket.EthernetType)
         fmt.Println()
     }
 
@@ -222,7 +225,7 @@ func printPacketInfo(packet gopacket.Packet) {
         // TOS, Length, Id, Flags, FragOffset, TTL, Protocol (TCP?),
         // Checksum, SrcIP, DstIP
         fmt.Printf("From %s to %s\n", ip.SrcIP, ip.DstIP)
-        fmt.Println("Protocol: ", ip.Protocol)
+        fmt.Println("Protocol:", ip.Protocol)
         fmt.Println()
     }
 
@@ -237,14 +240,14 @@ func printPacketInfo(packet gopacket.Packet) {
         // SrcPort, DstPort, Seq, Ack, DataOffset, Window, Checksum, Urgent
         // Bool flags: FIN, SYN, RST, PSH, ACK, URG, ECE, CWR, NS
         fmt.Printf("From port %d to %d\n", tcp.SrcPort, tcp.DstPort)
-        fmt.Println("Sequence number: ", tcp.Seq)
+        fmt.Println("Sequence number:", tcp.Seq)
         fmt.Println()
     }
 
     // Iterate over all layers, printing out each layer type
     fmt.Println("All packet layers:")
     for _, layer := range packet.Layers() {
-        fmt.Println("- ", layer.LayerType())
+        fmt.Println("-", layer.LayerType())
     }
 
     // When iterating through packet.Layers() above,
@@ -269,7 +272,7 @@ func printPacketInfo(packet gopacket.Packet) {
 ```
 
 ##  0x02    代码分析
-[`Packet`](https://github.com/google/gopacket/blob/master/packet.go#L56C6-L56C13)是数据解码器的公共接口实现，`packet`作为其[实例化](https://github.com/google/gopacket/blob/master/packet.go#L106)，gopacket提供了这几种内置解码器：
+[`Packet`](https://github.com/google/gopacket/blob/master/packet.go#L56C6-L56C13) 是数据解码器的公共接口实现，`packet` 作为其 [实例化](https://github.com/google/gopacket/blob/master/packet.go#L106)，gopacket 提供了这几种内置解码器：
 
 -	`eagerPacket`：
 -	[`lazyPacket`](https://github.com/google/gopacket/blob/master/packet.go#L495)：
@@ -327,11 +330,11 @@ type Packet interface {
 }
 ```
 
-2、`Layer`：抽象了协议层次，gopacket提供了如下几类：
+2、`Layer`：抽象了协议层次，gopacket 提供了如下几类：
 
 -	`LinkLayer`： the packet layer corresponding to TCP/IP layer 1 (OSI layer 2)
--	`NetworkLayer`：the packet layer corresponding to TCP/IP layer 2 (OSI layer 3)，实例化参考[ipv4](https://github.com/google/gopacket/blob/master/layers/ip4.go#L63C27-L63C28)
--	`TransportLayer`：is the packet layer corresponding to the TCP/IP layer 3 (OSI layer 4)，实例化参考[tcp](https://github.com/google/gopacket/blob/master/layers/tcp.go#L331)
+-	`NetworkLayer`：the packet layer corresponding to TCP/IP layer 2 (OSI layer 3)，实例化参考 [ipv4](https://github.com/google/gopacket/blob/master/layers/ip4.go#L63C27-L63C28)
+-	`TransportLayer`：is the packet layer corresponding to the TCP/IP layer 3 (OSI layer 4)，实例化参考 [tcp](https://github.com/google/gopacket/blob/master/layers/tcp.go#L331)
 -	`ApplicationLayer`：the packet layer corresponding to the TCP/IP layer 4 (OSI layer 7), also known as the packet payload
 -	`ErrorLayer`：a packet layer created when decoding of the packet has failed
 
@@ -360,7 +363,7 @@ type Layer interface {
 TCP 流重组的代码在 [此](https://github.com/google/gopacket/blob/master/reassembly/tcpassembly.go)
 
 ####	httpassembly
-这里简单分析下[httpassembly](https://github.com/google/gopacket/blob/master/examples/httpassembly/main.go)的实现
+这里简单分析下 [httpassembly](https://github.com/google/gopacket/blob/master/examples/httpassembly/main.go) 的实现
 
 1、核心结构
 
@@ -391,8 +394,8 @@ func (h *httpStreamFactory) New(net, transport gopacket.Flow) tcpassembly.Stream
 
 而重组的逻辑如下：
 
-1.	收包并组装`AssembleWithTimestamp`
-2.	超时清理`FlushOlderThan`
+1.	收包并组装 `AssembleWithTimestamp`
+2.	超时清理 `FlushOlderThan`
 
 ```GO
 func main() {
@@ -431,7 +434,15 @@ func main() {
 }
 ```
 
-TODO
+####	流重组的实现分析
+快速回顾一下，TCP 流是网络上两台主机之间交换的连续数据流。为了允许网络适应不同的带宽，网络堆栈将每个 TCP 流拆分为多个数据包。由于底层 IP 网络不保证按顺序传送，因此数据包捕获可能包含每个流的重复或无序数据包，这也是 TCP 重组实现的重点问题
+
+使用 gopacket 重组包需要实现两个接口 `interface`：
+-	`Stream `：每个流代表一个重组的 TCP 流，并且是重组包将数据从 TCP 数据包传递给开发者的机制
+-	`StreamFactory`：用于为每个 TCP 流构造新 Stream 的包装器（wrapper）
+
+
+![assembly]()
 
 
 ##  0x04	参考
@@ -442,7 +453,10 @@ TODO
 -   [网络流量抓包库 gopacket 介绍](https://blog.csdn.net/RA681t58CJxsgCkJ31/article/details/115152820)
 -   [gopacket-GODOC](https://pkg.go.dev/github.com/google/gopacket#section-readme)
 -   [Rebuilding Network Flows in Go](https://medium.com/a-bit-off/rebuilding-network-flows-in-gol-d89cfa0884ae)
--   [TCP/IP详解 卷1：协议（原书第2版）](https://book.douban.com/subject/26825411/)
--	[网络入侵检测系统之Suricata(十一)--TCP重组实现详解](https://zhuanlan.zhihu.com/p/393121010)
+-   [TCP/IP 详解 卷 1：协议（原书第 2 版）](https://book.douban.com/subject/26825411/)
+-	[网络入侵检测系统之 Suricata(十一)--TCP 重组实现详解](https://zhuanlan.zhihu.com/p/393121010)
 -	[stream-tcp-reassemble.c](https://doxygen.openinfosecfoundation.org/stream-tcp-reassemble_8c_source.html)
 -	[爱奇艺网络流量分析引擎 QNSM 及其应用](https://www.infoq.cn/article/eelzsuyzo7rbjaxk6tau)
+-	[Programmatically Analyze Packet Captures with GoPacket](https://www.akitasoftware.com/blog-posts/programmatically-analyze-packet-captures-with-gopacket)
+-	[解析 http：parser](https://github.com/akitasoftware/akita-libs/blob/main/akinet/http/parser.go)
+-	[tcp 重组实现：stream](https://github.com/akitasoftware/akita-cli/blob/main/pcap/stream.go)
