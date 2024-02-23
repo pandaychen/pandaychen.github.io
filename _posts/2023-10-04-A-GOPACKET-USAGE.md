@@ -32,7 +32,7 @@ tags:
 
 libpcap 主要由网络分接头（Network Tap）和数据过滤器（Packet Filter）构成，网络分接头从网络设备驱动程序（NIC driver）中收集数据拷贝，过滤器决定是否接收该数据包。Libpcap 的工作原理可以描述为，当一个数据包到达网卡时，通过网络分接口（即旁路机制）将数据包发给 BPF（BSD Packet Filter）过滤器，匹配通过的数据包可以被 libpcap 利用创建的套接字 PF_PACKET 从链路层驱动程序中获得。进而在用户空间提供独立于系统的用户级 API 接口，用户程序获取报文后可以做相关处理
 
-##  0x01    gopacket
+##  0x01    gopacket 基础
 以 TCP 报文为例，其在协议栈上的格式如下图所示，从 libpcap 拿到的原始数据是 `Ethernet` 层，然后逐层向上面解码，最终拿到开发者想要的数据（协议栈层次、应用数据等）
 ![stack](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/protocol/tcp-ip-stack.gif)
 
@@ -80,7 +80,7 @@ func main() {
     fmt.Println("Only capturing TCP port 80 packets.")
 
     packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
-    for packet := range packetSource.Packets() {
+for packet := range packetSource.Packets() {
         // Do something with a packet here.
         fmt.Println(packet)
     }
@@ -181,13 +181,17 @@ var (
 
 func main() {
     // Open device
+	// 对网卡流量进行实时捕获
     handle, err := pcap.OpenLive(device, snapshotLen, promiscuous, timeout)
     if err != nil {
         log.Fatal(err)
     }
-    defer handle.Close()
 
+	//需要关闭
+    defer handle.Close()
+	
     packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
+	// packetSource.Packets返回一个channel
     for packet := range packetSource.Packets() {
         printPacketInfo(packet)
     }
@@ -226,6 +230,7 @@ func printPacketInfo(packet gopacket.Packet) {
     tcpLayer := packet.Layer(layers.LayerTypeTCP)
     if tcpLayer != nil {
         fmt.Println("TCP layer detected.")
+		 // Get actual TCP data from this layer
         tcp, _ := tcpLayer.(*layers.TCP)
 
         // TCP layer variables:
@@ -351,11 +356,85 @@ type Layer interface {
 3、[`LayerType`](https://github.com/google/gopacket/blob/master/layertype.go)
 
 
-##  TCP 流重组
+##	0x03	TCP 流重组
 TCP 流重组的代码在 [此](https://github.com/google/gopacket/blob/master/reassembly/tcpassembly.go)
 
+####	httpassembly
+这里简单分析下[httpassembly](https://github.com/google/gopacket/blob/master/examples/httpassembly/main.go)的实现
 
-##  参考
+1、核心结构
+
+```go
+// Build a simple HTTP request parser using tcpassembly.StreamFactory and tcpassembly.Stream interfaces
+
+// httpStreamFactory implements tcpassembly.StreamFactory
+type httpStreamFactory struct{}
+
+// httpStream will handle the actual decoding of http requests.
+type httpStream struct {
+	net, transport gopacket.Flow
+	r              tcpreader.ReaderStream
+}
+
+func (h *httpStreamFactory) New(net, transport gopacket.Flow) tcpassembly.Stream {
+	hstream := &httpStream{
+		net:       net,
+		transport: transport,
+		r:         tcpreader.NewReaderStream(),
+	}
+	go hstream.run() // Important... we must guarantee that data from the reader stream is read.
+
+	// ReaderStream implements tcpassembly.Stream, so we can return a pointer to it.
+	return &hstream.r
+}
+```
+
+而重组的逻辑如下：
+
+1.	收包并组装`AssembleWithTimestamp`
+2.	超时清理`FlushOlderThan`
+
+```GO
+func main() {
+	// ...
+	streamFactory := &httpStreamFactory{}
+	streamPool := tcpassembly.NewStreamPool(streamFactory)
+	assembler := tcpassembly.NewAssembler(streamPool)
+
+	log.Println("reading in packets")
+	// Read in packets, pass to assembler.
+	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
+	packets := packetSource.Packets()
+	ticker := time.Tick(time.Minute)
+	for {
+		select {
+		case packet := <-packets:
+			// A nil packet indicates the end of a pcap file.
+			if packet == nil {
+				return
+			}
+			if *logAllPackets {
+				log.Println(packet)
+			}
+			if packet.NetworkLayer() == nil || packet.TransportLayer() == nil || packet.TransportLayer().LayerType() != layers.LayerTypeTCP {
+				log.Println("Unusable packet")
+				continue
+			}
+			tcp := packet.TransportLayer().(*layers.TCP)
+			assembler.AssembleWithTimestamp(packet.NetworkLayer().NetworkFlow(), tcp, packet.Metadata().Timestamp)
+
+		case <-ticker:
+			// Every minute, flush connections that haven't seen activity in the past 2 minutes.
+			assembler.FlushOlderThan(time.Now().Add(time.Minute * -2))
+		}
+	}
+}
+```
+
+TODO
+
+
+##  0x04	参考
 -   [Provides packet processing capabilities for Go](https://github.com/google/gopacket)
 -   [[译] 利用 gopackage 进行包的捕获、注入和分析](https://colobu.com/2019/06/01/packet-capture-injection-and-analysis-gopacket/)
 -   [tcp 重组](https://github.com/google/gopacket/blob/master/reassembly/tcpassembly.go)
@@ -364,3 +443,6 @@ TCP 流重组的代码在 [此](https://github.com/google/gopacket/blob/master/r
 -   [gopacket-GODOC](https://pkg.go.dev/github.com/google/gopacket#section-readme)
 -   [Rebuilding Network Flows in Go](https://medium.com/a-bit-off/rebuilding-network-flows-in-gol-d89cfa0884ae)
 -   [TCP/IP详解 卷1：协议（原书第2版）](https://book.douban.com/subject/26825411/)
+-	[网络入侵检测系统之Suricata(十一)--TCP重组实现详解](https://zhuanlan.zhihu.com/p/393121010)
+-	[stream-tcp-reassemble.c](https://doxygen.openinfosecfoundation.org/stream-tcp-reassemble_8c_source.html)
+-	[爱奇艺网络流量分析引擎 QNSM 及其应用](https://www.infoq.cn/article/eelzsuyzo7rbjaxk6tau)
