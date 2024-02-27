@@ -434,15 +434,47 @@ func main() {
 }
 ```
 
+
+####	reassemblydump
+`reassemblydump`[https://github.com/google/gopacket/blob/master/examples/reassemblydump/main.go] 展示了如何使用 gopacket 库的重组（reassembly）功能来处理并重组 TCP 数据流，主要功能如下：
+
+1.	从 PCAP 文件或网络接口中捕获 TCP 数据包（打开句柄，持续收包）
+2.	使用 gopacket 库的重组功能，对捕获的 TCP 数据包进行排序、重组和处理
+3.	为每个 TCP 流创建一个新文件，并将重组后的数据流写入对应的文件中；在处理完所有数据包后，关闭并完成文件的写入
+
+TODO：代码解析
+
 ####	流重组的实现分析
 快速回顾一下，TCP 流是网络上两台主机之间交换的连续数据流。为了允许网络适应不同的带宽，网络堆栈将每个 TCP 流拆分为多个数据包。由于底层 IP 网络不保证按顺序传送，因此数据包捕获可能包含每个流的重复或无序数据包，这也是 TCP 重组实现的重点问题
 
 使用 gopacket 重组包需要实现两个接口 `interface`：
--	`Stream `：每个流代表一个重组的 TCP 流，并且是重组包将数据从 TCP 数据包传递给开发者的机制
+-	`Stream`：每个流代表一个重组的 TCP 流，并且是重组包将数据从 TCP 数据包传递给开发者的机制
 -	`StreamFactory`：用于为每个 TCP 流构造新 Stream 的包装器（wrapper）
 
+`Assembler`/`Stream`/`StreamFactory`/`StreamPool`/`Stream` 的关系如下图所示：
+![assembly](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/gopacket/gopacket_reassembly.png)
 
-![assembly]()
+从上面的示意图可知，需要将 `StreamFactory` 包装在 `StreamPool` 中，其目的是在新 TCP 流的数据到达时使用 `StreamFactory` 创建新流，或者将数据传递到现有流。`StreamPool` 又由 `Assembler` 使用，它包含所有负责从数据包及其相关边缘情况（无序数据包、早期连接终止等）重建 TCP 流的特殊逻辑。要处理数据包，开发者程序只需将数据包传递给 `Assembler` 即可
+
+```GO
+// tcpStream represents a pair of uni-directional tcpFlows. It
+// implements reassembly.Stream interface to receive reassembled
+// packets for BOTH flows, which it then directs to the correct
+// tcpFlow.
+type tcpStream struct {
+	clock  clockWrapper     // constant
+	bidiID akinet.TCPBidiID // constant
+
+	// Network layer flow.
+	netFlow gopacket.Flow
+
+	// flows is populated upon seeing the first packet.
+	flows map[reassembly.TCPFlowDirection]*tcpFlow
+
+	factorySelector akinet.TCPParserFactorySelector
+	outChan         chan<- akinet.ParsedNetworkTraffic
+}
+```
 
 
 ##  0x04	参考
@@ -460,3 +492,4 @@ func main() {
 -	[Programmatically Analyze Packet Captures with GoPacket](https://www.akitasoftware.com/blog-posts/programmatically-analyze-packet-captures-with-gopacket)
 -	[解析 http：parser](https://github.com/akitasoftware/akita-libs/blob/main/akinet/http/parser.go)
 -	[tcp 重组实现：stream](https://github.com/akitasoftware/akita-cli/blob/main/pcap/stream.go)
+-	[再谈 golang 抓包 gopacket](https://www.jianshu.com/p/505995c8e0ba)
