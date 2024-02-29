@@ -49,15 +49,17 @@ TCP Timestamp Option（时间戳选项）在三次握手中的作用是提供一
 ####    TCP 滑动窗口
 
 ####    SEQ && ACK
--   序列号（SEQ）：在建立连接时由内核生成的随机数作为其初始值，通过 `SYN` 报文传给接收端主机，每发送一次数据，就累加一次该数据字节数的大小，用来解决网络包乱序问题。累加方式为：序列号 = 上一次发送的序列号 + `len(data)`，若上一次发送的报文是 SYN/FIN 报文，则改为上一次发送的序列号 + `1`
--   确认号（ACK）：指下一次期望收到的数据的序列号，发送端收到接收方发来的 `ACK` 确认报文以后，可认为在这个序号以前的数据都已经被正常接收；用来解决丢包的问题。确认号 = 上一次收到的报文中的序列号 + `len(data)`。若收到的是 SYN/FIN 报文，则改为上一次收到的报文中的序列号 + `1`
+-   序列号（`SEQ`）：在建立连接时由内核生成的随机数作为其初始值，通过 `SYN` 报文传给接收端主机，每发送一次数据，就累加一次该数据字节数的大小，用来解决网络包乱序问题。累加方式为：序列号 = 上一次发送的序列号 + `len(data)`，若上一次发送的报文是 `SYN`/`FIN` 报文，则改为上一次发送的序列号 + `1`
+-   确认号（`ACK`）：指下一次期望收到的数据的序列号，发送端收到接收方发来的 `ACK` 确认报文以后，可认为在这个序号以前的数据都已经被正常接收；用来解决丢包的问题。确认号 = 上一次收到的报文中的序列号 + `len(data)`。若收到的是 SYN/FIN 报文，则改为上一次收到的报文中的序列号 + `1`
 
 在 TCP 重组中，依赖于这两个关键参数
 
 ####    TCP - 流重组
-SEQ 是为了保证 TCP 数据包的按顺序传输来设计的，可以有效的实现 TCP 数据的完整传输，特别是在数据传送过程中出现错误的时候可以有效的进行错误修正。在 TCP 会话的重新组合过程中需要按照数据包的序列号对接收到的数据包进行排序
+`SEQ` 是为了保证 TCP 数据包的按顺序传输来设计的，可以有效的实现 TCP 数据的完整传输，特别是在数据传送过程中出现错误的时候可以有效的进行错误修正。在 TCP 会话的重新组合过程中需要按照数据包的序列号对接收到的数据包进行排序
 
 1、BSD 的实现思路 <br>
+
+![BSD](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/protocol/tcpip/tcp-assembly-1.png)
 以 SSH 连接的服务端（被动接收）出发，实现涉及两个队列，队列 A 存放顺序到来的数据包，队列 B 存放失序到来的数据包；假设队列 A 最后的缓存数据记录为 `seq=100`/`len=100`，下一个到达的数据包可能如下：
 -   case1：顺序到来的数据包，数据包 `2` 的序列号为 `seq2 = seq1+len1`，由此数据包的 seq 可知，这个报文预期后续报文，将此报文追加到正常报文队列
 -   case2：重复数据包，如数据包 `3`/`4`/`5`，都包含在队列 A 已经缓存的数据包 buffer 之中，应该被丢弃
@@ -70,7 +72,11 @@ SEQ 是为了保证 TCP 数据包的按顺序传输来设计的，可以有效�
 -   case4：提前到达的报文，如数据包 `7`：`seq2>seq1+len1`，是提前到来的报文，此时应该将这个报文放置到失序报文队列 B 缓存起来，以备后续重组使用
 
 这样直到客户端断开此 TCP 连接（`FIN` OR `RST`），此时将正常报文队列和失序报文队列中的数据合并起来，完成重组。取出正常报文队列最后一个报文的 `seq` 和 `len`，在失序报文队列中查找属于它的后续报文，该报文是否可以作为正常报文队列的后续报文，至此重组完成
-####    gvisor 的实现
+
+2、cs144的tcp assembler<br>
+
+
+3、gvisor 的实现<br>
 参考 [代码](https://github.com/google/gvisor/tree/master/pkg/tcpip/transport/tcp)
 
 ####    gopacket 中的 tcp 重组实现
@@ -95,3 +101,6 @@ SEQ 是为了保证 TCP 数据包的按顺序传输来设计的，可以有效�
 -   [4.2 TCP 重传、滑动窗口、流量控制、拥塞控制](https://xiaolincoding.com/network/3_tcp/tcp_feature.html#%E9%87%8D%E4%BC%A0%E6%9C%BA%E5%88%B6)
 -   [CS144 计算机网络 Lab1](https://kiprey.github.io/2021/11/cs144-lab1/)
 -   [Comp 443 program 2: TCP Stream Reassembler](http://pld.cs.luc.edu/courses/443/spr10/tcp_reassembler.html)
+-   [TCP Datagram Reassembly](https://pypcapkit.jarryshaw.me/en/v0.15.4/reassembly/tcp.html)
+-   [CS144-minnow](https://github.com/cs144/minnow)
+-   [【计算机网络】Stanford CS144 Lab Assignments 学习笔记](https://www.cnblogs.com/kangyupl/p/stanford_cs144_labs.html)
