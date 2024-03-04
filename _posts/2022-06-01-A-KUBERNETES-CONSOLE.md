@@ -136,9 +136,58 @@ func CreateK8SStream(option PyStreamOption) {
 }
 ```
 
-接下来的思路就是如何生成一个 `Executor`，来打通 SSH 到 SPDY（主要还是打通上图的 STDIN/STDOUT）。
+接下来的思路就是如何生成一个 `Executor`，来打通 SSH 到 SPDY（主要还是打通上图的 STDIN/STDOUT）
+
+##	0x02	问题
+笔者项目中遇到了在某些 kubernetes 集群版本下，当网关退出时，容器内的连接（网关到 kubernetes APIserver）、容器内 `bash` 残留的问题，如下描述：
+
+1、`NewSPDYExecutor` 创建的 stream 泄漏问题：
+
+关联相关 issue：
+-	[How to cancel a SPDYExecutor stream? #554](https://github.com/kubernetes/client-go/issues/554)
+-	[How to cancel a RESTClient exec? Can add context to the request？ #884](https://github.com/kubernetes/client-go/issues/884)
+
+本项目中涉及到如下库：
+
+```GO
+go 1.17
+
+require (
+		// ......
+        k8s.io/api v0.24.3
+        k8s.io/apimachinery v0.24.3
+        k8s.io/client-go v0.24.3
+        k8s.io/kubectl v0.22.0
+)
+```
+
+问题原因是通过 `exec.Stream` 构建的阻塞方法，开发者无法主动关闭这个 goroutine（网上也有相关 wrapped 改造，但是个人感觉不优雅），解决方案是使用新版本的 `client-go` 库，它提供了 `StreamWithContext`[方法](https://pkg.go.dev/k8s.io/client-go/tools/remotecommand)
+
+```go
+func main(){
+	// ...
+	exec, err := remotecommand.NewSPDYExecutor(config, "POST", req.URL())
+	if err != nil {
+		return err
+	}
+	err = exec.Stream(remotecommand.StreamOptions{
+		Stdin:             stdin,
+		Stdout:            stdout,
+		Stderr:            stderr,
+		Tty:               true,
+		TerminalSizeQueue: terminalSizeQueue,
+	})
+
+	// ...
+}
+```
+
+2、`bash` 残留
 
 
-##  0x02	参考
+##  0x03	参考
 -	[remotecommand 包](https://github.com/kubernetes/client-go/blob/master/tools/remotecommand)
 -	[kubectl 的 resize 窗口实现](https://github.com/kubernetes/kubectl/blob/master/pkg/util/term/resize.go)
+-	[kubernetes client-go web 命令行终端内存泄露问题解决](https://zhuanlan.zhihu.com/p/365431632)
+-	[How to cancel a RESTClient exec? Can add context to the request？](https://github.com/kubernetes/client-go/issues/884)
+-	[一个 Kubernetes Web 终端连接工具](https://jiankunking.com/kubernetes-client-go-how-to-make-a-web-terminal.html)
