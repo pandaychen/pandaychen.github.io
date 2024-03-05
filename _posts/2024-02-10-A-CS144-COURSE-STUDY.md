@@ -34,9 +34,19 @@ CS144 给出了一个简化 TCP 版本（sponge），它的特点如下
 -   Sponge 协议建立在 UDP/IP（基于 TUN/TAP 技术） 之上
 -   Sponge 协议是一种简易版 TCP 协议，和 TCP 协议一样有滑动窗口、重传、校验和等功能，但是一些复杂的特性（如：紧急指针、拥塞控制、Options）暂不支持
 
-####    cs144-Lab
-LAB0-LAB4 是循序渐进的
 
+####    cs144-Lab
+LAB0-LAB4 是循序渐进的，最终实现如下架构图的 sponge 协议流
+
+![tcp](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/cs144/tcp-connection.jpg)
+
+上图中梳理下 Sponge 协议数据流过程（假设走 TUN-UDP 隧道方式通信）：
+
+-   内核态下 UDP 数据包中的 payload 被解析为 TCPSegment 后，交给用户态下的 `TCPConnection`（调用 `segment_received` 方法）
+-   `TCPConnection` 收到报文后，将报文交给 `TCPReceiver`，即调用 `TCPReceiver.segment_received` 方法，并将报文中的 `ackno` 与 `window_size` 交给 `TCPSender`（调用 `ack_received` 方法），这里是回复 ACK 报文
+-   `TCPReceiver` 处理 TCP 报文，并将报文中的 payload 推入 `StreamReassembler` 中，并重组后交给应用程序，随后尝试发送 response 报文
+-   `TCPConnection` 调用 `TCPSender.fill_window` 方法尝试得到待发送报文（可能得不到，视具体情况而定），若有报文，则设置报文 payload 以及其它字段，如 `SYN`/`ackno`（从 `receiver` 获取）/`window_size` 等，设置完毕后包装为 TCP 报文，将报文交给 UDP
+-   UDP 将其打包为数据报，并发送给另外一端
 
 ##  0x02   核定代码分析
 
@@ -56,8 +66,91 @@ libsponge/
 └── wrapping_integers.hh    // WrappingIntegers 头文件
 ```
 
+sponge-TCP 框架类图如下：
+
+![class](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/cs144/sponge-class.jpg)
+
+主体类为 `TCPConnection`，该类主要维护 TCP 连接、TCP 状态机等信息数据，并将接收到的报文交给 `TCPReceiver` 处理，从 `TCPSender` 获取报文并发送：
+
+-   `TCPConnection` 负责维护连接，报文发送、接收分别由 `TCPSender` 和 `TCPReceiver` 来负责
+-   `TCPSender` 负责发送报文，接收确认号（ackno）确认报文，记录发送但未确认的报文，对超时未确认的报文进行重发
+-   `TCPReceiver` 负责接收报文，对报文数据进行重组（报文可能乱序 / 重传等，由 `StreamReassembler` 负责重组）
+-   `StreamReassembler` 负责对报文数据进行重组，每个报文中的每个字节都有唯一的序号，将字节按照序号进行重组得到正确的字节流，并将字节流写入到 `ByteStream` 中
+-   `ByteStream` 是 Sponge 协议中的字节流类，一个 `TCPConnection` 拥有两个字节流，一个输出流，一个输入流。** 输出流 ** 为 `TCPSender` 中的 `_output` 字段，该流负责接收程序写入的数据，并将其包装成报文并发送，** 输入流 ** 为 `StreamReassembler` 中的 `_output` 字段，该流由 `StreamReassembler` 重组报文数据而来，并将流数据交付给应用程序
+
 ##  0x03    LAB0
-实现一个读写字节流 [`ByteSteam`]()，用来作为存放给用户调用获取数据的有限长度缓冲区 buffer
+实现一个读写字节流 [`ByteSteam`]()，用来作为存放给用户调用获取数据的有限长度缓冲区 buffer，这里采用 `std::deque<char>` 实现，一端读另一端写入
+
+![]()
+
+```C
+class ByteStream {
+  private:
+    // Your code here -- add private members as necessary.
+
+    // Hint: This doesn't need to be a sophisticated data structure at
+    // all, but if any of your tests are taking longer than a second,
+    // that's a sign that you probably want to keep exploring
+    // different approaches.
+    std::deque<char> buffer;
+    size_t capacity;
+    bool end_write;         // 用来标识本 stream 写入结束
+    bool end_read;          // 用来标识本 stream 读取结束
+    size_t written_bytes;
+    size_t read_bytes;      // 累计读取字节数
+    bool _error{};  //!< Flag indicating that the stream suffered an error.
+};
+```
+
+需要实现如下方法：
+
+```c
+std::string ByteStream::read(const size_t len)
+size_t write(const std::string &data);
+bool eof() const;
+```
+
+-  `write`：向字节流中写入数据，注意写入数据的大小和当前缓冲区的大小加起来不能超过容量大小，然后将数据加入到 `buffer` deque 中，并且更新 `buffer_size` 及 `bytes_written`
+-   `read`：读取字节流中的前 `len` 个字节，注意 `read` 会消费流数据，读取后会移除前 `len` 个字节
+-   `peek_output`：查看字节流的前 `len` 个字节，`peek_out` 方法不会消费字节流，只会查看前 `len` 个字节，并且查询字节数量不能超过当前缓冲区字节的数量
+-   `pop_out`：移除字节流中的前 `len` 个字节，然后更新 `bytes_read` 和 `buffer_size`
+
+核心实现如下：
+
+```C
+void ByteStream::end_input() { end_write = true;}
+
+bool ByteStream::eof() const { return buffer.empty() && end_write; }
+
+size_t ByteStream::write(const string &data) {
+    // 缓冲区的剩余字节
+    size_t canWrite = capacity - buffer.size();
+    // 取实际可写大小
+    size_t realWrite = min(canWrite, data.length());
+    for (size_t i = 0; i < realWrite; i++) {
+        buffer.push_back(data[i]);
+    }
+    written_bytes += realWrite;
+    return realWrite;
+}
+
+std::string ByteStream::read(const size_t len) {
+    string out = "";
+    // 过长，非法
+    if (len> buffer.size()) {
+        set_error();
+        return out;
+    }
+    for (size_t i = 0; i < len; i++) {
+        out += buffer.front();
+        buffer.pop_front();
+    }
+    read_bytes += len;
+    return out;
+}
+```
+
+
 
 ##  0x04    LAB1
 `StreamReassembler` 实现，作为 `ByteSteam` 的上游，实现 sponge-TCP 协议流重组的功能
@@ -91,3 +184,4 @@ libsponge/
 -   [CS144 Lab2 翻译](https://doraemonzzz.com/2021/12/27/2021-12-27-CS144-Lab2%E7%BF%BB%E8%AF%91/)
 -   [CS144 Labs 总结](https://carlclone.github.io/labs/cs144/)
 -   [CS144-Lab2-TCPReceiver](https://www.cnblogs.com/lawliet12/p/17066709.html)
+-   [【计算机网络】Stanford CS144 Lab Assignments 学习笔记](https://www.cnblogs.com/kangyupl/p/stanford_cs144_labs.html)
