@@ -256,7 +256,7 @@ PING 10.10.10.2 (10.10.10.2) 56(84) bytes of data.
 64 bytes from 10.10.10.2: icmp_seq=6 ttl=64 time=592 ms
 ```
 
-在 B 机器上启动转包 `tcpdump -i gtun -s0 -w ping.pcap`
+在 B 机器上启动抓包 `tcpdump -i gtun -s0 -w ping.pcap`
 
 ![pcap](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/tun-dev/tun-programming-basic-pcap.png)
 

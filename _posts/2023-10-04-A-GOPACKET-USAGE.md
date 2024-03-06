@@ -436,7 +436,7 @@ func main() {
 
 
 ####	reassemblydump
-`reassemblydump`[https://github.com/google/gopacket/blob/master/examples/reassemblydump/main.go] 展示了如何使用 gopacket 库的重组（reassembly）功能来处理并重组 TCP 数据流，主要功能如下：
+[`reassemblydump`](https://github.com/google/gopacket/blob/master/examples/reassemblydump/main.go) 展示了如何使用 gopacket 库的重组（reassembly）功能来处理并重组 TCP 数据流，主要功能如下：
 
 1.	从 PCAP 文件或网络接口中捕获 TCP 数据包（打开句柄，持续收包）
 2.	使用 gopacket 库的重组功能，对捕获的 TCP 数据包进行排序、重组和处理
