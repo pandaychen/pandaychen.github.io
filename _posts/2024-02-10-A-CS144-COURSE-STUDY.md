@@ -79,9 +79,9 @@ sponge-TCP 框架类图如下：
 -   `ByteStream` 是 Sponge 协议中的字节流类，一个 `TCPConnection` 拥有两个字节流，一个输出流，一个输入流。** 输出流 ** 为 `TCPSender` 中的 `_output` 字段，该流负责接收程序写入的数据，并将其包装成报文并发送，** 输入流 ** 为 `StreamReassembler` 中的 `_output` 字段，该流由 `StreamReassembler` 重组报文数据而来，并将流数据交付给应用程序
 
 ##  0x03    LAB0
-实现一个读写字节流 [`ByteSteam`]()，用来作为存放给用户调用获取数据的有限长度缓冲区 buffer，这里采用 `std::deque<char>` 实现，一端读另一端写入
+实现一个读写字节流 [`ByteSteam`]()，用来作为存放给用户调用获取数据的有限长度缓冲区 buffer，这里采用 `std::deque<char>` 实现，一端读另一端写入，`ByteSteam` 的位置如下图：
 
-![]()
+![ByteSteam]()
 
 ```C
 class ByteStream {
@@ -110,14 +110,17 @@ size_t write(const std::string &data);
 bool eof() const;
 ```
 
--  `write`：向字节流中写入数据，注意写入数据的大小和当前缓冲区的大小加起来不能超过容量大小，然后将数据加入到 `buffer` deque 中，并且更新 `buffer_size` 及 `bytes_written`
+-   `write`：向字节流中写入数据，注意写入数据的大小和当前缓冲区的大小加起来不能超过容量大小，然后将数据加入到 `buffer` deque 中，并且更新 `buffer_size` 及 `bytes_written`
 -   `read`：读取字节流中的前 `len` 个字节，注意 `read` 会消费流数据，读取后会移除前 `len` 个字节
 -   `peek_output`：查看字节流的前 `len` 个字节，`peek_out` 方法不会消费字节流，只会查看前 `len` 个字节，并且查询字节数量不能超过当前缓冲区字节的数量
 -   `pop_out`：移除字节流中的前 `len` 个字节，然后更新 `bytes_read` 和 `buffer_size`
+-   `buffer_size`：获取当前 `buffer` 的实际数据大小
 
 核心实现如下：
 
 ```C
+size_t ByteStream::buffer_size() const { return buffer.size(); }
+
 void ByteStream::end_input() { end_write = true;}
 
 bool ByteStream::eof() const { return buffer.empty() && end_write; }
@@ -148,12 +151,126 @@ std::string ByteStream::read(const size_t len) {
     read_bytes += len;
     return out;
 }
+
+//param[in] len bytes will be copied from the output side of the buffer
+string ByteStream::peek_output(const size_t len) const {
+    size_t canPeek = min(len, buffer.size());
+    string out = "";
+    for (size_t i = 0; i < canPeek; i++) {
+        out += buffer[i];
+    }
+    return out;
+}
+
+//param[in] len bytes will be removed from the output side of the buffer
+void ByteStream::pop_output(const size_t len) {
+    if (len> buffer.size()) {
+        set_error();
+        return;
+    }
+    for (size_t i = 0; i < len; i++) {
+        buffer.pop_front();
+    }
+    read_bytes += len;
+}
 ```
 
-
-
 ##  0x04    LAB1
-`StreamReassembler` 实现，作为 `ByteSteam` 的上游，实现 sponge-TCP 协议流重组的功能
+`StreamReassembler` 实现，作为 `ByteSteam` 的上游，实现 sponge-TCP 协议流重组的功能，本 LAB 仍然不涉及到 TCP 的相关属性，是一个通用实现；`StreamReassembler` 的核心接口就是 `push_substring`，其参数如下：
+
+-   `data`：报文应用数据（不含 TCP header）
+-   `index`：报文数据第一个字节的序号（注意这个是字节流的序号，跟 `seqno` 有区别）
+-   `eof`：是否收到了 `fin` 包数据，即是否要关闭输入数据流
+
+在 `StreamReassembler` 类中，定义 `buffer` 为临时缓冲队列，使用 `bitmap` 来标识每个位置（`char`）的占用情况（当前也有更优雅的实现方式）
+
+```C
+class StreamReassembler {
+  private:
+    // Your code here -- add private members as necessary.
+    size_t unass_base;        //!< The index of the first unassembled byte
+    size_t unass_size;        //!< The number of bytes in the substrings stored but not yet reassembled
+    bool _eof;                //!< The last byte has arrived
+    std::deque<char> buffer;  //!< The unassembled strings
+    std::deque<bool> bitmap;  //!< buffer bitmap
+
+    ByteStream _output;  //!< The reassembled in-order byte stream
+    size_t _capacity;    //!< The maximum number of bytes
+
+    void check_contiguous();
+    size_t real_size(const std::string &data, const size_t index);
+
+    // ....
+}
+```
+
+上述成员的初始化值如下：
+```c
+StreamReassembler::StreamReassembler(const size_t capacity)
+    : unass_base(0)
+    , unass_size(0)
+    , _eof(0)
+    , buffer(capacity, '\0')
+    , bitmap(capacity, false)
+    , _output(capacity)
+    , _capacity(capacity) {}
+```
+
+由于从 sponge-tcp 获取到的字节流可能为乱序报文，所以 `StreamReassembler` 主要完成这几件事情：
+1.  接收乱序字节流，按照重组序列规则缓存到 `buffer`，丢弃非预期的字节流，尝试检查缓存 `buffer` 中的字节流是否能与当前流进行合并
+2.  定期将已重组完成的数据写入到 LAB0 中的 `ByteStream`（调用 `ByteStream` 的 `write` 接口）
+3.  判断流重组完整，设置 `eof`
+
+```C
+void StreamReassembler::push_substring(const string &data, const size_t index, const bool eof) {
+    if (eof) {
+        _eof = true;
+    }
+    size_t len = data.length();
+    if (len == 0 && _eof && unass_size == 0) {
+        _output.end_input();
+        return;
+    }
+    // ignore invalid index
+    if (index>= unass_base + _capacity) return;
+
+    if (index>= unass_base) {
+        int offset = index - unass_base;
+        size_t real_len = min(len, _capacity - _output.buffer_size() - offset);
+        if (real_len < len) {
+            // 注意：此说明buffer的剩余空间装不下当前的data，需要标记流状态结束标记为false
+            _eof = false;
+        }
+        for (size_t i = 0; i < real_len; i++) {
+            if (bitmap[i + offset])
+                continue;
+            buffer[i + offset] = data[i];
+            bitmap[i + offset] = true;
+            unass_size++;
+        }
+    } else if (index + len> unass_base) {
+        int offset = unass_base - index;
+        size_t real_len = min(len - offset, _capacity - _output.buffer_size());
+        if (real_len < len - offset) {
+            // 注意：此说明buffer的剩余空间装不下当前的data，需要标记流状态结束标记为false
+            _eof = false;
+        }
+        for (size_t i = 0; i < real_len; i++) {
+            if (bitmap[i])
+                continue;
+            buffer[i] = data[i + offset];
+            bitmap[i] = true;
+            unass_size++;
+        }
+    }
+
+    //尝试检查把已经重组完成的流写入ByteStream
+    check_contiguous();
+    if (_eof && unass_size == 0) {
+        _output.end_input();
+    }
+}
+```
 
 ##  0x05    LAB2
 `TCPReceiver` 的实现，`TCPReceiver` 包含了一个 `StreamReassembler` 实现，它主要解决如下问题：
