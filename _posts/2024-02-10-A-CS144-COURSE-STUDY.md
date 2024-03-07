@@ -238,7 +238,7 @@ void StreamReassembler::push_substring(const string &data, const size_t index, c
         int offset = index - unass_base;
         size_t real_len = min(len, _capacity - _output.buffer_size() - offset);
         if (real_len < len) {
-            // 注意：此说明buffer的剩余空间装不下当前的data，需要标记流状态结束标记为false
+            // 注意：此说明 buffer 的剩余空间装不下当前的 data，需要标记流状态结束标记为 false
             _eof = false;
         }
         for (size_t i = 0; i < real_len; i++) {
@@ -252,7 +252,7 @@ void StreamReassembler::push_substring(const string &data, const size_t index, c
         int offset = unass_base - index;
         size_t real_len = min(len - offset, _capacity - _output.buffer_size());
         if (real_len < len - offset) {
-            // 注意：此说明buffer的剩余空间装不下当前的data，需要标记流状态结束标记为false
+            // 注意：此说明 buffer 的剩余空间装不下当前的 data，需要标记流状态结束标记为 false
             _eof = false;
         }
         for (size_t i = 0; i < real_len; i++) {
@@ -264,7 +264,7 @@ void StreamReassembler::push_substring(const string &data, const size_t index, c
         }
     }
 
-    //尝试检查把已经重组完成的流写入ByteStream
+    // 尝试检查把已经重组完成的流写入 ByteStream
     check_contiguous();
     if (_eof && unass_size == 0) {
         _output.end_input();
@@ -272,12 +272,96 @@ void StreamReassembler::push_substring(const string &data, const size_t index, c
 }
 ```
 
+####    capacity 的意义
+这里再回顾下 `StreamReassembler._capacity` 的含义：
+
+![capacity]()
+
+-   `ByteStream` 的空间上限是 `capacity`
+-   `StreamReassembler` 用于暂存未重组字符串片段的缓冲区空间 `StreamReassembler.buffer` 上限也是 `capacity`
+-   上图绿色部分代表了 ByteStream 中已经重组并写入但还未被读取的字节流所占据的空间大小。
+-   红色部分代表了 StreamReassembler 中已经缓存但未经重组的若干字符串片段所占据的空间大小。
+-   同时绿色和红色两部分加起来的空间总占用大小不会超过 capacity（事实上会一直小于它）。
+
+此外：
+
+-   first unread 的索引等于 ByteStream 的 bytes_read() 函数的返回值。
+-   first unassembled 的索引等于 ByteStream 的 bytes_write() 函数的返回值。
+-   first unacceptable 的索引等于 ByteStream 的 bytes_read() 加上 capacity 的和。
+-   first unread 和 first unacceptable 这两个边界是动态变化的。
+
 ##  0x05    LAB2
-`TCPReceiver` 的实现，`TCPReceiver` 包含了一个 `StreamReassembler` 实现，它主要解决如下问题：
+
+原实验稿在 [此](https://cs144.github.io/assignments/check2.pdf)
+
+lab0 实现了读 / 写字节流 `ByteStream`，lab1 实现了可靠有序不重复的字节流重组 `StreamReassembler`，本 LAB 开始就涉及到 TCP 协议属性了，即 `TCPReceiver` 的实现，`TCPReceiver` 包含了一个 `StreamReassembler` 实现，它主要解决如下问题：
+
+####    可靠的接收数据
 
 -   从哪里接收 TCP 分段数据
 -   重组数据（调用 `StreamReassembler`），缓存数据
 -   重组后的数据放在哪里（写入 `ByteSteam`），等待上层读取
+
+####   与 `TCPSender` 交互
+-   第一个未被 assembly（first unassembled）字节的索引 index，称为确认号（`ackno`），告知对端当前本端已经成功接收了多少字节
+-   提供 window size：第一个未被 assembly 字节的索引和 "第一个不可接收"（first unacceptable） 索引之间的距离（the distance between the "first unassembled" index and the "first unacceptable" index）
+
+新版课程把上述 window size 重新描述为 "the available capacity in the output ByteStream"。`ackno` 和窗口大小一起描述了接收方的窗口：允许 `TCPSender` 发送的一系列索引。使用该窗口，接收方可以控制传入数据的流量，使发送方限制其发送量，直到接收方准备好接收更多数据。有时将 `ackno` 称为窗口的左边缘（`TCPReceiver` 感兴趣的最小索引），将 `ackno` + 窗口大小称为右边缘（刚好超出 `TCPReceiver` 所感兴趣的最大索引）
+
+
+####    seqno/absolute sequence number/stream index
+
+正常情况下在 sponge 协议中，`TCPReceiver` 会收到 `3` 种报文：
+-   SYN 报文，有初始 `ISN`（用来标记字节流的起始位置）
+-   FIN 报文，表明通信结束
+-   普通的数据报文，只需要写入 payload 到 `ByteStream` 即可
+
+TCP 流的逻辑开始数据包和逻辑结束数据包各占用一个 `seqno`。除了确保接收到所有字节的数据以外，TCP 还需要确保接收到流的开头和结尾。在 TCP 中，SYN（流开始）和 FIN（流结束）控制标志将会被分别分配一个序列号，流中的每个数据字节也占用一个序列号。但需要注意的是，SYN 和 FIN 不是流本身的一部分，也不是传输的字节数据。它们只是代表字节流本身的开始和结束
+
+为了实现 TCP 流重组，sponge 协议提供了三种 index：
+
+1、序列号 `seqno`：从 `ISN` 起步，包含 SYN 和 FIN，`32` 位循环计数
+
+TCP 报文头部的 `seqno` 标识了 payload 字节流在完整字节流中的起始位置，然而该字段只有 `32` 位，最多只能支持 `4gb` 的字节流，这显然不够的，因此引入 `absolute sequence number` 定义为 `uin64_t`，最高可以支持 `2^64 - 1` 长度的字节流
+
+2、绝对序列号 `absolute seqno`：从 `0` 起步，包含 SYN/FIN，`64` 位非循环计数
+
+`absolute seqno` 的起始位置（针对单个 stream）永远是 `0`，它对于 `seqno` 会有 `ISN` 长度的偏移，每次写入时都不断对其递增，由于 `seqno` 可能会溢出，`abs_seqno` 保证了正常记录正确的长度；此外，在 sponge 协议中需要有 `seqno` 和 `absolute seqno` 转换
+
+3、流索引 `stream index`：从 `0` 起步，排除 SYN/FIN，`64` 位非循环计数
+
+`stream index` 本质上是 `ByteStream` 的字节流索引，只是少了 FIN 和 SYN 各自在字节流中的 `1` 个字节占用，也是 `uint64_t` 类型
+
+这里，以数据流 `cat` 为例，上述 index 的对比图如下：
+
+![cat]()
+
+####     seqno 和 absolute seqno 的转换
+对于 `TCPReceiver` 而言，数据包中的 `seqno` 不是真正的字节流起始位置，因此接收报文时，需要对其转换成 `absolute seqno`，才可以进行后续操作，如流重组、 `TCPReceiver` 中计算窗口大小；由于 `seqno` 类型与其他不同，所以这里需要有一个转换算法：
+
+
+```C
+WrappingInt32 wrap(uint64_t n, WrappingInt32 isn) { return isn + uint32_t(n); }
+
+uint64_t unwrap(WrappingInt32 n, WrappingInt32 isn, uint64_t checkpoint) {
+    uint64_t tmp = 0;
+    uint64_t tmp1 = 0;
+    if (n - isn < 0) {
+        tmp = uint64_t(n - isn + (1l << 32));
+    } else {
+        tmp = uint64_t(n - isn);
+    }
+    if (tmp>= checkpoint)
+        return tmp;
+    tmp |= ((checkpoint>> 32) << 32);
+    while (tmp <= checkpoint)
+        tmp += (1ll << 32);
+    tmp1 = tmp - (1ll << 32);
+    return (checkpoint - tmp1 < tmp - checkpoint) ? tmp1 : tmp;
+}
+```
+
+
 
 ##  0x06    LAB3
 `TCPSender` 实现，仅包含 outbound 的 `ByteSteam`，但实际相对于 `TCPReceiver` 要复杂，需要支持：
@@ -302,3 +386,5 @@ void StreamReassembler::push_substring(const string &data, const size_t index, c
 -   [CS144 Labs 总结](https://carlclone.github.io/labs/cs144/)
 -   [CS144-Lab2-TCPReceiver](https://www.cnblogs.com/lawliet12/p/17066709.html)
 -   [【计算机网络】Stanford CS144 Lab Assignments 学习笔记](https://www.cnblogs.com/kangyupl/p/stanford_cs144_labs.html)
+-   [CS144 计算机网络 Lab1](https://kiprey.github.io/2021/11/cs144-lab1/)
+-   [CS144: Computer Network](https://csdiy.wiki/%E8%AE%A1%E7%AE%97%E6%9C%BA%E7%BD%91%E7%BB%9C/CS144/)
