@@ -78,10 +78,10 @@ sponge-TCP 框架类图如下：
 -   `StreamReassembler` 负责对报文数据进行重组，每个报文中的每个字节都有唯一的序号，将字节按照序号进行重组得到正确的字节流，并将字节流写入到 `ByteStream` 中
 -   `ByteStream` 是 Sponge 协议中的字节流类，一个 `TCPConnection` 拥有两个字节流，一个输出流，一个输入流。** 输出流 ** 为 `TCPSender` 中的 `_output` 字段，该流负责接收程序写入的数据，并将其包装成报文并发送，** 输入流 ** 为 `StreamReassembler` 中的 `_output` 字段，该流由 `StreamReassembler` 重组报文数据而来，并将流数据交付给应用程序
 
-##  0x03    LAB0
+##  0x03    LAB0：有序字节流ByteSteam
 实现一个读写字节流 [`ByteSteam`]()，用来作为存放给用户调用获取数据的有限长度缓冲区 buffer，这里采用 `std::deque<char>` 实现，一端读另一端写入，`ByteSteam` 的位置如下图：
 
-![ByteSteam]()
+![ByteSteam](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/cs144/stream-assembly-bytestream.png)
 
 ```C
 class ByteStream {
@@ -175,7 +175,7 @@ void ByteStream::pop_output(const size_t len) {
 }
 ```
 
-##  0x04    LAB1
+##  0x04    LAB1：重组器StreamReassembler
 `StreamReassembler` 实现，作为 `ByteSteam` 的上游，实现 sponge-TCP 协议流重组的功能，本 LAB 仍然不涉及到 TCP 的相关属性，是一个通用实现；`StreamReassembler` 的核心接口就是 `push_substring`，其参数如下：
 
 -   `data`：报文应用数据（不含 TCP header）
@@ -272,29 +272,28 @@ void StreamReassembler::push_substring(const string &data, const size_t index, c
 }
 ```
 
-####    capacity 的意义
+####    StreamReassembler.capacity 的意义
 这里再回顾下 `StreamReassembler._capacity` 的含义：
 
-![capacity]()
+![capacity](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/cs144/lab1-bytestream.png)
 
 -   `ByteStream` 的空间上限是 `capacity`
 -   `StreamReassembler` 用于暂存未重组字符串片段的缓冲区空间 `StreamReassembler.buffer` 上限也是 `capacity`
--   上图绿色部分代表了 ByteStream 中已经重组并写入但还未被读取的字节流所占据的空间大小。
--   红色部分代表了 StreamReassembler 中已经缓存但未经重组的若干字符串片段所占据的空间大小。
--   同时绿色和红色两部分加起来的空间总占用大小不会超过 capacity（事实上会一直小于它）。
+-   蓝色部分代表了已经被上层应用读取的已重组数据
+-   绿色部分代表了 `ByteStream` 中已经重组并写入但还未被读取的字节流所占据的空间大小
+-   红色部分代表了 `StreamReassembler` 中已经缓存但未经重组的若干字符串片段所占据的空间大小
+-   同时绿色和红色两部分加起来的空间总占用大小不会超过 `capacity`（事实上会一直小于它）
 
-此外：
+从代码层面来看：
 
--   first unread 的索引等于 ByteStream 的 bytes_read() 函数的返回值。
--   first unassembled 的索引等于 ByteStream 的 bytes_write() 函数的返回值。
--   first unacceptable 的索引等于 ByteStream 的 bytes_read() 加上 capacity 的和。
--   first unread 和 first unacceptable 这两个边界是动态变化的。
+-   first unread 的索引等于 `ByteStream` 的 `bytes_read()` 函数的返回值
+-   first unassembled 的索引等于 `ByteStream` 的 `bytes_write()` 函数的返回值
+-   first unacceptable 的索引等于 `ByteStream` 的 `bytes_read()` 加上 `capacity` 的和（已超过 `ByteStream` 的 buffer 限制）
+-   first unread 和 first unacceptable 这两个边界是动态变化的，每次重组结束都需要更新
 
-##  0x05    LAB2
+##  0x05    LAB2：TCP接收器TCPReceiver
 
-原实验稿在 [此](https://cs144.github.io/assignments/check2.pdf)
-
-lab0 实现了读 / 写字节流 `ByteStream`，lab1 实现了可靠有序不重复的字节流重组 `StreamReassembler`，本 LAB 开始就涉及到 TCP 协议属性了，即 `TCPReceiver` 的实现，`TCPReceiver` 包含了一个 `StreamReassembler` 实现，它主要解决如下问题：
+原实验稿在 [此](https://cs144.github.io/assignments/check2.pdf)，lab0 实现了读 / 写字节流 `ByteStream`，lab1 实现了可靠有序不重复的字节流重组 `StreamReassembler`，本 LAB 开始就涉及到 TCP 协议属性了，即 `TCPReceiver` 的实现，`TCPReceiver` 包含了一个 `StreamReassembler` 实现，它主要解决如下问题：
 
 ####    可靠的接收数据
 
@@ -334,14 +333,38 @@ TCP 报文头部的 `seqno` 标识了 payload 字节流在完整字节流中的�
 
 这里，以数据流 `cat` 为例，上述 index 的对比图如下：
 
-![cat]()
+![cat](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/cs144/lab2-seqno.png)
+
+注意，在程序中计算的概念均使用 `uint64_t` 的偏移，如 `absolute seqno`，`seqno` 的 `32` 位类型是由于 TCP 协议的设计遗留问题导致的
 
 ####     seqno 和 absolute seqno 的转换
-对于 `TCPReceiver` 而言，数据包中的 `seqno` 不是真正的字节流起始位置，因此接收报文时，需要对其转换成 `absolute seqno`，才可以进行后续操作，如流重组、 `TCPReceiver` 中计算窗口大小；由于 `seqno` 类型与其他不同，所以这里需要有一个转换算法：
+对于 `TCPReceiver` 而言，数据包中的 `seqno` 不是真正的字节流起始位置，因此接收报文时（拿到的是 `seqno`），需要对其转换成 `absolute seqno`，才可以进行后续操作，如流重组、 `TCPReceiver` 中计算窗口大小；由于 `seqno` 类型与其他不同，所以这里需要有一个相互转换算法，描述如下：
 
+由于 `absolute seqno` 表示的范围是 `seqno` 的 `2^32` 倍，所以映射转换需要一定的技巧（因为 `seqno=17` 可以表示多个 `absolute seqno`，如 `2^32 + 17`/`2^33 + 17`/`2^34 + 17` 等），通过引入 `checkpoint` 变量来解决转换的问题，在 `TCPReceiver` 实现中 `checkpoint` 表示 ** 当前写入的总字节数 **，期望通过此值来寻找到离 `absolute seqno` 最近的那个 index，因为单个 TCP packet 长度必然不可超过 `2^32`，就是说，一旦 `seqno` 的区间映射到 `[2^32 + 17,2^33 + 17]` 这个区间，那就要计算到底 `seqno` 是 `2^32 + 17`、还是 `2^33 + 17`？
+
+![absolute_seqno](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/cs144/seqno_and_abseq.png)
+
+-   `unwrap` 接口用于将 `absolute seqno` 转换成 `seqno`，只需把 `absolute seqno` 加上 `isn` 初始偏移量，然后取 `absolute seqno` 的低 `32` 位值即可
+-   `unwrap` 接口用于反向转换，假设要将 `n` 从 `seqno` 转换成 `absolute seqno`，先将当前的 `chekpoint` 从 `absolute seqno` 转换成 `seqno`，然后计算 `n`（`seqno` 版本） 和 `checkpoint`（`seqno` 版本） 的偏移量，最后加到 `checkpoint` （`absolute seqno` 版本）上面即可得出 `n`（`absolute seqno` 版本），参考下图:
+
+![absolute_seqno](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/cs144/seqno_and_abseq-trans.png)
+
+
+实现代码如下：
 
 ```C
-WrappingInt32 wrap(uint64_t n, WrappingInt32 isn) { return isn + uint32_t(n); }
+// absolute seqno 转 seqno
+WrappingInt32 wrap(uint64_t n, WrappingInt32 isn) {
+    return isn + uint32_t(n);
+}
+
+// version2
+WrappingInt32 wrap(uint64_t n, WrappingInt32 isn) {
+    uint64_t m = (1ll << 32);
+    uint32_t num = (n + isn.raw_value()) % m;
+
+    return WrappingInt32{num};
+}
 
 uint64_t unwrap(WrappingInt32 n, WrappingInt32 isn, uint64_t checkpoint) {
     uint64_t tmp = 0;
@@ -361,15 +384,108 @@ uint64_t unwrap(WrappingInt32 n, WrappingInt32 isn, uint64_t checkpoint) {
 }
 ```
 
+如何理解 `unwrap` 的这种转换方法呢？TODO
 
 
-##  0x06    LAB3
+####    接收（并重组）报文实现 `segment_received`
+基于前文基础，看看处理 sponge-TCP 报文的流程，主要关注前面 SYN/FIN 报文即可，及时更新最新的 `absolute seqno`
+
+```C
+void TCPReceiver::segment_received(const TCPSegment &seg) {
+    const TCPHeader head = seg.header();
+
+    if (!head.syn && !_synReceived) {
+        return;
+    }
+
+    // extract data from the payload
+    string data = seg.payload().copy();
+
+    bool eof = false;
+
+    // first SYN received
+    if (head.syn && !_synReceived) {
+        _synReceived = true;
+        _isn = head.seqno;
+        if (head.fin) {
+            // 如果同时设置了 fin
+            _finReceived = eof = true;
+        }
+
+        // 重组开始（SYN）/ 重组结束（FIN）
+        _reassembler.push_substring(data, 0, eof);
+        return;
+    }
+
+    // FIN received
+    if (_synReceived && head.fin) {
+        _finReceived = eof = true;
+    }
+
+    // convert the seqno into absolute seqno
+    // 计算 absolute seqno 以及 stream_index
+    uint64_t checkpoint = _reassembler.ack_index();
+    uint64_t abs_seqno = unwrap(head.seqno, _isn, checkpoint);
+    uint64_t stream_idx = abs_seqno - _synReceived;
+
+    // push the data into stream reassembler
+    // 重组当前 data
+    _reassembler.push_substring(data, stream_idx, eof);
+}
+```
+
+####    窗口大小和 ackno
+窗口大小用于通知对端当前可以接收的字节流大小，`ackno` 用于通知对端当前接收的字节流进度。这两个也是由 `TCPReceiver` 提供，实现如下：
+
+```C
+optional<WrappingInt32> TCPReceiver::ackno() const {
+	// next_write + 1 ,because syn flag will not push in stream
+	size_t next_write = _reassembler.stream_out().bytes_written() + 1;
+	next_write = _reassembler.stream_out().input_ended() ? next_write + 1 : next_write;
+	return !_received_syn ? optional<WrappingInt32>() : wrap(next_write, _isn);
+}
+
+size_t TCPReceiver::window_size() const {
+	return _reassembler.stream_out().remaining_capacity();
+}
+
+size_t ByteStream::remaining_capacity() const { return capacity - buffer.size(); }
+```
+
+####    TCPReceiver 定义
+前面已经描述了 `TCPReceiver` 的核心功能了，这里列举下其定义：
+
+```C
+class TCPReceiver {
+    //! Our data structure for re-assembling bytes.
+    StreamReassembler _reassembler;
+
+    //! The maximum number of bytes we'll store.
+    size_t _capacity;
+
+    //! Flag to indicate whether the first SYN message has received
+    bool _synReceived;
+
+    //! Flag to indicate whether FIN mesaage has received
+    bool _finReceived;
+
+    //! Inital Squence Number
+    WrappingInt32 _isn;
+}
+```
+
+`TCPReceiver` 只负责：
+-   SYN/FIN 的标记，SYN - 流开始；FIN - 流结束
+-   重组
+
+
+##  0x06    LAB3：TCP发送器TCPSender
 `TCPSender` 实现，仅包含 outbound 的 `ByteSteam`，但实际相对于 `TCPReceiver` 要复杂，需要支持：
 -   根据 `TCPSender` 当前的状态对可发送窗口进行填充，发包
 -   `TCPSender` 需要根据对方通知的窗口大小和 `ackno` 来确认对方当前收到的字节流进度
 -   需支持超时重传机制，根据时间变化（RTO），定时重传那些还没有 `ack` 的报文
 
-##  0x07    LAB4
+##  0x07    LAB4：完整sponge-TCP连接：TCPConnection
 `TCPConnection` 的实现，包含如下步骤：
 
 -   发起连接
