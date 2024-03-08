@@ -78,7 +78,7 @@ sponge-TCP 框架类图如下：
 -   `StreamReassembler` 负责对报文数据进行重组，每个报文中的每个字节都有唯一的序号，将字节按照序号进行重组得到正确的字节流，并将字节流写入到 `ByteStream` 中
 -   `ByteStream` 是 Sponge 协议中的字节流类，一个 `TCPConnection` 拥有两个字节流，一个输出流，一个输入流。** 输出流 ** 为 `TCPSender` 中的 `_output` 字段，该流负责接收程序写入的数据，并将其包装成报文并发送，** 输入流 ** 为 `StreamReassembler` 中的 `_output` 字段，该流由 `StreamReassembler` 重组报文数据而来，并将流数据交付给应用程序
 
-##  0x03    LAB0：有序字节流ByteSteam
+##  0x03    LAB0：有序字节流 ByteSteam
 实现一个读写字节流 [`ByteSteam`]()，用来作为存放给用户调用获取数据的有限长度缓冲区 buffer，这里采用 `std::deque<char>` 实现，一端读另一端写入，`ByteSteam` 的位置如下图：
 
 ![ByteSteam](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/cs144/stream-assembly-bytestream.png)
@@ -175,7 +175,7 @@ void ByteStream::pop_output(const size_t len) {
 }
 ```
 
-##  0x04    LAB1：重组器StreamReassembler
+##  0x04    LAB1：重组器 StreamReassembler
 `StreamReassembler` 实现，作为 `ByteSteam` 的上游，实现 sponge-TCP 协议流重组的功能，本 LAB 仍然不涉及到 TCP 的相关属性，是一个通用实现；`StreamReassembler` 的核心接口就是 `push_substring`，其参数如下：
 
 -   `data`：报文应用数据（不含 TCP header）
@@ -291,7 +291,7 @@ void StreamReassembler::push_substring(const string &data, const size_t index, c
 -   first unacceptable 的索引等于 `ByteStream` 的 `bytes_read()` 加上 `capacity` 的和（已超过 `ByteStream` 的 buffer 限制）
 -   first unread 和 first unacceptable 这两个边界是动态变化的，每次重组结束都需要更新
 
-##  0x05    LAB2：TCP接收器TCPReceiver
+##  0x05    LAB2：TCP 接收器 TCPReceiver
 
 原实验稿在 [此](https://cs144.github.io/assignments/check2.pdf)，lab0 实现了读 / 写字节流 `ByteStream`，lab1 实现了可靠有序不重复的字节流重组 `StreamReassembler`，本 LAB 开始就涉及到 TCP 协议属性了，即 `TCPReceiver` 的实现，`TCPReceiver` 包含了一个 `StreamReassembler` 实现，它主要解决如下问题：
 
@@ -478,14 +478,18 @@ class TCPReceiver {
 -   SYN/FIN 的标记，SYN - 流开始；FIN - 流结束
 -   重组
 
+整个接收端的空间由窗口空间（`StreamReassmbler`）和缓冲区空间（`ByteStream`）两部分共享。需要注意窗口长度等于接收端容量减去还留在缓冲区的字节数，只有当字节从缓冲区读出后窗口长度才能缩减，CS144对整个`TCPReceiver`的执行流程期望如下：
 
-##  0x06    LAB3：TCP发送器TCPSender
+![lab2-tested]()
+
+
+##  0x06    LAB3：TCP 发送器 TCPSender
 `TCPSender` 实现，仅包含 outbound 的 `ByteSteam`，但实际相对于 `TCPReceiver` 要复杂，需要支持：
 -   根据 `TCPSender` 当前的状态对可发送窗口进行填充，发包
 -   `TCPSender` 需要根据对方通知的窗口大小和 `ackno` 来确认对方当前收到的字节流进度
 -   需支持超时重传机制，根据时间变化（RTO），定时重传那些还没有 `ack` 的报文
 
-##  0x07    LAB4：完整sponge-TCP连接：TCPConnection
+##  0x07    LAB4：完整 sponge-TCP 连接：TCPConnection
 `TCPConnection` 的实现，包含如下步骤：
 
 -   发起连接
