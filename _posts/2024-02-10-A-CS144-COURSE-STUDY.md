@@ -388,7 +388,7 @@ uint64_t unwrap(WrappingInt32 n, WrappingInt32 isn, uint64_t checkpoint) {
 
 
 ####    接收（并重组）报文实现 `segment_received`
-基于前文基础，看看处理 sponge-TCP 报文的流程，主要关注前面 SYN/FIN 报文即可，及时更新最新的 `absolute seqno`
+基于前文基础，看看处理 sponge-TCP 报文的流程，主要关注前面 SYN/FIN 报文即可，及时更新最新的 `absolute seqno`，这个也是`TCPReceiver`最核心的实现：
 
 ```C
 void TCPReceiver::segment_received(const TCPSegment &seg) {
