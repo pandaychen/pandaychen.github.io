@@ -345,11 +345,19 @@ TCP 报文头部的 `seqno` 标识了 payload 字节流在完整字节流中的�
 2.  要将序列号转换为绝对序列号稍微麻烦些，由于 `k* 2^32` 项的存在，一个序列号可以映射为多个绝对序列号。这时候需要上一个收到的报文段绝对序列号 `checkpoint` 来辅助转换，虽然不能保证各个报文段都是有序到达的，但是相邻到达的报文段序列号差值超过 `2^32` 的可能性很小，所以可以将离 `checkpoint` 最近的转换结果作为绝对序列号。实现方式就是利用上述 `wrap()` 函数将 `checkpoint` 转为序列号（`uint32_t`），然后计算新旧序列号的差值，一般情况下直接让存档点序列号加上差值就行，但是有时可能出现负值。比如 `ISN` 为 `2^32 -1`，`checkpoint` 和 `seqno` 都是 `0` 时，相加结果会是 `-1`，这时候需要再加上 `2^32` 才能得到正确结果
 
 ```C
-WrappingInt32 wrap(uint64_t n, WrappingInt32 isn) { return WrappingInt32{isn + static_cast<uint32_t>(n)}; }
+WrappingInt32 wrap(uint64_t n, WrappingInt32 isn) {
+    // 由于是 uint32，所以即使 IS+ cast(n) 溢出了，也无所谓，是我们需要的值
+     return WrappingInt32{isn + static_cast<uint32_t>(n)};
+}
 
 uint64_t unwrap(WrappingInt32 n, WrappingInt32 isn, uint64_t checkpoint) {
+    // wrap(checkpoint, isn) 的结果可能比 n 大，也可能比 n 小（循环）
     auto offset = n - wrap(checkpoint, isn);
+
+    // 如果 offset 大于 0，是最容易理解的
     int64_t abs_seq = checkpoint + offset;
+
+    // 若 abs_seq 小于 9，则需要加上一个 2^32，强制从 0 开始循环
     return abs_seq >= 0 ? abs_seq : abs_seq + (1ul << 32);
 }
 ```
@@ -369,16 +377,14 @@ uint64_t unwrap(WrappingInt32 n, WrappingInt32 isn, uint64_t checkpoint) {
 
 不过，上面此图中只涵盖了在 32 位场景下，`checkpoint>n` 的场景，实际上，转化成 `32` 位的 `checkpoint` 可能比 `n` 要小（由于 `32` 位可能计算循环了）
 
-unwrap() 函数需要计算 n 所对应的最接近 checkpoint 的 absolute seqno，可以通过计算 偏移量（offset） 来实现。
-形参 checkpoint 是 absolute seqno，代表最后一个重组字节的序号（the index of the last reassembled byte）。
-unwrap() 中 n 所代表的位置既可以在 checkpoint 的左侧，也可以在 checkpoint 右侧，同时又是无符号数相减，因此要仔细考虑以上两种情况（具体可以参考代码中的注释）。
+`unwrap()` 函数需要计算 `n` 所对应的最接近 `checkpoint` 的 `absolute seqno`，可以通过计算 偏移量（`offset`） 来实现。参数 `checkpoint` 是 `absolute seqno`，代表最后一个重组字节的序号（the index of the last reassembled byte）。`unwrap()` 中 `n` 所代表的位置既可以在 `checkpoint` 的左侧，也可以在 `checkpoint` 右侧，同时又是无符号数相减，因此要仔细考虑以上两种情况（具体可以参考 `version1-unwarp` 的注释）。
 
 实现代码如下：
 
 ```C
 // absolute seqno 转 seqno
 WrappingInt32 wrap(uint64_t n, WrappingInt32 isn) {
-    return isn + uint32_t(n);
+    return isn + uint32_t(n);   // 转换两次
 }
 
 // version2
@@ -395,22 +401,33 @@ WrappingInt32 wrap(uint64_t n, WrappingInt32 isn) {
    return WrappingInt32{static_cast<uint32_t>(n) + isn.raw_value()};
 }
 
-// n/isn 都是 32 位
+// vesion1：n/isn 都是 32 位（这个容易明白）
 uint64_t unwrap(WrappingInt32 n, WrappingInt32 isn, uint64_t checkpoint) {
     uint64_t tmp = 0;
     uint64_t tmp1 = 0;
     if (n - isn < 0) {
-        //
+        // 如果 n 在 isn 的左边，需要加上一个 2^32
         tmp = uint64_t(n - isn + (1l << 32));
     } else {
+        // n 在 isn 的右边
         tmp = uint64_t(n - isn);
     }
+
+    // 最理想的情况，无溢出循环
     if (tmp>= checkpoint)
         return tmp;
+
+    // tmp<checkpoint 时，找到离 checkpoint 最近的那个值
     tmp |= ((checkpoint>> 32) << 32);
+
+    // 找到最近的那个值，这个值在 checkpoint 的右边
     while (tmp <= checkpoint)
         tmp += (1ll << 32);
+
+    // 再拿到 checkpoint 左边那个值
     tmp1 = tmp - (1ll << 32);
+
+    // 比较 checkpoint 左边的更近？还是右边的更近？取最近的那个值返回
     return (checkpoint - tmp1 < tmp - checkpoint) ? tmp1 : tmp;
 }
 ```
