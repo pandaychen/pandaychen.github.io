@@ -319,45 +319,55 @@ TCP 流的逻辑开始数据包和逻辑结束数据包各占用一个 `seqno`�
 
 为了实现 TCP 流重组，sponge 协议提供了三种 index：
 
-1、序列号 `seqno`：从随机数 `ISN` 起步，包含 SYN 和 FIN，`32` 位循环计数，用于填充TCP header的SEQ
+1、序列号 `seqno`：从随机数 `ISN` （对于一个 tcp stream 而言 ISN 是固定的）起步，包含 SYN 和 FIN，`32` 位循环计数，用于填充 TCP header 的 SEQ，溢出之后从 `0` 开始接着计数
 
 TCP 报文头部的 `seqno` 标识了 payload 字节流在完整字节流中的起始位置，然而该字段只有 `32` 位，最多只能支持 `4gb` 的字节流，这显然不够的，因此引入 `absolute sequence number` 定义为 `uin64_t`，最高可以支持 `2^64 - 1` 长度的字节流
 
-2、绝对序列号 `absolute seqno`：从 `0` 起步，包含 SYN/FIN，`64` 位非循环计数，用于重组器
+2、绝对序列号 `absolute seqno`：从 `0` 起步，包含 SYN/FIN，`64` 位非循环计数，用于重组器，不考虑溢出
 
 `absolute seqno` 的起始位置（针对单个 stream）永远是 `0`，它对于 `seqno` 会有 `ISN` 长度的偏移，每次写入时都不断对其递增，由于 `seqno` 可能会溢出，`abs_seqno` 保证了正常记录正确的长度；此外，在 sponge 协议中需要有 `seqno` 和 `absolute seqno` 转换
 
-3、流索引 `stream index`：从 `0` 起步，**不包含 SYN/FIN**，`64` 位非循环计数
+3、流索引 `stream index`：从 `0` 起步，** 不包含 SYN/FIN**，`64` 位非循环计数，不考虑溢出
 
 `stream index` 本质上是 `ByteStream` 的字节流索引，只是少了 FIN 和 SYN 各自在字节流中的 `1` 个字节占用，也是 `uint64_t` 类型
 
-这里，以数据流 `cat` 为例，上述 index 的对比图如下：
+这里假设 ISN 为 `2^32-2`，待传输的数据为 `cat`，那么三种编号的关系如下表所示上述 index 的对比图如下：
 
 ![cat](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/cs144/lab2-seqno.png)
 
 注意，在程序中计算的概念均使用 `uint64_t` 的偏移，如 `absolute seqno`，`seqno` 的 `32` 位类型是由于 TCP 协议的设计遗留问题导致的
 
-由于 `uint32_t` 的数值范围为`0 ~ 2^32 -1`，所以上图 `a` 对应的报文段序列号溢出，又从 `0` 开始计数了。三者的关系可以表示为：
+由于 `uint32_t` 的数值范围为 `0 ~ 2^32 -1`，所以上图 `a` 对应的报文段序列号溢出，又从 `0` 开始计数。三者的关系可以表示下图：
 
-![]()
+![trans](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/cs144/index-trans.png)
 
-1.  将绝对序列号转为序列号比较简单，只要加上 ISN 并强制转换为 `uint32_t`
-2.  要将序列号转换为绝对序列号稍微麻烦些
+1.  将绝对序列号转为序列号较简单，只要加上 ISN 并强制转换为 `uint32_t`
+2.  要将序列号转换为绝对序列号稍微麻烦些，由于 `k* 2^32` 项的存在，一个序列号可以映射为多个绝对序列号。这时候需要上一个收到的报文段绝对序列号 `checkpoint` 来辅助转换，虽然不能保证各个报文段都是有序到达的，但是相邻到达的报文段序列号差值超过 `2^32` 的可能性很小，所以可以将离 `checkpoint` 最近的转换结果作为绝对序列号。实现方式就是利用上述 `wrap()` 函数将 `checkpoint` 转为序列号（`uint32_t`），然后计算新旧序列号的差值，一般情况下直接让存档点序列号加上差值就行，但是有时可能出现负值。比如 `ISN` 为 `2^32 -1`，`checkpoint` 和 `seqno` 都是 `0` 时，相加结果会是 `-1`，这时候需要再加上 `2^32` 才能得到正确结果
+
+```C
+WrappingInt32 wrap(uint64_t n, WrappingInt32 isn) { return WrappingInt32{isn + static_cast<uint32_t>(n)}; }
+
+uint64_t unwrap(WrappingInt32 n, WrappingInt32 isn, uint64_t checkpoint) {
+    auto offset = n - wrap(checkpoint, isn);
+    int64_t abs_seq = checkpoint + offset;
+    return abs_seq >= 0 ? abs_seq : abs_seq + (1ul << 32);
+}
+```
 
 
 ####     seqno 和 absolute seqno 的转换
 对于 `TCPReceiver` 而言，数据包中的 `seqno` 不是真正的字节流起始位置，因此接收报文时（拿到的是 `seqno`），需要对其转换成 `absolute seqno`，才可以进行后续操作，如流重组、 `TCPReceiver` 中计算窗口大小；由于 `seqno` 类型与其他不同，所以这里需要有一个相互转换算法，描述如下：
 
-由于 `absolute seqno` 表示的范围是 `seqno` 的 `2^32` 倍，所以映射转换需要一定的技巧（因为 `seqno=17` 可以表示多个 `absolute seqno`，如 `2^32 + 17`/`2^33 + 17`/`2^34 + 17` 等），通过引入 `checkpoint` 变量来解决转换的问题，在 `TCPReceiver` 实现中 `checkpoint` 表示 ** 当前写入的总字节数 **（`checkpoint`亦是`uint64_t`类型），期望通过此值来寻找到离 `absolute seqno` 最近的那个 index，因为单个 TCP packet 长度必然不可超过 `2^32`，就是说，一旦 `seqno` 的区间映射到 `[2^32 + 17,2^33 + 17]` 这个区间，那就要计算到底 `seqno` 是 `2^32 + 17`、还是 `2^33 + 17`这两个`uint64_t`类型的数据映射后的结果？
+由于 `absolute seqno` 表示的范围是 `seqno` 的 `2^32` 倍，所以映射转换需要一定的技巧（因为 `seqno=17` 可以表示多个 `absolute seqno`，如 `2^32 + 17`/`2^33 + 17`/`2^34 + 17` 等），通过引入 `checkpoint` 变量来解决转换的问题，在 `TCPReceiver` 实现中 `checkpoint` 表示 ** 当前写入的总字节数 **（`checkpoint` 亦是 `uint64_t` 类型），期望通过此值来寻找到离 `absolute seqno` 最近的那个 index，因为单个 TCP packet 长度必然不可超过 `2^32`，就是说，一旦 `seqno` 的区间映射到 `[2^32 + 17,2^33 + 17]` 这个区间，那就要计算到底 `seqno` 是 `2^32 + 17`、还是 `2^33 + 17` 这两个 `uint64_t` 类型的数据映射后的结果？
 
 ![absolute_seqno](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/cs144/seqno_and_abseq.png)
 
 -   `unwrap` 接口用于将 `absolute seqno` 转换成 `seqno`，只需把 `absolute seqno` 加上 `isn` 初始偏移量，然后取 `absolute seqno` 的低 `32` 位值即可（）
--   `unwrap` 接口用于反向转换，假设要将 `n`（当前sponge-TCP头部中的`32`位`seqno`） 从 `seqno` 转换成 `absolute seqno`，先将当前的 `chekpoint` 从 `absolute seqno` 转换成 `seqno`，然后计算 `n`（`seqno` 版本） 和 `checkpoint`（`seqno` 版本） 的偏移量，最后加到 `checkpoint` （`absolute seqno` 版本）上面即可得出 `n`对应的（`absolute seqno` 版本），参考下图:
+-   `unwrap` 接口用于反向转换，假设要将 `n`（当前 sponge-TCP 头部中的 `32` 位 `seqno`） 从 `seqno` 转换成 `absolute seqno`，先将当前的 `chekpoint` 从 `absolute seqno` 转换成 `seqno`，然后计算 `n`（`seqno` 版本） 和 `checkpoint`（`seqno` 版本） 的偏移量，最后加到 `checkpoint` （`absolute seqno` 版本）上面即可得出 `n` 对应的（`absolute seqno` 版本），参考下图:
 
 ![absolute_seqno](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/cs144/seqno_and_abseq-trans.png)
 
-不过，上面此图中只涵盖了在32位场景下，`checkpoint>n`的场景，实际上，转化成`32`位的`checkpoint`可能比`n`要小（由于`32`位可能计算循环了）
+不过，上面此图中只涵盖了在 32 位场景下，`checkpoint>n` 的场景，实际上，转化成 `32` 位的 `checkpoint` 可能比 `n` 要小（由于 `32` 位可能计算循环了）
 
 unwrap() 函数需要计算 n 所对应的最接近 checkpoint 的 absolute seqno，可以通过计算 偏移量（offset） 来实现。
 形参 checkpoint 是 absolute seqno，代表最后一个重组字节的序号（the index of the last reassembled byte）。
@@ -379,18 +389,18 @@ WrappingInt32 wrap(uint64_t n, WrappingInt32 isn) {
     return WrappingInt32{num};
 }
 
-//version3：直接利用加法重载，对于unsigned类型，溢出直接归零，不需要单独处理
+//version3：直接利用加法重载，对于 unsigned 类型，溢出直接归零，不需要单独处理
 WrappingInt32 wrap(uint64_t n, WrappingInt32 isn) {
    // 超出直接溢出即可
    return WrappingInt32{static_cast<uint32_t>(n) + isn.raw_value()};
 }
 
-// n/isn都是32位
+// n/isn 都是 32 位
 uint64_t unwrap(WrappingInt32 n, WrappingInt32 isn, uint64_t checkpoint) {
     uint64_t tmp = 0;
     uint64_t tmp1 = 0;
     if (n - isn < 0) {
-        // 
+        //
         tmp = uint64_t(n - isn + (1l << 32));
     } else {
         tmp = uint64_t(n - isn);
@@ -405,22 +415,21 @@ uint64_t unwrap(WrappingInt32 n, WrappingInt32 isn, uint64_t checkpoint) {
 }
 ```
 
-如何理解 `unwrap` 的这种转换方法呢？用更通俗易懂的例子来解释：
+如何理解基于 `uint64_t` 类型的 `unwrap` 的这种转换方法呢？用更通俗易懂的例子来解释：
 
-逻辑开始SYN和结束FIN都占用一个`seqno`，收发两条路的`seqno`各不相干，wrap是asn转sn，直接加上isn再取模即可。unwrap是sn转asn，可能落在多个位置。比如，设sn容量是5，isn是3，那么sn4可能对应1/6/11/16。
-所以它还给定一个checkpoint，比如10，让我们找离10最近的可能值，结果就是11。
-最无脑的办法，先用checkpoint除以sn容量，得到一个大致的轮数，再用sn在这个轮数周围(比如+-2)试一个最接近的值出来
+逻辑开始 SYN 和结束 FIN 都占用一个 `seqno`，收发两条路的 `seqno` 各不相干，wrap 是 `absolute seqno` 转 `seqno`，直接加上 `ISN` 再取模即可。unwrap 是 `seqno` 转 `absolute seqno`，可能落在多个位置。比如，设 `seqno` 容量是 `5`，`ISN` 是 `3`，那么 `seqno=4` 可能对应 `1/6/11/16`，所以这里还给定一个 `checkpoint`，比如 `10`，让找离 `10` 最近的可能值，结果就是 `11`。还有一种可行的方法，先用 `checkpoint` 除以 `seqno` 容量，得到一个大致的轮数，再用 `seqno` 在这个轮数周围（比如 `+-2`）试一个最接近的值出来
 
 ```text
 sn    3  4  0  1  2  3  4  0  1  2  3  4  0  1  2  3  4  ...
 asn   0  1  2  3  4  5  6  7  8  9  10 11 12 13 14 15 16 ...
 ```
 
-
+小结下，从 32 位 `seqno` 转 64 位 `absolute seqno` 的方法：
+1.
 
 
 ####    接收（并重组）报文实现 `segment_received`
-基于前文基础，看看处理 sponge-TCP 报文的流程，主要关注前面 SYN/FIN 报文即可，及时更新最新的 `absolute seqno`，这个也是`TCPReceiver`最核心的实现：
+基于前文基础，看看处理 sponge-TCP 报文的流程，主要关注前面 SYN/FIN 报文即可，及时更新最新的 `absolute seqno`，这个也是 `TCPReceiver` 最核心的实现：
 
 ```C
 void TCPReceiver::segment_received(const TCPSegment &seg) {
@@ -510,7 +519,7 @@ class TCPReceiver {
 -   SYN/FIN 的标记，SYN - 流开始；FIN - 流结束
 -   重组
 
-整个接收端的空间由窗口空间（`StreamReassmbler`）和缓冲区空间（`ByteStream`）两部分共享。需要注意窗口长度等于接收端容量减去还留在缓冲区的字节数，只有当字节从缓冲区读出后窗口长度才能缩减，CS144对整个`TCPReceiver`的执行流程期望如下：
+整个接收端的空间由窗口空间（`StreamReassmbler`）和缓冲区空间（`ByteStream`）两部分共享。需要注意窗口长度等于接收端容量减去还留在缓冲区的字节数，只有当字节从缓冲区读出后窗口长度才能缩减，CS144 对整个 `TCPReceiver` 的执行流程期望如下：
 
 ![lab2-tested]()
 
@@ -531,7 +540,64 @@ class TCPReceiver {
 -   丰富超时重传机制
 
 
-##  0x01    参考
+##  0x  总结
+
+####    TCP receiver
+回顾下 `WrappingInt32` 的定义：
+
+```C
+class WrappingInt32 {
+ private:
+  uint32_t _raw_value;  //!< The raw 32-bit stored integer
+​
+ public:
+  //! Construct from a raw 32-bit unsigned integer
+  explicit WrappingInt32(uint32_t raw_value) : _raw_value(raw_value) {}
+​
+  uint32_t raw_value() const { return _raw_value;}  //!< Access raw stored value
+};
+```
+
+1、实现一
+
+```C
+uint64_t unwrap(WrappingInt32 n, WrappingInt32 isn, uint64_t checkpoint) {
+    const uint32_t offset = n - isn - static_cast<uint32_t>(checkpoint);
+    uint64_t res;
+    if (offset <= (1U << 31)) {
+        res = checkpoint + offset;
+    } else {
+        // if `res` has 64 bit underflow, chose the right one.
+        res = checkpoint - ((1UL << 32) - offset);
+        if (res> checkpoint) {
+            res = checkpoint + offset;
+        }
+    }
+    return res;
+}
+```
+此方法思路如下：
+
+-   首先， 根据当前 `32` 位序列号 `n`、初始序列号 `ISN` 可以计算出两者的差值 `delta = n − ISN`， 而实际的相对序列号应该是 `A = {delta + k* 2^32 ∣ k = 0,1...}` 之中最接近检查点 `checkpoint` 的一个；距离检查点更近的数字范围为 `B = { checkpoint − 2^31 + 1 ≤ x ≤ checkpoint + 2^31 ∣ x ∈ Z }`，而这里有一个特殊的情况， 即 `checkpoint − 2^31` 与 `checkpoint + 2^31`  据检查点的距离均为 `2^31`， 但检查点实际上是最后一个重排的字节序号， 而当前收到字节的序号理论上应该在检查点之后（因为都是 `uint64_t` 不考虑溢出循环的情况）， 因此这里选择的是后者 `checkpoint + 2^31`；最后， 实际的相对序列号 `result = A ∩ B`
+-   为了确定 A 中的 `k`，需要计算 `delta` 相对 `checkpoint` 的距离 `offset = delta − uint32_t(checkpoint)`， 这里 `checkpoint` 需要仅考虑低 `32` 位， 这样计算出的距离 `offset` 实际上就是序列号 `n` 的相对序列号和检查点 `checkpoint` 的距离，`offset` 满足 `0 ≤offset≤ 2^32`，然后判断该距离， 若 `offset ≤ 2^31`，则实际 `n` 的相对序列号在检查点的右侧 `result = checkpoint + offset`；而若 `offset> 2^31`，则 `n` 的相对序列号在检查点的左侧 `result = checkpoint − (2^32 − o ffset)`
+-   这里有一个特殊情况， 即 `checkpoint=0`、`n = 2^32 − 1` 且 `ISN = 0` 的情况， 根据上述算法计算出来的 `n` 的相对序列号应该在检查点的左侧，此时便会发生整数下溢，但传输 `2^64` 字节需要几十年， 因此不存在 `64` 位溢出的情况， 因此在计算有 `64` 位整数下溢情况时， 应该选择在检查点右侧的值， 即 `checkpoint + offset`
+
+2、实现二（更简洁的实现）
+
+```C
+uint64_t unwrap(WrappingInt32 n, WrappingInt32 isn, uint64_t checkpoint) {
+    int32_t offset = static_cast<uint32_t>(checkpoint) - (n - isn);
+    int64_t result = checkpoint - offset;
+    return result >= 0 ? result : result + (1UL << 32);
+}
+```
+
+根据距离检查点更近的数字范围 `B = {checkpoint − 2^31 + 1 ≤ x ≤ checkpoint + 2^31 ∣ x ∈ Z}`，以及随后会计算 `checkpoint` 与 `offset` 相加或相减， 实际上就可以将 `offset` 视为一个 `32` 位有符号整数 `int32_t`，这样对于在检查点左右两侧的情况都可以用 `checkpoint + offset`  表示
+
+但由于 `int32_t` 表示的范围为 `{checkpoint − 2^31 ≤ x ≤ checkpoint + 2^31 − 1 ∣ x ∈ Z}`，与 B 在端点处正好相反，因此这里将 `offset` 表示为 `uint32_t(checkpoint) − delta`，这样在检查点左右两侧的情况都可以用 `checkpoint−offset` 表示
+-   而对于 `64` 位溢出的情况，此处同样使用了另一种做法， 即将 `result` 先表示为有符号 `64` 整数 `int64_t`， 这样对于上述 `64` 溢出情况， `result` 的值就会变为负数， 此时只需要再这基础上加 `2^32` 即可，但此时就会限制 `result` 的大小不能大于等于 `2^63` ，否则会发生有符号整数上溢， 此时便会计算错误， 理论上应该再加 `2^64` 才是正确结果。但实际上可以忽略上溢的情况，因为根据传输 `2^64` 字节的时间推算， 达到 `2^63` 字节的情况也需要几十年， 因此理论上不存在这种情况
+
+##  0x0    参考
 -   [谈谈用户态 TCP 协议实现](https://zhuanlan.zhihu.com/p/412758694)
 -   [CS144 Lab2](https://doraemonzzz.com/2021/12/27/2021-12-27-CS144-Lab2/)
 -   [CS144 Lab2 翻译](https://doraemonzzz.com/2021/12/27/2021-12-27-CS144-Lab2%E7%BF%BB%E8%AF%91/)
@@ -540,3 +606,4 @@ class TCPReceiver {
 -   [【计算机网络】Stanford CS144 Lab Assignments 学习笔记](https://www.cnblogs.com/kangyupl/p/stanford_cs144_labs.html)
 -   [CS144 计算机网络 Lab1](https://kiprey.github.io/2021/11/cs144-lab1/)
 -   [CS144: Computer Network](https://csdiy.wiki/%E8%AE%A1%E7%AE%97%E6%9C%BA%E7%BD%91%E7%BB%9C/CS144/)
+-   [[CS144] Lab 2: the TCP receiver](https://blog.csdn.net/LostUnravel/article/details/124810142)
