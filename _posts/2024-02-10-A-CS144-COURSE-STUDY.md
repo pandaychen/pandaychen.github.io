@@ -291,6 +291,8 @@ void StreamReassembler::push_substring(const string &data, const size_t index, c
 -   first unacceptable 的索引等于 `ByteStream` 的 `bytes_read()` 加上 `capacity` 的和（已超过 `ByteStream` 的 buffer 限制）
 -   first unread 和 first unacceptable 这两个边界是动态变化的，每次重组结束都需要更新
 
+最后，有个很重要点，`ByteStream` 和 `StreamReassembler` 的总容量有固定的限制，多余的数据需要丢弃（此需要对端重传数据，这就引出了重传等知识点）
+
 ##  0x05    LAB2：TCP 接收器 TCPReceiver
 
 原实验稿在 [此](https://cs144.github.io/assignments/check2.pdf)，lab0 实现了读 / 写字节流 `ByteStream`，lab1 实现了可靠有序不重复的字节流重组 `StreamReassembler`，本 LAB 开始就涉及到 TCP 协议属性了，即 `TCPReceiver` 的实现，`TCPReceiver` 包含了一个 `StreamReassembler` 实现，它主要解决如下问题：
@@ -442,11 +444,11 @@ asn   0  1  2  3  4  5  6  7  8  9  10 11 12 13 14 15 16 ...
 ```
 
 小结下，从 32 位 `seqno` 转 64 位 `absolute seqno` 的方法：
-1.
 
+TODO
 
 ####    接收（并重组）报文实现 `segment_received`
-基于前文基础，看看处理 sponge-TCP 报文的流程，主要关注前面 SYN/FIN 报文即可，及时更新最新的 `absolute seqno`，这个也是 `TCPReceiver` 最核心的实现：
+基于前文基础，看看处理 sponge-TCP 报文的流程，主要关注前面 SYN/FIN 报文即可，及时更新最新的 `absolute seqno`，这个也是 `TCPReceiver` 最核心的实现，其中参数 `TCPSegment` 结构体包含了 TCP header 和 负载 payload，具体实现代码如下：
 
 ```C
 void TCPReceiver::segment_received(const TCPSegment &seg) {
@@ -492,6 +494,14 @@ void TCPReceiver::segment_received(const TCPSegment &seg) {
 }
 ```
 
+简单梳理下 `segment_received` 的实现步骤：
+
+1.  判断是不是 SYN 包，是就设置 ISN 序列号
+2.  如果多次收到 SYN 包，或者第一个包不是 SYN，直接返回
+3.  收到 FIN 包，也要设置 FIN 标志；多次收到 FIN 包直接返回
+4.  根据发送的序列号 `seqno` 转为绝对序列号 `absolute seqno`，首先需要获取 `checkpoint`，即为 `StreamReassembler.unass_base` 的值
+5.  计算出 `absolute seqno` 后减 `1` 得到 `stream_index`，接着调用 `StreamReassembler.push_substring` 方法进行重组（参考上面代码），在该方法中需要检测接收的数据包是否在当前窗口内，为此需要获取窗口的下边缘，如果是合法的数据包则按前述算法进行重组
+
 ####    窗口大小和 ackno
 窗口大小用于通知对端当前可以接收的字节流大小，`ackno` 用于通知对端当前接收的字节流进度。这两个也是由 `TCPReceiver` 提供，实现如下：
 
@@ -535,6 +545,12 @@ class TCPReceiver {
 `TCPReceiver` 只负责：
 -   SYN/FIN 的标记，SYN - 流开始；FIN - 流结束
 -   重组
+
+包含三个方法：
+-   `segment_received`：该函数会在每次收到 TCP 报文的时候被调用
+-   `ackno`：返回接收方尚未获取到的第一个字节的索引；如果 ISN 未被设置，返回空
+-   `window_size`：返回窗口大小
+
 
 整个接收端的空间由窗口空间（`StreamReassmbler`）和缓冲区空间（`ByteStream`）两部分共享。需要注意窗口长度等于接收端容量减去还留在缓冲区的字节数，只有当字节从缓冲区读出后窗口长度才能缩减，CS144 对整个 `TCPReceiver` 的执行流程期望如下：
 
