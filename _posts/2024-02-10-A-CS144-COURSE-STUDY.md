@@ -571,7 +571,7 @@ class TCPReceiver {
 3.  `tick`：外层会不断调用 `tick`，参数是两次调用的时间刻度差值，在函数中需要检测并按需重传一些数据包
 4.  `send_empty_segment`：发送空的报文 (正确设置 `seqno` 的)，可以让接收方也返回一个空的 ACK 报文，可以用来探测接收方的状态，是否连接或者最新窗口大小等
 
-`TCPSender`主要的状态变迁如下图所示：
+`TCPSender` 主要的状态变迁如下图所示：
 
 ![tcp-sender](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/cs144/tcp-sender-flow-arch.png)
 
@@ -589,15 +589,15 @@ class TCPSender {
     unsigned int _initial_retransmission_timeout;
 
     //! outgoing stream of bytes that have not yet been sent
-    ByteStream _stream;     //用于本端发送数据
+    ByteStream _stream;     // 用于本端发送数据
 
     //! the (absolute) sequence number for the next byte to be sent
     uint64_t _next_seqno{0};
 
-    bool _syn_sent = false;     //状态机启动标志（SYN包是否发送）
+    bool _syn_sent = false;     // 状态机启动标志（SYN 包是否发送）
     bool _fin_sent = false;
     uint64_t _bytes_in_flight = 0;
-    uint16_t _receiver_window_size = 0;
+    uint16_t _receiver_window_size = 0; // 保存对端的窗口大小
     uint16_t _receiver_free_space = 0;
     uint16_t _consecutive_retransmissions = 0;
     unsigned int _rto = 0;
@@ -613,23 +613,25 @@ class TCPSender {
 }
 ```
 
-`TCPSender`的主要成员如下：
+`TCPSender` 的主要成员如下：
 -   `_segments_out`
--   `_segments_outstanding`
+-   `_segments_outstanding`：细节是`queue`中的`TCPSegment`，它的seqno都是按顺序的
+-   `_receiver_window_size`：保存对端的 tcp 的 `window_size`，初始值为 `0`；当收到对端的 TCP 包时，会实时更新 `_receiver_window_size`
+-   `_receiver_free_space`：在每次 `ack_received` 时会被设置为 `window_size`，在本端发送填充数据 `fill_window` 时进行累减，用来标识本端还能够发送的数据长度
 
-####    `TCPSender._send_segment`方法
-用来组装TCP报文，并追加挂在发送队列`_segments_out`中等待发送，同时也压入备份队列`_segments_outstanding`
+####    `TCPSender._send_segment` 方法
+用来组装 TCP 报文，并追加挂在发送队列 `_segments_out` 中等待发送，同时也压入备份队列 `_segments_outstanding`
 
 ```C
 void TCPSender::_send_segment(TCPSegment &seg) {
-    // 计算SEQNO
+    // 计算 SEQNO
     seg.header().seqno = wrap(_next_seqno, _isn);
     _next_seqno += seg.length_in_sequence_space();
     _bytes_in_flight += seg.length_in_sequence_space();
     if (_syn_sent)
         _receiver_free_space -= seg.length_in_sequence_space();
 
-    //为了配合重传机制的实现，当填充成功一个数据包的同时，也需要对其进行缓存备份
+    // 为了配合重传机制的实现，当填充成功一个数据包的同时，也需要对其进行缓存备份
     _segments_out.push(seg);
     _segments_outstanding.push(seg);
     if (!_timer_running) {
@@ -642,14 +644,21 @@ void TCPSender::_send_segment(TCPSegment &seg) {
 
 ####    fill_window 的实现
 两个要点：
-1.  `fill_window`的实现
-2.  `fill_window`的被调用时机
+1.  `fill_window` 的实现
+2.  `fill_window` 的被调用时机
 
-从tcpsender的流转图看，有这么几种case需要处理：
--   TCP三次握手，初始化状态，需要发送 SYN 包，即 CLOSED 状态，此刻需要填充 SYN 包
--   `ByteStream` 中还有数据可写入发送，且对方窗口大小足够，此时正常按照 payload 大小限制填充数据包
+从 tcpsender 的流转图看，有这么几种 case 需要处理：
+-   TCP 三次握手，初始化状态，需要发送 SYN 包，即 CLOSED 状态，此刻需要填充 SYN 包
+-   `ByteStream` 中还有数据可写入发送，且对方窗口大小足够，此时正常按照 payload 大小限制填充数据包（不停地填充直到 buffer 空了或者 eof 为止）
 -   `ByteStream` 已经 eof，但是 FIN 包还未发送，此刻需要填充 FIN 包
--   通过调用`_send_segment`方法填充数据包，需要构造好`TCPSegment`传入参数
+-   通过调用 `_send_segment` 方法填充数据包，需要构造好 `TCPSegment` 传入参数
+
+
+`fill_window` 的实现如下，需要注意几点：
+1.  SYN/FIN 的填充时机
+2.  根据 `_receiver_window_size` 大小来决定是发送正常的数据包还是
+3.  根据 `_receiver_free_space` 来循环填充准备发送的 `TCPSegment`
+
 
 ```c
 void TCPSender::fill_window() {
@@ -670,22 +679,29 @@ void TCPSender::fill_window() {
     if (_fin_sent)
         return;
 
+    // 如果对端窗口大于 0，及可以发送填充数据
     if (_receiver_window_size) {
+        // 注意：_receiver_free_space 的值会在 TCPSender::_send_segment 中被修改
         while (_receiver_free_space) {
             TCPSegment seg;
             size_t payload_size = min({_stream.buffer_size(),
                                        static_cast<size_t>(_receiver_free_space),
                                        static_cast<size_t>(TCPConfig::MAX_PAYLOAD_SIZE)});
+            // 构造本 tcpsegment 的 payload，大小为 payload_size
             seg.payload() = Buffer{_stream.read(payload_size)};
             if (_stream.eof() && static_cast<size_t>(_receiver_free_space) > payload_size) {
+                // 如果流结束了（上层 Set）且当前缓冲区的数据已经被取完了，那就设置 FIN
                 seg.header().fin = true;
                 _fin_sent = true;
             }
+            // 将 seg 包追加到当前发送等待队列，同时在此方法中也会更新_receiver_free_space 的值
             _send_segment(seg);
+            // 如果 buffer 中没有数据了，就先退出
             if (_stream.buffer_empty())
                 break;
         }
     } else if (_receiver_free_space == 0) {
+        // 当对端窗口为 0 时的处理，对端可能会拒绝此包，但是本端可以获知对端的 window-size
         // The zero-window-detect-segment should only be sent once (retransmition excute by tick function).
         // Before it is sent, _receiver_free_space is zero. Then it will be -1.
         TCPSegment seg;
@@ -702,7 +718,7 @@ void TCPSender::fill_window() {
 ```
 
 ####    重传（超时检测）的实现
-针对重传，需要再回顾下 TCP 协议的[要求]()，关于TCP的超时重传机制有一点需要格外注意，**接收方返回的 ackno 并不对应发送方的 seqno**，这是因为接收方很可能由于字节流内存问题而主动截断发送方的数据包，导致返回的 ackno 是另外的数字；并且也由于数据包的到达顺序未知，接收方成功接收位于后面的数据，但是依旧返回位置靠前的序列号。但是有一点可以确认，接收方收到了某个ackno代表这个ackno之前（ISN~ackno）的数据包均被正确收到，本端（接收方）可以安心确认并删除备份队列
+针对重传，需要再回顾下 TCP 协议的 [要求]()，关于 TCP 的超时重传机制有一点需要格外注意，** 接收方返回的 ackno 并不对应发送方的 seqno**，这是因为接收方很可能由于字节流内存问题而主动截断发送方的数据包，导致返回的 ackno 是另外的数字；并且也由于数据包的到达顺序未知，接收方成功接收位于后面的数据，但是依旧返回位置靠前的序列号。但是有一点可以确认，接收方收到了某个 ackno 代表这个 ackno 之前（ISN~ackno）的数据包均被正确收到，本端（接收方）可以安心确认并删除备份队列
 
 在 CS144 中，超时检测的逻辑在 `tick` 函数中实现，而外部会不断地调用 `tick` 函数，它的参数代表两次调用 `tick` 间隔的时间，此设计较为巧妙，细节如下：
 
@@ -712,11 +728,12 @@ void TCPSender::tick(const size_t ms_since_last_tick) {
     if (!_timer_running)
         return;
     _time_elapsed += ms_since_last_tick;
-    // cout << "time_elapsed " << _time_elapsed << " rto " << _rto << " conti " << _consecutive_retransmissions << "\n";
-    if (_time_elapsed >= _rto) {
+    // cout << "time_elapsed" << _time_elapsed << "rto" << _rto << "conti" << _consecutive_retransmissions << "\n";
+    if (_time_elapsed>= _rto) {
         _segments_out.push(_segments_outstanding.front());
         if (_receiver_window_size || _segments_outstanding.front().header().syn) {
             ++_consecutive_retransmissions;
+            // *2
             _rto <<= 1;
         }
         _time_elapsed = 0;
@@ -724,7 +741,77 @@ void TCPSender::tick(const size_t ms_since_last_tick) {
 }
 ```
 
+-   `TCPSender` 构造初始会设置一个重传超时时间，固定不变；由于会发生多次重传，并且每次超时时间都会翻倍，记录 `_rto`，代表当前的超时时间，最开始和 RTO 相等；此外还需记录超时等待时间 `_time_elapsed`，每次调用 `tick` 函数都会增加，直到超过 `_rto` 触发重传
+-   重传时，是要发送接收者需要的最低索引的数据 `_segments_out.push(_segments_outstanding.front())`；由于重传数据，所以需要将已经发送了的报文备份到合适的数据结构，当重传时直接读取；反之，当收到确认报文后，可以将接收方完全确认的报文从备份中删除（在 `ack_received` 方法中实现），同时将 `_rto` 设为初始值 `_initial_retransmission_timeout`，`_time_elapsed` 清 `0`，并将连续重传次数也清 `0`
+-   如果接收者回复的 `window_size` 不为 `0`，代表可以正常接收数据；如果 `window_size` 等于 `0`，代表接收方内存不够，不能接收更多的数据，但是此时发送方可以按照接收方窗口大小为 `1` 的情况进行处理，持续发包；虽然接收方可能拒绝接收，但是在回传的报文中会附带最新的 `window_size`。此外，如果发送方这个数据包没有及时 ack，并不需要将 `_rto` 翻倍
+-   在 `tick` 函数内部，如果发生重传，则将当前超时时间 `_rto` 翻倍，超时等待时间清 `0`，连续重传次数 `_consecutive_retransmissions` 加 `1`
+
 TODO
+在上面的逻辑中，` _segments_out.push(_segments_outstanding.front())` 的实现较为巧妙，从 `ack_received` 的实现可知，`_segments_outstanding` 队列的头部保存的一定是当前未被 ack 的最小 index 的那个数据包
+
+####    ack_received 方法
+接着分析 `ack_received` 方法的实现，当 TCP 收到一个报文的时候，会先由 `TCPReceiver` 处理，然后得到 `ackno` 和 `window_size`（对端宣告），接着将它们传入 `TCPSender` 处理；根据这些信息，删除已经完全确认但仍处于 buffer 中的数据包，更新必要属性（对端已经 ack 确认了，可以删除）；同时可以继续发送数据（可以发送的大小受 `window_size` 限制）
+
+实现代码如下（注意其中`while`的那部分逻辑），参数为`TCPSegment`的`32`位ack，以及对端通告的`window_size`
+1.  根据`unwrap`得到`64`位的`absolute seqno`，校验是否非法
+2.  更新`_receiver_window_size`以及`_receiver_free_space`的值，都为`window_size`
+3.  遍历备份队列`_segments_outstanding`，
+
+```C
+//param ackno The remote receiver's ackno (acknowledgment number)
+//Sparam window_size The remote receiver's advertised window size
+void TCPSender::ack_received(const WrappingInt32 ackno, const uint16_t window_size) {
+    // pop seg from segments_outstanding
+    // deduct bytes_inflight
+    // reset rto, reset _consecutive_retransmissions
+    // reset timer
+    // stop timer if bytes_inflight == 0
+    // fill window
+    // update _receiver_window_size
+    uint64_t abs_ackno = unwrap(ackno, _isn, _next_seqno);
+    if (!_ack_valid(abs_ackno)) {
+        // cout << "invalid ackno!\n";
+        return;
+    }
+    // cout << "ackno " << ackno << " windows_size " << window_size << "\n";
+    _receiver_window_size = window_size;
+    _receiver_free_space = window_size;
+
+    while (!_segments_outstanding.empty()) {
+        TCPSegment seg = _segments_outstanding.front();
+        if (unwrap(seg.header().seqno, _isn, _next_seqno) + seg.length_in_sequence_space() <= abs_ackno) {
+            // 计算queue中的seqno，如果此seqno小于abs_ackno，说明此包已经被对端确认接收了，可以从备份包队列删除掉
+            _bytes_in_flight -= seg.length_in_sequence_space();
+            _segments_outstanding.pop();
+            // Do not do the following operations outside while loop.
+            // Because if the ack is not corresponding to any segment in the segment_outstanding,
+            // we should not restart the timer.
+            _time_elapsed = 0;
+            _rto = _initial_retransmission_timeout;
+            _consecutive_retransmissions = 0;
+        } else {
+            //说明没有可确认删除的数据包
+            break;
+        }
+    }
+    if (!_segments_outstanding.empty()) {
+        // 获取最新的_receiver_free_space值，即还可以发送多少数据，需要考虑到对方还未ack的这部分数据
+        _receiver_free_space = static_cast<uint16_t>(
+            abs_ackno + static_cast<uint64_t>(window_size) -
+            unwrap(_segments_outstanding.front().header().seqno, _isn, _next_seqno) - _bytes_in_flight);
+    }
+
+    // if ((_segments_outstanding.empty() && _bytes_in_flight > 0) ||
+    //     (!_segments_outstanding.empty() && _bytes_in_flight == 0)) {
+    //     cout << "either bytes_in_flight is 0 or _segments_outstanding is empty, but not both!\n";
+    //     return;
+    // }
+    if (!_bytes_in_flight)
+        _timer_running = false;
+    // Note that test code will call it again.
+    fill_window();
+}
+```
 
 ####    小结
 汇总下 `TCPSender` 的功能：
@@ -802,6 +889,14 @@ uint64_t unwrap(WrappingInt32 n, WrappingInt32 isn, uint64_t checkpoint) {
 但由于 `int32_t` 表示的范围为 `{checkpoint − 2^31 ≤ x ≤ checkpoint + 2^31 − 1 ∣ x ∈ Z}`，与 B 在端点处正好相反，因此这里将 `offset` 表示为 `uint32_t(checkpoint) − delta`，这样在检查点左右两侧的情况都可以用 `checkpoint−offset` 表示
 -   而对于 `64` 位溢出的情况，此处同样使用了另一种做法， 即将 `result` 先表示为有符号 `64` 整数 `int64_t`， 这样对于上述 `64` 溢出情况， `result` 的值就会变为负数， 此时只需要再这基础上加 `2^32` 即可，但此时就会限制 `result` 的大小不能大于等于 `2^63` ，否则会发生有符号整数上溢， 此时便会计算错误， 理论上应该再加 `2^64` 才是正确结果。但实际上可以忽略上溢的情况，因为根据传输 `2^64` 字节的时间推算， 达到 `2^63` 字节的情况也需要几十年， 因此理论上不存在这种情况
 
+
+####    何时发送 FIN？
+需要区分 `TCPReceiver` 和 `TCPSender`
+
+1、接收 `TCPReceiver`
+
+2、发送 `TCPSender`
+
 ##  0x0    参考
 -   [谈谈用户态 TCP 协议实现](https://zhuanlan.zhihu.com/p/412758694)
 -   [CS144 Lab2](https://doraemonzzz.com/2021/12/27/2021-12-27-CS144-Lab2/)
@@ -812,4 +907,4 @@ uint64_t unwrap(WrappingInt32 n, WrappingInt32 isn, uint64_t checkpoint) {
 -   [CS144 计算机网络 Lab1](https://kiprey.github.io/2021/11/cs144-lab1/)
 -   [CS144: Computer Network](https://csdiy.wiki/%E8%AE%A1%E7%AE%97%E6%9C%BA%E7%BD%91%E7%BB%9C/CS144/)
 -   [[CS144] Lab 2: the TCP receiver](https://blog.csdn.net/LostUnravel/article/details/124810142)
--   [CS144-Lab3-TCPSender ](https://www.cnblogs.com/lawliet12/p/17066712.html)
+-   [CS144-Lab3-TCPSender](https://www.cnblogs.com/lawliet12/p/17066712.html)
