@@ -615,7 +615,7 @@ class TCPSender {
 
 `TCPSender` 的主要成员如下：
 -   `_segments_out`
--   `_segments_outstanding`：细节是`queue`中的`TCPSegment`，它的seqno都是按顺序的
+-   `_segments_outstanding`：细节是 `queue` 中的 `TCPSegment`，它的 seqno 都是按顺序的
 -   `_receiver_window_size`：保存对端的 tcp 的 `window_size`，初始值为 `0`；当收到对端的 TCP 包时，会实时更新 `_receiver_window_size`
 -   `_receiver_free_space`：在每次 `ack_received` 时会被设置为 `window_size`，在本端发送填充数据 `fill_window` 时进行累减，用来标识本端还能够发送的数据长度
 
@@ -752,10 +752,10 @@ TODO
 ####    ack_received 方法
 接着分析 `ack_received` 方法的实现，当 TCP 收到一个报文的时候，会先由 `TCPReceiver` 处理，然后得到 `ackno` 和 `window_size`（对端宣告），接着将它们传入 `TCPSender` 处理；根据这些信息，删除已经完全确认但仍处于 buffer 中的数据包，更新必要属性（对端已经 ack 确认了，可以删除）；同时可以继续发送数据（可以发送的大小受 `window_size` 限制）
 
-实现代码如下（注意其中`while`的那部分逻辑），参数为`TCPSegment`的`32`位ack，以及对端通告的`window_size`
-1.  根据`unwrap`得到`64`位的`absolute seqno`，校验是否非法
-2.  更新`_receiver_window_size`以及`_receiver_free_space`的值，都为`window_size`
-3.  遍历备份队列`_segments_outstanding`，
+实现代码如下（注意其中 `while` 的那部分逻辑），参数为 `TCPSegment` 的 `32` 位 ack，以及对端通告的 `window_size`
+1.  根据 `unwrap` 得到 `64` 位的 `absolute seqno`，校验是否非法
+2.  更新 `_receiver_window_size` 以及 `_receiver_free_space` 的值，都为 `window_size`
+3.  遍历备份队列 `_segments_outstanding`，
 
 ```C
 //param ackno The remote receiver's ackno (acknowledgment number)
@@ -773,14 +773,14 @@ void TCPSender::ack_received(const WrappingInt32 ackno, const uint16_t window_si
         // cout << "invalid ackno!\n";
         return;
     }
-    // cout << "ackno " << ackno << " windows_size " << window_size << "\n";
+    // cout << "ackno" << ackno << "windows_size" << window_size << "\n";
     _receiver_window_size = window_size;
     _receiver_free_space = window_size;
 
     while (!_segments_outstanding.empty()) {
         TCPSegment seg = _segments_outstanding.front();
         if (unwrap(seg.header().seqno, _isn, _next_seqno) + seg.length_in_sequence_space() <= abs_ackno) {
-            // 计算queue中的seqno，如果此seqno小于abs_ackno，说明此包已经被对端确认接收了，可以从备份包队列删除掉
+            // 计算 queue 中的 seqno，如果此 seqno 小于 abs_ackno，说明此包已经被对端确认接收了，可以从备份包队列删除掉
             _bytes_in_flight -= seg.length_in_sequence_space();
             _segments_outstanding.pop();
             // Do not do the following operations outside while loop.
@@ -790,12 +790,12 @@ void TCPSender::ack_received(const WrappingInt32 ackno, const uint16_t window_si
             _rto = _initial_retransmission_timeout;
             _consecutive_retransmissions = 0;
         } else {
-            //说明没有可确认删除的数据包
+            // 说明没有可确认删除的数据包
             break;
         }
     }
     if (!_segments_outstanding.empty()) {
-        // 获取最新的_receiver_free_space值，即还可以发送多少数据，需要考虑到对方还未ack的这部分数据
+        // 获取最新的_receiver_free_space 值，即还可以发送多少数据，需要考虑到对方还未 ack 的这部分数据
         _receiver_free_space = static_cast<uint16_t>(
             abs_ackno + static_cast<uint64_t>(window_size) -
             unwrap(_segments_outstanding.front().header().seqno, _isn, _next_seqno) - _bytes_in_flight);
@@ -830,6 +830,126 @@ void TCPSender::ack_received(const WrappingInt32 ackno, const uint16_t window_si
 -   接收数据包
 -   关闭连接
 -   丰富超时重传机制
+
+lab4 的目标如下：
+1.  结合 `TCPSender` 和 `TCPReceiver`，实现 `TCPConnection`
+2.  根据 TCP 状态机，完善发送 / 接收流程，主要包括上述五个细节部分的实现
+
+![tcp-connection](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/cs144/tcpconnection.png)
+
+####    TCP 状态转换
+![tcp-state](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/cs144/tcp-flow-state-classic.jpg)
+
+
+`TCPConnection` 的定义 / 接口如下，`_segments_out` 这个成员的作用是什么？
+
+```C
+class TCPConnection {
+  private:
+    TCPConfig _cfg;
+    TCPReceiver _receiver{_cfg.recv_capacity};
+    TCPSender _sender{_cfg.send_capacity, _cfg.rt_timeout, _cfg.fixed_isn};
+
+    // outbound queue of segments that the TCPConnection wants sent
+    std::queue<TCPSegment> _segments_out{};
+
+    // Should the TCPConnection stay active (and keep ACKing)
+    // for 10 * _cfg.rt_timeout milliseconds after both streams have ended,
+    // in case the remote TCPConnection doesn't know we've received its whole stream?
+    bool _linger_after_streams_finish{true};
+
+    size_t _time_since_last_segment_received_counter{0};
+
+    bool _active{true};
+
+
+    void send_RST();
+    bool real_send();
+    void set_ack_and_windowsize(TCPSegment& segment);
+    // prereqs1 : The inbound stream has been fully assembled and has ended.
+    bool check_inbound_ended();
+    // prereqs2 : The outbound stream has been ended by the local application and fully sent (including
+    // the fact that it ended, i.e. a segment with fin ) to the remote peer.
+    // prereqs3 : The outbound stream has been fully acknowledged by the remote peer.
+    bool check_outbound_ended();
+
+
+  public:
+    //brief Initiate a connection by sending a SYN segment
+    void connect();
+
+    //brief Write data to the outbound byte stream, and send it over TCP if possible
+    //returns the number of bytes from `data` that were actually written.
+    size_t write(const std::string &data);
+
+    //returns the number of `bytes` that can be written right now.
+    size_t remaining_outbound_capacity() const;
+
+    //brief Shut down the outbound byte stream (still allows reading incoming data)
+    void end_input_stream();
+
+    //brief The inbound byte stream received from the peer
+    ByteStream &inbound_stream() { return _receiver.stream_out(); }
+
+    //brief number of bytes sent and not yet acknowledged, counting SYN/FIN each as one byte
+    size_t bytes_in_flight() const;
+    //brief number of bytes not yet reassembled
+    size_t unassembled_bytes() const;
+    //brief Number of milliseconds since the last segment was received
+    size_t time_since_last_segment_received() const;
+    // \brief summarize the state of the sender, receiver, and the connection
+    TCPState state() const { return {_sender, _receiver, active(), _linger_after_streams_finish}; };
+
+    // Called when a new segment has been received from the network
+    void segment_received(const TCPSegment &seg);
+
+    // Called periodically when time elapses
+    void tick(const size_t ms_since_last_tick);
+}
+```
+
+####    step1：发起连接
+通过 `TCPSender::fill_window` 填充一个 SYN 包，然后将 `_sender.segments_out` 中的 `TCPSegment` 挂到 `TCPConnection` 的发送队列 `TCPConnection._segments_out` 中；
+1.  `fill_window` 的操作是在 `TCPSender` 中把 TCP 报文 `TCPSegment`push 入了 `TCPSender._segments_out` 和 `TCPSender._segments_outstanding` 中
+2.  `real_send` 的操作是把 `TCPSegment` 从 `sender.segments_out()` 中取出，放入其发送队列中
+3.  `TCPConnection.connect` 的调用方在 `tcp_sponge_socket.cc` 中，即`TCPSpongeSocket.connect`实现中
+
+```C
+void TCPConnection::connect() {
+    // send SYN
+    _sender.fill_window();
+    real_send();
+}
+
+bool TCPConnection::real_send() {
+    bool isSend = false;
+    while (!_sender.segments_out().empty()) {
+        isSend = true;
+        TCPSegment segment = _sender.segments_out().front();
+        _sender.segments_out().pop();
+        set_ack_and_windowsize(segment);
+        _segments_out.push(segment);
+    }
+    return isSend;
+}
+```
+
+####    step2：发送数据包
+发包数据包的流程是将数据写入 `TCPSender` 的 `ByteStream` 中，然后填充窗口发送即可：
+
+```C
+size_t TCPConnection::write(const string &data) {
+    if (!data.size()) return 0;
+    size_t actually_write = _sender.stream_in().write(data);
+    _sender.fill_window();
+    real_send();
+    return actually_write;
+}
+```
+
+####    step3：接收数据包
+
+####    step4：关闭连接
 
 
 ##  0x  总结
