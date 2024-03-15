@@ -10,7 +10,14 @@ tags:
 ---
 
 ##  0x00    开篇
-网上基于 [websocket](https://github.com/gorilla/websocket) 打通 kubernetes pod 的实现非常多，但是受限于 webconsole 的不便利性，这边文章来分析下如何使用 SSH 方式打通 kubernetes 的登录。
+网上基于 [websocket](https://github.com/gorilla/websocket) 打通 kubernetes pod 的实现非常多，但是受限于 webconsole 的不便利性，这边文章来分析下如何使用 SSH 方式打通 kubernetes 的登录
+
+
+####	Kubectl exec 的原理简介
+通过 `kubectl exec` 进行容器的数据流如下：
+
+![kubernetes-exec](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kubernetes/kubectl-principle3.png)
+
 
 
 ##  0x01    实现思路
@@ -138,7 +145,15 @@ func CreateK8SStream(option PyStreamOption) {
 
 接下来的思路就是如何生成一个 `Executor`，来打通 SSH 到 SPDY（主要还是打通上图的 STDIN/STDOUT）
 
-##	0x02	问题
+##	0x02	文件 COPY 的实现
+如前文描述，方法 `exec.Stream` 执行时会向 APServer 发起一个请求，APServer 会通过代理机制将请求转发给相应节点上的 kubelet 服务，kubelet 会通过 CRI 接口调用 runtime 的接口，最终调用流式接口中的 `Exec()` 进入到 container 执行。通常针对一般化的命令调用，输入和输出以文本为主，并不会占用带宽和 APServer 的资源，但是当涉及到文件传输的时候则会占用较多带宽，因此这种方式不太适合大容量文件的 copy，如何优化？
+
+1.	增加流控
+2.	在文件 copy 场景下，直接向 kubelet 发起 `exec` 请求（绕过 APServer），需要解决 kubelet 地址、认证等相关问题
+
+TODO
+
+##	0x03	问题
 笔者项目中遇到了在某些 kubernetes 集群版本下，当网关退出时，容器内的连接（网关到 kubernetes APIserver）、容器内 `bash` 残留的问题，如下描述：
 
 1、`NewSPDYExecutor` 创建的 stream 泄漏问题：
@@ -184,10 +199,12 @@ func main(){
 
 2、`bash` 残留
 
-
-##  0x03	参考
+##  0x04	参考
 -	[remotecommand 包](https://github.com/kubernetes/client-go/blob/master/tools/remotecommand)
 -	[kubectl 的 resize 窗口实现](https://github.com/kubernetes/kubectl/blob/master/pkg/util/term/resize.go)
 -	[kubernetes client-go web 命令行终端内存泄露问题解决](https://zhuanlan.zhihu.com/p/365431632)
 -	[How to cancel a RESTClient exec? Can add context to the request？](https://github.com/kubernetes/client-go/issues/884)
+-	[一个 Kubernetes Web 终端连接工具](https://jiankunking.com/kubernetes-client-go-how-to-make-a-web-terminal.html)
+-	[Kubectl exec 的工作原理解读](https://icloudnative.io/posts/how-it-works-kubectl-exec/)
+-	[利用 kubernetes exec 接口实现任意容器的 web-terminal](https://bbs.huaweicloud.com/blogs/281515)
 -	[一个 Kubernetes Web 终端连接工具](https://jiankunking.com/kubernetes-client-go-how-to-make-a-web-terminal.html)
