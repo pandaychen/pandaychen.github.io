@@ -911,8 +911,8 @@ class TCPConnection {
 ####    step1：发起连接
 通过 `TCPSender::fill_window` 填充一个 SYN 包，然后将 `_sender.segments_out` 中的 `TCPSegment` 挂到 `TCPConnection` 的发送队列 `TCPConnection._segments_out` 中；
 1.  `fill_window` 的操作是在 `TCPSender` 中把 TCP 报文 `TCPSegment`push 入了 `TCPSender._segments_out` 和 `TCPSender._segments_outstanding` 中
-2.  `real_send` 的操作是把 `TCPSegment` 从 `sender.segments_out()` 中取出，放入其发送队列中
-3.  `TCPConnection.connect` 的调用方在 `tcp_sponge_socket.cc` 中，即`TCPSpongeSocket.connect`实现中
+2.  `real_send` 的操作是把 `TCPSegment` 从 `sender.segments_out()` 中取出，放入其发送队列 `TCPConnection.queue` 中
+3.  `TCPConnection.connect` 的调用方在 `tcp_sponge_socket.cc` 中，即 `TCPSpongeSocket.connect` 实现中
 
 ```C
 void TCPConnection::connect() {
@@ -935,19 +935,76 @@ bool TCPConnection::real_send() {
 ```
 
 ####    step2：发送数据包
-发包数据包的流程是将数据写入 `TCPSender` 的 `ByteStream` 中，然后填充窗口发送即可：
+发包数据包的流程是将数据写入 `TCPSender` 的 `ByteStream` 中，然后填充窗口发送即可，这里注意传入的参数 `data`，可能并不是一次调用就能全部写完的，所以本方法返回了实际写入的数据长度 `actually_write`，剩余的数据还需要调用侧实现继续尝试发送的逻辑
 
 ```C
 size_t TCPConnection::write(const string &data) {
     if (!data.size()) return 0;
+
+    // 将数据写入到 TCPConnection.TCPSender.ByteStream 中
     size_t actually_write = _sender.stream_in().write(data);
+
+    // 从上面的 ByteStream 取数据，组包
     _sender.fill_window();
+
+    // 发送
     real_send();
     return actually_write;
 }
 ```
 
 ####    step3：接收数据包
+通过调用 `TCPReceiver::segment_received` 接收数据包：
+1.  检查连接关闭情况
+2.  如果是 ack 包，调用 `TCPSender::ack_received` 更新对端窗口 size 及对端确认情况
+3.  如果数据包有数据（没数据不需要回复，防止无限 ack），需要回复一个 ack 包
+
+
+```C
+void TCPConnection::segment_received(const TCPSegment &seg) {
+    _time_since_last_segment_received_counter = 0;
+    // check if the RST has been set
+    if (seg.header().rst) {
+        _sender.stream_in().set_error();
+        _receiver.stream_out().set_error();
+        _active = false;
+        return;
+    }
+
+    // give the segment to receiver
+    _receiver.segment_received(seg);
+
+    // check if need to linger
+    if (check_inbound_ended() && !_sender.stream_in().eof()) {
+        _linger_after_streams_finish = false;
+    }
+
+    // check if the ACK has been set
+    if (seg.header().ack) {
+        _sender.ack_received(seg.header().ackno, seg.header().win);
+        real_send();
+    }
+
+    // send ack
+    // 如果包携带数据
+    if (seg.length_in_sequence_space() > 0) {
+        // handle the SYN/ACK case
+        _sender.fill_window();
+        bool isSend = real_send();
+        // send at least one ack message
+        if (!isSend) {
+            _sender.send_empty_segment();
+            TCPSegment ACKSeg = _sender.segments_out().front();
+            _sender.segments_out().pop();
+            set_ack_and_windowsize(ACKSeg);
+            _segments_out.push(ACKSeg);
+        }
+    }
+
+    return;
+}
+```
+
 
 ####    step4：关闭连接
 
