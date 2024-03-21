@@ -83,6 +83,8 @@ sponge-TCP 框架类图如下：
 
 ![ByteSteam](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/cs144/stream-assembly-bytestream.png)
 
+`deque` 双向队列支持头尾读写，刚好对应字节流从尾部写入从头部读取的特性，并且拥有迭代器，完美支持了该字节流类中的 `peek` 操作，定义如下：
+
 ```C
 class ByteStream {
   private:
@@ -294,8 +296,7 @@ void StreamReassembler::push_substring(const string &data, const size_t index, c
 最后，有个很重要点，`ByteStream` 和 `StreamReassembler` 的总容量有固定的限制，多余的数据需要丢弃（此需要对端重传数据，这就引出了重传等知识点）
 
 ##  0x05    LAB2：TCP 接收器 TCPReceiver
-
-原实验稿在 [此](https://cs144.github.io/assignments/check2.pdf)，lab0 实现了读 / 写字节流 `ByteStream`，lab1 实现了可靠有序不重复的字节流重组 `StreamReassembler`，本 LAB 开始就涉及到 TCP 协议属性了，即 `TCPReceiver` 的实现，`TCPReceiver` 包含了一个 `StreamReassembler` 实现，它主要解决如下问题：
+原实验稿在 [check2](https://cs144.github.io/assignments/check2.pdf)，lab0 实现了读 / 写字节流 `ByteStream`，lab1 实现了可靠有序不重复的字节流重组 `StreamReassembler`，本 LAB 开始就涉及到 TCP 协议属性了，即 `TCPReceiver` 的实现，`TCPReceiver` 包含了一个 `StreamReassembler` 实现，它主要解决如下问题：
 
 ####    可靠的接收数据
 
@@ -434,6 +435,7 @@ uint64_t unwrap(WrappingInt32 n, WrappingInt32 isn, uint64_t checkpoint) {
 }
 ```
 
+
 如何理解基于 `uint64_t` 类型的 `unwrap` 的这种转换方法呢？用更通俗易懂的例子来解释：
 
 逻辑开始 SYN 和结束 FIN 都占用一个 `seqno`，收发两条路的 `seqno` 各不相干，wrap 是 `absolute seqno` 转 `seqno`，直接加上 `ISN` 再取模即可。unwrap 是 `seqno` 转 `absolute seqno`，可能落在多个位置。比如，设 `seqno` 容量是 `5`，`ISN` 是 `3`，那么 `seqno=4` 可能对应 `1/6/11/16`，所以这里还给定一个 `checkpoint`，比如 `10`，让找离 `10` 最近的可能值，结果就是 `11`。还有一种可行的方法，先用 `checkpoint` 除以 `seqno` 容量，得到一个大致的轮数，再用 `seqno` 在这个轮数周围（比如 `+-2`）试一个最接近的值出来
@@ -443,9 +445,50 @@ sn    3  4  0  1  2  3  4  0  1  2  3  4  0  1  2  3  4  ...
 asn   0  1  2  3  4  5  6  7  8  9  10 11 12 13 14 15 16 ...
 ```
 
-小结下，从 32 位 `seqno` 转 64 位 `absolute seqno` 的方法：
+#####   再看 checkpoint
+
+`unwrap` 函数返回的索引值为最接近 `checkpoint` 的值，首先计算出 `n` 与 开头 `ISN` 的偏移量 `offset`，`checkpoint` 可以表示为 `k + mod * 2^32`，距离 `checkpoint` 最近的数可能有 `3` 种情况：
+
+1.  `mod * 2^32 + offset`
+2.  `(mod - 1) * 2^32 + offset`
+3.  `(mod + 1) * 2^32 + offset`
+
+那么把 `offset` 放大之后的 `3` 种情况与 `checkpoint` 进行比较，通过绝对值相减找出来最近（最小）的那个即可
+
+![checkpoint]()
+
+```C
+uint64_t unwrap(WrappingInt32 n, WrappingInt32 isn, uint64_t checkpoint) {
+    // 1、计算得到offset
+    uint64_t offset = static_cast<uint64_t> (n.raw_value()- isn.raw_value());
+    uint64_t add =  1ul << 32;
+    // 2、计算checkpoint的放大倍数
+    uint64_t mod = checkpoint >> 32;
+    // 3、将offset按放大倍数计算上述3个值
+    uint64_t offset_1 = offset + mod * add;
+    //需要特判 mod 为 0 的情况，此时 mod-1 没有意义
+
+    uint64_t offset_2 = mod !=0 ? offset + (mod - 1) * add : offset_1;
+    uint64_t offset_3 = offset + (mod + 1) * add;
+
+    //4、计算距离checkpoint最近的值
+    uint64_t abs_1 = offset_1 > checkpoint ? offset_1 - checkpoint : checkpoint - offset_1;
+    uint64_t abs_2 = offset_2 > checkpoint ? offset_2 - checkpoint : checkpoint - offset_2;
+    uint64_t abs_3 = offset_3 > checkpoint ? offset_3 - checkpoint : checkpoint - offset_3;
+
+    uint64_t min_abs = min(min(abs_1,abs_2),abs_3);
+    if(min_abs == abs_1)    return offset_1;
+    if(min_abs == abs_2)    return offset_2;
+    if(min_abs == abs_3)    return offset_3;
+
+}
+```
+
+小结下，从 `32` 位 `seqno` 转 64 位 `absolute seqno` 的方法：
 
 TODO
+
+最后，也是最重要的一点这里的计算依据是一个 TCP 单包大小不会超过 `2^32`，即不论加法还是减法，最终计算结果都会落在一个 `2^32` 的区间内
 
 ####    接收（并重组）报文实现 `segment_received`
 基于前文基础，看看处理 sponge-TCP 报文的流程，主要关注前面 SYN/FIN 报文即可，及时更新最新的 `absolute seqno`，这个也是 `TCPReceiver` 最核心的实现，其中参数 `TCPSegment` 结构体包含了 TCP header 和 负载 payload，具体实现代码如下：
