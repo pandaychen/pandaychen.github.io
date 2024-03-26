@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      重拾 Linux 网络（五）：TCP/IP 协议栈回顾
-subtitle:   工作中遇到的那些协议栈相关的知识点汇总（基于 google-netstack 的讨论）
+subtitle:   工作中遇到的那些协议栈相关的知识点汇总（基于 google-netstack 的应用开发）
 date:       2023-10-02
 author:     pandaychen
 catalog:    true
@@ -37,6 +37,10 @@ tags:
 
 ##  0x03    传输层 - TCP
 
+####    TCP协议格式
+
+####    TCP的状态机
+
 ####    TCP options
 
 1、tcp timestamp option 在三次握手中有什么作用？
@@ -45,14 +49,29 @@ TCP Timestamp Option（时间戳选项）在三次握手中的作用是提供一
 
 ####    拥塞控制算法
 
-
-####    TCP 滑动窗口
+####    TCP 滑动窗口机制
 
 ####    SEQ && ACK
 -   序列号（`SEQ`）：在建立连接时由内核生成的随机数作为其初始值，通过 `SYN` 报文传给接收端主机，每发送一次数据，就累加一次该数据字节数的大小，用来解决网络包乱序问题。累加方式为：序列号 = 上一次发送的序列号 + `len(data)`，若上一次发送的报文是 `SYN`/`FIN` 报文，则改为上一次发送的序列号 + `1`
 -   确认号（`ACK`）：指下一次期望收到的数据的序列号，发送端收到接收方发来的 `ACK` 确认报文以后，可认为在这个序号以前的数据都已经被正常接收；用来解决丢包的问题。确认号 = 上一次收到的报文中的序列号 + `len(data)`。若收到的是 SYN/FIN 报文，则改为上一次收到的报文中的序列号 + `1`
 
 在 TCP 重组中，依赖于这两个关键参数
+
+####    MTU And MSS
+MTU: Maxitum Transmission Unit 最大传输单元
+MSS: Maxitum Segment Size 最大分段大小
+
+
+
+####    TCP重传机制
+
+1、超时重传机制
+
+2、快速重传机制
+
+3、SACK 方法
+
+4、Duplicate SACK：重复收到数据的问题
 
 ####    TCP - 流重组
 `SEQ` 是为了保证 TCP 数据包的按顺序传输来设计的，可以有效的实现 TCP 数据的完整传输，特别是在数据传送过程中出现错误的时候可以有效的进行错误修正。在 TCP 会话的重新组合过程中需要按照数据包的序列号对接收到的数据包进行排序
@@ -82,6 +101,8 @@ TCP Timestamp Option（时间戳选项）在三次握手中的作用是提供一
 ####    gopacket 中的 tcp 重组实现
 
 
+####    TCP：拥塞控制
+
 ##  0x04    传输层 - UDP
 
 
@@ -104,3 +125,4 @@ TCP Timestamp Option（时间戳选项）在三次握手中的作用是提供一
 -   [TCP Datagram Reassembly](https://pypcapkit.jarryshaw.me/en/v0.15.4/reassembly/tcp.html)
 -   [CS144-minnow](https://github.com/cs144/minnow)
 -   [【计算机网络】Stanford CS144 Lab Assignments 学习笔记](https://www.cnblogs.com/kangyupl/p/stanford_cs144_labs.html)
+-   [The IP Fragmentation and Re-assembly Algorithm](https://www.cs.emory.edu/~cheung/Courses/455/Syllabus/4b-internet/IP-protocol5.html)
