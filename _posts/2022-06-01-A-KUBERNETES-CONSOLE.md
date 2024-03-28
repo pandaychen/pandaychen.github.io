@@ -149,9 +149,105 @@ func CreateK8SStream(option PyStreamOption) {
 如前文描述，方法 `exec.Stream` 执行时会向 APServer 发起一个请求，APServer 会通过代理机制将请求转发给相应节点上的 kubelet 服务，kubelet 会通过 CRI 接口调用 runtime 的接口，最终调用流式接口中的 `Exec()` 进入到 container 执行。通常针对一般化的命令调用，输入和输出以文本为主，并不会占用带宽和 APServer 的资源，但是当涉及到文件传输的时候则会占用较多带宽，因此这种方式不太适合大容量文件的 copy，如何优化？
 
 1.	增加流控
-2.	在文件 copy 场景下，直接向 kubelet 发起 `exec` 请求（绕过 APServer），需要解决 kubelet 地址、认证等相关问题
+2.	在文件 copy 场景下，直接向 kubelet 发起 `exec` 请求（绕过 APServer），但是需要解决访问 kubelet 地址、认证等相关问题
 
-TODO
+以文件 copy 场景为例，使用的命令是 `kubectl cp`，**前提是 Pod 中对应的 container 中安装了 `tar` 命令，本质上该指令还是调用了 `exec` 接口，然后执行 `tar` 命令进行文件的拷贝动作**
+
+```BASH
+#宿主机 –> Pod
+#将宿主机 /tmp/test_pod.txt copy到 mycentos-7b59b5b755-8rbgc 对应的第一个容器中的 /root 目录下
+kubectl cp /tmp/test_pod.txt default/mycentos-7b59b5b755-8rbgc:/root
+
+#Pod –> 宿主机
+#将 mycentos-7b59b5b755-8rbgc 中 /root/from_pod.txt 文件拷贝到宿主机 /tmp 目录下，并命名为 from_pod.new
+kubectl cp default/mycentos-7b59b5b755-8rbgc:/root/from_pod.txt  /tmp/from_pod.new
+#将 mycentos-7b59b5b755-8rbgc 中 /root/pod_dir 目录下的文件拷贝到宿主机 /tmp 目录下
+kubectl cp default/mycentos-7b59b5b755-8rbgc:/root/pod_dir /tmp
+```
+
+为什么要使用 `tar` 呢？`tar` 支持压缩从标准输入读取文件名列表
+
+```BASH
+find . -type f -name "*.jpg" -print | xargs tar -czvf images.tar.gz
+find $HOME -name "*.doc" -print0 | tar -cvf /tmp/file.tar --null -T -
+find $HOME -type f -name "*.sh" | xargs tar cfvz /nfs/x230/my-shell-scripts.tgz
+
+# 从容器向外拷贝，通过 tar 命令压缩将输出重定向到标准输出
+tar cf - ${srcFile}
+# 从外面向容器内拷贝，将标准输入数据通过 tar 解压写入到 container 内的文件目录
+tar --no-same-permissions --no-same-owner -xmf -
+# OR
+tar -xmf -
+```
+
+通过 `client-go` 向 pod 所在节点实现查询kubelet地址，然后向 kubelet 直接发起 `exec` 请求，代码如下：
+
+```go
+func main() {
+        // 此处直接使用了 / root/.kube/config 文件（有足够的权限）
+        // 如果使用 service account token 的话，还需要额外创建 role 和 rolebinding
+        // 当直接访问 kubelet 接口的时候，kubelet 支持使用证书和 token 进行认证，
+        // 使用 rbac 对请求进行鉴权操作
+        var kubeConfig *string
+        if home := homedir.HomeDir(); home != "" {
+                kubeConfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
+        } else {
+                kubeConfig = flag.String("kubeconfig", "","absolute path to the kubeconfig file")
+        }
+        flag.Parse()
+
+        config, err := clientcmd.BuildConfigFromFlags("", *kubeConfig)
+        if err != nil {
+                panic(err)
+        }
+
+        // 构建请求，直接请求 kubelet 需要的各种参数
+        params := url.Values{}
+        params.Add("tty", "1")
+        params.Add("input", "0")
+        params.Add("output", "1")
+        params.Add("error", "0")
+        params.Add("command", "ls")
+        params.Add("command", "/")
+        url := &url.URL{
+                Scheme:   "https",
+                Host:     "10.0.0.1:10250",
+                Path:     "/exec/default/busybox/busybox1",
+                RawQuery: params.Encode(),
+        }
+        // 此处配置证书相关配置，由于是测试，这块直接忽略了，在实际生产使用时可从文件读取
+        // 此处配置的 CAFile 在更新后，client-go 能够定时自动刷新
+        config.TLSClientConfig.CAFile = ""
+        config.TLSClientConfig.CAData = nil
+        config.TLSClientConfig.Insecure = true
+        executor, err := remotecommand.NewSPDYExecutor(config, "POST", url)
+        if err != nil {
+                panic(err)
+        }
+
+        done := make(chan error)
+        var buf bytes.Buffer
+        wrap := func() {
+                err := executor.Stream(remotecommand.StreamOptions{
+                        Stdout: &buf,
+                        Tty: true,
+                })
+                done <- err
+        }
+
+        go wrap()
+
+        fmt.Println("wait for out")
+
+        select {
+        case err := <-done:
+                if err != nil {
+                        fmt.Println("Command exit with error", err)
+                }
+                fmt.Println(string(buf.Bytes()))
+        }
+}
+```
 
 ##	0x03	问题
 笔者项目中遇到了在某些 kubernetes 集群版本下，当网关退出时，容器内的连接（网关到 kubernetes APIserver）、容器内 `bash` 残留的问题，如下描述：
