@@ -209,9 +209,89 @@ func tickWriter(connect *websocket.Conn) {
 -   [websocket](https://github.com/gorilla/websocket)：稳定
 -   [nbio](https://github.com/lesismal/nbio)：About Pure Go 1000k+ connections solution, support tls/http1.x/websocket and basically compatible with net/http, with high-performance and low memory cost, non-blocking, event-driven, easy-to-use
 
-##  0x02    参考
+
+##	0x02	使用 Websocket 协议登录容器
+在 [一个安全的 Web-Console 的实现思路](https://pandaychen.github.io/2019/10/29/A-SIMPLE-WEBCONSOLE-OF-SSH/)、[一种基于 TTY-based 的 kubernetes console 实现思路](https://pandaychen.github.io/2022/06/01/A-KUBERNETES-CONSOLE/) 中介绍了使用 websocket 登录容器的一些思路方法，由于 `kubectl exec` 命令行是实时交互的，输入和输出实时发生，所以 kubernetes 使用 SPDY/Websocket 等双向实时通信的协议，来传递输入 / 输出内容，数据流路径为：
+
+```text
+Kubectl <---(双向实时协议 SPDY/Websocket)---> Kube-Api-Server <---(双向实时协议)---> 节点 kubelet
+```
+
+旧版本 `kubectl` 使用 SPDY 协议连接 kubernetes 的 API-server，新版本已经被 HTTP2 所替代，参考 [SPDY is deprecated. Switch to HTTP/2](https://github.com/kubernetes/kubernetes/issues/7452)，kubernetes 的 API-server 同时支持 SPDY/Websocket 协议
+
+比如通常使用如下代码连接容器，就是使用的 SPDY 协议的方式：
+```go
+exec, err := remotecommand.NewSPDYExecutor(config, method, url)
+if err != nil {
+   return err
+}
+
+// 这里开始，将输入输出，进行实时传递（Stream）
+return exec.Stream(remotecommand.StreamOptions{
+   Stdin:             stdin,
+   Stdout:            stdout,
+   Stderr:            stderr,
+   Tty:               tty,
+   TerminalSizeQueue: terminalSizeQueue,
+})
+```
+
+下面描述下如何使用 websocket 来构建容器登录，采用的架构如下：
+
+![gw](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/websocket/websocket-to-kubernetes.png)
+
+####	former-CONN（Websocket）
+这里有细节需要注意，客户端使用 Websocket 去连接登录网关，然后网关再通过 websocket 去连接容器，前向后向都是 websocket 协议，看起来直接协议转发就好了？答案是否定的。以客户端（用户）敲下 `ls` 命令到容器，然后容器 list 文件列表的场景为例，如果直接发送 `ls` 内容，那么肯定是不通的，因为 kubernetes 根本不认这种输入，kubernetes 认为 websocket 的报文内容是归属有频道的，不然一条 cmd 命令行执行后，用户无法判断响应的内容是 stdout？还是 stderr？
+
+由于 kubernetes 的 `exec` 在使用 Websocket 协议时是有扩展的，并且扩展规则是 kubernetes 自己设置的规则。kubernetes 对 websocket 的约定规则如下：
+
+| 第一字节值 | 内容含义 |
+| :----:|:----:|
+| 0| 标准输入 |
+| 1| 标准输出 |
+| 2| 标准错误 |
+| 3| 服务端异常信息 |
+| 4| terminal 窗口大小调整 resize|
+
+小结下，当 WebSocket 建立连接后，发送数据时需要将缓冲的第一个字节定义为 stdin（`buf [0] = 0`），而接收数据时要判断 stdout（`buf [0] = 1`）与 stderr（`buf [0] = 2`）
+
+```TEXT
+＃传送 `ls` 指令，必须 buf[0] 自行填入 0 来表示
+stdin.buf = [0 108 115 10]
+
+＃接收
+BUF = [1 108 115 13 10 27 91 48 109 27 91 ...]
+```
+
+####	latter-CONN（websocket）
+第二个细节是在与 kubernetes websocket 频道的内容，需要使用 `base64` 进行编解码，当要发送 `ls` 命令，需要向 kubernetes 发送的内容如下：
+
+```js
+// 这样发送，kubernetes 才认为是收到 ls 命令
+sendMsg := "0" + base64.Encoding("ls")
+```
+
+当从 kubernetes 收到响应数据时，网关需要先去掉第一个字节，然后再进行 `base64` 解码，这样才可以获取到真实的 stdout/stder 文本数据
+
+```JS
+
+// 发送内容
+ws.send("0" + utf8_to_b64(data));
+
+// 接收内容
+switch(ev.data[0]) {
+case '1':
+case '2':
+case '3':
+term.write(b64_to_utf8(data));
+break;
+}
+```
+
+##  0x03    参考
 -   [MQTT 和 Websocket 的区别是什么？](https://www.zhihu.com/question/21816631)
 -   [万字长文，一篇吃透 WebSocket：概念、原理、易错常识、动手实践](http://www.52im.net/thread-3713-1-1.html)
 -   [WebSocket 教程](https://www.ruanyifeng.com/blog/2017/05/websocket.html)
 -   [为什么很少看到有人用 websocket？](https://www.v2ex.com/t/506933)
 -   [golang 的哪个 websocket 好用？](https://www.v2ex.com/t/919140)
+-	[利用 kubernetes exec 接口实现任意容器的 web-terminal](https://bbs.huaweicloud.com/blogs/281515)
