@@ -38,7 +38,7 @@ golang 的闭包有如下特点：
 
 `path/filepath` 包的 `Walk` [方法](https://pkg.go.dev/path/filepath#Walk)是典型的应用场景：
 ```golang
-Walk(root stirng, walkFn WalkFunc) error
+Walk(root string , walkFn WalkFunc) error
 ```
 
 > walk 方法会遍历 root 下的所有文件 (包含 root) 并对每一个目录和文件都调用 `walkFunc` 方法。在访问文件和目录时发
