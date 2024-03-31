@@ -149,6 +149,58 @@ node_cpu_seconds_total{cpu="3",mode="system"} 22.32
 node_cpu_seconds_total{cpu="3",mode="user"} 7.33
 ```
 
+##  0x03  Review（2024）
+
+####  四大指标的意义及常用应用
+
+
+####   项目中的实际应用
+如何使用Conter实现基于增量的告警策略？借助于 PromQL编写适当的查询表达式，并将其配置为 Alertmanager 的告警规则来实现。下面使用 Prometheus Counter 监控 HTTP `5xx` 错误并在错误率超过阈值时触发告警，主要代码如下：
+
+```GO
+var httpRequestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "http_requests_total",
+	Help: "Total number of HTTP requests",
+}, []string{"code", "method"})
+
+func main() {
+	http.Handle("/metrics", promhttp.Handler())
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		code := "200"
+		if r.URL.Path == "/error" {
+			code = "500"
+		}
+		httpRequestsTotal.WithLabelValues(code, r.Method).Inc()
+		w.WriteHeader(200)
+	})
+	http.ListenAndServe(":8080", nil)
+}
+```
+
+那么，使用如下PromQL来计算以过去 `5` 分钟内每分钟 HTTP `5xx` 错误的增量：
+
+```TEXT
+rate(http_requests_total{code=~"5.."}[5m])
+```
+
+最后，在 Prometheus 配置文件中创建一个告警规则，当过去 `5` 分钟内**每分钟的** HTTP `5xx` 错误率超过 `10` 时，触发告警：
+
+```YAML
+groups:
+- name: example
+  rules:
+  - alert: HighErrorRate
+    expr: rate(http_requests_total{code=~"5.."}[5m]) > 10
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "High error rate ({{ $value }} errors/min)"
+      description: "HTTP 5xx error rate is too high, affecting the application"
+```
+
+####  label的意义
+
 ##  0x03 参考
 -   [彻底理解 Prometheus 查询语法](https://blog.csdn.net/zhouwenjun0820/article/details/105823389)
 -   [Prometheus 操作指南](https://github.com/yunlzheng/prometheus-book)
