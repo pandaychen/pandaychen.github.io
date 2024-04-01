@@ -153,8 +153,74 @@ node_cpu_seconds_total{cpu="3",mode="user"} 7.33
 
 ####  四大指标的意义及常用应用
 
+以http-cgi为例，定义如下指标
+```go
+var (
+	httpRequestsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "http_requests_total",
+			Help: "Number of HTTP requests",
+		},
+		[]string{"path", "method", "status"},
+	)
 
-####   项目中的实际应用
+	httpRequestDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "http_request_duration_seconds",
+			Help: "Duration of HTTP requests",
+		},
+		[]string{"path", "method", "status"},
+	)
+
+	httpInflightRequests = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "http_inflight_requests",
+			Help: "Number of inflight HTTP requests",
+		},
+		[]string{"path", "method"},
+	)
+
+	httpResponseSizeBytes = promauto.NewSummaryVec(
+		prometheus.SummaryOpts{
+			Name: "http_response_size_bytes",
+			Help: "Size of HTTP responses",
+		},
+		[]string{"path", "method", "status"},
+	)
+)
+
+func handleRequest(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Path
+	method := r.Method
+	status := "200" // 假设响应状态码为 200
+
+	// Counter
+	httpRequestsTotal.WithLabelValues(path, method, status).Inc()
+
+	// Gauge
+	httpInflightRequests.WithLabelValues(path, method).Inc()
+	defer httpInflightRequests.WithLabelValues(path, method).Dec()
+
+	// Histogram
+	timer := prometheus.NewTimer(httpRequestDuration.WithLabelValues(path, method, status))
+	defer timer.ObserveDuration()
+
+	// Summary
+	respSize := doWork()
+	httpResponseSizeBytes.WithLabelValues(path, method, status).Observe(float64(respSize))
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func doWork() int {
+	// 模拟处理请求
+	time.Sleep(100 * time.Millisecond)
+	return 512 // 假设响应大小为 512 字节
+}
+```
+
+
+####   实际应用：基于alertmanager的高级配置
 如何使用Conter实现基于增量的告警策略？借助于 PromQL编写适当的查询表达式，并将其配置为 Alertmanager 的告警规则来实现。下面使用 Prometheus Counter 监控 HTTP `5xx` 错误并在错误率超过阈值时触发告警，主要代码如下：
 
 ```GO
@@ -200,6 +266,11 @@ groups:
 ```
 
 ####  label的意义
+标签（label）是一种强大且灵活的元数据机制，用于对时间序列数据进行描述、区分和过滤。标签是键值对（key-value pair）形式的数据，可以附加到时间序列上，以提供有关数据来源和特性的详细信息。通过使用标签，Prometheus 可以更有效地查询和聚合数据，帮助开发人员和运维人员更好地理解和监控系统、应用程序和服务的性能
+
+- 描述数据来源和特性：标签可以提供有关时间序列数据的详细描述，例如实例名称、服务名称、请求方法、状态码等
+- 区分和过滤时间序列：标签允许你根据特定条件过滤和选择时间序列数据。例如，你可以使用标签查询特定服务或实例的性能指标，或者根据请求方法和状态码过滤 HTTP 请求数据
+- 数据聚合：标签可以用于对数据进行分组和聚合，以便计算各种统计信息，如总和、平均值、最大值、最小值等
 
 ##  0x03 参考
 -   [彻底理解 Prometheus 查询语法](https://blog.csdn.net/zhouwenjun0820/article/details/105823389)
