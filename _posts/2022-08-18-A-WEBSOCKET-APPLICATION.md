@@ -274,7 +274,6 @@ sendMsg := "0" + base64.Encoding("ls")
 当从 kubernetes 收到响应数据时，网关需要先去掉第一个字节，然后再进行 `base64` 解码，这样才可以获取到真实的 stdout/stder 文本数据
 
 ```JS
-
 // 发送内容
 ws.send("0" + utf8_to_b64(data));
 
