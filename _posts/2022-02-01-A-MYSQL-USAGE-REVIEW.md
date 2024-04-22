@@ -15,6 +15,7 @@ tags:
 -   索引的使用
 -   插入 / 查询优化
 -   业务上分库分表
+-   MySQL 开发经验
 
 ![mysql-optimization](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/mysql/mysql-optimistic-all.png)
 
@@ -175,7 +176,7 @@ PARTITION BY KEY (openId)
 PARTITIONS 100;
 ```
 
-But，场景变为`t_user`表同一个 openId 可以有多条数据，通过一个自增 id 来区分，但查询还是以 openId 来查询，此时要如何分区？解决方案是将 (id,openId) 作为联合主键，这样分区列 openId 就是主键或者 unique key 的组成部分了，如下：
+But，场景变为 `t_user` 表同一个 `openId` 可以有多条数据，通过一个自增 `id` 来区分，但查询还是以 `openId` 来查询，此时要如何分区？解决方案是将 `(id,openId)` 作为联合主键，这样分区列 `openId` 就是主键或者 unique key 的组成部分了，如下：
 
 ```sql
 CREATE TABLE `t_user` (
@@ -213,9 +214,12 @@ func ticker(){
 SELECT col_a,create_time from t_table partition(p20220717) where username ="pandaychen";
 ```
 
-##  0x04    分库分表
+##  0x04    Mysql 批量插入优化
 
+####    实现分析
+[bulkexecutor](https://github.com/zeromicro/go-zero/blob/master/core/executors/bulkexecutor.go)
 
-## 0x05 参考
+## 0x06 参考
 -   [哪些场景我不建议用分区表？](https://learn.lianglianglee.com/%E4%B8%93%E6%A0%8F/MySQL%E5%AE%9E%E6%88%98%E5%AE%9D%E5%85%B8/14%20%20%E5%88%86%E5%8C%BA%E8%A1%A8%EF%BC%9A%E5%93%AA%E4%BA%9B%E5%9C%BA%E6%99%AF%E6%88%91%E4%B8%8D%E5%BB%BA%E8%AE%AE%E7%94%A8%E5%88%86%E5%8C%BA%E8%A1%A8%EF%BC%9F.md)
-
+-   [MYSQL - 批量插入](https://go-zero.dev/docs/tutorials/mysql/bulk/insert)
+-   [MYSQL - 缓存管理](https://go-zero.dev/docs/tutorials/mysql/cache)
