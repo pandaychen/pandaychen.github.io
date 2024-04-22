@@ -70,6 +70,84 @@ func PipelineGetHashField(keyList []string,filed string) []string {
 }
 ```
 
+关于上面代码示例中`res`，也可以通过保存每一步pipeline的结果来实现一些额外的功能，看下面的例子：
+
+1、批量获取kv数据，不过`pipeline.Exec`的结果中不会包含`key`的数据，所以建议在`value`中包含`key`的数据（写入kv时就设计好），这样就可直接在`value`中拿到`key`的信息（比如`hostid`）
+
+```GO
+func pipeline_1(){
+  for _, hk := range xxxxxx {
+    redis_pipe.Get(hk)
+  }
+
+  cmders, err := redis_pipe.Exec()
+  if err != nil {
+    //WARN：当pipeline里面的key不存在时（过期或删除），此时pipeline会报错: redis: nil
+  }
+  for _, cmder := range cmders {
+    if cmder == nil {
+      continue
+    }
+    cmd, ok := cmder.(*redis.StringCmd)
+    if !ok {
+      continue
+    }
+    strmap, err := cmd.Result()
+    if err != nil {
+      continue
+    }
+    if len(strmap) == 0 {
+      continue
+    }
+    //check data valid 
+    // .....
+  }
+}
+```
+
+2、通过一个map，保存每次`pipeline.Get`的结果，借此来保存kv的映射关系，参考代码如下：
+
+```go
+func pipeline_2(){
+  var (
+		err            error
+		pipeline       = h.rds.Pipeline()
+		allowsCacheMap = make(map[string]bool)
+		pipelineResult = make(map[string]*redis.StringCmd)
+	)
+
+	for key, _ := range keyMap {
+		key = fmt.Sprintf("%s#%s", subject, key)
+		pipelineResult[key] = pipeline.Get(ctx, key)
+	}
+
+	_, err = pipeline.Exec(ctx)
+	if err != nil {
+		h.apiLogger.Error("pipeline exec found error", zap.Any("errmsg", err))
+	}
+
+	for key, r := range pipelineResult {
+		var (
+			array []string
+		)
+		v, err := r.Result()
+		if err != nil {
+			//no data
+			continue
+		}
+		array = strings.Split(key, "#")
+		if len(array) < 2 {
+			continue
+		}
+		if v == "1" {
+      //use key
+			allowsCacheMap[array[1]] = true
+		} else {
+			allowsCacheMap[array[1]] = false
+		}
+	}
+}
+```
 
 ##  0x02    Pool 连接池使用
 &emsp;&emsp; 连接池的好处，在于避免每次 Redis 操作时，新建 TCP 连接的开销，在要求高性能的场景推荐开启。个人建议，使用的 Redis 客户端库，包含的连接池至少满足下面的特性：
