@@ -11,6 +11,11 @@ tags:
     - OpenSource
 ---
 
+##  项目汇总
+-   [go-awesome](https://github.com/shockerli/go-awesome?tab=readme-ov-file)
+-   [Safety-Project-Collection](https://github.com/Bypass007/Safety-Project-Collection)
+-   [有哪些值得学习的 Go 语言开源项目？](https://www.zhihu.com/question/20801814)
+-   [Uber Go 语言编码规范](https://github.com/xxjwxc/uber_go_guide_cn)
 
 ##	SSH 相关
 -   [sshesame](https://github.com/jaksi/sshesame)，官方介绍：A fake SSH server that lets everyone in and logs their activity，可以用于实现 ssh 蜜罐
