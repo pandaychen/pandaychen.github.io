@@ -285,9 +285,9 @@ offsets.retention.minutes
 
 推荐的解决方案如下：
 1. `session.timeout.ms`：`v0.10.2` 之前的版本可适当提高该参数值，需要大于消费一批数据的时间，但不要超过 `30s`（建议设置为 `25s`）；而 `v0.10.2` 及其之后的版本，保持默认值 `10s` 即可
-2. `max.poll.records`：降低该参数值，建议远远小于 <单个线程每秒消费的条数> * < 消费线程的个数 > *<`max.poll.interval.ms`> 的乘积，即尽量不要超过消费者处理的条目数，保证在 `max.poll.interval.ms` 内可以处理完成
+2. `max.poll.records`：降低该参数值，建议远远小于 <单个线程每秒消费的条数> * <消费线程的个数> *`max.poll.interval.ms` 的乘积，即尽量不要超过消费者处理的条目数，保证在 `max.poll.interval.ms` 内可以处理完成
 
-3. `max.poll.interval.ms`：该值要大于 <`max.poll.records`> / (< 单个线程每秒消费的条数 > * < 消费线程的个数 >) 的值
+3. `max.poll.interval.ms`：该值要大于 `max.poll.records` / (<单个线程每秒消费的条数> * <消费线程的个数>) 的值
 
 4. 尽量提高客户端的消费速度，消费逻辑另起线程进行处理；减少 Group 订阅 Topic 的数量，一个 Group 订阅的 Topic 最好不要超过 `5` 个，建议一个 Group 只订阅一个 Topic
 
@@ -295,6 +295,8 @@ offsets.retention.minutes
 
 ####  重复消费的解决方案
 TODO
+
+
 ##      0x06    一个关于 consumer 的问题排查经过
 在工作中遇到过这样的问题，测试环境消费者进程重启后，不消费重启前一段时间（间隔不久）的数据，大致描述如下：
 
