@@ -394,5 +394,7 @@ func DefaultClientCodeToLevel(code codes.Code) zapcore.Level {
 -   [在 Go 语言项目中使用 Zap 日志库](https://www.liwenzhou.com/posts/Go/zap/)
 -	[jupiter：2.3 日志](https://jupiter.douyu.com/jupiter/2.3logger.html#_2-3-5-%E4%B8%9A%E5%8A%A1%E7%9A%84%E6%96%87%E6%9C%AC%E6%97%A5%E5%BF%97)
 -	[TARS染色日志 ｜ 收集记录特定日志](https://cloud.tencent.com/developer/article/1791859)
+-	[golang 日志切割库 goroutine 泄漏导致进程 panic 问题排查](https://zhuanlan.zhihu.com/p/453788600)
+-	[Go 每日一库之 zap](https://darjun.github.io/2020/04/23/godailylib/zap/)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

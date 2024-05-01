@@ -24,3 +24,4 @@ tags:
 - [CRD 就像 Kubernetes 中的一张表](https://zhuanlan.zhihu.com/p/260797410)
 - [KUBERNETES CRD&CONTROLLER入门实践](https://davidlovezoe.club/wordpress/archives/690)
 - [Repository for sample controller. Complements sample-apiserver](https://github.com/kubernetes/sample-controller)
+- [KubeFlow -> CRD开发实践](https://zhuanlan.zhihu.com/p/339946957)
