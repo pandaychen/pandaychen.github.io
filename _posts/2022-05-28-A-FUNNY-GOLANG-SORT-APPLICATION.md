@@ -1,6 +1,6 @@
 ---
 layout: post
-title: 数据结构与算法回顾（八）：海量整数排序的分治式解决思路（未完待续）
+title: 数据结构与算法回顾（八）：海量整数排序的分治式解决思路
 subtitle: 一道 pingcap 的算法题目
 date: 2022-05-28
 header-img: img/super-mario.jpg
@@ -37,7 +37,7 @@ tags:
 运行，待全部执行完成后 `ConcurrentSorter` 收集排序结果，并封装成 `MergeTask` 放入协程池中进行合并。
 
 
-1、排序算法 `Sorter` 、待排序（单个分组）的抽象定义为`SortableSlice`，如下
+1、排序算法 `Sorter` 、待排序（单个分组）的抽象定义为 `SortableSlice`，如下
 
 ```GO
 type Sorter interface {
@@ -56,7 +56,7 @@ type SortableSlice interface {
 }
 ```
 
-`Sorter` 接口的实例化为 `Quick`，其对应初始化方法`NewQuick` 传入的参数为 `SortableSlice`，`SortableSlice` 的实例化结构为 `MinInt64Slice`，定义如下：
+`Sorter` 接口的实例化为 `Quick`，其对应初始化方法 `NewQuick` 传入的参数为 `SortableSlice`，`SortableSlice` 的实例化结构为 `MinInt64Slice`，定义如下：
 
 ```GO
 type Quick struct {
@@ -121,7 +121,7 @@ func (s *MinInt64Slice) Pop() (int64, error) {
 
 很明显，`Quick` 的主要作用就是对 `Quick.slice` 排序
 
-2、通过 `SortTask` 启动单个分组的排序，然后将结果异步返回，从实现看，`SortTask.Run()` 必然要是并发执行的；为此，项目构建了一个并发协程池管理结构`ConcurrentSorter`，用来完成分组的排序及结果输出
+2、通过 `SortTask` 启动单个分组的排序，然后将结果异步返回，从实现看，`SortTask.Run()` 必然要是并发执行的；为此，项目构建了一个并发协程池管理结构 `ConcurrentSorter`，用来完成分组的排序及结果输出
 
 ```GO
 type SortTask struct {
@@ -138,7 +138,7 @@ func NewSortTask(src []int64, retChan chan *MinInt64Slice) *SortTask {
 	}
 }
 
-//在协程池调用此方法，进行排序和输出
+// 在协程池调用此方法，进行排序和输出
 func (s *SortTask) Run() error {
 	s.sorter.Sort()
 	// 运行结束返回结果
@@ -148,16 +148,7 @@ func (s *SortTask) Run() error {
 ```
 
 
-2、并发协程池实现
 
-
-pool.go
-
-配置最大协程数量
-按需创建协程
-空闲超时则回收协程
-合并有序切片 algorithm.heap_merge.go
-若采用 2 路循环合并，每次合并需要申请长度为 2 路之和的内存保存合并结果，循环合并会导致过多的内存申请。通过堆实现多路的有序切片的合并，只需要额外申请一次一倍的内存用于存放合并结果。
 
 ```GO
 type SortableSlice interface {
@@ -213,9 +204,9 @@ func (s *MinInt64Slice) Pop() (int64, error) {
 }
 ```
 
-3、管理结构`ConcurrentSorter`，用于拆分、组内并行排序`m.sort()`，组件多路归并`m.merge(mergedChan)`，核心代码如下：
+3、管理结构 `ConcurrentSorter`，用于拆分、组内并行排序 `m.sort()`，组件多路归并 `m.merge(mergedChan)`，核心代码如下：
 
-注意，在协程池中会调用`SortTask.Run()`方法进行排序和输出结果到`ConcurrentSorter.sortedChan`
+注意，在协程池中会调用 `SortTask.Run()` 方法进行排序和输出结果到 `ConcurrentSorter.sortedChan`
 
 ```GO
 type ConcurrentSorter struct {
@@ -252,11 +243,11 @@ func (m *ConcurrentSorter) sort() {
 			end = len(m.sortingArray)
 		}
 
-		//构建单个分组
+		// 构建单个分组
 		t := NewSortTask(m.sortingArray[start:end], m.sortedChan)
 		start = end
 
-		//将分组放入协程池排序
+		// 将分组放入协程池排序
 		m.pool.Put(t)
 		count++
 	}
@@ -286,7 +277,7 @@ loop:
 }
 ```
 
-4、`ConcurrentSorter`主入口
+4、`ConcurrentSorter` 主入口
 
 ```go
 func (m *ConcurrentSorter) Run() {
@@ -299,13 +290,13 @@ func (m *ConcurrentSorter) Run() {
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 	go func() {
-		//组间并行（排序）
+		// 组间并行（排序）
 		m.sort()
 		wg.Done()
 	}()
 	wg.Add(1)
 	go func() {
-		//归并
+		// 归并
 		m.merge(mergedChan)
 		wg.Done()
 	}()
@@ -317,12 +308,12 @@ func (m *ConcurrentSorter) Run() {
 ```
 
 
-4、最后看看最核心的归并算法实现`m.merge(mergedChan)`
+4、最后看看最核心的归并算法实现 `m.merge(mergedChan)`
 
 -	输入：`n` 路待合并的有序 slice
 -	输出：有序 slice
 
-堆 node 定义为一个 `SortedSlice`结构，它实现了 `HasNext` 方法，用于迭代到当前 slice 的下一个元素
+堆 node 定义为一个 `SortedSlice` 结构，它实现了 `HasNext` 方法，用于迭代到当前 slice 的下一个元素
 
 ```GO
 type SortedSlice struct {
@@ -337,7 +328,7 @@ type Iterator struct {
 
 //
 func (i *Iterator) HasNext() bool {
-	return i.index < len(i.slice)-1
+	return i.index <len(i.slice)-1
 }
 
 func (i *Iterator) Next() {
@@ -348,7 +339,7 @@ func (i *Iterator) Value() int64 {
 	return i.slice[i.index]
 }
 
-//参数slice为有序数组
+// 参数 slice 为有序数组
 func NewSortedSlice(slice []int64) *SortedSlice {
 	return &SortedSlice{
 		slice: slice,
@@ -366,6 +357,10 @@ func NewSortedSlice(slice []int64) *SortedSlice {
 -	如果 `hasNext==true`，执行当前 node 的 `Next()`，重新调整当前的堆顶
 -	如果 `hasNext==false`, 当前 slice 已经空了，因此剔除堆顶, 然后需要重建堆，原因是堆中的父子关系已经破坏
 
+在多路归并实现中，若采用 `2` 路循环合并，每次合并需要申请长度为 `2` 路之和的内存保存合并结果，循环合并会导致过多的内存申请，通过最小堆实现多路的有序切片的合并，只需要额外申请一次 `1` 倍的内存用于存放合并结果即可
+
+![]()
+
 调用入口：
 ```go
 func (m *MergeTask) Run() error {
@@ -374,6 +369,7 @@ func (m *MergeTask) Run() error {
 		sortedSlices = append(sortedSlices, algorithm.NewSortedSlice(s))
 	}
 	merge := algorithm.NewHeapMerge(sortedSlices)
+	// 合并有序切片
 	m.retChan <- merge.Sort()
 	return nil
 }
@@ -384,7 +380,7 @@ type HeapMerge struct {
 	nodes []*SortedSlice
 }
 
-//构建一个 n 个元素的最小堆
+// 构建一个 n 个元素的最小堆
 func NewHeapMerge(sources []*SortedSlice) *HeapMerge {
 	// 需要保证
 	return &HeapMerge{nodes: sources}
@@ -405,11 +401,11 @@ func (h *HeapMerge) Pop() (int64, error) {
 		err = nil
 
 		if h.nodes[0].HasNext() {
-			h.nodes[0].Next() //不需要获取值
+			h.nodes[0].Next() // 不需要获取值
 			h.adjust(0, len(h.nodes))
-		} else { // 顶部的node(slice)已经为空
+		} else {// 顶部的 node(slice) 已经为空
 			if len(h.nodes) >= 1 {
-				// 移除为已经合并完成的slice
+				// 移除为已经合并完成的 slice
 				h.nodes = h.nodes[1:]
 				//h.adjust(0, len(h.nodes))
 				h.Build()
@@ -430,7 +426,7 @@ func (h *HeapMerge) adjust(start, end int) {
 	if childIndex >= end {
 		return
 	}
-	if childIndex+1 < end && h.nodes[childIndex+1].Value() < h.nodes[childIndex].Value() {
+	if childIndex+1 <end && h.nodes[childIndex+1].Value() < h.nodes[childIndex].Value() {
 		childIndex++
 	}
 
@@ -442,7 +438,7 @@ func (h *HeapMerge) adjust(start, end int) {
 	}
 }
 
-//入口
+// 入口
 func (h *HeapMerge) Sort() []int64 {
 	h.Build()
 	length := 0
@@ -459,7 +455,7 @@ loop:
 		if err != nil {
 			break loop
 		} else {
-			// 替换掉 mergeSlice = append(mergeSlice,v) 节省了大约10ms
+			// 替换掉 mergeSlice = append(mergeSlice,v) 节省了大约 10ms
 			mergeSlice[mergeSliceIndex] = v
 			//mergeSlice = append(mergeSlice, v)
 		}
@@ -470,6 +466,11 @@ loop:
 }
 ```
 
+####	协程池的实现
+
+-	配置最大协程数量
+-	按需创建协程
+-	空闲超时则回收协程
 
 ##  0x03  参考
 -   [PingCAP training courses](https://github.com/heteddy/talent-plan/tree/master/tidb/mergesort)
