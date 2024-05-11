@@ -211,6 +211,7 @@ func (tw *TimingWheel) scanAndRunTasks(l *list.List) {
 	for e := l.Front(); e != nil; {
 		task := e.Value.(*timingEntry)
 		if task.removed {
+			// 被标记为删除，在scanAndRunTasks中进行清理
 			next := e.Next()
 			l.Remove(e)
 			e = next

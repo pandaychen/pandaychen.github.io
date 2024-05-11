@@ -320,7 +320,7 @@ func (pq *PriorityQueue) update(item *Item, value string, priority int) {
 3.	`heap.Fix`、`heap.Remove`方法的使用场景
 
 ##	0x02	list包
-`container/list`包，[https://go.dev/src/container/list/list.go]有两个暴露对外部的结构：
+`container/list`[包](https://go.dev/src/container/list/list.go)，有两个暴露对外部的结构：
 -	`List`：List 实现了一个双向链表
 -	`Element`：Element 代表了链表中元素的结构
 

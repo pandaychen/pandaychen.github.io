@@ -65,12 +65,10 @@ options ndots:5
 在 `demo-svc1` 中直接请求域名 `demo-svc2.demo-ns.svc.cluster.local`，此时的 `ndots` 为 `4`，依然会触发上面的 `search` 规则。而请求域名 `demo-svc2.demo-ns.svc.cluster.local.` 时，`ndots` 为 `5`，因此不会触发 `search` 规则，直接去解析 `demo-svc2.demo-ns.svc.cluster.local.` 这个域名并返回结果；又如请求更长的 pod 域名 `pod-1.demo-svc2.demo-ns.svc.cluster.local.`，此时的 `ndots` 为 `6`，亦不会触发 `search` 规则，会直接查询域名并返回解析
 
 ####    小结
--   同命名空间（namespace）内的服务直接通过 `$service_name` 进行互相访问而不需要使用全域名（FQDN），此时 DNS 解析速度最快
--   跨命名空间（namespace）的服务，可以通过 `$service_name.$namespace_name` 进行互相访问，此时 DNS 解析第一次查询失败，第二次才会匹配到正确的域名
--   所有的服务之间通过全域名（FQDN）`$service_name.$namespace_name.svc.$cluster_name.` 访问的时候 DNS 解析的速度最快
+-   同命名空间（namespace）内的服务直接通过 `service_name` 进行互相访问而不需要使用全域名（FQDN），此时 DNS 解析速度最快
+-   跨命名空间（namespace）的服务，可以通过 `service_name.namespace_name` 进行互相访问，此时 DNS 解析第一次查询失败，第二次才会匹配到正确的域名
+-   所有的服务之间通过全域名（FQDN）`service_name.namespace_name.svc.cluster_name.` 访问的时候 DNS 解析的速度最快
 -   在 K8S 集群内访问大部分的常见外网域名（ndots 小于 `5`）都会触发 `search` 规则，因此在访问外部域名的时候可以使用 FQDN，即在域名的结尾配置一个点号 `.`
-
-
 
 ##  0x03    golang 的 DNSCACHE
 通过 `net.Dial`/`net.DialContext` 创建连接时，或者使用 `Resolver` 解析 DNS 时，都是无缓存的；所以客户端并发场景下每创建一个连接，`Resolver` 都会去解析一次 DNS，如果遇到网络不好或 DNS 服务器问题，大概率会遇到类似错误 `dial tcp: lookup xxxx.com`，已有多个不错的 DNScache 库实现：
@@ -188,13 +186,19 @@ DNS 泄漏（DNS leaking）是指使用 VPN 连接时，计算机设备仍然使
 
 由于 DNSSEC 会导致返回的数据包变大，一旦超出 UDP 所允许的大小，那么数据包会被截断，DNS 服务器返回一个 `TC=1` 的标志位，用户接到 `TC` 的标识后，会改为用 TCP 方式传输
 
-##  0x08  DNS 性能压测
-笔者在开发 DNS 代理中使用到的 DNS 客户端性能压测库，推荐使用 dnstrace：
+##  0x08  DNSproxy的实现思路
+
+####  指标与监控设计
+
+TODO
+
+##  0x09  DNS 性能压测
+列举下笔者在开发 DNS 代理中使用到的 DNS 客户端性能压测库，推荐使用 dnstrace：
 
 - [dnspyre](https://github.com/Tantalor93/dnspyre)：CLI tool for a high QPS DNS benchmark
 - [dnstrace](https://github.com/redsift/dnstrace)：Command-line DNS benchmark
 
-##  0x09 参考
+##  0x0A 参考
 -   [Examples made with Go DNS](https://github.com/miekg/exdns)
 -   [CoreDNS 篇 10 - 分流与重定向](https://tinychen.com/20221120-dns-13-coredns-10-dnsredir-and-alternate/)
 -   [CoreDNS 篇 9-kubernetes 插件](https://tinychen.com/20221107-dns-12-coredns-09-kubernetes/)

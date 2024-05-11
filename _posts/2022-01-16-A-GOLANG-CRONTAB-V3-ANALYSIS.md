@@ -3,6 +3,7 @@ layout: post
 title: 基于 CRON 库扩展的分布式 Crontab 的实现
 subtitle: 基于 golang 的分布式定时器任务模型的通用实现
 date: 2022-01-16
+header-img: img/super-mario.jpg
 author: pandaychen
 catalog: true
 tags:
