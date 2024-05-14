@@ -209,7 +209,7 @@ Consumer 在重启后会继续消费，这是因为 Kafka 使用 offset（偏移
 1、如果 `CURRENT-OFFSET` 不是为 `unknown`（Consumer 以前消费过数据，提交过 offset），重启消费者时 `Earliest`/`Latest`/`none` 都是会从 `CURRENT-OFFSET` 一直消费到 `LOG-END-OFFSET`
 
 2、如果 `CURRENT-OFFSET` 为 `unknown`，重启 Consumer 后 `Earliest`/`Latest`/`none` 表现均不相同
-- `Earliest` 模式：会从该分区当前最开始的 offset 消息开始消费 (即从头消费)，如果最开始的消息 offset 是 `0`，那么消费者的 offset 就会被更新为 `0`
+- `Earliest` 模式：会从该分区当前最开始的 offset 消息开始消费（即从头消费），如果最开始的消息 offset 是 `0`，那么消费者的 offset 就会被更新为 `0`
 - `Latest`：只消费当前 Consumer 启动完成后生产者新生产的数据，旧数据不会再消费，offset 被重置为分区的 `HW`
 - `none`：启动消费者时，该 Consumer 所消费的主题的分区没有被消费过，会抛出异常 (一般新建的 Topic 或者用新的消费者组是使用该模式会抛异常)
 
