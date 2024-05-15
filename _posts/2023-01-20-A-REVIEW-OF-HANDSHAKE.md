@@ -125,3 +125,4 @@ AuthorizedKey: AuthorizedKey 是用户的公钥，存储在服务器上，用于
 -   [SSH Handshake Explained](https://goteleport.com/blog/ssh-handshake-explained/)
 -   [Diffie Hellman key exchange](https://en.wikipedia.org/wiki/Diffie%E2%80%93Hellman_key_exchange)
 -   [OpenSSH/SSH Protocols](https://en.wikibooks.org/wiki/OpenSSH/SSH_Protocols)
+-   [10. Diffie-Hellman key exchange](https://textbook.cs161.org/crypto/key-exchange.html)
