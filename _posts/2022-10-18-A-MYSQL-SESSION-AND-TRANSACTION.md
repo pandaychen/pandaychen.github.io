@@ -440,3 +440,5 @@ set GLOBAL innodb_status_output_locks; 开启所监控
 -	[深入浅出 mysql 锁]()
 -	
 一文理解MySQL的事务原则与事务隔离
+-        [Innodb中的事务隔离级别和锁的关系](https://tech.meituan.com/2014/08/20/innodb-lock.html)
+-        [深入理解 MySQL：锁、事务与并发控制](https://cloud.tencent.com/developer/article/1401196)
