@@ -353,8 +353,8 @@ Read View 主要是用来做可见性分析的, 里面保存了 ** 对本事务�
 回滚日志，Undo log 中存储的是老版本数据，当一个事务需要读取记录行时，** 如果当前记录行不可见 **，可以顺着 undo log 链找到满足其可见性条件的记录行版本
 
 Undo log 分类：在 InnoDB 里分为如下两类：
--	insert undo log：事务对 insert 新记录时产生的 undo log, 只在事务回滚时需要, 并且在事务提交后就可以立即丢弃
--	update undo log：事务对记录进行 delete 和 update 操作时产生的 undo log，不仅在事务回滚时需要，快照读也需要，只有当数据库所使用的快照中不涉及该日志记录，对应的回滚日志才会被 purge 线程删除
+-	insert undo log：事务对 `insert` 新记录时产生的 undo log, 只在事务回滚时需要, 并且在事务提交后就可以立即丢弃
+-	update undo log：事务对记录进行 `delete` 和 `update` 操作时产生的 undo log，不仅在事务回滚时需要，快照读也需要，只有当数据库所使用的快照中不涉及该日志记录，对应的回滚日志才会被 `purge` 线程删除
 
 Undo log 的作用是：a）保证事务原子性，即可以通过 undo log 做回滚操作；b）实现数据多版本：即实现 MVCC 机制。结合上面的 Read View 来看，一个事务会在上述的链表中，最终找到一个在当前事务中可见的记录版本
 
@@ -363,7 +363,7 @@ Undo log 的作用是：a）保证事务原子性，即可以通过 undo log 做
 ![]()
 
 ####	当前读 VS 快照读
-1.	在 innodb 中创建一个新事务后，执行第一个 `select` 语句的时候，innodb 会创建一个快照（Read View），快照中会保存系统当前不应该被本事务看到的其他活跃事务 id 列表（即 trx_ids）
+1.	在 innodb 中创建一个新事务后，执行第一个 `select` 语句的时候，innodb 会创建一个快照（Read View），快照中会保存系统当前不应该被本事务看到的其他活跃事务 id 列表（即 `trx_ids`）
 2.	当用户在这个事务中要读取某个记录行的时候，innodb 会将该记录行的 `DB_TRX_ID` 与该 Read View 中的一些变量进行比较，判断是否满足可见性条件（见 Read View 可见性分析）
 
 -	快照读（snapshot read）：也叫普通读，即通过回滚指针构成的链表，读取到当前事务对应的事务 id** 可见的数据版本 **。普通的 `select` 语句（但是不包括 `select ... lock in share mode`，`select ... for update`）就是快照读；该方法是利用 MVCC 机制读取快照中的数据（不加锁的简单的 SELECT 都属于快照读）
@@ -484,3 +484,4 @@ INSERT INTO book VALUES(3, '精通Java', 100);
 -   [深入理解 MySQL：锁、事务与并发控制](https://cloud.tencent.com/developer/article/1401196)
 -	[一文带你理解 MySQL 事务核心知识点](https://juejin.cn/post/7165896352797294623)
 -	[MySQL 日志：undo log、redo log、binlog 有什么用？](https://www.xiaolincoding.com/mysql/log/how_update.html)
+-	[浅谈MySQL并发控制：隔离级别、锁与MVCC](https://cloud.tencent.com/developer/article/1622258)
