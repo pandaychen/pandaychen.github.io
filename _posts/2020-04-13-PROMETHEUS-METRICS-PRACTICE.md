@@ -290,8 +290,36 @@ rate(node_network_receive_packets_total{device=~"en.*"}[1m])
 
 这样的指标在笔者现网中也是极为常用的
 
-####	rate VS irate VS increase
+####	rate VS irate
+上节分析了 `rate` 的实现，对比 `irate` 则是计算的最后两个点之间的差值，如下图，注意对比与 `rate` 方法的不同：
 
+![irate](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/Prometheus-basic/irate-chart-.png)
+
+`irate` 函数因为只用最后两个点的差值来计算，会比 `rate` 平均值的方法得到的结果，变化更加剧烈，更能反映当时的情况。那既然是使用最后两个点计算，这里又为什么需要时间跨度 `[1m]` 参数？这个 `[1m]` 不是用来计算的，是用来限制找 `t-2` 个点的时间的，比如，如果中间丢了很多数据，那么显然这个点的计算会很不准确，`irate` 在计算的时候会最多向前在 `[1m]` 找点，如果超过 `[1m]` 没有找到数据点，这个点的计算就放弃了。`irate(node_network_receive_packets_total{device=~"en.*"}[1m])` 的指标图更新如下：
+
+![irate](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/Prometheus-basic/network-irate-query.png)
+
+对比与 `rate`，可以看到后者变化更加剧烈了，比较适合于 CPU，network 这种资源的变化，使用 `irate` 更加有意义
+
+####	increase
+`increase` 的计算方式是 `end - start`（没有除）计算的是每分钟的增量
+
+小结下，`rate`/`irate`/`increase` 函数接受的都是 Range Vector，返回的是 Instant Vector，另外需要 [注意](https://www.robustperception.io/what-range-should-i-use-with-rate/) 的是，`increase` 和 `rate` 的 range 内必须要有至少 `4` 个数据点
+
+####	使用函数的顺序问题
+计算如下公式 `P99` 的时候，要注意函数顺序（`rate`、`sum` 与 `histogram_quantile` 的次序不能交换）：
+
+```python
+histogram_quantile(0.99,
+    sum by (le)
+    (rate(http_request_duration_seconds_bucket[10m]))
+)
+```
+
+首先，Histogram 是一个 Counter，所以要使用 `rate` 先处理，然后根据 `le` 将 labels 使用 `sum` 合起来，最后使用 `histogram_quantile` 来计算。这三个函数的顺序是不能调换的，必须是先 `rate` 再 `sum`，最后 `histogram_quantile`
+
+-	`rate` 必须在 `sum` 之前。前面提到过 Prometheus 支持在 Counter 的数据有下降之后自动处理的，比如服务器重启了，metric 重新从 `0` 开始。这个其实不是在存储的时候做的，比如应用暴露的 metric 就是从 `2033` 变成 `0` 了，那么 Prometheus 就会存储 `0`。 但是在计算 `rate` 的时候，就会识别出来这个下降。但是 `sum` 不会，所以如果先 `sum` 再 `rate`，曲线就会出现非常大的波动（通过 `rate` 尽力排除掉疑似 `0` 这种对结果的干扰）
+-	`histogram_quantile` 必须在最后，由于 `histogram_quantile` 计算的结果是近似值，去聚合（无论是 `sum` 还是 `max` 还是 `avg`）这个值都是没有意义的，可以参考上述 `histogram_quantile` 的分析逻辑
 
 ####	常用
 
