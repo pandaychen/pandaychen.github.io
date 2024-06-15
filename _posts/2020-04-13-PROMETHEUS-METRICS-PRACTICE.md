@@ -239,31 +239,40 @@ http_request_duration_seconds{api="add_product" instance="host1.domain.com" quan
 
 本小节介绍下 PromQL 语言的基础概念，下图表示了 Metric 在 Prometheus 中的样子（假设有如下 `5` 张网卡的流量 counter 指标 `node_network_receive_packets_total`）：
 
-![selector]()
+![selector](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/Prometheus-basic/selectors-1.png)
 
-![grafana-1]()
+![grafana-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/Prometheus-basic/network-counter.png)
 
 直接在 Grafana 中使用 `node_network_receive_packets_total` 来画图会得到 `5` 条线，不过此图意义不大且无法看到指标变化趋势。因为 Counter 只增加，可以认为是该服务器自存在以来收到的所有的包的数量。Metric 可以通过 `label` 来进行选择，比如 `node_network_receive_packets_total{device="bond0"}` 就会只查询到 `bond0` 的数据（绘制 `bond0` 这个 device 的曲线）, 当然也支持正则表达式，可以通过 `node_network_receive_packets_total{device=~"en.*"}` 绘制 `en0` 和 `en2` 的曲线。其实，metric name 也是一个 label， 所以 `node_network_receive_packets_total{device="bond0"}` 本质上是 `{__name__="node_network_receive_packets_total", device="bond0"}` 。但是因为 metric name 基本上是必用的 label，一般用第一种写法
 
-但实际上，如果使用下面的查询语句，将会仅仅得到一个数字，而不是整个 metric 的历史数据（`node_network_receive_packets_total{device=~"en.*"}` 得到的是下图中黄色的部分（即 Instant Vector），只查询到 metric 的在某个时间点（默认是当前时间）的值。
+但实际上，如果使用下面的查询语句，将会仅仅得到一个数字，而不是整个 metric 的历史数据（`node_network_receive_packets_total{device=~"en.*"}` 得到的是下图中黄色的部分（即 Instant Vector），只查询到 metric 的在某个时间点（默认是当前时间）的值
 
-![]()
+![instant-vector](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/Prometheus-basic/instant-vector.png)
 
 ####	Instant vector selectors
 这里描述的 Instant Vector 还是 Range Vector, ** 指的是 PromQL 函数的入参和返回值的类型 **，Instant Vector 就是当前的值，假如查询的时间点是 `t`，那么查询会返回距离 `t` 时间点最近的一个值
 
-![Instant vector]()
+![Instant vector](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/Prometheus-basic/prometheus-instant-vector.png)
 
 ####	Range vector selectors
-![Range vector]()
+![Range vector](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/Prometheus-basic/prometheus-range-vector.png)
 
 Range Vector 返回的是一个 range 的数据。Range 的表示方法是 `[1m]`，表示 `1` 分钟的数据，假如对 Prometheus 的采集配置是每 `10s` 采集一次，那么 `1m` 内就会有采集 `6` 次，就会有 `6` 个数据点，使用 `node_network_receive_packets_total{device=~"en.*"}[1m]` 查询的话，就可以得到以下的数据：两个 metric 的最后的 `6` 个数据点，如下图：
 
 ![Range vector selectors](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/Prometheus-basic/select-en-range.png)
 
 
-####	一个插曲
-思考一个问题，在 Grafana 中画出来一个 Metric 的图标，需要查询结果是一个 Instant Vector，还是 Range Vector 呢？答案是 Instant Vector
+####	一个插曲：关于 grafana 的绘图原理
+思考一个问题，在 Grafana 中画出来一个 Metric 的图标，需要查询结果是一个 Instant Vector，还是 Range Vector 呢？答案是 Instant Vector，直觉上有些奇怪（绘出的图是一个区间），结论是 Range Vector 基本上只是为了给 PromQL 函数用的，Grafana 绘图只能接受 Instant Vector（Grafana 只接受 Instant Vector, 如果查询的结果是 Range Vector, 会报错）。**Prometheus 的查询 API 是以 HTTP 的形式提供的，Grafana 在渲染一个图标的时候会向 Prometheus 去查询数据 **。查询 API 主要有两类：
+
+1. `/query`，查询一个时间点的数据，返回一个数据值，通过 `?time=1627111334` 参数可以查询指定时间的数据，假如要绘制 `1` 个小时内的 Chart 的话，Grafana 首先需要在创建 Chart 的时候传入一个 `step` 值（表示多久查一个数据），假设 `step=1min` 的话，对每分钟需要查询一次数据。那么 Grafana 会向 Prometheus 发送 `60` 次请求，查询 `60` 个数据点，即 `60` 个 Instant Vector，然后绘制出来一张图表（缺点是请求次数太多）
+
+2.	`query_range`，接收的参数如 `?start=<start_timestamp>&end=<end_timestamp>&step=60`，在 Prometheus 内部还是对 `60` 个点进行了分别计算，然后返回
+
+要注意区分，Range Vector 并不是 grafana 绘制的时间，而是函数计算所需要的时间区间，Grafana 只接受 Instant Vector, 如果查询的结果是 Range Vector, 会报错
+
+![error](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/Prometheus-basic/grafana-only-accept-instant-vector.png)
+
 
 ####	常用操作
 
@@ -295,14 +304,14 @@ rate(node_network_receive_packets_total{device=~"en.*"}[1m])
 
 ![irate](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/Prometheus-basic/irate-chart-.png)
 
-`irate` 函数因为只用最后两个点的差值来计算，会比 `rate` 平均值的方法得到的结果，变化更加剧烈，更能反映当时的情况。那既然是使用最后两个点计算，这里又为什么需要时间跨度 `[1m]` 参数？这个 `[1m]` 不是用来计算的，是用来限制找 `t-2` 个点的时间的，比如，如果中间丢了很多数据，那么显然这个点的计算会很不准确，`irate` 在计算的时候会最多向前在 `[1m]` 找点，如果超过 `[1m]` 没有找到数据点，这个点的计算就放弃了。`irate(node_network_receive_packets_total{device=~"en.*"}[1m])` 的指标图更新如下：
+`irate` 函数因为只用最后两个点的差值来计算，会比 `rate` 平均值的方法得到的结果，变化更加剧烈，更能反映当时的情况。那既然 `irate` 函数是用最后两个点计算，这里又为什么需要带上时间跨度 `[1m]` 参数？这个 `[1m]` 不是用来计算的，是用来限制找 `t-2` 个点的时间的，比如，如果中间丢了很多数据，那么显然这个点的计算会很不准确，`irate` 在计算的时候会最多向前在 `[1m]` 找点，如果超过 `[1m]` 没有找到数据点，这个点的计算就放弃了。`irate(node_network_receive_packets_total{device=~"en.*"}[1m])` 的指标图更新如下：
 
 ![irate](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/Prometheus-basic/network-irate-query.png)
 
-对比与 `rate`，可以看到后者变化更加剧烈了，比较适合于 CPU，network 这种资源的变化，使用 `irate` 更加有意义
+对比与 `rate`，可以看到后者变化更加剧烈，比较适合于 CPU，network 这种资源的变化，使用 `irate` 更加有意义
 
 ####	increase
-`increase` 的计算方式是 `end - start`（没有除）计算的是每分钟的增量
+`increase` 的计算方式是 `end - start`（没有除），它计算的是每分钟的增量
 
 小结下，`rate`/`irate`/`increase` 函数接受的都是 Range Vector，返回的是 Instant Vector，另外需要 [注意](https://www.robustperception.io/what-range-should-i-use-with-rate/) 的是，`increase` 和 `rate` 的 range 内必须要有至少 `4` 个数据点
 
@@ -311,47 +320,49 @@ rate(node_network_receive_packets_total{device=~"en.*"}[1m])
 
 ```python
 histogram_quantile(0.99,
-    sum by (le)
+    sum by (le)		# 按照 le 这个 label 进行分组
     (rate(http_request_duration_seconds_bucket[10m]))
 )
 ```
 
-首先，Histogram 是一个 Counter，所以要使用 `rate` 先处理，然后根据 `le` 将 labels 使用 `sum` 合起来，最后使用 `histogram_quantile` 来计算。这三个函数的顺序是不能调换的，必须是先 `rate` 再 `sum`，最后 `histogram_quantile`
+首先，Histogram 本质（`http_request_duration_seconds_bucket`）也是一个 Counter，所以要使用 `rate` 先处理，然后根据 `le` 将 labels 使用 `sum` 合起来，最后使用 `histogram_quantile` 来计算。这三个函数的顺序是不能调换的，必须是先 `rate` 再 `sum`，最后 `histogram_quantile`。原因如下：
 
--	`rate` 必须在 `sum` 之前。前面提到过 Prometheus 支持在 Counter 的数据有下降之后自动处理的，比如服务器重启了，metric 重新从 `0` 开始。这个其实不是在存储的时候做的，比如应用暴露的 metric 就是从 `2033` 变成 `0` 了，那么 Prometheus 就会存储 `0`。 但是在计算 `rate` 的时候，就会识别出来这个下降。但是 `sum` 不会，所以如果先 `sum` 再 `rate`，曲线就会出现非常大的波动（通过 `rate` 尽力排除掉疑似 `0` 这种对结果的干扰）
--	`histogram_quantile` 必须在最后，由于 `histogram_quantile` 计算的结果是近似值，去聚合（无论是 `sum` 还是 `max` 还是 `avg`）这个值都是没有意义的，可以参考上述 `histogram_quantile` 的分析逻辑
+-	`rate` 必须在 `sum` 之前。前面提到过 Prometheus 支持在 Counter 的数据有下降之后自动处理的，比如服务器重启了，metric 重新从 `0` 开始。这个其实不是在存储的时候做的，比如应用暴露的 metric 就是从 `2033` 变成 `0` 了，那么 Prometheus 就会存储 `0`。 但是在计算 `rate` 的时候，就会识别出来这个下降。但是 `sum` 不会，所以如果先 `sum` 再 `rate`，曲线就会出现非常大的波动（通过 `rate` 尽力排除掉疑似 `0` 这种对计算结果的干扰）
+-	`histogram_quantile` 必须在最后，由于 `histogram_quantile` 计算的结果是近似值，去聚合（`sum`/ `max`/ `avg` 这些函数）这个值都是没有意义的，可以参考上述 `histogram_quantile` 的分析逻辑
 
-####	常用
+此外，对于 histogram 指标的 PXX 计算，桶的区间越大，越不准确，桶的区间越小，越准确
 
+可以参考下面的文章：
+-	[What range should I use with rate()?](https://www.robustperception.io/what-range-should-i-use-with-rate/)
+-	[P99 是如何计算的](https://www.kawabangga.com/posts/4284)
+-	[Rate then sum, never sum then rate](https://www.robustperception.io/rate-then-sum-never-sum-then-rate/)
+
+####	常用 PromQL 汇总
 
 ##  0x03  promql 的典型应用：实践
 
 ##  0x04  小结
 
 ####  summary vs Histogram
-在大多数情况下，直方图是首选，因为它更灵活，并允许汇总百分位数。在不需要百分位数而只需要平均数的情况下，或者在需要非常精确的百分位数的情况下，汇总是有用的。例如，在履行关键系统的合约责任的情况下。
+在大多数情况下，histogram 直方图是首选，因为它更灵活，并允许汇总百分位数。在不需要百分位数而只需要平均数的情况下，或者在需要非常精确的百分位数的情况下，使用 summary 是有用的，histogram 与 summary 的对比如下：
+
+Histogram：
+-	客户端性能消耗小，服务端查询分位数时消耗大
+-	可以在查询期间自由计算各种不同的分位数
+-	分位数的精度无法保证，其精确度受桶的配置、数据分布、数据量大小情况影响
+-	可聚合，可以计算全局分位数
+-	客户端兼容性好
+
+Summary：
+-	客户端性能消耗大（因为分位数计算发生在客户端），服务端查询分位数时消耗小
+-	只能查询客户端上报的哪些分位数
+-	分位数的精度可以得到保证，精度会影响客户端的消耗
+-	不可聚合，无法计算全局分位数（因此不支持多实例，平行扩展的 http 服务）
+-	客户端兼容性不好
 
 
-Histogram
-客户端性能消耗小，服务端查询分位数时消耗大。
-可以在查询期间自由计算各种不同的分位数。
-分位数的精度无法保证，其精确度受桶的配置、数据分布、数据量大小情况影响。
-可聚合，可以计算全局分位数。
-客户端兼容性好。
-Summary
-客户端性能消耗大（因为分位数计算发生在客户端），服务端查询分位数时消耗小。
-只能查询客户端上报的哪些分位数。
-分位数的精度可以得到保证，精度会影响客户端的消耗。
-不可聚合，无法计算全局分位数（因此不支持多实例，平行扩展的 http 服务）。
-客户端兼容性不好。
-综上所述，大多数场景使用 Histogram 更为灵活
-
-
-
-####  PromQL 要先 rate() 再 sum()，不能 sum() 完再 rate()
-这背后与 rate() 的实现方式有关，rate() 在设计上假定对应的指标是一个 Counter，也就是只有 incr(增加) 和 reset(归 0) 两种行为。而做了 sum() 或其他聚合之后，得到的就不再是一个 Counter 了，举个例子，比如 sum() 的计算对象中有一个归 0 了，那整体的和会下降，而不是归零，这会影响 rate() 中判断 reset(归 0) 的逻辑，从而导致错误的结果。写 PromQL 时这个坑容易避免，但碰到 Recording Rule 就不那么容易了，因为不去看配置的话大家也想不到 new_metric 是怎么来的。
-
-Recording Rule 规则：一步到位，直接算出需要的值，避免算出一个中间结果再拿去做聚合。
+####  规则：PromQL 要先 rate() 再 sum()，不能 sum() 完再 rate()
+这背后与 `rate()` 的实现方式有关，`rate()` 在设计上假定对应的指标是一个 Counter，也就是只有 `incr`（增加）和 `reset`（归 `0`） 两种行为。而做了 `sum()` 或其他聚合之后，得到的就不再是一个 Counter 了。比如 `sum()` 的计算对象中有一个归 `0` 了，那整体的和会下降，而不是归零，这会影响 `rate()` 中判断 `reset`（归 `0`） 的逻辑，从而导致错误的结果。此外，建议遵循此外，建议遵循 Recording Rule 规则：一步到位，直接算出需要的值，避免算出一个中间结果再拿去做聚合
 
 ```python
 rate(http_requests_total{job="node"}[5m])
