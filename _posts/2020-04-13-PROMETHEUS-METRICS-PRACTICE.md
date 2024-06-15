@@ -231,9 +231,10 @@ http_request_duration_seconds{api="add_product" instance="host1.domain.com" quan
 
 上例包括总和和计数以及五个分位数。分位数 `0` 相当于最小值，分位数 `1` 相当于最大值。分位数 `0.5` 是中位数，分位数 `0.90`、`0.95` 和 `0.99` 相当于在 `host1.domain.com` 上运行的 `add_product` API 后端响应时间的第 `90`、`95` 和 `99` 个百分位。像 Histogram 一样，Summary 指标包括总和和计数，可用于计算随时间的平均值以及不同时间序列的平均值。Summary 提供了比 Histogram 更精确的百分位计算结果，但这些百分位有三个主要缺点：
 
-1.  首先，客户端计算百分位是很昂贵的。这是因为客户端库必须保持一个有序的数据点列表，以进行这种计算。在 Prometheus SDK 中的实现限制了内存中保留和排序的数据点的数量，这降低了准确性以换取效率的提高（并非所有的 Prometheus 客户端库都支持汇总指标中的量值）
-2.  第二，你要查询的量值必须由客户端预先定义。只有那些已经提供了指标的量值才能通过查询返回。没有办法在查询时计算其他百分位。增加一个新的百分位指标需要修改代码，该指标才可以被使用
+1.  客户端计算百分位是很昂贵的。这是因为客户端库必须保持一个有序的数据点列表，以进行这种计算。在 Prometheus SDK 中的实现限制了内存中保留和排序的数据点的数量，这降低了准确性以换取效率的提高（并非所有的 Prometheus 客户端库都支持汇总指标中的量值）
+2.  你要查询的量值必须由客户端预先定义。只有那些已经提供了指标的量值才能通过查询返回。没有办法在查询时计算其他百分位。增加一个新的百分位指标需要修改代码，该指标才可以被使用
 3.  无法把多个 Summary 指标进行聚合计算。在本例中若 `add_product` 的 API 后端运行在 `10` 个主机上，在这些服务之前有一个负载均衡器。没有任何聚合函数可以用来计算 `add_product` API 接口在所有请求中响应时间的第 `99` 百分位数，无论这些请求被发送到哪个后端实例上。只能看到每个主机的第 `99` 个百分点。同样也只能知道某个接口，比如 `add_product` API 端点的（在某个实例上的）第 `99` 百分位数，而无法对不同的接口进行聚合
+4.	Histogram 并不会保存数据采样点值，每个 bucket 只有个记录样本数的 counter（`float64`），即 Histogram 存储的是区间的样本数统计值，因此客户端性能开销相比 Counter 和 Gauge 而言没有明显改变，适合高并发的数据收集；因为 Histogram 在客户端就是简单的分桶和分桶计数，在 Prometheus 服务端基于这么有限的数据做百分位估算，所以的确不是很准确，Summary 就是解决百分位准确的问题而来的。**Summary 直接存储了 quantile 数据，而不是根据统计区间计算出来的**。Prometheus 的分位数称为 quantile，其实叫 percentile 更准确。百分位数是指小于某个特定数值的采样点达到一定的百分比
 
 ##  0x02  promql 的典型应用：引入
 
@@ -391,5 +392,6 @@ rate(sum by (job)(http_requests_total{job="node"})[5m])  # Don't do this
 - [What is the difference between increase and delta in PromQL?](https://stackoverflow.com/questions/74991963/what-is-the-difference-between-increase-and-delta-in-promql)
 - [P99 是如何计算的](https://www.kawabangga.com/posts/4284)
 - [Understanding Prometheus Range Vectors](https://satyanash.net/software/2021/01/04/understanding-prometheus-range-vectors.html)
+- [Prometheus 的 Summary 和 Histogram](https://liqiang.io/post/summary-and-histogram-in-prometheus-zh#google_vignette)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
