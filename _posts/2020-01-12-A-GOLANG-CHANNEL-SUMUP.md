@@ -505,6 +505,7 @@ func main() {
                 }(val)
         }
         wg.Wait()
+        // 注意，这里必须先close
         close(results)
 
         for v := range results {
@@ -512,6 +513,11 @@ func main() {
         }
 }
 ```
+
+在上面这个经典示例中，使用close可以关闭channel，当channel关闭后，就无法再向channel写数据了，但是仍然可以从channel中读取数据（而且必须关闭）。支持`for-range`的方式进行遍历：
+1.  在`for...range`遍历时，如果channel没有关闭，则回出现`deadlock`的错误
+2.  在遍历时，如果channel已经关闭，则会正常遍历数据，遍历完后，就会退出遍历
+
 
 ##      0x05    协程的优雅退出
 本小节介绍下 goroutine 的优雅主动退出机制（不能通过某种手段强制关闭，只能等待 goroutine 主动退出）
