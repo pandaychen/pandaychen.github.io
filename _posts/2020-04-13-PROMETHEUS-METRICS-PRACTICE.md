@@ -342,6 +342,28 @@ histogram_quantile(0.99,
 
 ##  0x03  promql 的典型应用：实践
 
+####  sum 用法
+`sum`是PromQL中的一个聚合操作符，用于计算一组时间序列数据的总和。简单地说，`sum`的作用是将一组时间序列数据相加，得到一个总和值。这对于计算多个实例（如服务器、容器等）的资源使用情况总和等场景非常有用。当然，`sum`计算需要基于同一指标名：
+
+```text
+#not ok
+http_requests_total{job="api-server", instance="instance-1"}
+cpu_usage{job="api-server", instance="instance-1"}
+
+#ok
+http_requests_total{job="api-server", instance="instance-1"}
+http_requests_total{job="api-server", instance="instance-2"}
+```
+
+假设三台服务器的CPU使用率如下，使用`sum(cpu_usage)`可以得到这三台服务器的CPU使用率总和，`sum`通常与`by`子句配合，以便在对多个标签进行分组求和时更加明确。如果希望按照服务器所在的数据中心对CPU使用率求和`sum(cpu_usage) by (datacenter)`，结果将按照数据中心分组，显示每个数据中心中所有服务器的CPU使用率总和。这有点像是一个维度的设计，需要开发者自行规划label
+```text
+server1：10%
+server2：20%
+server3：30%
+```
+
+又如`sum by (job)(rate(http_requests_total{job="node"}[5m]))`，这个例子的含义是计算过去`5`分钟中，每个`job="node"`的HTTP请求的平均速率，并按照`job`的值进行求和，但同时只关心一个特定的 `job` 值（即 `node`），这个查询模式在处理多个 job 值的情况下比较有用
+
 ##  0x04  小结
 
 ####  summary vs Histogram
@@ -393,5 +415,6 @@ rate(sum by (job)(http_requests_total{job="node"})[5m])  # Don't do this
 - [P99 是如何计算的](https://www.kawabangga.com/posts/4284)
 - [Understanding Prometheus Range Vectors](https://satyanash.net/software/2021/01/04/understanding-prometheus-range-vectors.html)
 - [Prometheus 的 Summary 和 Histogram](https://liqiang.io/post/summary-and-histogram-in-prometheus-zh#google_vignette)
+- [PromQL中Counter相关函数rate(), irate()与 increase() 的使用与区别](https://bbs.huaweicloud.com/blogs/246148)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
