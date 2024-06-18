@@ -304,7 +304,12 @@ TODO
 
 ![question](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kafka/consumer-debug-question1.png)
 
-问题是重启后 consumer 不消费 `data0` 的数据？
+问题是重启后 consumer 不消费 `data0` 的数据？初步排查已知：
+
+1. 生产者成功写入
+2. 消费者模式设置为``sarama.OffsetNewest`，且上面数据未被消费过
+
+猜测是存在数据过期机制，
 
 ## 0x07 参考
 
