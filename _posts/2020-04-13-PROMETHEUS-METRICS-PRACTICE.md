@@ -26,7 +26,7 @@ tags:
 
 
 ####  计数器（Counter）
-Counter 类型指标被用于单调增加的测量结果，只增不减。唯一的例外是 Counter 重启，在这种情况下，counter 值会被重置为 `0`。Counter 的实际值本身并不是十分有用，通常，** 一个计数器的值经常被用来计算两个时间戳之间的 delta 或者随时间变化的速率 **；举例如下 counter `http_requests_total`：
+Counter 类型指标被用于单调增加的测量结果，只增不减。唯一的例外是 Counter 重启，在这种情况下，counter 值会被重置为 `0`。Counter 的实际值本身并不是十分有用（** 从另外角度看 counter 的前后两个值是有关系的，后者是由前者累加过来 **），通常，** 一个计数器的值经常被用来计算两个时间戳之间的 delta 或者随时间变化的速率 **；举例如下 counter `http_requests_total`：
 
 ```TEXT
 # Counter 的一个典型用例是记录 API 调用次数，这是一个总是会增加的测量值
@@ -234,7 +234,7 @@ http_request_duration_seconds{api="add_product" instance="host1.domain.com" quan
 1.  客户端计算百分位是很昂贵的。这是因为客户端库必须保持一个有序的数据点列表，以进行这种计算。在 Prometheus SDK 中的实现限制了内存中保留和排序的数据点的数量，这降低了准确性以换取效率的提高（并非所有的 Prometheus 客户端库都支持汇总指标中的量值）
 2.  你要查询的量值必须由客户端预先定义。只有那些已经提供了指标的量值才能通过查询返回。没有办法在查询时计算其他百分位。增加一个新的百分位指标需要修改代码，该指标才可以被使用
 3.  无法把多个 Summary 指标进行聚合计算。在本例中若 `add_product` 的 API 后端运行在 `10` 个主机上，在这些服务之前有一个负载均衡器。没有任何聚合函数可以用来计算 `add_product` API 接口在所有请求中响应时间的第 `99` 百分位数，无论这些请求被发送到哪个后端实例上。只能看到每个主机的第 `99` 个百分点。同样也只能知道某个接口，比如 `add_product` API 端点的（在某个实例上的）第 `99` 百分位数，而无法对不同的接口进行聚合
-4.	Histogram 并不会保存数据采样点值，每个 bucket 只有个记录样本数的 counter（`float64`），即 Histogram 存储的是区间的样本数统计值，因此客户端性能开销相比 Counter 和 Gauge 而言没有明显改变，适合高并发的数据收集；因为 Histogram 在客户端就是简单的分桶和分桶计数，在 Prometheus 服务端基于这么有限的数据做百分位估算，所以的确不是很准确，Summary 就是解决百分位准确的问题而来的。**Summary 直接存储了 quantile 数据，而不是根据统计区间计算出来的**。Prometheus 的分位数称为 quantile，其实叫 percentile 更准确。百分位数是指小于某个特定数值的采样点达到一定的百分比
+4.	Histogram 并不会保存数据采样点值，每个 bucket 只有个记录样本数的 counter（`float64`），即 Histogram 存储的是区间的样本数统计值，因此客户端性能开销相比 Counter 和 Gauge 而言没有明显改变，适合高并发的数据收集；因为 Histogram 在客户端就是简单的分桶和分桶计数，在 Prometheus 服务端基于这么有限的数据做百分位估算，所以的确不是很准确，Summary 就是解决百分位准确的问题而来的。**Summary 直接存储了 quantile 数据，而不是根据统计区间计算出来的 **。Prometheus 的分位数称为 quantile，其实叫 percentile 更准确。百分位数是指小于某个特定数值的采样点达到一定的百分比
 
 ##  0x02  promql 的典型应用：引入
 
@@ -262,6 +262,36 @@ Range Vector 返回的是一个 range 的数据。Range 的表示方法是 `[1m]
 
 ![Range vector selectors](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/Prometheus-basic/select-en-range.png)
 
+####	Instant vectors  VS Range vectors
+1.	Instant vectors 可以用直接被绘制; Range vectors 则不能。这是因为绘制图表需要在 `y` 轴上为 `x` 轴上的每个时间戳显示一个数据点。Instant vectors 的每个时间戳只有一个值，而 Range vectors （可能）有很多。为了绘制指标图表，对于在时间序列中显示单个时间戳的多个数据点是没有被定义的
+2.	Instant vectors 可以进行比较和运算; Range vectors 不能
+
+
+####	Range Vector 的函数
+下面的 PromQL 函数只可用于 range vectors，即入参为 range vectors，返回为 instant vector：
+
+```PYTHON
+changes(range-vector)
+absent_over_time(range-vector)
+delta(range-vector)
+deriv(range-vector)
+holt_winters(range-vector, scalar, scalar)
+idelta(range-vector)
+irate(range-vector)
+predict_linear(range-vector, scalar)
+rate(range-vector)
+resets(range-vector)
+avg_over_time(range-vector)
+min_over_time(range-vector)
+max_over_time(range-vector)
+sum_over_time(range-vector)
+count_over_time(range-vector)
+quantile_over_time(scalar, range-vector)
+stddev_over_time(range-vector)
+stdvar_over_time(range-vector)'
+```
+
+range vectors 与 couter 的结合相当重要，单调递增 counter 的值永不减少；它要么增加要么保持不变。Prometheus 只允许一种 counter 减少的情况，即在目标重启期间。如果 counter 值低于之前记录的值，则 `rate` 和 `increase` 等 range vector 函数将假定目标重新启动并将整个值添加到它所知道的现有值。这也是为什么应该总是先 `rate` 后 `sum`，而不是先 `sum` 后 `rate`
 
 ####	一个插曲：关于 grafana 的绘图原理
 思考一个问题，在 Grafana 中画出来一个 Metric 的图标，需要查询结果是一个 Instant Vector，还是 Range Vector 呢？答案是 Instant Vector，直觉上有些奇怪（绘出的图是一个区间），结论是 Range Vector 基本上只是为了给 PromQL 函数用的，Grafana 绘图只能接受 Instant Vector（Grafana 只接受 Instant Vector, 如果查询的结果是 Range Vector, 会报错）。**Prometheus 的查询 API 是以 HTTP 的形式提供的，Grafana 在渲染一个图标的时候会向 Prometheus 去查询数据 **。查询 API 主要有两类：
@@ -298,7 +328,11 @@ rate(node_network_receive_packets_total{device=~"en.*"}[1m])
 
 ![flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/Prometheus-basic/network-rate-query.png)
 
-这样的指标在笔者现网中也是极为常用的
+这样的指标在笔者现网中也是极为常用的。最后在列举下这几个时间（容易混淆）
+
+-	grafana 的绘图区间（时间跨度）
+-	PromQL 的 offset（查询）
+-	Prometheus 的采集周期：对 Prometheus 的采集配置是每 `10s` 采集一次，那么 `1m` 内就会有采集 `6` 次，就会有 `6` 个数据点，正常情况下通过 `offset [1m]` 可以采集到 `6` 个点，`rate` 等相关的计算函数会基于这个点（序列）使用计算
 
 ####	rate VS irate
 上节分析了 `rate` 的实现，对比 `irate` 则是计算的最后两个点之间的差值，如下图，注意对比与 `rate` 方法的不同：
@@ -343,7 +377,7 @@ histogram_quantile(0.99,
 ##  0x03  promql 的典型应用：实践
 
 ####  sum 用法
-`sum`是PromQL中的一个聚合操作符，用于计算一组时间序列数据的总和。简单地说，`sum`的作用是将一组时间序列数据相加，得到一个总和值。这对于计算多个实例（如服务器、容器等）的资源使用情况总和等场景非常有用。当然，`sum`计算需要基于同一指标名：
+`sum` 是 PromQL 中的一个聚合操作符，用于计算一组时间序列数据的总和。简单地说，`sum` 的作用是将一组时间序列数据相加，得到一个总和值。这对于计算多个实例（如服务器、容器等）的资源使用情况总和等场景非常有用。当然，`sum` 计算需要基于同一指标名：
 
 ```text
 #not ok
@@ -355,14 +389,14 @@ http_requests_total{job="api-server", instance="instance-1"}
 http_requests_total{job="api-server", instance="instance-2"}
 ```
 
-假设三台服务器的CPU使用率如下，使用`sum(cpu_usage)`可以得到这三台服务器的CPU使用率总和，`sum`通常与`by`子句配合，以便在对多个标签进行分组求和时更加明确。如果希望按照服务器所在的数据中心对CPU使用率求和`sum(cpu_usage) by (datacenter)`，结果将按照数据中心分组，显示每个数据中心中所有服务器的CPU使用率总和。这有点像是一个维度的设计，需要开发者自行规划label
+假设三台服务器的 CPU 使用率如下，使用 `sum(cpu_usage)` 可以得到这三台服务器的 CPU 使用率总和，`sum` 通常与 `by` 子句配合，以便在对多个标签进行分组求和时更加明确。如果希望按照服务器所在的数据中心对 CPU 使用率求和 `sum(cpu_usage) by (datacenter)`，结果将按照数据中心分组，显示每个数据中心中所有服务器的 CPU 使用率总和。这有点像是一个维度的设计，需要开发者自行规划 label
 ```text
 server1：10%
 server2：20%
 server3：30%
 ```
 
-又如`sum by (job)(rate(http_requests_total{job="node"}[5m]))`，这个例子的含义是计算过去`5`分钟中，每个`job="node"`的HTTP请求的平均速率，并按照`job`的值进行求和，但同时只关心一个特定的 `job` 值（即 `node`），这个查询模式在处理多个 job 值的情况下比较有用
+又如 `sum by (job)(rate(http_requests_total{job="node"}[5m]))`，这个例子的含义是计算过去 `5` 分钟中，每个 `job="node"` 的 HTTP 请求的平均速率，并按照 `job` 的值进行求和，但同时只关心一个特定的 `job` 值（即 `node`），这个查询模式在处理多个 job 值的情况下比较有用
 
 ##  0x04  小结
 
@@ -415,6 +449,6 @@ rate(sum by (job)(http_requests_total{job="node"})[5m])  # Don't do this
 - [P99 是如何计算的](https://www.kawabangga.com/posts/4284)
 - [Understanding Prometheus Range Vectors](https://satyanash.net/software/2021/01/04/understanding-prometheus-range-vectors.html)
 - [Prometheus 的 Summary 和 Histogram](https://liqiang.io/post/summary-and-histogram-in-prometheus-zh#google_vignette)
-- [PromQL中Counter相关函数rate(), irate()与 increase() 的使用与区别](https://bbs.huaweicloud.com/blogs/246148)
+- [PromQL 中 Counter 相关函数 rate(), irate() 与 increase() 的使用与区别](https://bbs.huaweicloud.com/blogs/246148)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
