@@ -17,6 +17,8 @@ tags:
 本文是对前一篇文章 [理解 Prometheus 的基本数据类型及应用（基础篇）](https://pandaychen.github.io/2020/04/11/PROMETHEUS-METRICS-INTRO/) 的实践以及深入理解，推荐如下几篇文章：
 
 - [PromQL 简明教程](https://www.kawabangga.com/posts/4408)
+- [Prometheus 中文文档](https://prometheus.fuckcloudnative.io/di-san-zhang-prometheus/di-4-jie-cha-xun/operators)
+- [prometheus-book](https://yunlzheng.gitbook.io/prometheus-book)
 
 ##  0x01  再看四类指标
 指标名称和标签集的每个唯一组合定义了一条时间序列，而每个时间戳和浮点数定义了一个系列中的样本（即一个数据点），Prometheus 其实只有两种数据类型。Gauge 和 Counter，而 Histogram、 Summary 本质上都是 Counter
@@ -267,6 +269,78 @@ Range Vector 返回的是一个 range 的数据。Range 的表示方法是 `[1m]
 2.	Instant vectors 可以进行比较和运算; Range vectors 不能
 
 
+####	instant vector 的函数
+1、`sum`
+
+`http_requests_total` 记录了 HTTP 请求的总数，两个标签：`status_code`（HTTP 响应状态码）和 service（服务名称），样本数据如下：
+
+```PYTHON
+http_requests_total{status_code="200", service="serviceA"} 1000
+http_requests_total{status_code="200", service="serviceB"} 1200
+http_requests_total{status_code="404", service="serviceA"} 50
+http_requests_total{status_code="404", service="serviceB"} 30
+http_requests_total{status_code="500", service="serviceA"} 10
+http_requests_total{status_code="500", service="serviceB"} 5
+```
+
+那么，`sum by (service) (http_requests_total)` 这个公式是计算每个服务 service 的 HTTP 请求总数，不考虑状态码（`sum` 函数，按照 service 标签进行分组），会返回下面结果：
+
+```python
+{service="serviceA"} 1060	#serviceA 有 1060 个 HTTP 请求
+{service="serviceB"} 1235	#serviceB 有 1235 个 HTTP 请求
+
+sum by (status_code) (http_requests_total) #按照 status_code 标签对 http_requests_total 指标进行求和
+{status_code="200"} 2200
+{status_code="404"} 80
+{status_code="500"} 15
+
+sum(http_requests_total) #将对所有的 http_requests_total 指标进行求和，计算过程是将所有值相加：1000 + 1200 + 50 + 30 + 10 + 5 = 2295
+2295 #结果
+```
+
+2、`avg`、`min`、`max` 等
+
+这几个函数常用于 guage，不太适合 counter 指标，`http_request_duration_seconds` 为 Gauge 类型的指标，表示 HTTP 请求的持续时间
+
+```python
+http_request_duration_seconds{service="serviceA", request_id="1"} 0.1
+http_request_duration_seconds{service="serviceA", request_id="2"} 0.2
+http_request_duration_seconds{service="serviceA", request_id="3"} 0.3
+http_request_duration_seconds{service="serviceB", request_id="4"} 0.2
+http_request_duration_seconds{service="serviceB", request_id="5"} 0.3
+http_request_duration_seconds{service="serviceB", request_id="6"} 0.4
+```
+
+`min by (service) (http_request_duration_seconds)`：计算每个服务（按服务分组）的最小 HTTP 请求持续时间
+
+```PYTHON
+{service="serviceA"} 0.1
+{service="serviceB"} 0.2
+```
+
+`avg by (service) (http_request_duration_seconds)`：计算每个服务的平均 HTTP 请求持续时间
+
+```PYTHON
+serviceA：(0.1 + 0.2 + 0.3) / 3 = 0.2
+serviceB：(0.2 + 0.3 + 0.4) / 3 = 0.3
+{service="serviceA"} 0.2
+{service="serviceB"} 0.3
+```
+
+`quantile by (service) (0.5, http_request_duration_seconds)`： 计算每个服务的中位数（`50%` 分位数）HTTP 请求持续时间
+
+```PYTHON
+{service="serviceA"} 0.2
+{service="serviceB"} 0.3
+```
+
+`count by (service) (http_request_duration_seconds)`： 计算每个服务的 HTTP 请求持续时间数据点数量
+
+```PYTHON
+{service="serviceA"} 3
+{service="serviceB"} 3
+```
+
 ####	Range Vector 的函数
 下面的 PromQL 函数只可用于 range vectors，即入参为 range vectors，返回为 instant vector：
 
@@ -279,12 +353,12 @@ holt_winters(range-vector, scalar, scalar)
 idelta(range-vector)
 irate(range-vector)
 predict_linear(range-vector, scalar)
-rate(range-vector)
+rate(range-vector)：计算时间序列在给定时间范围内的平均速率
 resets(range-vector)
-avg_over_time(range-vector)
-min_over_time(range-vector)
-max_over_time(range-vector)
-sum_over_time(range-vector)
+avg_over_time(range-vector)：计算在给定时间范围内的时间序列平均值
+min_over_time(range-vector)：计算在给定时间范围内的时间序列最小值
+max_over_time(range-vector)：计算在给定时间范围内的时间序列最大值
+sum_over_time(range-vector)：计算在给定时间范围内的时间序列总和
 count_over_time(range-vector)
 quantile_over_time(scalar, range-vector)
 stddev_over_time(range-vector)
@@ -292,6 +366,147 @@ stdvar_over_time(range-vector)'
 ```
 
 range vectors 与 couter 的结合相当重要，单调递增 counter 的值永不减少；它要么增加要么保持不变。Prometheus 只允许一种 counter 减少的情况，即在目标重启期间。如果 counter 值低于之前记录的值，则 `rate` 和 `increase` 等 range vector 函数将假定目标重新启动并将整个值添加到它所知道的现有值。这也是为什么应该总是先 `rate` 后 `sum`，而不是先 `sum` 后 `rate`
+假设，`http_requests_total`5 分钟的时间序列如下：
+
+```TEXT
+时间（分钟）  service="serviceA"  service="serviceB"
+----------------------------------------------
+0            100                 200
+1            110                 210
+2            120                 220
+3            130                 230
+4            140                 240
+```
+
+
+1、`avg_over_time`：`avg_over_time(http_requests_total[5m])` 计算过去 `5` 分钟内 `http_requests_total` 指标的平均值（聚合所有 label 的指标）
+
+2、`rate(http_requests_total{service="serviceA"}[4m])`: 计算过去 `4` 分钟内 serviceA 的 HTTP 请求总数的平均速率，这里描述下具体计算过程
+
+首先，需要计算每分钟的增量：
+
+1 分钟: 110 - 100 = 10
+2 分钟: 120 - 110 = 10
+3 分钟: 130 - 120 = 10
+4 分钟: 140 - 130 = 10
+
+然后，我们计算 4 分钟内的平均速率：(10 + 10 + 10 + 10) / 4 = 10。所以，结果是 10。
+
+3、`max_over_time(http_requests_total{service="serviceB"}[4m])`：计算过去 `4` 分钟内 serviceB 的 HTTP 请求总数的最大值，即 `max(210, 220, 230, 240) = 240`
+
+4、`avg_over_time(http_requests_total{service="serviceA"}[4m])`：计算过去 4 分钟内 serviceA 的 HTTP 请求总数的平均值，将 `4` 分钟内的数据点相加后除以 `4`，即 `(110 + 120 + 130 + 140) / 4 = 125`
+
+5、`idelta(http_requests_total{service="serviceB"}[1m])`：计算过去 `1` 分钟内 serviceB 的 HTTP 请求总数最后两个数据点的差值，即 `240 - 230 = 10`
+
+6、`delta(http_requests_total{service="serviceA"}[4m])`： 计算过去 `4` 分钟内 serviceA 的 HTTP 请求总数的差值，只需计算第 `4` 分钟和第 `0` 分钟的差值：`140 - 100 = 40`
+
+7、`sum by (service) (increase(http_requests_total[1m]))`：计算每个服务在过去 `1` 分钟内的 HTTP 请求增量之和
+
+首先需要计算每个服务在过去 `1` 分钟内的增量：
+
+serviceA：140（第 4 分钟） - 130（第 3 分钟） = 10
+serviceB：240（第 4 分钟） - 230（第 3 分钟） = 10
+
+接下来，将按 `service` 标签对这些增量进行求和。由于只有两个服务，所以求和操作实际上就是将每个服务的增量作为结果。结果是：
+
+```PYTHON
+{service="serviceA"} 10
+{service="serviceB"} 10
+```
+
+8、`sum by (service) (rate(http_requests_total[1m]))`：计算每个服务在过去 1 分钟（60s）内的 HTTP 请求速率之和，按 service 分组
+
+```TEXT
+时间（秒）  service="serviceA"  service="serviceB"
+----------------------------------------------
+0          100                 200
+10         102                 204
+20         104                 208
+30         106                 212
+40         108                 216
+50         110                 220
+60         112                 224
+```
+
+首先需要计算每个服务在过去 `1` 分钟内的平均速率，如下：
+```text
+serviceA：rate(http_requests_total{service="serviceA"}[1m]) #在过去 60 秒内，从 100 增加到 112，增量为 12，速率为 12 / 60 = 0.2
+serviceB：rate(http_requests_total{service="serviceB"}[1m]) #在过去 60 秒内，从 200 增加到 224，增量为 24，速率为 24 / 60 = 0.4
+```
+
+结果是：
+```python
+{service="serviceA"} 0.2
+{service="serviceB"} 0.4
+#在过去 1 分钟内，serviceA 的 HTTP 请求速率为 0.2 次 / 秒，serviceB 的 HTTP 请求速率为 0.4 次 / 秒
+```
+
+9、`min by (service) (rate(http_request_duration_seconds[1m]))`：计算每个服务在过去 `1` 分钟内的最小 HTTP 请求持续时间速率
+
+####	其他内置函数
+可以参考 []()，这里列举一些常用的函数
+
+1、`histogram_quantile`，`histogram_quantile(float,instant-vector)` 从 bucket 类型的向量中计算 float 分位数的样本的最大值。向量 instant-vector 中的样本是每个 bucket 的采样点数量。每个样本的 labels 中必须要有 `le` 这个 label 来表示每个 bucket 的上边界，没有 `le` 标签的样本会被忽略；使用 `rate()` 函数来指定分位数计算的时间窗口。
+
+例如，一个直方图指标名称为 `employee_age_bucket_bucket`，要计算过去 `10` 分钟内 第 `90` 个百分位数，使用表达式 `histogram_quantile(0.9, rate(employee_age_bucket_bucket[10m]))`，返回表示最近 `10` 分钟之内 `90%` 的样本的最大值为 `35.714285714285715`
+
+```PYTHON
+{instance="10.0.86.71:8080",job="prometheus"} 35.714285714285715
+```
+
+上面的计算结果是每组标签组合成一个时间序列，在现网中，可能不会对所有这些维度（如 `job`、`instance` 和 `method`）感兴趣，并希望将其中的一些维度进行聚合，则可使用 `sum()` 函数。例如，以下表达式根据 job 标签来对第 `90` 个百分位数进行聚合：
+
+```TEXT
+# histogram_quantile() 函数必须包含 le 标签
+histogram_quantile(0.9, sum(rate(employee_age_bucket_bucket[10m])) by (job, le))
+```
+
+如果要聚合所有的标签，则使用表达式 `histogram_quantile(0.9,sum(rate(employee_age_bucket_bucket[10m])) by (le))`
+
+`histogram_quantile` 这个函数是根据假定每个区间内的样本分布是线性分布来计算结果值的（它的结果未必准确），最高的 bucket 必须是 `le="+Inf"` (否则就返回 `NaN`)
+
+此外，列举下聚合所有标签的例子：
+
+```PYTHON
+http_request_duration_seconds_bucket{le="0.1", handler="handlerA", instance="instance1"} 50
+http_request_duration_seconds_bucket{le="0.2", handler="handlerA", instance="instance1"} 100
+http_request_duration_seconds_bucket{le="0.3", handler="handlerA", instance="instance1"} 150
+http_request_duration_seconds_bucket{le="+Inf", handler="handlerA", instance="instance1"} 160
+
+http_request_duration_seconds_bucket{le="0.1", handler="handlerB", instance="instance2"} 20
+http_request_duration_seconds_bucket{le="0.2", handler="handlerB", instance="instance2"} 60
+http_request_duration_seconds_bucket{le="0.3", handler="handlerB", instance="instance2"} 120
+http_request_duration_seconds_bucket{le="+Inf", handler="handlerB", instance="instance2"} 130
+```
+
+那么 `histogram_quantile(0.9, sum(rate(http_request_duration_seconds_bucket[10m])) by (le))` 查询，结果将忽略 `handler` 和 `instance` 标签，只按 `le` 标签进行聚合，结果如下：
+
+```PYTHON
+{le="0.1"} 70
+{le="0.2"} 160
+{le="0.3"} 270
+{le="+Inf"} 290
+```
+
+2、假设 `http_request_duration_seconds_bucket` 的直方图指标记录了 HTTP 请求的持续时间，指标具有两个标签：`le`（表示持续时间的上限）和 `handler`（表示处理 HTTP 请求的程序），计算每个处理程序的 HTTP 请求持续时间的 90% 分位数的过程如下（`histogram_quantile(0.9, sum by (le, handler) (rate(http_request_duration_seconds_bucket[5m])))`）
+
+```TEXT
+http_request_duration_seconds_bucket{le="0.1", handler="handlerA"} 50
+http_request_duration_seconds_bucket{le="0.2", handler="handlerA"} 100
+http_request_duration_seconds_bucket{le="0.3", handler="handlerA"} 150
+http_request_duration_seconds_bucket{le="+Inf", handler="handlerA"} 160
+
+http_request_duration_seconds_bucket{le="0.1", handler="handlerB"} 20
+http_request_duration_seconds_bucket{le="0.2", handler="handlerB"} 60
+http_request_duration_seconds_bucket{le="0.3", handler="handlerB"} 120
+http_request_duration_seconds_bucket{le="+Inf", handler="handlerB"} 130
+```
+
+
+1.	`rate(http_request_duration_seconds_bucket[5m])`: 计算过去 `5` 分钟内 `http_request_duration_seconds_bucket` 指标（histogram）的速率
+2.	`sum by (le, handler) (...)`：将上一步得到的速率结果按照 `le` 和 `handler` 标签进行分组，并对每个分组计算总和。这意味着，最后的结果将展示每个持续时间上限（`le`）和处理程序（`handler`）在过去 `5` 分钟内的 HTTP 请求速率之和
+3.	`histogram_quantile(0.9, ...)`：根据上一步得到的直方图数据计算 `90%` 分位数。具体来说，它会找到一个持续时间值，使得 `90%` 的 HTTP 请求持续时间都小于等于这个值
+
 
 ####	一个插曲：关于 grafana 的绘图原理
 思考一个问题，在 Grafana 中画出来一个 Metric 的图标，需要查询结果是一个 Instant Vector，还是 Range Vector 呢？答案是 Instant Vector，直觉上有些奇怪（绘出的图是一个区间），结论是 Range Vector 基本上只是为了给 PromQL 函数用的，Grafana 绘图只能接受 Instant Vector（Grafana 只接受 Instant Vector, 如果查询的结果是 Range Vector, 会报错）。**Prometheus 的查询 API 是以 HTTP 的形式提供的，Grafana 在渲染一个图标的时候会向 Prometheus 去查询数据 **。查询 API 主要有两类：
