@@ -33,11 +33,11 @@ tags:
 
 
 ####  Pipeline 的坑
-注意当`pipeClient.Exec`方法返回err时，还需要处理返回值（当`err==redis.Nil`时），看下面批量`HGet`，其他批量操作也是同理，测试代码见[pipeline.go](https://github.com/pandaychen/golang_in_action/blob/master/redis/go-redis/pipeline.go)
+注意当 `pipeClient.Exec` 方法返回 err 时，还需要处理返回值（当 `err==redis.Nil` 时），看下面批量 `HGet`，其他批量操作也是同理，测试代码见 [pipeline.go](https://github.com/pandaychen/golang_in_action/blob/master/redis/go-redis/pipeline.go)
 
 ```GO
-// PipelineGetHashField 使用pipeline命令获取多个hash key的单个字段
-// keyList，需要获取的hash key列表
+// PipelineGetHashField 使用 pipeline 命令获取多个 hash key 的单个字段
+// keyList，需要获取的 hash key 列表
 // field 需要获取的字段值
 func PipelineGetHashField(keyList []string,filed string) []string {
     pipeClient :=client.Pipeline()
@@ -49,13 +49,13 @@ func PipelineGetHashField(keyList []string,filed string) []string {
         if err != redis.Nil {
             logrus.WithField("key_list", keyList).Errorf("get from redis error:%s", err.Error())
         }
-        // 注意这里如果某一次获取时出错（常见的redis.Nil），返回的err即不为空
-        // 如果需要处理redis.Nil为默认值，此处不能直接return
+        // 注意这里如果某一次获取时出错（常见的 redis.Nil），返回的 err 即不为空
+        // 如果需要处理 redis.Nil 为默认值，此处不能直接 return
     }
     valList := make([]string, 0, len(keyList))
     for index, cmdRes := range res {
         var val string
-        // 此处断言类型为在for循环内执行的命令返回的类型,上面HGet返回的即为*redis.StringCmd类型
+        // 此处断言类型为在 for 循环内执行的命令返回的类型, 上面 HGet 返回的即为 * redis.StringCmd 类型
         // 处理方式和直接调用同样处理即可
         cmd, ok := cmdRes.(*redis.StringCmd)
         if ok {
@@ -70,9 +70,9 @@ func PipelineGetHashField(keyList []string,filed string) []string {
 }
 ```
 
-关于上面代码示例中`res`，也可以通过保存每一步pipeline的结果来实现一些额外的功能，看下面的例子：
+关于上面代码示例中 `res`，也可以通过保存每一步 pipeline 的结果来实现一些额外的功能，看下面的例子：
 
-1、批量获取kv数据，不过`pipeline.Exec`的结果中不会包含`key`的数据，所以建议在`value`中包含`key`的数据（写入kv时就设计好），这样就可直接在`value`中拿到`key`的信息（比如`hostid`）
+1、批量获取 kv 数据，不过 `pipeline.Exec` 的结果中不会包含 `key` 的数据，所以建议在 `value` 中包含 `key` 的数据（写入 kv 时就设计好），这样就可直接在 `value` 中拿到 `key` 的信息（比如 `hostid`）
 
 ```GO
 func pipeline_1(){
@@ -82,7 +82,7 @@ func pipeline_1(){
 
   cmders, err := redis_pipe.Exec()
   if err != nil {
-    //WARN：当pipeline里面的key不存在时（过期或删除），此时pipeline会报错: redis: nil
+    //WARN：当 pipeline 里面的 key 不存在时（过期或删除），此时 pipeline 会报错: redis: nil
   }
   for _, cmder := range cmders {
     if cmder == nil {
@@ -99,13 +99,13 @@ func pipeline_1(){
     if len(strmap) == 0 {
       continue
     }
-    //check data valid 
+    //check data valid
     // .....
   }
 }
 ```
 
-2、通过一个map，保存每次`pipeline.Get`的结果，借此来保存kv的映射关系，参考代码如下：
+2、通过一个 map，保存每次 `pipeline.Get` 的结果，借此来保存 kv 的映射关系，参考代码如下：
 
 ```go
 func pipeline_2(){
@@ -321,20 +321,20 @@ OK
 ```
 
 ####  ZSET：有序不重复集合
-ZSET 即有序集合，通常用来实现延时队列或者排行榜（如销量 / 积分排行、成绩排行等等）。ZSET 通常包含 `3` 个 关键字操作：
+`ZSET` 即有序集合，通常用来实现延时队列或者排行榜（如销量 / 积分排行、成绩排行等等）。ZSET 通常包含 `3` 个 关键字操作：
 - `key` （与 redis 通常操作的 key value 中的 key 一致）
-- `score` （**用于排序的分数**，该分数是有序集合的关键，可以是双精度或者是整数）
+- `score` （** 用于排序的分数 **，该分数是有序集合的关键，可以是双精度或者是整数）
 - `member` （指传入的 obj，与 key value 中的 value 一致）
 
 几个细节：
 1.  `ZADD`，如果操作的 `key` 中已经有了相同的 `member`，则更新该 `member` 的 `score` 值，并会重排序
-2.  `ZRANGE/ZREVRANGE`，按照 `score` 排序并返回，注意需要传入 `score` 的 [start,end] 区间
-3.  ZSET 每个元素都会关联一个 `float64` 类型的分数，Redis 是通过分数来为集合中的成员进行从小到大的排序
-4.  ZSET 的成员 `member` 是唯一的, 但分数 `score` 却允许重复
-5.  ZSET 是通过哈希表实现的，所以添加 / 删除 / 查找的复杂度都是 `O(1)`
+2.  `ZRANGE/ZREVRANGE`，按照 `score` 排序并返回，注意需要传入 `score` 的 `[start,end]` 区间
+3.  `ZSET` 每个元素都会关联一个 `float64` 类型的分数，Redis 是通过分数来为集合中的成员进行从小到大的排序
+4.  `ZSET` 的成员 `member` 是唯一的, 但分数 `score` 却允许重复
+5.  `ZSET` 是通过哈希表实现的，所以添加 / 删除 / 查找的复杂度都是 `O(1)`
 6.  从使用意义来看，`ZSET` 中只有 `score` 值非常重要，`value` 值没有特别的意义，只需要保证它是唯一的就可以
 7.  `ZREMRANGEBYSCORE key startScore endScore` 会删除 `[startScore,endScore]` 区间的数据（包含左右区间）
-8.  一个key表示一个有序集合
+8.  一个 key 表示一个有序集合
 
 ![ZSET](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/redis/sorted-set-1.png)
 
@@ -352,7 +352,7 @@ ZSET 即有序集合，通常用来实现延时队列或者排行榜（如销量
 127.0.0.1:6379> ZREMRANGEBYSCORE key1 1 3
 (integer) 3
 
-127.0.0.1:6379> zadd scoreboard 100 userA 90 userB 80 userC 
+127.0.0.1:6379> zadd scoreboard 100 userA 90 userB 80 userC
 (integer) 3
 ```
 
@@ -362,11 +362,11 @@ ZSET 即有序集合，通常用来实现延时队列或者排行榜（如销量
 -   危险操作，如 `KEYS  *` 等，不要在现网中使用
 
 ##  0x04  Redis 的应用场景
-本小节梳理下，项目中使用 Redis 的场景。
+本小节梳理下，项目中使用 Redis 的场景
 
 ####  消息队列
 主要是利用 Redis 的 List 数据结构，实现 Broker 机制，又细分为三种模式：
-1、List：使用生产者：`LPUSH`；消费者：`RBPOP` 或 `RPOP` 模拟队列<br>
+1、List：使用生产者：`LPUSH`；消费者：`RBPOP` 或 `RPOP` 模拟队列 <br>
 2、Stream<br>
 3、PUB/SUB（订阅）<br>
 
@@ -379,7 +379,7 @@ ZSET 即有序集合，通常用来实现延时队列或者排行榜（如销量
 ####  延迟队列
 1、实现一思路 <br>
 - 使用 `ZSET` 配合定时轮询的方式实现延时队列机制，任务集合记为 `taskGroupKey`
-- 生成任务以 **当前时间戳** 与 **延时时间** 相加后得到任务真正的触发时间，记为 `time1`，任务的 uuid 即为 `taskid`，当前时间戳记为 `curTime`
+- 生成任务以 ** 当前时间戳 ** 与 ** 延时时间 ** 相加后得到任务真正的触发时间，记为 `time1`，任务的 uuid 即为 `taskid`，当前时间戳记为 `curTime`
 - 使用 `ZADD taskGroupKey time1 taskid` 将任务写入 `ZSET`
 - 主逻辑不断以轮询方式 `ZRANGE taskGroupKey curTime MAXTIME withscores` 获取 `[curTime,MAXTIME)` 之间的任务，记为已经到期的延时任务（集）
 - 处理延时任务，处理完成后删除即可
