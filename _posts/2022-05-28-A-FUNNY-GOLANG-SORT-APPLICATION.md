@@ -164,6 +164,8 @@ type SortableSlice interface {
 
 `SortableSlice` 的实例化结构为 `MinInt64Slice`，定义如下：
 
+![SortableSlice](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/algorithm/fast-merge-sort-1.png)
+
 ```go
 type MinInt64Slice struct {
 	array []int64   //
@@ -397,11 +399,13 @@ func (h *HeapMerge) Pop() (int64, error) {
 	var err error
 
 	if len(h.nodes) > 0 {
-		value = h.nodes[0].Value()
+		value = h.nodes[0].Value()	//从前面的步骤保证了，这里的value一定是最小值，Pop直接返回这个值；然后按照堆的性质调整堆即可
 		err = nil
 
 		if h.nodes[0].HasNext() {
 			h.nodes[0].Next() // 不需要获取值
+
+			// 取当前最小堆顶（即将被pop）的下一个位置元素，由于大概率会破坏堆的性质，所以需要调整堆（参考一般minheap的pop实现）
 			h.adjust(0, len(h.nodes))
 		} else {// 顶部的 node(slice) 已经为空
 			if len(h.nodes) >= 1 {
@@ -421,19 +425,26 @@ func (h *HeapMerge) Pop() (int64, error) {
 }
 
 func (h *HeapMerge) adjust(start, end int) {
-	childIndex := 2*start + 1
+	childIndex := 2*start + 1		//左边：2*start+1，右边：2*start+2（下标从0开始）
 	// 下标应该比长度小
 	if childIndex >= end {
+		// 递归退出的条件
 		return
 	}
 	if childIndex+1 <end && h.nodes[childIndex+1].Value() < h.nodes[childIndex].Value() {
+		// 如果start存在右边的孩子节点（childIndex+1 <end ）
+		// 右孩子比左孩子的value小
 		childIndex++
 	}
 
+	//上面较小的节点，再和start位置比
 	if h.nodes[childIndex].Value() < h.nodes[start].Value() {
+		// 如果小，那么则需要交换start与childIndex这两个节点
 		h.nodes[start], h.nodes[childIndex] = h.nodes[childIndex], h.nodes[start]
 
 		// 一旦交换了之后，后面的节点要重新调整顺序
+
+		// 这里是采用递归的方法实现
 		h.adjust(childIndex, end)
 	}
 }
@@ -465,6 +476,17 @@ loop:
 
 }
 ```
+
+分析下`Sort`核心入口的实现：
+首先，通过`h.Build()`进行初始化建堆，即对`h.nodes`（`[]*SortedSlice`类型）的第一个位置的元素进行建立最小堆，最终`h.Build()`执行完成后，`h.nodes[0].Value()`这个位置的元素一定是最小的
+
+用几张图汇总下上面的排序逻辑：
+
+![step-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/algorithm/fast-merge-sort-2.png)
+
+![step-2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/algorithm/fast-merge-sort-3.png)
+
+![step-3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/algorithm/fast-merge-sort-4.png)
 
 ####	协程池的实现
 

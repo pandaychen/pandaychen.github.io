@@ -95,7 +95,7 @@ const (
 
 以 sarama 库实现的客户端，kafka 消费数据后入库到 Mysql 的场景为例（采用自动提交模式）：通常消费端丢消息都是因为 Offset 自动提交，但是数据并没有插入到 Mysql（比如此时消费者进程 Crash），导致下一次消费者重启后，此条消息会漏掉
 
-a）自动提交模式下的丢消息问题：默认情况下 sarama 是自动提交的方式，间隔为 `1` 秒钟，此外注意**sarama 自动提交的原理：先标记再提交**。代码如下：
+a）自动提交模式下的丢消息问题：默认情况下 sarama 是自动提交的方式，间隔为 `1` 秒钟，此外注意 **sarama 自动提交的原理：先标记再提交 **。代码如下：
 
 ```GO
 // NewConfig returns a new configuration instance with sane defaults.
@@ -109,7 +109,7 @@ func NewConfig() *Config {
 }
 ```
 
-这里的自动提交，是基于被标记过的消息`sess.MarkMessage(msg, "")`，如果不调用 `sess.MarkMessage(msg, "")`，即使启用了自动提交也没有效果，下次启动消费者依然会从上一次的 Offset 重新消费。示例代码如下
+这里的自动提交，是基于被标记过的消息 `sess.MarkMessage(msg, "")`，如果不调用 `sess.MarkMessage(msg,"")`，即使启用了自动提交也没有效果，下次启动消费者依然会从上一次的 Offset 重新消费。示例代码如下
 
 ```go
 type exampleConsumerGroupHandler struct{}
@@ -129,7 +129,7 @@ func (h exampleConsumerGroupHandler) ConsumeClaim(sess ConsumerGroupSession, cla
 但是，这里还有一个细节：需要保持标记逻辑在插入 mysql 代码之后即可确保不会出现丢消息的问题：
 
 ```GO
-//正确的调用顺序：
+// 正确的调用顺序：
 func (h msgConsumerGroup) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
    for msg := range claim.Messages() {
       // 插入 mysql
@@ -140,7 +140,7 @@ func (h msgConsumerGroup) ConsumeClaim(sess sarama.ConsumerGroupSession, claim s
    return nil
 }
 
-//错误的顺序：
+// 错误的顺序：
 func (h msgConsumerGroup) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
    for msg := range claim.Messages() {
       // 错误 1：不能先标记，再插入 mysql，可能标记的时候刚好自动提交 Offset，但 mysql 插入失败了，导致下一次这个消息不会被消费，造成丢失
@@ -155,7 +155,7 @@ func (h msgConsumerGroup) ConsumeClaim(sess sarama.ConsumerGroupSession, claim s
 
 3、sarama 手动提交模式
 
-另外也可以通过手动提交来处理丢消息的问题（sarama库不推荐此模式，因为自动提交模式下已经能解决丢消息问题）
+另外也可以通过手动提交来处理丢消息的问题（sarama 库不推荐此模式，因为自动提交模式下已经能解决丢消息问题）
 
 ```go
 consumerConfig := sarama.NewConfig()
@@ -287,7 +287,7 @@ offsets.retention.minutes
 1. `session.timeout.ms`：`v0.10.2` 之前的版本可适当提高该参数值，需要大于消费一批数据的时间，但不要超过 `30s`（建议设置为 `25s`）；而 `v0.10.2` 及其之后的版本，保持默认值 `10s` 即可
 2. `max.poll.records`：降低该参数值，建议远远小于 <单个线程每秒消费的条数> * <消费线程的个数> *`max.poll.interval.ms` 的乘积，即尽量不要超过消费者处理的条目数，保证在 `max.poll.interval.ms` 内可以处理完成
 
-3. `max.poll.interval.ms`：该值要大于 `max.poll.records` / (<单个线程每秒消费的条数> * <消费线程的个数>) 的值
+3. `max.poll.interval.ms`：该值要大于 `max.poll.records` / (<单个线程每秒消费的条数> * < 消费线程的个数 >) 的值
 
 4. 尽量提高客户端的消费速度，消费逻辑另起线程进行处理；减少 Group 订阅 Topic 的数量，一个 Group 订阅的 Topic 最好不要超过 `5` 个，建议一个 Group 只订阅一个 Topic
 
@@ -304,12 +304,16 @@ TODO
 
 ![question](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kafka/consumer-debug-question1.png)
 
-问题是重启后 consumer 不消费 `data0` 的数据？初步排查已知：
+问题是重启后 consumer 不消费 `data0` 的数据？初步排查已知 kafka 生产者成功写入且消费者模式设置为 ``sarama.OffsetNewest`，从下面几个已知信息入手来排查
 
-1. 生产者成功写入
-2. 消费者模式设置为``sarama.OffsetNewest`，且上面数据未被消费过
+1. 在 Kafka 中，消费者的偏移量（offset）是由消费者自己维护的，消费者组会跟踪每个分区的偏移量，并将其存储在 Kafka 内部的 `__consumer_offsets` topic 中，当然了，这个数据存在有效期（亦或被覆盖或者分区数据被删除）
 
-猜测是存在数据过期机制，
+2. Kafka 中的数据保留策略：`log.retention.hours` 参数用于设置 Kafka 服务器保留日志的时间（小时）；`log.retention.bytes` 参数用于设置每个分区可以保留的最大日志大小（字节）；`offsets.retention.minutes` 参数用于设置 Kafka 服务器保留已提交消费者偏移量的时间（分钟），该设置主要用于处理长时间不活动的消费者（组）。当这些消费者（组）重新启动时，由于它们的偏移量已经过期并被删除，它们将根据消费者配置中的 `auto.offset.reset` 参数（`config.Consumer.Offsets.Initial`）来确定从哪个偏移量开始消费
+
+再腾讯云 ckafka 的默认消息保留时长为 `1` 天，所以问题解决：
+
+![ckafka](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/kafka/cloudtencent-ckafka-settings-1.png)
+
 
 ## 0x07 参考
 
@@ -320,5 +324,6 @@ TODO
 - [Go 社区主流 Kakfa 客户端简要对比](https://tonybai.com/2022/03/28/the-comparison-of-the-go-community-leading-kakfa-clients/)
 - [订阅者最佳实践](https://help.aliyun.com/zh/apsaramq-for-kafka/best-practices-for-consumers?spm=a2c4g.11186623.0.i0)
 - [CKafka 数据可靠性说明](https://cloud.tencent.com/document/product/597/36186)
+- [Kafka(Go) 教程 (六)---sarama 客户端 producer 源码分析](https://www.lixueduan.com/posts/kafka/06-sarama-producer/)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
