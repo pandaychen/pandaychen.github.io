@@ -84,7 +84,7 @@ config := &ssh.ServerConfig{
 ```
 
 ####    SSHD 开发的完整流程
-我们以 [sshd.go](https://gist.github.com/jpillora/b480fde82bff51a06238) 为例，简单看下如何构建一个 SSHD 服务端。<br>
+以 [sshd.go](https://gist.github.com/jpillora/b480fde82bff51a06238) 为例，简单看下如何构建一个 SSHD 服务端。<br>
 一般来说，SSHD 的开发流程如下图所示：
 ![img](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/sshd-dev-flow.png)
 
@@ -312,7 +312,7 @@ if err != nil {
 ```
 
 ####    实现数据交互
-我们知道，交互式 `tty` 是打开一个终端 `tty`，然后在 `tty` 上通过键盘输入命令，回车执行，那么数据交互的过程就是打通 `tty` 和 `bash` 的通道。<br>
+交互式 `tty` 是打开一个终端 `tty`，然后在 `tty` 上通过键盘输入命令，回车执行，那么数据交互的过程就是打通 `tty` 和 `bash` 的通道。<br>
 首先，使用 `exec.Command` 打开一个 `bash`， 然后将 `bash` 与 SSH Channel 对接, 从而实现和 `bash` 的远程交互。注意：这里可以使用定制化 `tty`（比如 `git` 也可通过 ssh 连接来交互）。比如，gliderlabs 的 [sshd 库](https://github.com/gliderlabs/ssh/blob/master/_examples/ssh-pty/pty.go) 代码，对外提供了 `pty` 接口，该库使用 `github.com/kr/pty` 包来实现 `sshd` 的 `tty` 交互功能。
 
 PS：这里如果直接将 `bash` 的输入和输出直接对接 `terminal`，这是错误的操作， 因为 `bash` 没有运行在 `tty` 中，这里需要一个模拟 `tty` 来运行 `bash`。<br>
@@ -392,7 +392,7 @@ go func() {
 }()
 ```
 
-以上，我们就实现了一个简单的交互式的 SSH Server。
+以上就实现了一个简单的交互式的 SSH Server。
 
 ##  0x03    构建 SSH 客户端
 SSH 客户端常见的实现有交互式 tty-bash 和命令执行，其中命令执行又分为交互式 command 和一般的 bash 命令，比如 `gdb`、`top` 等就属于交互式命令，而 `ls` 就属于一般的 bash 执行。
@@ -578,7 +578,7 @@ Port 22
 ProxyCommand bash -c "/bin/corkscrew %r@%h"
 ```
 
-上面是个非常有用的配置，`%r`、`%h`用来代替最终命令中的登录用户和登录ip（即动态的配置）；当然，`/bin/corkscrew`也可以换成其他的工具，在项目中我们是自己实现的proxycommand工具，加多了一些如权限控制，免密登录的特性。
+上面是个非常有用的配置，`%r`、`%h`用来代替最终命令中的登录用户和登录ip（即动态的配置）；当然，`/bin/corkscrew`也可以换成其他的工具，在项目中是自己实现的proxycommand工具，加多了一些如权限控制，免密登录的特性。
 
 PS：新版本的ssh客户端还支持`Match`指令，该指令可以决定是否触发子配置（类似PreCheck预先检查）：
 ```bash
@@ -630,7 +630,7 @@ SSH多路复用的原理如下：
 ##	0x05	几个细节问题
 
 ####    客户端的 hostkey 认证
-在客户端 `ssh.Dail` 中的 `HostKeyCallback`，为客户端验证 hostkey 的回调接口，通常我们都设置为 `ssh.InsecureIgnoreHostKey()`，但是这样做是不安全的（SSH 中间人攻击），参考 [Man-in-the-Middle Attack](https://www.ssh.com/attack/man-in-the-middle)：
+在客户端 `ssh.Dail` 中的 `HostKeyCallback`，为客户端验证 hostkey 的回调接口，通常都设置为 `ssh.InsecureIgnoreHostKey()`，但是这样做是不安全的（SSH 中间人攻击），参考 [Man-in-the-Middle Attack](https://www.ssh.com/attack/man-in-the-middle)：
 ```golang
 client, err := ssh.Dial("tcp", "127.0.0.1:22", &ssh.ClientConfig{
     User: "root",
@@ -716,7 +716,7 @@ func SSHDialTimeout(network, addr string, config *ssh.ClientConfig, timeout time
 }
 ```
 
-不过，在现网中，我们是通过在交互式的 session 发送 `SendRequest` 来实现 keepalive，如下面的客户端代码：
+不过，在现网中是通过在交互式的 session 发送 `SendRequest` 来实现 keepalive，如下面的客户端代码：
 ```golang
 func Client() {
         //....

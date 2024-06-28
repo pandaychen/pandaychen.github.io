@@ -79,7 +79,7 @@ Etcd 官方提供了一个动态演示集群原理的项目 <br>
 
 #### 各个物理节点的 NTP 同步
 
-Etcd 中，存在租约的概念，租约过期后，Key 就会被删除。假设我们三台机器组成了 Etcd 集群，那么如果其中某台机器的 `NTP` 误差较大的话，是存在风险的，可能会导致设置的 Lease 时间和预期不符。所以必要的 `NTP` 同步是需要的
+Etcd 中，存在租约的概念，租约过期后，Key 就会被删除。假设三台机器组成了 Etcd 集群，那么如果其中某台机器的 `NTP` 误差较大的话，是存在风险的，可能会导致设置的 Lease 时间和预期不符。所以必要的 `NTP` 同步是需要的
 
 ## 0x05 客户端
 
@@ -90,7 +90,7 @@ Etcd 中，存在租约的概念，租约过期后，Key 就会被删除。假�
 
 #### 更安全的客户端
 
-在很多环境中我们启动 Etcd 都是通过配置 TLS 方式进行的（比如 Kubernetes）, 所以在连接 Etcd 的时候需要使用 TLS 方式连接：
+在很多环境中启动 Etcd 都是通过配置 TLS 方式进行的（比如 Kubernetes）, 所以在连接 Etcd 的时候需要使用 TLS 方式连接：
 
 ```golang
 tlsInfo := transport.TLSInfo{
@@ -205,7 +205,7 @@ Etcdctl get /a/b --prefix --write-out=fields    #
 
 对于 Etcd 这种多版本的 kv 存储系统而言，每一次成功修改数据的原子操作，都会被记录到新的版本中，每一个历史版本的数据都会被完整保存下来。由于 Etcd 本身是磁盘存储，随着数据量的增大，不可避免的会出现两个问题：一是数据体积增大、二是磁盘碎片增多；随着修改次数的增多，存储的数据量会越来越大，这对 Etcd 集群的性能和稳定性都会带来很大的影响。<br>
 
-因此，在大量使用的 Etcd 的实际生产场景中，需要考虑优化 Etcd 集群的配置，定期做 compact 和 defrag，且对每个节点的 defrag 时间需要错开，不能同时进行。Etcd 提供了如下参数来帮助我们实现自动压缩和碎片整理：
+因此，在大量使用的 Etcd 的实际生产场景中，需要考虑优化 Etcd 集群的配置，定期做 compact 和 defrag，且对每个节点的 defrag 时间需要错开，不能同时进行。Etcd 提供了如下参数来帮助实现自动压缩和碎片整理：
 
 ```bash
 --auto-compaction-retention	#
@@ -296,7 +296,7 @@ for n := range rch {
 
 #### 封装 watcher 结构
 
-基于 Etcd Watcher 的特性，我们封装如下的结构：
+基于 Etcd Watcher 的特性，可以封装如下的结构：
 
 ```golang
 // Watch A watch only tells the latest revision

@@ -25,13 +25,13 @@ tags:
 
 #### 服务发现概念
 
-&emsp;&emsp; 我们说的服务发现，一般理解为客户端如何发现 (并连接到) 服务，这里一般包含三个组件：
+&emsp;&emsp; 服务发现，一般理解为客户端如何发现 (并连接到) 服务，这里一般包含三个组件：
 1. 服务消费者：一般指客户端（可以是简单的 TCP-Client 或者是 RPC-Client ）
 2. 服务提供者：一般指服务提供方，如传统服务，微服务等
 3. 服务注册中心：用来存储（Key-Value）服务提供者的服务，一般以 DNS/HTTP/RPC 等方式对外暴露接口
 
 #### 负载均衡概念
-我们把 LB 看作一个组件，根据组件位置的不同，大致上分为三种：
+把 LB 看作一个组件，根据组件位置的不同，大致上分为三种：
 ####    集中式 LB（Proxy Model）
 &emsp;&emsp; 独立的 LB, 可以是硬件实现，如 F5，或者是 nginx 这种内置 Proxy-pass 或者 upstream 功能的网关，亦或是 LVS/HAPROXY，之前也使用 [DPDK](http://core.dpdk.org/doc/quick-start/) 开发过类似的专用网关。<br>
 ![image](https://image-static.segmentfault.com/376/097/3760970390-58c6367e9e8e5_articlex)
@@ -59,7 +59,7 @@ tags:
 4.	gRPC 客户端发起 RPC 调用，根据 LB 均衡器中实现的负载均衡策略（gRPC 中默认提供的算法是 RoundRobin），选择其中一 HTTP2 长连接进行通信，即 LB 策略决定哪个子通道 - 即哪个 gRPC 服务器将接收请求
 
 ##	0x02 gRPC 负载均衡的运行机制
-gRPC 提供了负载均衡实现的用户侧接口，我们可以非常方便的定制化业务的负载均衡策略，为了理解 gRPC 的负载均衡的实现机制，后续博客中我会分析下 `gRPC` 实现负载均衡的代码。
+gRPC 提供了负载均衡实现的用户侧接口，可以非常方便的定制化业务的负载均衡策略，为了理解 gRPC 的负载均衡的实现机制，后续博客中我会分析下 `gRPC` 实现负载均衡的代码。
 ![grpc-lb-basic](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grpc-lb-basic1.png)
 1.  Resolver
 	-	解析器，用于从注册中心实时获取当前服务端的列表，同步发送给 Balancer
