@@ -12,7 +12,6 @@ tags:
 
 ##  0x00    前言
 
-
 ##  0x01    DEBUG 汇总
 
 ####    调用图
@@ -20,9 +19,6 @@ tags:
 1.  安装 `yum install graphviz`
 2.  `go tool pprof main http://localhost:8000/debug/pprof/heap` 或者 goroutine，进入命令行
 3.  输入 `svg` 命令即可保存
-
-![]()
-
 
 ####    火焰图
 
@@ -65,6 +61,44 @@ go tool pprof --base heap.timeA heap.timeB
 go tool pprof --http :8080 --base heap.timeA heap.timeB
 ```
 
+####    调试goroutine profile的方法
+```BASH
+# 下载cpu profile，默认从当前开始收集30s的cpu使用情况，需要等待30s
+go tool pprof http://localhost:6060/debug/pprof/profile   # 30-second CPU profile
+go tool pprof http://localhost:6060/debug/pprof/profile?seconds=120     # wait 120s
+
+# 下载heap profile
+go tool pprof http://localhost:6060/debug/pprof/heap      # heap profile
+
+# 下载goroutine profile
+go tool pprof http://localhost:6060/debug/pprof/goroutine # goroutine profile
+
+# 下载block profile
+go tool pprof http://localhost:6060/debug/pprof/block     # goroutine blocking profile
+
+# 下载mutex profile
+go tool pprof http://localhost:6060/debug/pprof/mutex
+```
+
+对应采集到的pprof文件，最常用的就是下面三个命令：
+
+-   `top`：显示正运行到某个函数goroutine的数量
+-   `traces`：显示所有goroutine的调用栈
+-   `list`：列出代码详细的信息
+
+####    traces命令
+现网中，基于`traces`命令可以协助排查并定位goroutine泄漏问题
+
+```BASH
+curl http://localhost:6060/debug/pprof/goroutine> goroutine.timeH
+go tool --pprof goroutine.timeH
+#执行traces
+```
+
+参考下面的例子，结合项目分析，排名前面的goroutine数量是不正常的，存在goroutine泄漏问题：
+
+![traces-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/pprof/pprof-traces-example1.png)
+
 ####    `runtime.gopark` 方法的启示
 若查看 goroutine 文件使用 `traces` 命令，发现大量的 `runtime.gopark` 函数调用，那么可以初步认定为程序存在 goroutine 泄漏。`gopark` 函数主要作用就是将当前的 goroutine 放入等待状态，这就意味着 goroutine 被暂时被搁置，也就是被运行时调度器暂停了
 
@@ -78,4 +112,6 @@ go tool pprof --http :8080 --base heap.timeA heap.timeB
 -   切换当前线程的堆栈，从 `g` 的堆栈切换到 `g0`的堆栈并调用 `fn(g)` 函数
 -   将 `g` 的当前 PC/SP 保存在 `g->sched` 中，以便后续调用 `goready` 函数时可以恢复运行现场
 
-##  参考
+##  0x03    参考
+-   [实战Go内存泄露](https://lessisbetter.site/2019/05/18/go-goroutine-leak/)
+-   [万字长文讲解Golang pprof 的使用](https://www.cnblogs.com/hobbybear/p/18059425)

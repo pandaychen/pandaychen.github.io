@@ -28,7 +28,7 @@ tags:
 
 
 ####  计数器（Counter）
-Counter 类型指标被用于单调增加的测量结果，只增不减。唯一的例外是 Counter 重启，在这种情况下，counter 值会被重置为 `0`。Counter 的实际值本身并不是十分有用（** 从另外角度看 counter 的前后两个值是有关系的，后者是由前者累加过来 **），通常，** 一个计数器的值经常被用来计算两个时间戳之间的 delta 或者随时间变化的速率 **；举例如下 counter `http_requests_total`：
+Counter 类型指标被用于单调增加的测量结果，只增不减。唯一的例外是 Counter 重启，在这种情况下，counter 值会被重置为 `0`。Counter 的实际值本身并不是十分有用（从另外角度看 counter 的前后两个值是有关系的，后者是由前者累加过来），通常，**一个计数器的值经常被用来计算两个时间戳之间的 delta 或者随时间变化的速率**；举例如下 counter `http_requests_total`：
 
 ```TEXT
 # Counter 的一个典型用例是记录 API 调用次数，这是一个总是会增加的测量值
@@ -383,14 +383,14 @@ range vectors 与 couter 的结合相当重要，单调递增 counter 的值永�
 
 2、`rate(http_requests_total{service="serviceA"}[4m])`: 计算过去 `4` 分钟内 serviceA 的 HTTP 请求总数的平均速率，这里描述下具体计算过程
 
-首先，需要计算每分钟的增量：
+首先，需要计算每分钟的增量（如下），然后，计算 `4` 分钟内的平均速率：`(10 + 10 + 10 + 10) / 4 = 10`
 
+```TEXT
 1 分钟: 110 - 100 = 10
 2 分钟: 120 - 110 = 10
 3 分钟: 130 - 120 = 10
 4 分钟: 140 - 130 = 10
-
-然后，我们计算 4 分钟内的平均速率：(10 + 10 + 10 + 10) / 4 = 10。所以，结果是 10。
+```
 
 3、`max_over_time(http_requests_total{service="serviceB"}[4m])`：计算过去 `4` 分钟内 serviceB 的 HTTP 请求总数的最大值，即 `max(210, 220, 230, 240) = 240`
 
@@ -429,6 +429,7 @@ serviceB：240（第 4 分钟） - 230（第 3 分钟） = 10
 ```
 
 首先需要计算每个服务在过去 `1` 分钟内的平均速率，如下：
+
 ```text
 serviceA：rate(http_requests_total{service="serviceA"}[1m]) #在过去 60 秒内，从 100 增加到 112，增量为 12，速率为 12 / 60 = 0.2
 serviceB：rate(http_requests_total{service="serviceB"}[1m]) #在过去 60 秒内，从 200 增加到 224，增量为 24，速率为 24 / 60 = 0.4
@@ -440,6 +441,8 @@ serviceB：rate(http_requests_total{service="serviceB"}[1m]) #在过去 60 秒�
 {service="serviceB"} 0.4
 #在过去 1 分钟内，serviceA 的 HTTP 请求速率为 0.2 次 / 秒，serviceB 的 HTTP 请求速率为 0.4 次 / 秒
 ```
+
+注：`sum by (label1,label2)`这里表示只关心`(label1,label2)`这两个label，其他的全部聚合（累加）
 
 9、`min by (service) (rate(http_request_duration_seconds[1m]))`：计算每个服务在过去 `1` 分钟内的最小 HTTP 请求持续时间速率
 

@@ -23,12 +23,11 @@ tags:
 ##  0x01    实现思路
 
 1、remotecommand 暴露的 `Executor` 方法 <br>
-
-我们实现的核心是打通 IO（即 `stdin` 与 `stdout`）之间的桥接，如下图：
+实现的核心是打通 IO（即 `stdin` 与 `stdout`）之间的桥接，如下图：
 
 ![flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/ssh2kubernetesflow.png)
 
-kubernetes 的 [client-go](https://github.com/kubernetes/client-go/blob/master/tools/remotecommand/remotecommand.go) 包提供了集群中的容器建立长连接的方法，并设置容器的 `stdin`，`stdout` 等。此 package 提供了基于 SPDY 协议的 `Executor`，其本质是一个 `interface`，用于和 pod 终端的流的传输及通信。`Executor` 接口定义了 `Stream` [方法](https://github.com/kubernetes/client-go/blob/master/tools/remotecommand/remotecommand.go#L108)，该方法会建立一个流传输的连接，直到服务端和调用端一端关闭连接，才会停止传输。（原 package 中给出的实现是基于 HTTP-SPDY 的，不适用于我们的场景，所有我们需要重新实现 `Stream` 方法）
+kubernetes 的 [client-go](https://github.com/kubernetes/client-go/blob/master/tools/remotecommand/remotecommand.go) 包提供了集群中的容器建立长连接的方法，并设置容器的 `stdin`，`stdout` 等。此 package 提供了基于 SPDY 协议的 `Executor`，其本质是一个 `interface`，用于和 pod 终端的流的传输及通信。`Executor` 接口定义了 `Stream` [方法](https://github.com/kubernetes/client-go/blob/master/tools/remotecommand/remotecommand.go#L108)，该方法会建立一个流传输的连接，直到服务端和调用端一端关闭连接，才会停止传输（原 package 中给出的实现是基于 HTTP-SPDY 的，不适用于笔者的场景，所有需要重新实现 `Stream` 方法）
 
 此外，考虑到 `StreamOptions` 是 `Stream` 方法的参数，在实现 `Stream` 方法时需要填充该结构。
 
@@ -92,7 +91,7 @@ type PyStreamOption interface {
 	remotecommand.TerminalSizeQueue
 }
 ```
-定义如上结构 `PyStreamOption`，然后需要实例化 `PyStreamOption`；注意实例化之后，我们必须实现该 `interface` 的 `3` 个方法：
+定义如上结构 `PyStreamOption`，然后需要实例化 `PyStreamOption`；注意实例化之后，必须实现该 `interface` 的 `3` 个方法：
 
 -	`Read(p []byte) (int, error)`：从前置 SSH 会话（ssh.Channel）中读取数据，转发到用户侧
 -	`Write(p []byte) (int, error)`：从前置 SSH 会话获取用户输入，写入 pod
@@ -151,11 +150,11 @@ func CreateK8SStream(option PyStreamOption) {
 1.	增加流控
 2.	在文件 copy 场景下，直接向 kubelet 发起 `exec` 请求（绕过 APServer），但是需要解决访问 kubelet 地址、认证等相关问题
 
-以文件 copy 场景为例，使用的命令是 `kubectl cp`，**前提是 Pod 中对应的 container 中安装了 `tar` 命令，本质上该指令还是调用了 `exec` 接口，然后执行 `tar` 命令进行文件的拷贝动作**
+以文件 copy 场景为例，使用的命令是 `kubectl cp`，** 前提是 Pod 中对应的 container 中安装了 `tar` 命令，本质上该指令还是调用了 `exec` 接口，然后执行 `tar` 命令进行文件的拷贝动作 **
 
 ```BASH
 #宿主机 –> Pod
-#将宿主机 /tmp/test_pod.txt copy到 mycentos-7b59b5b755-8rbgc 对应的第一个容器中的 /root 目录下
+#将宿主机 /tmp/test_pod.txt copy 到 mycentos-7b59b5b755-8rbgc 对应的第一个容器中的 /root 目录下
 kubectl cp /tmp/test_pod.txt default/mycentos-7b59b5b755-8rbgc:/root
 
 #Pod –> 宿主机
@@ -180,7 +179,7 @@ tar --no-same-permissions --no-same-owner -xmf -
 tar -xmf -
 ```
 
-通过 `client-go` 向 pod 所在节点实现查询kubelet地址，然后向 kubelet 直接发起 `exec` 请求，代码如下：
+通过 `client-go` 向 pod 所在节点实现查询 kubelet 地址，然后向 kubelet 直接发起 `exec` 请求，代码如下：
 
 ```go
 func main() {
@@ -295,6 +294,46 @@ func main(){
 
 2、`bash` 残留
 
+3、不当使用 `TerminalSizeQueue` 导致的内存泄漏问题
+
+这里以 [v0.30.2](https://github.com/kubernetes/client-go/blob/v0.30.2/tools/remotecommand/v3.go) 版本分析下窗口动态更新的实现，先看下用户实现的 `Next` 方法是在何处调用的，如下：
+
+```go
+// streamProtocolV3 implements version 3 of the streaming protocol for attach
+// and exec. This version adds support for resizing the container's terminal.
+type streamProtocolV3 struct {
+	*streamProtocolV2
+
+	resizeStream io.Writer		//resizeStream 是一个 io.Writer
+}
+
+
+func (p *streamProtocolV3) handleResizes() {
+	if p.resizeStream == nil || p.TerminalSizeQueue == nil {
+		// 这两个都需要定义才能启用
+		return
+	}
+	go func() {
+		defer runtime.HandleCrash()
+
+		encoder := json.NewEncoder(p.resizeStream)
+		for {
+			// 在循环中调用 p.TerminalSizeQueue.Next() 拿到一个 size（当前的窗口尺寸）
+			size := p.TerminalSizeQueue.Next()
+			if size == nil {
+				// 注意：协程退出的条件，需要外界主动触发
+				return
+			}
+			if err := encoder.Encode(&size); err != nil {
+				runtime.HandleError(err)
+			}
+		}
+	}()
+}
+```
+
+这段代码可知，在 `handleResizes` 中异步方式启动并监听由 `Next` 方法传递的窗口信息，并将新的 size 信息编码为 JSON 格式发送给 `p.resizeStream`，特别注意这里 goroutine 退出的条件是 `size == nil`，所以外部在调用 `exec.StreamWithContext` 时一定要注意在合适的时机关闭该 goroutine，不然会造成内存泄漏
+
 ##  0x04	参考
 -	[remotecommand 包](https://github.com/kubernetes/client-go/blob/master/tools/remotecommand)
 -	[kubectl 的 resize 窗口实现](https://github.com/kubernetes/kubectl/blob/master/pkg/util/term/resize.go)
@@ -304,3 +343,4 @@ func main(){
 -	[Kubectl exec 的工作原理解读](https://icloudnative.io/posts/how-it-works-kubectl-exec/)
 -	[利用 kubernetes exec 接口实现任意容器的 web-terminal](https://bbs.huaweicloud.com/blogs/281515)
 -	[一个 Kubernetes Web 终端连接工具](https://jiankunking.com/kubernetes-client-go-how-to-make-a-web-terminal.html)
+-	[remotecommand](https://github.com/kubernetes/client-go/blob/v0.30.2/tools/remotecommand/v3.go)

@@ -387,7 +387,7 @@ ip rule规则配置：
 
 最后强调一下，**Tproxy 确实没有改变数据包内容，而是在本地把对应的 socket 换了**
 
-####    代理程序 1：国内服务（socksv5 可客户端）
+####    代理程序 1：国内服务（socksv5 客户端）
 在本地监听 `1081` 端口就可以获取到从 tproxy 过来的数据了，参考项目 [go-tproxy](https://github.com/KatelynHaworth/go-tproxy)，记得一定要设置 socket 的选项。支持接收非本地端口的请求，需要在 socket 上设置 `SOL_IP`、`IP_TRANSPARENT` 选项，否则的话会被 tproxy 丢弃
 
 ```golang

@@ -68,10 +68,10 @@ SSH 公钥认证流程如下图所示，SSH 公钥是公开分发的，任何持
 关于安全性可以参考此文 [Comparing SSH Keys - RSA, DSA, ECDSA, or EdDSA?](https://goteleport.com/blog/comparing-ssh-keys/)
 
 ##      0x02    Certificate 的优化及改造实践
-基于 OpenSSH 证书签发 CA, 与我们所熟知的 HTTPS 证书的签发使用的 `X.509` 体系不同, 它不支持证书链（Certificate Chain） 和可信商业 CA。在项目实践中，我们基于 OpenSSH 证书做了大量的安全性提升的工作。如下，OpenSSH 证书存在两种类型，用户证书（User Certificate）和主机证书（Host Certificate）：
+基于 OpenSSH 证书签发 CA, 与所熟知的 HTTPS 证书的签发使用的 `X.509` 体系不同, 它不支持证书链（Certificate Chain） 和可信商业 CA。在项目实践中，基于 OpenSSH 证书做了大量的安全性提升的工作。如下，OpenSSH 证书存在两种类型，用户证书（User Certificate）和主机证书（Host Certificate）：
 
 ####    用户认证
-基于 CA 签发的用户证书主要用于 SSH 登录，如下面这个用户证书，我们可以基于 `key ID` 或者 `Critical Options` 这个字段做些额外的工作。
+基于 CA 签发的用户证书主要用于 SSH 登录，如下面这个用户证书，可以基于 `key ID` 或者 `Critical Options` 这个字段做些额外的工作。
 
 ```text
  Type: ssh-ed25519-cert-v01@openssh.com user certificate
@@ -126,7 +126,7 @@ OpenSSH 证书与 `X.509` 是两种不同的证书体系，二者的区别如下
 
 
 ####    其他安全特性
-由于证书的不可伪造性（Unforgeability），我们可以利用证书的内置字段或结构来提升证书使用的安全性。此外，OpenSSH 还支持多个 CA （公钥）共用（虽然不推荐这样配置）
+由于证书的不可伪造性（Unforgeability），可以利用证书的内置字段或结构来提升证书使用的安全性。此外，OpenSSH 还支持多个 CA （公钥）共用（虽然不推荐这样配置）
 
 ##      0x03   OpenSSH Certificate With SSO（零信任方案）
 CloudFlare 的 OpenSSH 实践：[Public keys are not enough for SSH security](https://blog.cloudflare.com/public-keys-are-not-enough-for-ssh-security/)，文中给出了一个非常值得借鉴的 OpenSSH 证书架构与 SSO 结合的安全登录体系。整体架构图如下：
@@ -151,7 +151,7 @@ CloudFlare 的 OpenSSH 实践：[Public keys are not enough for SSH security](ht
 2.      CA 私钥的定期轮换机制
 
 ####    CA 证书安全
-对 CA 证书的管理，在项目应用中主要还是加强对用户证书（User Certificate）的管理，一般我们是按照下面的维度来实施：
+对 CA 证书的管理，在项目应用中主要还是加强对用户证书（User Certificate）的管理，一般按照下面的维度来实施：
 1.      证书签发的生效时间区间尽量缩短（快速过期）
 2.      证书的登录用户唯一（最小化签发）
 3.      一次一签
