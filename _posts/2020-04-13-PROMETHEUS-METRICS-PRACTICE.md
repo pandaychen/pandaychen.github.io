@@ -652,6 +652,17 @@ rate(sum by (job)(http_requests_total{job="node"})[5m])  # Don't do this
 
 可以参考此文 [Rate then sum, never sum then rate](https://www.robustperception.io/rate-then-sum-never-sum-then-rate/)
 
+##	0x05	指标与grafana：典型的图
+
+####	couter
+
+####	guage
+
+####	histogram
+
+
+##	0x06	Metrics && SLI && SLO
+
 
 
 ## 0x07 参考

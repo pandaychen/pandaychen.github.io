@@ -323,7 +323,7 @@ OK
 ####  ZSET：有序不重复集合
 `ZSET` 即有序集合，通常用来实现延时队列或者排行榜（如销量 / 积分排行、成绩排行等等）。ZSET 通常包含 `3` 个 关键字操作：
 - `key` （与 redis 通常操作的 key value 中的 key 一致）
-- `score` （** 用于排序的分数 **，该分数是有序集合的关键，可以是双精度或者是整数）
+- `score` （**用于排序的分数**，该分数是有序集合的关键，可以是双精度或者是整数）
 - `member` （指传入的 obj，与 key value 中的 value 一致）
 
 几个细节：
@@ -379,14 +379,14 @@ OK
 ####  延迟队列
 1、实现一思路 <br>
 - 使用 `ZSET` 配合定时轮询的方式实现延时队列机制，任务集合记为 `taskGroupKey`
-- 生成任务以 ** 当前时间戳 ** 与 ** 延时时间 ** 相加后得到任务真正的触发时间，记为 `time1`，任务的 uuid 即为 `taskid`，当前时间戳记为 `curTime`
+- 生成任务以 **当前时间戳** 与 **延时时间** 相加后得到任务真正的触发时间，记为 `time1`，任务的 uuid 即为 `taskid`，当前时间戳记为 `curTime`
 - 使用 `ZADD taskGroupKey time1 taskid` 将任务写入 `ZSET`
 - 主逻辑不断以轮询方式 `ZRANGE taskGroupKey curTime MAXTIME withscores` 获取 `[curTime,MAXTIME)` 之间的任务，记为已经到期的延时任务（集）
 - 处理延时任务，处理完成后删除即可
 - 保存当前时间戳 `curTime`，作为下一次轮询时的 `ZRANGE` 指令的范围起点
 
 
-####  滑动窗口
+####  滑动窗口（rolling window）
 
 ######  场景 1：通过 Redis 构建滑动窗口并实现计数器限流
 
@@ -394,7 +394,7 @@ OK
 
 ![redis-rolling](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/redis/redis-rolling-window1.png)
 
-1.  当用户 A 访问时，向 ZSET 中添加 `ZADD usernameA curTime uuid`，其中 `score` 值 `$curtime` 为当前时间戳，`value` 值 `uuid` 为保证唯一性的字符串（或者改用毫秒时间戳减少 `size`）
+1.  当用户 A 访问时，向 `ZSET` 中添加 `ZADD usernameA curTime uuid`，其中 `score` 值 `$curtime` 为当前时间戳，`value` 值 `uuid` 为保证唯一性的字符串（或者改用毫秒时间戳减少 `size`）
 2.  针对用户 `usernameA`，限流只需要计算指定的时间区间的总数 `ZCOUNT usernameA startTime endTime`，将此值与限流值 `limiter` 比较即可；通过 `score` 值圈出时间窗口，实现了滑动窗口的效果
 3.  对于 `score` 窗口之外的数据，会有占用内存过大的风险，有两个方法优化：
   - 异步清理 `score` 过期的数据（滑动窗口外的数据）
@@ -447,6 +447,36 @@ else
 end
 ```
 
+####  场景3：利用滑动窗口实现DNS域名解析合并
+使用时间戳作为score，DNS解析的域名A记录（IP）作为member，如下图：
+
+![redis-rolling2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/redis/redis-rolling-window2-dns.png)
+
+每次将新解析出来的DNS域名的A记录增加（更新）到ZSET，其中将时间戳更新为当前的IP（如果已经存在相同的IP，那么时间戳会更新），参考如下操作：
+
+```BASH
+1.1.1.1:6380> zadd www.baidu.com 12345 1.1.1.1
+(integer) 1
+1.1.1.1:6380> zadd www.baidu.com 12346 1.1.1.2
+(integer) 1
+1.1.1.1:6380> zadd www.baidu.com 12348 1.1.1.1
+(integer) 0
+1.1.1.1:6380> ZRANGEBYSCORE www.baidu.com -inf +inf WITHSCORES
+1) "1.1.1.2"
+2) "12346"
+3) "1.1.1.1"
+4) "12348"
+1.1.1.1:6380> zadd www.baidu.com 12349 1.1.1.3
+(integer) 1
+1.1.1.1:6380> 
+1.1.1.1:6380> ZRANGEBYSCORE www.baidu.com -inf +inf WITHSCORES
+1) "1.1.1.2"
+2) "12346"
+3) "1.1.1.1"
+4) "12348"
+5) "1.1.1.3"
+6) "12349"
+```
 
 ##	0x05	参考
 -   [Using pipelining to speedup Redis queries](https://redis.io/topics/pipelining)
