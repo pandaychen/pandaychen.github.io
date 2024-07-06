@@ -308,7 +308,7 @@ func waitDelete(ctx context.Context, client *v3.Client, key string, rev int64) e
 ##	0x06	应用 concurrency 包的几个细节
 
 ####	concurrency.Session 结构
-让我们来看下 `concurrency` 封装的 [Session](https://github.com/etcd-io/etcd/blob/master/clientv3/concurrency/session.go#L28) 结构：
+先看下 `concurrency` 封装的 [Session](https://github.com/etcd-io/etcd/blob/master/clientv3/concurrency/session.go#L28) 结构：
 ```golang
 const defaultSessionTTL = 60	//session 的默认 TTL 是 60s
 

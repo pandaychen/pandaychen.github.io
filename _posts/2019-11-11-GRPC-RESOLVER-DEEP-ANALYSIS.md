@@ -77,7 +77,7 @@ type Address struct {
 #### 	resolver.Builder
 官方文档的这句：`Builder creates a resolver that will be used to watch name resolution updates`，大致意思是：当向 gRPC 注册（解析器）服务发现时，实际上注册的是 `Builder`，一般在 `Build` 中会开启单独的 groutine，进行 List-watcher 逻辑。<br>
 Build() 参数中的 `cc ClientConn`，提供了 `Builder` 和 `ClientConn` 交互的纽带，可以调用 `cc.UpdateState(resolver.State{Addresses: addrList})` 来向 `ClientConn` 即时发送服务器列表的更新。<br>
-**<font color="#dd0000"> 这里先预埋一个问题，我们实现的 `resolver.Builder()` 在哪个 gRPC 阶段被调用？</font>**
+**<font color="#dd0000"> 这里先预埋一个问题，实现的 `resolver.Builder()` 在哪个 gRPC 阶段被调用？</font>**
 
 ```golang
 type Builder interface {

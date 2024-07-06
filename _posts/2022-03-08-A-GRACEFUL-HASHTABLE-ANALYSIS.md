@@ -265,9 +265,115 @@ int32_t DeleteServerIpHashTable(CommHashTable *t_pHashTable, uint32_t t_uServeri
 ```
 
 ##	0x02	建堆及排序
+在 hashtable 一轮操作完成后（定时器间隔），可以对 hashtable 中的数据进行排序及汇总，这里采用最小堆实现次数排序：
 
+1、建堆
+```c
+void BuildHeapOfHashTable(CommHashTable *t_pCommHashTable,uint32_t *t_pHeapArray,uint32_t *t_pKeyArray,int32_t t_uLen)
+{
+	// 遍历 hashtable, 首先建立一个长度为 N 的小根堆
+	int32_t i = 0;
+	ServerIp *pTempTcpSessionNode =NULL;
+	pTempTcpSessionNode = (ServerIp *)GetHashTableFirstNode(t_pCommHashTable);
+	if (pTempTcpSessionNode != NULL){
+		t_pHeapArray[i] = pTempTcpSessionNode->uServeripCount;
+		t_pKeyArray[i] = pTempTcpSessionNode->uServerip;
+        //printf("####i=%d,key=%d,count=%d\n",i, t_pKeyArray[i],t_pHeapArray[i]);
+
+		i++;
+		//printf("%p\n", pTempTcpSessionNode);
+		//DeleteServerIpHashTable(&pCommHashTable, uHash);
+		//ClearTcpSessionNode(pTempTcpSessionNode);
+		while (1)
+		{
+			if (i>= t_uLen){
+				break;
+			}
+			pTempTcpSessionNode = (ServerIp *)GetHashTableNextNode(t_pCommHashTable);
+			if (!pTempTcpSessionNode){
+				break;
+			}
+			t_pHeapArray[i] = pTempTcpSessionNode->uServeripCount;
+			t_pKeyArray[i] = pTempTcpSessionNode->uServerip;
+            //printf("####key=%d,count=%d\n", t_pKeyArray[i],t_pHeapArray[i]);
+			i++;
+		}
+	}
+
+	// 将 m_Data[0, Len-1] 建成小根堆，这里只维护一个小根堆，不排序
+	for (i = t_uLen / 2 - 1; i>= 0; i--)
+	{
+		HashtableHeapAdjust(t_pHeapArray, t_pKeyArray, i, t_uLen);
+	}
+
+	while (1)
+	{
+		pTempTcpSessionNode = (ServerIp *)GetHashTableNextNode(t_pCommHashTable);
+		if (!pTempTcpSessionNode){
+			break;
+		}
+		uint32_t uKey = pTempTcpSessionNode->uServerip;
+		uint32_t uCount = pTempTcpSessionNode->uServeripCount;
+		if (uCount> t_pHeapArray[0])
+		{
+			// 如果新的元素比最小堆顶的元素大的话, 淘汰堆顶的元素, 调整堆
+			// 交换并调整堆
+			t_pHeapArray[0] = uCount;
+            t_pKeyArray[0] = uKey;
+			HashtableHeapAdjust(t_pHeapArray,t_pKeyArray,0,t_uLen);
+		}
+	}
+
+	return;
+}
+```
+
+2、堆排序
+
+```C
+// 调整小根堆，堆顶为 Top K 最小
+void HashtableHeapAdjust(uint32_t *t_pHeapArray, uint32_t *t_pKeyArray,int32_t t_iStart, int32_t t_iLen){
+	int32_t nMinChild = 0;
+
+	while ((2 * t_iStart + 1) < t_iLen)
+	{
+		nMinChild = 2 * t_iStart + 1;
+		if ((2 * t_iStart + 2) < t_iLen)
+		{
+			// 比较左子树和右子树, 记录最小值的 Index
+			if (t_pHeapArray[2 * t_iStart + 2] < t_pHeapArray[2 * t_iStart + 1])
+			{
+				nMinChild = 2 * t_iStart + 2;
+			}
+		}
+
+		//change data
+		if (t_pHeapArray[t_iStart] > t_pHeapArray[nMinChild])
+		{
+			// 交换 t_iStart 与 nMaxChild 的数据
+			uint32_t uTemp = t_pHeapArray[t_iStart];
+			t_pHeapArray[t_iStart] = t_pHeapArray[nMinChild];
+			t_pHeapArray[nMinChild] = uTemp;
+
+			// 交换 key
+			uint32_t uKeyTemp = t_pKeyArray[t_iStart];
+			t_pKeyArray[t_iStart] = t_pKeyArray[nMinChild];
+			t_pKeyArray[nMinChild] = uKeyTemp;
+
+			// 堆被破坏, 需要重新调整
+			t_iStart = nMinChild;
+
+		}
+		else
+		{
+			// 比较左右孩子均大则堆未破坏, 不再需要调整
+			break;
+		}
+	}
+}
+```
 
 ##	0x03	参考
--	[bmp_hashtable实现](https://github.com/pandaychen/bmp_hashtable)
+-	[bmp_hashtable 实现](https://github.com/pandaychen/bmp_hashtable)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

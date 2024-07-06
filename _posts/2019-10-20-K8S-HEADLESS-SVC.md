@@ -77,7 +77,7 @@ tags:
 使用 `Kubernetes` 默认的 `Service` 做负载均衡的情况下，`gRPC` 的 `RPC` 通信是基于 `HTTP/2` 标准实现的，`HTTP/2` 的一大特性就是不需要像 `HTTP/1.1` 一样，每次发出请求都要新建立一个连接，而会复用原有的连接。所以这将导致 `Kube-proxy` 只有在连接建立时才会做负载均衡，而在这之后的每一次 `RPC` 请求都会利用原本的连接，那么实际上后续的每一次的 `RPC` 请求都跑到了同一个地方。看下面的这篇文章
 [gRPC Load Balancing on Kubernetes without Tears](https://kubernetes.io/blog/2018/11/07/grpc-load-balancing-on-kubernetes-without-tears/)
 
-既然在 `HTTP/2` 中存在了这样一个特性，那么 `gRPC` 如何与 `Kubernetes` 进行整合呢？我们从 `Kubernetes Service` 的几个类型中来寻找解决 `LB` 问题的方案
+既然在 `HTTP/2` 中存在了这样一个特性，那么 `gRPC` 如何与 `Kubernetes` 进行整合呢？从 `Kubernetes Service` 的几个类型中来寻找解决 `LB` 问题的方案
 
 ## 0x08 再看 Headless Service
 如前所说，`Kubernetes` 提供了一个基础的 `Pod` 控制方式给用户，参加官方文档 [Headless Services](https://kubernetes.io/docs/concepts/services-networking/service/#headless-services)

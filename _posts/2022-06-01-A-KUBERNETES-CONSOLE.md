@@ -150,7 +150,7 @@ func CreateK8SStream(option PyStreamOption) {
 1.	增加流控
 2.	在文件 copy 场景下，直接向 kubelet 发起 `exec` 请求（绕过 APServer），但是需要解决访问 kubelet 地址、认证等相关问题
 
-以文件 copy 场景为例，使用的命令是 `kubectl cp`，** 前提是 Pod 中对应的 container 中安装了 `tar` 命令，本质上该指令还是调用了 `exec` 接口，然后执行 `tar` 命令进行文件的拷贝动作 **
+以文件 copy 场景为例，使用的命令是 `kubectl cp`，**前提是 Pod 中对应的 container 中安装了 `tar` 命令，本质上该指令还是调用了 `exec` 接口，然后执行 `tar` 命令进行文件的拷贝动作**
 
 ```BASH
 #宿主机 –> Pod
@@ -296,7 +296,7 @@ func main(){
 
 3、不当使用 `TerminalSizeQueue` 导致的内存泄漏问题
 
-这里以 [v0.30.2](https://github.com/kubernetes/client-go/blob/v0.30.2/tools/remotecommand/v3.go) 版本分析下窗口动态更新的实现，先看下用户实现的 `Next` 方法是在何处调用的，如下：
+这里以 [v0.30.2](https://github.com/kubernetes/client-go/blob/v0.30.2/tools/remotecommand/v3.go) 版本分析下窗口动态更新的实现（`v3`），先看下用户实现的 `Next` 方法是在何处调用的，如下：
 
 ```go
 // streamProtocolV3 implements version 3 of the streaming protocol for attach
@@ -329,6 +329,32 @@ func (p *streamProtocolV3) handleResizes() {
 			}
 		}
 	}()
+}
+
+// stream：streamProtocolV3创建execstream入口
+func (p *streamProtocolV3) stream(conn streamCreator) error {
+        if err := p.createStreams(conn); err != nil {
+                return err
+        }
+
+        // now that all the streams have been created, proceed with reading & copying
+
+        errorChan := watchErrorStream(p.errorStream, &errorDecoderV3{})
+
+		//默认在创建stream时，会异步启动handleResizes方法
+        p.handleResizes()
+
+        p.copyStdin()
+
+        var wg sync.WaitGroup
+        p.copyStdout(&wg)
+        p.copyStderr(&wg)
+
+        // we're waiting for stdout/stderr to finish copying
+        wg.Wait()
+
+        // waits for errorStream to finish reading with an error or nil
+        return <-errorChan
 }
 ```
 

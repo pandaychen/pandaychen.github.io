@@ -30,7 +30,7 @@ User`<--->`Browser`<--->`WebSocket`<--->`SSH`<--->`(TTY)RemoteServer
 ![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2019/1029-ssh-flow1.png)
 
 ##  0x02    实现
-作为一个 SSH 远程登陆系统，认证是及其重要的一环，我们将上面的数据流扩展下，加入必要的身份及票据认证，如下图<br>
+作为一个 SSH 远程登陆系统，认证是及其重要的一环，将上面的数据流扩展下，加入必要的身份及票据认证，如下图<br>
 ![webconsoleWithAuth](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ssh/webconsole-jiagou.png)
 
 ####  组件
@@ -38,7 +38,7 @@ User`<--->`Browser`<--->`WebSocket`<--->`SSH`<--->`(TTY)RemoteServer
 1.  CGI+WEB，采用开源的框架 [Gin](https://github.com/gin-gonic/gin) 实现
 2.  [Websocket](https://github.com/gorilla/websocket)
 3.  [SSH](https://godoc.org/golang.org/x/crypto/ssh)
-4.  认证我们采用临时（一次性）Token 兑换真实 Token（如 SSH 证书 / 秘钥 / 口令等）的方式，这种方式简单易理解，当然了也可以使用 `OAuth2/OpenID` 这种开放认证协议
+4.  认证采用临时（一次性）Token 兑换真实 Token（如 SSH 证书 / 秘钥 / 口令等）的方式，这种方式简单易理解，当然了也可以使用 `OAuth2/OpenID` 这种开放认证协议
 
 ####  基本实现流程
 1.  用户 A 申请某一台机器的登录权限，后台服务返回一个一次性 token 构造的 url 给用户，如 `https://1.2.3.4/cgi-bin/webconsole/check?token=token1`（这里假设以 GET 方式请求）
@@ -220,7 +220,7 @@ go func() {
 
 
 ##  0x05    总结
-1.  在整个系统中，最关键的点是怎样防止用户的身份被伪造，直观点，就是在第 2 步中，后台服务如何确定，当前的接口调用方就是用户 A。另外，我们如何解决共享权限的场景，假设 A 申请了某台机器的登录权限，假设 A 授权 B 也可以使用该票据登录，那么我们的系统的认证如何完成呢？这个是很有趣的问题，待后面在工作中慢慢思考和实现吧。
+1.  在整个系统中，最关键的点是怎样防止用户的身份被伪造，直观点，就是在第 2 步中，后台服务如何确定，当前的接口调用方就是用户 A。另外，如何解决共享权限的场景，假设 A 申请了某台机器的登录权限，假设 A 授权 B 也可以使用该票据登录，那么系统的认证如何完成呢？这个是很有趣的问题，待后面在工作中慢慢思考和实现吧。
 2.  此外，作为 SSH 连接代理的服务（本文中以 `CGI` 服务承担）的稳定性也很重要，因为 WebConsole 的所有流量都会经由 SSH 连接代理转发，TCP 连接也由代理维持，一旦代理故障，所有的 WebConsole 连接都会断开，所以可用性的设计也是非常重要的一环。
 3.  整个 Web 页面需要前置认证机制，比如接入 Github 的 `Oauth`、`Onelogin` 等等
 
