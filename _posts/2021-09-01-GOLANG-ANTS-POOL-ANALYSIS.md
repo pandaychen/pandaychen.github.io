@@ -24,7 +24,114 @@ ants 提供了两种执行模式：
 2、`ants.NewPoolWithFunc(pool_size, func(interface{}))`<br>
 这种方式创建的 Pool 需要指定任务处理函数，需调用 `p.Invoke(arg)` 提交任务，`arg` 是传递给 `func(interface{})` 的参数，此 Pool 适合关注结果的并发任务执行场景 <br>
 
-现网中，大部分使用 `2` 的方式，因为需要关注任务执行的结果。
+现网中，大部分使用 `2` 的方式，因为需要关注任务执行的结果
+
+####	Options 选项
+```GO
+// src/github.com/panjf2000/ants/options.go
+type Options struct {
+  ExpiryDuration time.Duration
+  PreAlloc bool
+  MaxBlockingTasks int
+  Nonblocking bool
+  PanicHandler func(interface{})
+  Logger Logger
+}
+```
+-	`ExpiryDuration`：过期时间。表示 goroutine 空闲多长时间之后会被池回收
+-	`PreAlloc`：预分配。调用 `NewPool()`/`NewPoolWithFunc()` 之后预分配 worker（管理一个工作 goroutine 的结构体）切片。而且使用预分配与否会直接影响池中管理 worker 的结构
+-	`MaxBlockingTasks`：最大阻塞任务数量。即池中 goroutine 数量已到池容量，且所有 goroutine 都处理繁忙状态，这时到来的任务会在阻塞列表等待。这个选项设置的是列表的最大长度。阻塞的任务数量达到这个值后，后续任务提交直接返回失败
+-	`Nonblocking`：池是否阻塞，默认阻塞。提交任务时，如果 goroutine池中 goroutine 已到上限且全部繁忙，阻塞的池会将任务添加的阻塞列表等待（当然受限于阻塞列表长度）非阻塞的池直接返回失败
+-	`PanicHandler`：panic 处理。遇到 panic 会调用这里设置的处理函数
+
+
+1、最大等待队列长度：设置池容量之后，如果所有的 goroutine 都在处理任务。这时提交的任务默认会进入等待队列，超过这个长度，提交任务直接返回错误：
+
+```GO
+func wrapper(i int, wg *sync.WaitGroup) func() {
+  return func() {
+    fmt.Printf("hello from task:%d\n", i)
+    time.Sleep(1 * time.Second)
+    wg.Done()
+  }
+}
+
+func main() {
+  p, _ := ants.NewPool(4, ants.WithMaxBlockingTasks(2))
+  defer p.Release()
+
+  var wg sync.WaitGroup
+  wg.Add(8)
+  for i := 1; i <= 8; i++ {
+    go func(i int) {
+	  //提交任务必须并行进行。如果是串行提交，第 5 个任务提交时由于池中没有空闲的 goroutine 处理该任务，Submit() 方法会被阻塞，后续任务就都不能提交了
+      err := p.Submit(wrapper(i, &wg))
+      if err != nil {
+        fmt.Printf("task:%d err:%v\n", i, err)
+        wg.Done()
+      }
+    }(i)
+  }
+
+  wg.Wait()
+}
+```
+
+2、非阻塞：默认是阻塞的，非阻塞的 ants 池中，在所有 goroutine 都在处理任务时，提交新任务会直接返回错误：
+
+```GO
+func main() {
+  p, _ := ants.NewPool(2, ants.WithNonblocking(true))
+  defer p.Release()
+
+  var wg sync.WaitGroup
+  wg.Add(3)
+  for i := 1; i <= 3; i++ {
+    err := p.Submit(wrapper(i, &wg))
+    if err != nil {
+      fmt.Printf("task:%d err:%v\n", i, err)
+      wg.Done()
+    }
+  }
+
+  wg.Wait()
+}
+```
+
+3、`panic` 处理器：ants 中如果 goroutine 在执行任务时发生 panic，会终止当前任务的执行，将发生错误的堆栈输出到 `os.Stderr`。注意，该 goroutine 还是会被放回池中，下次可以取出执行新的任务
+
+```GO
+func wrapper(i int, wg *sync.WaitGroup) func() {
+  return func() {
+    fmt.Printf("hello from task:%d\n", i)
+    if i%2 == 0 {
+      panic(fmt.Sprintf("panic from task:%d", i))
+    }
+    wg.Done()
+  }
+}
+
+func panicHandler(err interface{}) {
+  fmt.Fprintln(os.Stderr, err)
+}
+
+func main() {
+  //p, _ := ants.NewPool(2)
+	p, _ := ants.NewPool(2, ants.WithPanicHandler(panicHandler))
+	defer p.Release()
+
+  var wg sync.WaitGroup
+  wg.Add(3)
+  for i := 1; i <= 2; i++ {
+    p.Submit(wrapper(i, &wg))
+  }
+
+  time.Sleep(1 * time.Second)
+  p.Submit(wrapper(3, &wg))
+  p.Submit(wrapper(5, &wg))
+  wg.Wait()
+}
+```
 
 ## 0x02 整体分析
 
@@ -96,6 +203,15 @@ type workerArray interface {
 	reset()
 }
 ```
+
+-	`capacity`：池容量，最多能创建的 goroutine 数量。如果为负数，表示容量无限制
+-	`running`：已经创建的 worker goroutine 的数量
+-	`workers`：存放一组 worker 对象，workerArray 只是一个接口
+-	`state`：记录池子当前的状态，是否已关闭（`CLOSED`）
+-	`lock`：锁。ants 自己实现了一个自旋锁。用于同步并发操作
+-	`cond`：条件变量。处理任务等待和唤醒
+-	`workerCache`：使用 `sync.Pool` 对象池管理和创建 worker 对象，提升性能
+-	`blockingNum`：阻塞等待的任务数量
 
 注意 `workerArray` 类型是一个抽象类型 `interface{}`，ants 提供了基于 `stackType` 和 `loopQueueType` 的两种 [实现](https://github.com/panjf2000/ants/blob/master/worker_array.go#L32)。`workerArray` 中的核心结构是 [goWorker](https://github.com/panjf2000/ants/blob/master/worker.go#L33)。通常对于协程池，一个 `Pool` 会生成固定的若干个 `goWorker`，对任务分配指定的 `goWorker` 来实现流水线任务运行，从而达到复用 worker 的目的。
 
@@ -294,14 +410,14 @@ func (p *Pool) Submit(task func()) error {
 }
 ```
 
-#### Pool 获取可用的 goWoker
+#### retrieveWorker 方法：Pool 获取可用的 goWoker
 
-通过 `retrieveWorker` 方法获取当前池中可用的（空闲的） `goWorker`，该方法实现了开头示意图的逻辑。空闲 worker 的获取采用优先级策略，其优先级如下：
+通过 `retrieveWorker` 方法获取当前池中可用的（空闲的） `goWorker`，该方法实现了开头流程图的逻辑。空闲 worker 的获取采用优先级策略，其优先级如下：
 
 1.	优先从 `workerArray` 中获取可用的 worker（有空闲 worker 直接用）
 2.	如果当前运行的协程未达到协程池的容量，从 `workerCache` 中获取并启动一个 worker（即 `spawnWorker` 实现，直接从 `sync.Pool` 的缓存中复用一个）
 3.	若协程池设置了非阻塞，直接返回一个空 worker
-4.	若协程池不支持非阻塞，则阻塞等待可用的 worker
+4.	若协程池阻塞（默认配置），则阻塞等待可用的 worker（全部阻塞在 `p.cond.Wait()` 上）
 
 ```golang
 func (p *Pool) retrieveWorker() (w *goWorker) {
@@ -366,6 +482,7 @@ func (p *Pool) retrieveWorker() (w *goWorker) {
                                 return
                         }
 						// 如果没有取到 goWorker，那么就返回到 p.cond.Wait() 继续阻塞等待好了
+						// TODO
                         goto RETRY
                 }
 
@@ -373,7 +490,46 @@ func (p *Pool) retrieveWorker() (w *goWorker) {
         }
     return
 }
+
 ```
+
+再详细描述下该方法的细节，首先调用 `p.workers.detach()` 获取 `goWorker`（`p.workers` 是 `loopQueue`OR`workerStack`），如果返回了一个 goWorker 对象，说明有空闲 goroutine，直接返回。否则，goroutine 池容量还有余额（即说明容量大于正在工作的 goWorker 数量），则调用 `spawnWorker()` 方法新建一个 `goWorker`，执行其 `run()` 方法，参考上面 `spawnWorker` 的实现。
+
+若 goroutine 池容量已用完。如果设置了非阻塞选项，则直接返回（如果使用 `Invoke` 调用方法会报错 `too many goroutines blocked on submit or Nonblocking is set`）。如果设置了最大阻塞队列长度上限，且当前阻塞等待的任务数量已经达到这个上限，直接返回。否则，阻塞 goroutine 等待数量加 `1`，调用 `p.cond.Wait()` 等待
+
+
+然后 `goWorker.run()` 执行完成一个任务后，调用池的 `revertWorker()` 方法放回 `goWorker`，在此方法中最后会调用 `p.cond.Signal()` 唤醒之前 `retrieveWorker()` 方法中 `cond.Wait()` 的等待，`retrieveWorker()` 方法继续执行阻塞等待数量减 `1`，这里判断当前 goWorker 的数量（也即 goroutine 数量）。如果数量为 `0`，很有可能 goroutine 池刚刚执行了 `Release()` 关闭，所以此时需要先判断池是否处于关闭状态，如果是则直接返回。否则，调用 `spawnWorker()` 创建一个新的 `goWorker` 并执行其 `run()` 方法，这就将本次的 goroutine 调度和用户调用之间绑定了
+
+如果当前 `goWorker` 数量不为 `0`（说明池正在正常的工作状态），则调用 `p.workers.detach()` 取出一个空闲的 goWorker 返回。这个操作有可能失败，因为可能同时有多个 goroutine 在等待，唤醒的时候只有部分 goroutine 能获取到 `goWorker`。如果失败了，其容量还未用完，直接创建新的 `goWorker`，反之重新执行阻塞等待逻辑（为何获取不到`goWorker`？）
+
+```GO
+func (p *Pool) revertWorker(worker *goWorker) bool {
+  if capacity := p.Cap(); (capacity> 0 && p.Running() > capacity) || p.IsClosed() {
+    return false
+  }
+  worker.recycleTime = time.Now()
+  p.lock.Lock()
+
+  if p.IsClosed() {
+    p.lock.Unlock()
+    return false
+  }
+
+  // 放回池
+  err := p.workers.insert(worker)
+  if err != nil {
+    p.lock.Unlock()
+    return false
+  }
+
+  //唤醒同时解锁 
+  p.cond.Signal()
+  p.lock.Unlock()
+  return true
+}
+```
+
+最后，理解这里的实现，需要搞清楚 `p.cond.Wait()` 内部会将当前 goroutine 挂起，然后解开它持有的锁，即会调用 `p.lock.Unlock()`。这也是为什么 `revertWorker()` 中 `p.lock.Lock()` 加锁能成功的原因。然后 `p.cond.Signal()` 或 `p.cond.Broadcast()` 会唤醒因为 `p.cond.Wait()` 而挂起的 goroutine，但是需要 `Signal()`/`Broadcast()` 所在 goroutine 调用解锁方法。而调用 `p.cond.Wait()` 的 goroutine 被唤醒之后，内部会重新执行加锁操作（即调用 `p.lock.Lock()`），所以 `p.cond.Wait()` 之后的逻辑还是在有锁的状态下执行的
 
 #### 动态修改 Pool 容量
 
@@ -824,7 +980,18 @@ func (wq *workerStack) detach() *goWorker {
 }
 ```
 
-## 0x08 参考
+##	0x08	ants 使用的坑
+
+1、默认启动的 goroutine 池是阻塞的，如 `p, _ := ants.NewPoolWithFunc(1024, func(interface{}))`，这里的风险在于当整个 goroutine 池中没有可用的 goroutine 时（池容量已用完），会导致 goroutine 泄漏，如下图：
+
+![pprof](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/pprof/pprof-ants-goroutine-leak.png)
+
+如何解决？
+1.	设置了非阻塞选项，则直接返回（代码实现相应的补偿逻辑）
+2.	设置了最大阻塞队列长度上限，且当前阻塞等待的任务数量已经达到这个上限，直接返回
+3.	定位并解决池阻塞的根本原因
+
+## 0x09 参考
 
 - [Go 每日一库之 ants](https://darjun.github.io/2021/06/03/godailylib/ants/)
 - [Go 语言高性能编程 - sync.Cond](https://geektutu.com/post/hpg-sync-cond.html)
