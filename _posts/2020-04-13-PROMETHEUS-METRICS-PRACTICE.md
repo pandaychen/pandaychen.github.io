@@ -652,18 +652,158 @@ rate(sum by (job)(http_requests_total{job="node"})[5m])  # Don't do this
 
 可以参考此文 [Rate then sum, never sum then rate](https://www.robustperception.io/rate-then-sum-never-sum-then-rate/)
 
-##	0x05	指标与grafana：典型的图
+##	0x05	指标与grafana：典型的面板
+以ETCD的[指标](https://grafana.com/grafana/dashboards/15308-etcd-cluster-overview/)为例
 
 ####	couter
 
+1、qps-top
+
+```PYTHON
+topk(10, sum by (grpc_method) (rate(xxmonitor:grpc_server_handled_total{bcs_cluster_id="$cluster_id",instance="$instance",job="$job"}[2m])))
+```
+
+![qps-top10](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/etcd/qps-top-10.png)
+
+2、出流量qps实时
+
+```python
+sum by (instance) (rate(xxmonitor:container_network_transmit_packets_total{bcs_cluster_id="$cluster_id",pod=~"etcd"}[2m]))
+```
+
+![out-qps](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/etcd/out-flow-qps.png)
+
+3、peer节点入流量qps
+
+```python
+sum by (job, instance) (rate(xxmonitor:etcd_network_peer_sent_bytes_total{bcs_cluster_id="$cluster_id",instance="$instance",job="$job"}[5m]))
+```
+
+![peer-in](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/etcd/peer-in-flow-qps.png)
+
 ####	guage
+1、master出流量视图
+
+```PYTHON
+sum by (bk_target_ip) (sum_over_time(xxmonitor:system:net:speed_sent{bk_target_ip="$masters"}[1m]))
+```
+
+![master-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/etcd/master-out-flow-qps.png)
 
 ####	histogram
 
+```python
+histogram_quantile(0.99, avg by (grpc_method, instance, job, le) (rate(xxmonitor:grpc_server_handling_seconds_bucket{bcs_cluster_id="$cluster_id",grpc_method!~"Watch|Compact",instance="$instance",job="$job"}[2m])))
+```
 
-##	0x06	Metrics && SLI && SLO
+![histogram-p-99](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/etcd/etcd-grpc-latency.png)
+
+##	0x06	Metrics && SLI/SLO
+SLI（Service Level Indicator）和SLO（Service Level Objective）是服务质量管理中的两个关键概念：
+
+-	SLI是衡量服务质量的指标，通常用于衡量服务提供商提供的服务在某个方面的表现。SLI可以是吞吐量、延迟、错误率等指标，用于反映服务的性能、可用性、可靠性等，SLI可以帮助服务提供商和客户了解服务的实际状况，并为改进服务提供依据
+
+-	SLO是基于SLI的目标值，它定义了服务提供商希望达到或维持的服务水平。SLO通常以一定的时间范围（例如每月、每季度）为基准，设定SLI的目标值，如`99.9%`可用性、平均响应时间小于`100ms`等，SLO可以作为服务提供商与客户之间的约定，帮助双方明确期望和责任
+
+####	一个简单的例子：apiserver
+1.	定义SLI
+
+-	请求延迟：通过Prometheus的`http_request_duration_seconds`指标来衡量，该指标可以衡量每个请求的处理时间
+-	请求错误率：通过Prometheus的`http_requests_total`和`http_requests_failed_total`两个指标来计算错误率。`http_requests_total`表示所有的请求总数，`http_requests_failed_total`表示失败的请求总数
+
+2、定义SLO
+
+-	平均请求延迟应该小于`100ms`：通过PromQL来计算平均请求延迟，然后再与目标值进行比较
+-	请求错误率应该小于`1%`：可以通过计算`http_requests_failed_total`与`http_requests_total`的比值，然后与的目标值进行比较
+
+实现：
+```GO
+var (
+	httpRequestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "http_request_duration_seconds",
+			Help:    "HTTP request latency",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"method", "path", "status"},
+	)
+	httpRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "http_requests_total",
+			Help: "Total number of HTTP requests",
+		},
+		[]string{"method", "path", "status"},
+	)
+	httpRequestsFailedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "http_requests_failed_total",
+			Help: "Total number of failed HTTP requests",
+		},
+		[]string{"method", "path"},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(httpRequestDuration)
+	prometheus.MustRegister(httpRequestsTotal)
+	prometheus.MustRegister(httpRequestsFailedTotal)
+}
+
+func main() {
+	router := gin.Default()
+
+	router.Use(prometheusMiddleware())
+
+	router.GET("/", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"message": "Hello, World!"})
+	})
+
+	router.GET("/error", func(c *gin.Context) {
+		c.JSON(http.StatusInternalServerError, gin.H{"message": "An error occurred"})
+	})
+
+	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
+
+	router.Run(":8080")
+}
+
+func prometheusMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+
+		c.Next()
+
+		status := c.Writer.Status()
+		method := c.Request.Method
+		path := c.FullPath()
+
+		httpRequestsTotal.WithLabelValues(method, path, fmt.Sprint(status)).Inc()
+		httpRequestDuration.WithLabelValues(method, path, fmt.Sprint(status)).Observe(time.Since(start).Seconds())
+
+		if status >= http.StatusInternalServerError {
+			httpRequestsFailedTotal.WithLabelValues(method, path).Inc()
+		}
+	}
+}
+```
 
 
+3、计算SLI/SLO
+
+-	平均请求延迟应该小于`100ms`：`avg(http_request_duration_seconds_sum / http_request_duration_seconds_count) * 1000`
+-	请求错误率应该小于`1%`：`sum(http_requests_failed_total) / sum(http_requests_total) * 100`
+-	`P99`的请求响应时间需要小于`500ms`：`histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le)) * 1000`
+其中`sum(rate(http_request_duration_seconds_bucket[5m])) by (le)`部分计算了每个延迟桶的速率，然后将其按照延迟上限（`le`）进行聚合。最后，将结果乘以`1000`，将其转换为`ms`
+
+进一步，将指标按照`GET`/`POST`进行分组，如下：
+
+```python
+avg(http_request_duration_seconds_sum / http_request_duration_seconds_count) by (method) * 1000
+#请求错误率（按GET/POST分组）：
+sum(http_requests_failed_total) by (method) / sum(http_requests_total) by (method) * 100
+#P99响应时间（按GET/POST分组）：
+histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, method)) * 1000
+```
 
 ## 0x07 参考
 
