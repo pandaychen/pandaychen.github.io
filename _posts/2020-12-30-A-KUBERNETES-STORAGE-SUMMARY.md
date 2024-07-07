@@ -12,7 +12,7 @@ tags:
 ---
 
 ##  0x00  前言
-我们知道，Pod 是 Kubernetes 中创建和部署的最小单位，Pod 中封装着应用的容器，存储、独立的网络 IP，以及管理容器如何运行的策略选项。由于容器本身是非持久化的，因此需要解决在容器中运行应用程序遇到的一些问题。首先，当容器崩溃时，Kubelet 将重新启动容器，但是写入容器的文件将会丢失，容器将会以镜像的初始状态重新开始；第二，在通过多个 Pod 中一起运行的容器，通常需要共享容器之间一些文件。Kubernetes 通过 PersistentVolume 解决上述的两个问题。无状态的应用部署与容器内，有状态的部分使用 PersistentVolume 来保存成为基于 Kubernetes 构建应用的 basic 原则之一。
+Pod 是 Kubernetes 中创建和部署的最小单位，Pod 中封装着应用的容器，存储、独立的网络 IP，以及管理容器如何运行的策略选项。由于容器本身是非持久化的，因此需要解决在容器中运行应用程序遇到的一些问题。首先，当容器崩溃时，Kubelet 将重新启动容器，但是写入容器的文件将会丢失，容器将会以镜像的初始状态重新开始；第二，在通过多个 Pod 中一起运行的容器，通常需要共享容器之间一些文件。Kubernetes 通过 PersistentVolume 解决上述的两个问题。无状态的应用部署与容器内，有状态的部分使用 PersistentVolume 来保存成为基于 Kubernetes 构建应用的 basic 原则之一。
 
 在开发及实践中经常遇到的问题是：
 1.  Kubernetes 的存储类型
@@ -89,7 +89,7 @@ spec:
     readOnly: false
   persistentVolumeReclaimPolicy: Recycle
 ```
-这里我们使用的 `accessModes` 模型为 `ReadWriteMany`（即支持多个 Pod 同时以读写方式挂载），接下来创建 PV。
+这里使用的 `accessModes` 模型为 `ReadWriteMany`（即支持多个 Pod 同时以读写方式挂载），接下来创建 PV。
 
 2、创建 PV<br>
 ```bash

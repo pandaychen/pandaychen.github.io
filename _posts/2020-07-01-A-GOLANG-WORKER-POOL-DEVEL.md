@@ -111,7 +111,7 @@ func DoFixedSizeWorks(concurrency int, TaskInputList []TaskInput, fun func(task 
 ```
 
 ##  0x03    调用实例
-调用协程池的方法也非常简单，首先，自定义我们的工作处理回调方法 `WorkCallback`：
+调用协程池的方法也非常简单，首先，自定义工作处理回调方法 `WorkCallback`：
 ```golang
 func WorkCallback(rawTask TaskInput) (id, guid string, outputData interface{}, err error, ret bool) {
 	//DO Batch Jobs
