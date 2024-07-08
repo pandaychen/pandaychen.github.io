@@ -97,7 +97,7 @@ OK
 {"header":{"cluster_id":14841639068965178418,"member_id":10276657743932975437,"revision":53,"raft_term":2},"kvs":[{"key":"a2V5MQ==","create_revision":53,"mod_revision":53,"version":1,"value":"dmFsdWUxMQ=="}],"count":1}
 ```
 
-此时，我们通过下面的代码查询 `key1` 的值，使用 `clientv3.WithRev(47)` 这个条件，仍然得到了 `create_revision=47` 时 `key1` 的值，同时 `head revision=53` 告诉我们当前 `key1` 的 `Revision` 是 `53`：
+此时，通过下面的代码查询 `key1` 的值，使用 `clientv3.WithRev(47)` 这个条件，仍然得到了 `create_revision=47` 时 `key1` 的值，同时 `head revision=53` 告诉当前 `key1` 的 `Revision` 是 `53`：
 ```golang
 func main() {
         endpoints := []string{"127.0.0.1:2379"}
@@ -129,7 +129,7 @@ func main() {
 key1 -> value1, create revsion=47, head revision=53
 ```
 
-再次删掉 `key1`，查询一个不存在的 `Revision`，会得到 `len(resp.Kvs)==0` 的结果，符合我们的预期。
+再次删掉 `key1`，查询一个不存在的 `Revision`，会得到 `len(resp.Kvs)==0` 的结果，符合预期。
 ```bash
 [root@VM_0_7_centos etcd_tools]# etcdctl del key1
 1

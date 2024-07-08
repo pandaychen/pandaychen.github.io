@@ -31,7 +31,7 @@ tags:
 1.  执行周期性任务
 2.  只执行一次的任务
 
-试想一下，我们的系统应该是下面这样的，满足如下特性：
+试想一下，设计的系统应该是下面这样的，满足如下特性：
 ![distribute-crontab](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/dcrontab/dcron1.png)
 
 - 存储：定时任务必须落地在满足 AP 或 CP 的分布式系统中，典型的系统如 Redis（AP）、Etcd（CP）
@@ -46,7 +46,7 @@ tags:
 [dcron](https://github.com/libi/dcron) 正是采用 redis 实现的一个分布式定时任务库。其整体架构如下：
 ![dcron 架构图](https://raw.githubusercontent.com/libi/dcron/master/dcron.png)
 
-dcron 的背景和我们遇到的场景 [基本类似](https://libisky.com/post/Dcron-%E5%9F%BA%E4%BA%8Eredis%E4%B8%8E%E4%B8%80%E8%87%B4%E6%80%A7%E5%93%88%E5%B8%8C%E7%AE%97%E6%B3%95%E7%9A%84%E5%88%86%E5%B8%83%E5%BC%8F%E5%AE%9A%E6%97%B6%E4%BB%BB%E5%8A%A1%E5%BA%93)，主要实现多机分布式场景下的定时任务执行问题。
+dcron 的背景和笔者遇到的场景 [基本类似](https://libisky.com/post/Dcron-%E5%9F%BA%E4%BA%8Eredis%E4%B8%8E%E4%B8%80%E8%87%B4%E6%80%A7%E5%93%88%E5%B8%8C%E7%AE%97%E6%B3%95%E7%9A%84%E5%88%86%E5%B8%83%E5%BC%8F%E5%AE%9A%E6%97%B6%E4%BB%BB%E5%8A%A1%E5%BA%93)，主要实现多机分布式场景下的定时任务执行问题。
 
 ####	核心数据结构
 1、`Dcron`：代表一个进程（机器），用以注册（操作）任务，每个 `Dcron` 都关联了唯一的 `NodePool`<br>
@@ -322,7 +322,7 @@ func (m *Map) Get(key string) string {
 此外，定时任务可以通过api接口方式，动态注册到各个dcron节点中；或者提供删除定时任务的接口
 
 ####	Kubernetes 部署
-现网中，我们是如此在 kubernetes 部署的，并且实现了如下几点优化：
+现网中在 kubernetes 部署场景如下，并且实现了如下几点优化：
 ![dcron-k8s-change](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/dcrontab/dcron-k8s-change.png)
 -	增加了 namespace 的支持，比如任务是属于某个 namespace 下的
 -	增加了 etcd 支持，采用 etcd 存储每个 pod 节点信息及任务信息（实际上 pod 节点和主机节点的功能一样）
