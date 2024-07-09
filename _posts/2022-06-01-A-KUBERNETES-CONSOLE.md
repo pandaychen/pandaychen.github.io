@@ -370,3 +370,4 @@ func (p *streamProtocolV3) stream(conn streamCreator) error {
 -	[利用 kubernetes exec 接口实现任意容器的 web-terminal](https://bbs.huaweicloud.com/blogs/281515)
 -	[一个 Kubernetes Web 终端连接工具](https://jiankunking.com/kubernetes-client-go-how-to-make-a-web-terminal.html)
 -	[remotecommand](https://github.com/kubernetes/client-go/blob/v0.30.2/tools/remotecommand/v3.go)
+-	[kubectl进入node shell](https://www.huweihuang.com/article/kubernetes-notes/operation/kubectl/kubectl-node-shell/)

@@ -490,9 +490,18 @@ ip route add 163.172.161.0/32 via 192.168.1.1 dev eth0
 该trick也可以参考[Routing & Network Namespace Integration](https://www.wireguard.com/netns/#routing-all-your-traffic)
 
 ##  0x06  TUN with DNS
+笔者的代理场景，本地监听了Fake-dns-service的UDP`53`端口，作用是将所有流经TUN网卡的DNS查询请求包劫持，分配一个虚拟的TUN IP（TUN子网内的IP），所以需要按如下配置：
 
+```bash
+iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 53
+```
 
-##  0x07 参考
+##  0x07  TUN with Windows
+在windows系统上，当然也可以实现基于虚拟网卡的全流量代理，通常有两种方式：
+-  Tun/WinTun 的数据包获取通过修改路由表实现
+-  WinDivert 通过一个 `PacketFilter`按 IP/进程名/ IP 地理位置信息将指定的数据包拦截并发送到网络栈（代理）
+
+##  0x08 参考
 -   [网络编程学习：vpn 实现](https://www.jianshu.com/p/e74374a9c473)
 -   [Listener and Dialer using a TUN and netstack.](https://github.com/costinm/tungate)
 -   [tungate.go](https://github.com/costinm/tungate/blob/main/gvisor/cmd/tungate.go)
@@ -504,3 +513,4 @@ ip route add 163.172.161.0/32 via 192.168.1.1 dev eth0
 -   [记录 Tun 透明代理的多种实现方式，以及如何避免 routing loop](https://chaochaogege.com/2021/08/01/57/)
 -   [Tun device: How to avoid routing dead loop when write a transparent proxy?](https://superuser.com/questions/1664065/tun-device-how-to-avoid-routing-dead-loop-when-write-a-transparent-proxy)
 -   [Tag Routing with TOS and fwmark](https://flylib.com/books/en/2.783.1.50/1/)
+-   [tailscale实现](https://github.com/tailscale/tailscale/blob/7ef2f7213528d388c3e40bfbd1da0fa9bd32a58f/net/netstat/netstat.go)

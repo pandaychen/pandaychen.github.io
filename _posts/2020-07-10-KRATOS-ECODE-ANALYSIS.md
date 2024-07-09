@@ -19,7 +19,7 @@ tags:
 错误码，一般被用来进行异常传递，且需要具有携带 `message` 文案信息的能力。
 
 ##	0x01	Kratos 的错误码使用
-我们先从用例入手，然后再简单分析下 ecode 内部实现及其与 RPC 协议的封装。
+先从用例入手，然后再简单分析下 ecode 内部实现及其与 RPC 协议的封装。
 
 ```golang
 import (
@@ -191,7 +191,7 @@ func String(e string) Code {
 `Details` 接口为 `gRPC` 预留，`gRPC` 传递异常会将服务端的错误码 pb 序列化之后赋值给 `Details`，客户端拿到之后反序列化得到，这里在下面的章节中详细分析下。
 
 #### 如何转换为 ecode？
-在我们开发中，可以按照如下方式将 `errors` 或错误码转换为 ecode 类型，通常而言，错误码转换有以下两种情况：
+在开发中，可以按照如下方式将 `errors` 或错误码转换为 ecode 类型，通常而言，错误码转换有以下两种情况：
 1. 因为框架传递错误是靠 `ecode` 错误码，比如 bm 框架返回的 `code` 字段默认就是数字，那么客户端接收到如 `{"code":-404}` 的话，可以使用 `ec := ecode.Int(-404)` 或 `ec := ecode.String("-404")` 来进行转换
 2. 在项目中 `dao` 层返回一个错误码，往往返回参数类型建议为 `error` 而不是 `ecode.Codes`，因为 `error` 更通用，那么上层 `service` 就可以使用 `ec := ecode.Cause(err)` 进行转换（为 `ecode`）
 

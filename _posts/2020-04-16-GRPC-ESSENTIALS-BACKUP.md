@@ -47,7 +47,7 @@ timestamp from metadata:
  0. Jun  9 01:35:01.069962038
 ```
 
-我们按照 ctx 的结果来画下继承关系（注意：紫色的位置是当前打印的 ctx 所处于的位置），由于可以向上查找，所以 `metadata.FromIncomingContext(ctx)` 可以查找到上一级 `metadata.mdIncomingKey{}` 对应的 Value 值：
+按照 ctx 的结果来画下继承关系（注意：紫色的位置是当前打印的 ctx 所处于的位置），由于可以向上查找，所以 `metadata.FromIncomingContext(ctx)` 可以查找到上一级 `metadata.mdIncomingKey{}` 对应的 Value 值：
 ![image](https://wx2.sbimg.cn/2020/06/09/grpc-context-1.png)
 
 再看看 `metadata.FromIncomingContext(ctx)` 的 [实现](https://github.com/grpc/grpc-go/blob/master/metadata/metadata.go#L169)，其中 gRPC 封装了取 `mdIncomingKey{}`Value 的接口给到用户（`mdIncomingKey{}` 开头是小写，用户无法直接调用）：
