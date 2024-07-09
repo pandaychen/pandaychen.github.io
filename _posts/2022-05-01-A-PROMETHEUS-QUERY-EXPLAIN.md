@@ -27,7 +27,7 @@ Prometheus 会定期去对数据进行采集，每一次采集的结果都是一
 ####    关于监控指标的解读
 监控指标被表示为下面的格式：
 
-```text
+```python
 metric_name {label_name_1=label_value_1, label_name_2=label_value_2, ...}
 ```
 
@@ -62,44 +62,42 @@ Y
 ##  0x02  指标计算
 
 ####  常用函数整理
-**一个常用技巧是遇到 `counter` 数据类型，在做任何操作之前，先套上一个 `rate` 或 `increase` 函数**
+** 一个常用技巧是遇到 `counter` 数据类型，在做任何操作之前，先套上一个 `rate` 或 `increase` 函数 **
 
 1、`rate` 函数是专门搭配 `counter` 数据类型使用函数，功能是取 `counter` 在这个时间段中平均每秒的增量，例如获取 `eth0` 网卡 `1m` 内每秒流量的平均值，指标名是 `node_network_receive_bytes_total`，label 选择 `eth0`
 
-```BASH
+```python
 rate(node_network_receive_bytes_total{device="eth0"}[1m])
 ```
 
 2、`increase` 函数表示某段时间内数据的增量，而 `rate()` 函数则表示某段时间内数据的平均值；那么这两个函数如何选取使用呢？当获取数据比较精细的时候，类似于 `1m` 取样推荐使用 `rate()` 函数；当获取数据比较粗糙的时候类似于 `5m`/`10m` 甚至更长时间取样推荐使用 `increase()` 函数；例如获取 `eth0` 网卡 `1m` 内流量的增量
+`increase` 增量是不做除法的，而 `rate` 要先计算增量后要除以当前的 offset 的偏移
 
-```BASH
+```python
 increase(node_network_receive_bytes_total{device="eth0"}[1m])
 ```
 
-3、`sum` 函数是求和函数, 注意点是使用 `sum` 后是 ** 将所有的监控的服务器的值进行取和 **，所以只看某一台服务器指标时需要使用 `by increase()` 进行拆分。例如获取所有主机 `eth0` 网卡 `1m` 内每秒流量的平均值的和
+3、`sum` 函数是求和函数, 注意点是使用 `sum` 是 ** 将所有的监控的服务器的值进行取和 **，所以只看某一台服务器指标时需要使用 `by` 进行拆分。例如获取所有主机 `eth0` 网卡 `1m` 内每秒流量的平均值的和：
 
-```BASH
+```python
 sum(rate(node_network_receive_bytes_total{device="eth0"}[1m]))
 ```
 
-4、`topk` 函数取前面 `N` 位的最高值（即 topN），当有很多服务器我们想要获取某个 key 的数据排在前 `3` 位的服务器，可使用如下：
+4、`topk` 函数取前面 `N` 位的最高值（即 topN），当存在很多服务器时，想要获取某个 key 的数据排在前 `3` 位的服务器，可使用如下：
 
-```BASH
+```python
 topk(3,key) #FOR GUAGE
 topk(3,rate(key[1m])) #FOR COUNTER
 ```
 
 5、`count` 函数是找出当前或者历史数据中某个 key 的数值大于或小于某个值的统计，例如：
 
-```BASH
+```python
 count(node_netstat_Tcp_CurrEstab>50)
 ```
 
-6、`irate` 函数
-
-
-##  0x03  实战：CPU 使用率的计算
-CPU 模式，CPU 要通过分时复用的方式运行于不同的模式中，使用 `top` 命令查看，通过 `curl http://localhost:9100/metrics` 拿到 CPU 的具体指标数据如下：
+##  0x03  PromQL 实战：CPU 使用率的计算
+本小节，以 CPU 使用率场景介绍下 PromQL 的使用，CPU 模式，CPU 要通过分时复用的方式运行于不同的模式中，使用 `top` 命令查看，通过 `curl http://localhost:9100/metrics` 拿到 CPU 的具体指标数据如下（通过 `node-exporter` 抓取的指标中 cpu 相关主要是各个 `node_cpu_seconds_total`）
 
 - `us`：用户进程使用 cpu 的时间
 - `sy`：内核进程使用 cpu 的时间
@@ -148,6 +146,36 @@ node_cpu_seconds_total{cpu="3",mode="steal"} 0
 node_cpu_seconds_total{cpu="3",mode="system"} 22.32
 node_cpu_seconds_total{cpu="3",mode="user"} 7.33
 ```
+
+上面的一行就是某一核 cpu 的某个模式的运行时间（单位：s），把某一核各个模式的 cpu 时间加起来就是执行 `uptime` 得到的系统开机以来运行运行的总的秒数，比如 `node_cpu_seconds_total{cpu="0",mode="idle"} 26659.41` 意义是从系统开机到现在为止，`cpu0` 的空闲时间是 `26659.41s`，用它除以 `uptime` 就可得到开机以来 `cpu0` 的空闲率
+
+基于上述指标，扩展计算 CPU 使用率的公式：
+
+1、`cpu0` 在 `5` 分钟内处于空闲状态的时间：`increase(node_cpu_seconds_total{cpu="0",mode="idle"}[5m])`，该公式表示的是当前时间点的 `node_cpu_seconds_total` 减去 `5min` 之前的 `node_cpu_seconds_total` 的值，也就是这 `5min` 内处于 `idle` 状态的 cpu 时间
+
+2、`cpu0` `5` 分钟内处于空闲状态的时间占比：`increase(node_cpu_seconds_total{cpu="0",mode="idle"}[5m]) / increase(node_cpu_seconds_total{cpu="0"}[5m])`
+
+3、一台主机所有 `cpu` `5` 分钟内处于空闲状态的时间占比：`sum (increase(node_cpu_seconds_total{mode="idle"}[5m])) / sum (increase(node_cpu_seconds_total{mode="idle"}[5m]))`
+
+4、若 Prometheus 监控多台主机（`instance`），要根据每台主机做 sum：`sum (increase(node_cpu_seconds_total{mode="idle"}[5m]))  by (instance) / sum (increase(node_cpu_seconds_total[5m])) by (instance)`
+
+5、计算 cpu 使用率 = 1 - cpu 空闲率
+
+```python
+100 * (1 - sum (increase(node_cpu_seconds_total{mode="idle"}[5m]))  by (instance) / sum (increase(node_cpu_seconds_total[5m])) by (instance))
+```
+
+5、根据 irate() 函数，可以简化计算公式为：
+
+```PYTHON
+100 - (avg(irate(node_cpu_seconds_total{mode="idle"}[5m])) by (instance) * 100)
+```
+
+6、空闲内存剩余率：`(node_memory_MemFree_bytes+node_memory_Cached_bytes+node_memory_Buffers_bytes) / node_memory_MemTotal_bytes * 100`
+
+7、内存使用率：`100 - (node_memory_MemFree_bytes+node_memory_Cached_bytes+node_memory_Buffers_bytes) / node_memory_MemTotal_bytes * 100`
+
+8、磁盘使用率：`100 - (node_filesystem_free_bytes{mountpoint="/",fstype=~"ext4|xfs"} / node_filesystem_size_bytes{mountpoint="/",fstype=~"ext4|xfs"} * 100)`
 
 ##  0x04  Review（2024）
 
@@ -245,7 +273,7 @@ func main() {
 
 那么，使用如下 PromQL 来计算以过去 `5` 分钟内每分钟 HTTP `5xx` 错误的增量：
 
-```PYTHON
+```python
 rate(http_requests_total{code=~"5.."}[5m])
 ```
 
