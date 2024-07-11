@@ -26,6 +26,7 @@ WebSocket 是一种网络传输协议，可在单个 TCP 连接上进行全双�
 1. 用户打开 Web 浏览器
 2. Web 浏览器（客户端）与 Web 服务端建立连接
 3. Web 浏览器（客户端）能定时收发 Web 服务端数据，Web 服务端也能定时收发 Web 浏览器数据
+![protocol](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/websocket/protocol.jpeg)
 
 ####    协议格式
 1、请求消息体
@@ -294,3 +295,4 @@ break;
 -   [为什么很少看到有人用 websocket？](https://www.v2ex.com/t/506933)
 -   [golang 的哪个 websocket 好用？](https://www.v2ex.com/t/919140)
 -	[利用 kubernetes exec 接口实现任意容器的 web-terminal](https://bbs.huaweicloud.com/blogs/281515)
+-	[gowebsocket：golang基于websocket单台机器支持百万连接分布式聊天(IM)系统](https://github.com/link1st/gowebsocket)

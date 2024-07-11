@@ -158,7 +158,7 @@ func Join(c1 io.ReadWriteCloser, c2 io.ReadWriteCloser) (inCount int64, outCount
 ####    问题三
 来源于 issue：[Fix: wrap net.Conn to avoid using *net.TCPConn.(ReadFrom) ](https://github.com/Dreamacro/clash/pull/1209)，重点摘要如下：
 
-考虑这样的情况，在传入参数有任意一个是 *net.TCPConn (当然 rightConn 不可能是 TCP 毕竟有 TcpTracker）
+考虑这样的情况，在传入参数有任意一个是 `*net.TCPConn` (当然 `rightConn` 不可能是 TCP 毕竟有 TcpTracker），该问题最终会导致传入 `CopyBuffer` 的 `sync.Pool` 内存池失效
 
 ```GO
 // relay copies between left and right bidirectionally.
@@ -181,7 +181,7 @@ func relay(leftConn, rightConn net.Conn) {
 }
 ```
 
-调用到 `CopyBuffer`，调用链如下：
+调用到标准库的 `io.CopyBuffer`，调用链如下（主要是前面的断言判断影响到内存池的作用）：
 
 ```go
 func CopyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
@@ -194,15 +194,17 @@ func CopyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
 func copyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
 	// If the reader has a WriteTo method, use it to do the copy.
 	// Avoids an allocation and a copy.
+	// 如果 源Reader 实现了 WriterTo 接口,直接调用该方法 将数据写入到 目标Writer 当中
 	if wt, ok := src.(WriterTo); ok {
 		return wt.WriteTo(dst)
 	}
 	// Similarly, if the writer has a ReadFrom method, use it to do the copy.
+	// 同理，如果 目标Writer 实现了 ReaderFrom 接口,直接调用ReadFrom方法
 	if rt, ok := dst.(ReaderFrom); ok {
 		return rt.ReadFrom(src) // 到此为止
 	}
 
-        // Copy
+    // Copy
     //......
 }
 ```
@@ -246,7 +248,109 @@ func genericReadFrom(w io.Writer, r io.Reader) (n int64, err error) {
 3.  再尝试 Zero Copy - `sendFile`
 4.  要求 Reader 是一个 `*os.File`
 5.  回退到常规复制 `genericReadFrom`，最终会使 `CopyBuffer` 使用的 来自 `pool` 的 `buffer` 失去意义
+再看一个SSH端口转发（同样内存池会失效）的例子，在下面的`handleClient`方法中，`client` 的具体类型是 `*net.TCPConn`，而 `remote` 的具体类型是 `ssh.Channel`：
 
+```go
+// Get default location of a private key
+func privateKeyPath() string {
+  return os.Getenv("HOME") + "/.ssh/id_rsa"
+}
+
+// Get private key for ssh authentication
+func parsePrivateKey(keyPath string) (ssh.Signer, error) {
+  buff, _ := ioutil.ReadFile(keyPath)
+  return ssh.ParsePrivateKey(buff)
+}
+
+// Get ssh client config for our connection
+// SSH config will use 2 authentication strategies: by key and by password
+func makeSshConfig(user, password string) (*ssh.ClientConfig, error) {
+  key, err := parsePrivateKey(privateKeyPath())
+  if err != nil {
+    return nil, err
+  }
+
+  config := ssh.ClientConfig{
+    User: user,
+    Auth: []ssh.AuthMethod{
+      ssh.PublicKeys(key),
+      ssh.Password(password),
+    },
+  }
+
+  return &config, nil
+}
+
+// Handle local client connections and tunnel data to the remote serverq
+// Will use io.Copy - http://golang.org/pkg/io/#Copy
+func handleClient(client net.Conn, remote net.Conn) {
+  defer client.Close()
+  chDone := make(chan bool)
+
+  // Start remote -> local data transfer
+  go func() {
+    _, err := io.Copy(client, remote)
+    if err != nil {
+      log.Println("error while copy remote->local:", err)
+    }
+    chDone <- true
+  }()
+
+  // Start local -> remote data transfer
+  go func() {
+    _, err := io.Copy(remote, client)
+    if err != nil {
+      log.Println(err)
+    }
+    chDone <- true
+  }()
+
+  <-chDone
+}
+
+func main() {
+  // Connection settings
+  sshAddr := "remote_ip:22"
+  localAddr := "127.0.0.1:5000"
+  remoteAddr := "127.0.0.1:5432"
+
+  // Build SSH client configuration
+  cfg, err := makeSshConfig("user", "password")
+  if err != nil {
+    log.Fatalln(err)
+  }
+
+  // Establish connection with SSH server
+  conn, err := ssh.Dial("tcp", sshAddr, cfg)
+  if err != nil {
+    log.Fatalln(err)
+  }
+  defer conn.Close()
+
+  // Establish connection with remote server
+  remote, err := conn.Dial("tcp", remoteAddr)
+  if err != nil {
+    log.Fatalln(err)
+  }
+
+  // Start local server to forward traffic to remote connection
+  local, err := net.Listen("tcp", localAddr)
+  if err != nil {
+    log.Fatalln(err)
+  }
+  defer local.Close()
+
+  // Handle incoming connections
+  for {
+    client, err := local.Accept()
+    if err != nil {
+      log.Fatalln(err)
+    }
+
+    handleClient(client, remote)
+  }
+}
+```
 
 ## 0x02 一些细节
 
@@ -263,7 +367,7 @@ func genericReadFrom(w io.Writer, r io.Reader) (n int64, err error) {
 ##  0x03 业界的实现
 介绍几个典型的 pipe 转发实现：
 
-####    clash的实现
+####    clash 的实现
 clash 的实现 [在此](https://github.com/Dreamacro/clash/blob/master/common/net/relay.go#L9-L24)：
 
 ```golang
@@ -297,13 +401,13 @@ func Relay(leftConn, rightConn net.Conn) {
 注意，上面第一个 `io.Copy` 退出的时候，说明这段逻辑已经退出了，无法向 `leftConn` 继续写入了，这里合理的设置 `leftConn.SetReadDeadline(time.Now())` ，该方法设置了 `leftConn` 的读取截止时间为当前时间，这意味着在当前时间之后，`leftConn` 的任何读取操作都将立即返回错误。这里设置读取截止时间的目的是在 `io.Copy(WriteOnlyWriter{Writer: rightConn}, ReadOnlyReader{Reader: leftConn})` 完成后，不再继续读取 `leftConn` 的数据。这是因为 `Relay` 方法目的是在 `leftConn` 和 `rightConn` 之间双向复制数据，当其中一个连接关闭或者出现错误时，函数会返回；反之 `rightConn.SetReadDeadline(time.Now())` 的操作也是如此
 
 
-####    go-tun2socks的实现
-[go-tun2socks](https://github.com/eycorsican/go-tun2socks/blob/master/proxy/socks/tcp.go)的实现如下：
+####    go-tun2socks 的实现
+[go-tun2socks](https://github.com/eycorsican/go-tun2socks/blob/master/proxy/socks/tcp.go) 的实现如下：
 ```golang
 type duplexConn interface {
 	net.Conn
-	CloseRead() error       //单独关闭读取
-	CloseWrite() error      //单独关闭写入
+	CloseRead() error       // 单独关闭读取
+	CloseWrite() error      // 单独关闭写入
 }
 
 func (h *tcpHandler) relay(lhs, rhs net.Conn) {
@@ -354,7 +458,7 @@ func (h *tcpHandler) relay(lhs, rhs net.Conn) {
 }
 ```
 
-####   cloudflare/cloudflared的实现
+####   cloudflare/cloudflared 的实现
 [cloudflared](https://github.com/cloudflare/cloudflared/blob/be64362fdb2a2da481f8e0414f75de3db2ccdf32/stream/stream.go#L43)
 
 ```golang
@@ -458,7 +562,7 @@ var bufferPool = sync.Pool{
 	},
 }
 
-// cfio.Copy实现
+// cfio.Copy 实现
 func Copy(dst io.Writer, src io.Reader) (written int64, err error) {
 	_, okWriteTo := src.(io.WriterTo)
 	_, okReadFrom := dst.(io.ReaderFrom)
@@ -489,4 +593,5 @@ func Copy(dst io.Writer, src io.Reader) (written int64, err error) {
 - [Why copyBuffer implements while loop](https://stackoverflow.com/questions/59014085/why-copybuffer-implements-while-loop)
 - [Fix: tcp relay #219](https://github.com/xjasonlyu/tun2socks/pull/219)
 - [TCP Half-Close: a cool feature that is now broken](https://www.excentis.com/blog/tcp-half-close-a-cool-feature-that-is-now-broken/)
-- [关于tcp流量的阻塞问题 #100](https://github.com/eycorsican/go-tun2socks/issues/100)
+- [SSH port forwarding with Go](https://sosedoff.com/2015/05/25/ssh-port-forwarding-with-go.html)
+- [关于 tcp 流量的阻塞问题 #100](https://github.com/eycorsican/go-tun2socks/issues/100)

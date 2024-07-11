@@ -12,10 +12,10 @@ tags:
 ## 0x00 前言
 先记录一下自己实现sshd（proxy）相关系统中需要搞懂的几个重要的ssh数据结构
 
-## 0x01 重要结构
+## 0x01 重要结构（golang-ssh库）
 
 1、Channel<br>
-A Channel is an ordered, reliable, flow-controlled, duplex stream that is multiplexed over an SSH connection.（注，个人理解是channel最大的作用是给开发者提供了读取SSH明文的手段）
+A Channel is an ordered, reliable, flow-controlled, duplex stream that is multiplexed over an SSH connection.（注，个人理解是channel最大的作用是给开发者提供了读取SSH明文的手段），是一种有序、可靠、流量受控的双工流，通过 SSH 连接进行多路复用
 
 ```golang
 type Channel interface {
@@ -690,6 +690,181 @@ func (sess *session) handleRequests(reqs <-chan *gossh.Request) {
 ```
 
 ##	0x04	subsystem
+如何理解sshd中的subsytem及时间？subsystem是SSH协议的一个扩展功能，它允许SSH服务器在远程客户端的请求下，启动特定的预定义服务。这些服务可以是文件传输、版本控制系统、远程桌面等。subsytem是一种**在SSH会话中运行特定应用程序的方法，而无需在远程计算机上启动一个完整的shell会话**。`sftp-server`就是典型的subsytem服务，在`/etc/ssh/sshd_config`一般可以看到`Subsystem sftp    /usr/libexec/openssh/sftp-server`的配置选项，当客户端发起一个SFTP会话时，sshd将启动`/usr/lib/openssh/sftp-server`程序，并将其与客户端的SSH会话关联。
+
+此外，还有几种典型的场景：
+- git server：`Subsystem git /usr/bin/git-shell`
+- x11 转发：`Subsystem x11 /usr/bin/Xvnc`
+
+子系统的优势是可以为特定任务提供专用的环境。如使用SFTP子系统，用户可以在不启动一个完整的远程shell会话的情况下，安全地传输文件。这有助于提高安全性，同时减少了系统资源的消耗
+
+#### gliderlabs/ssh的子系统
+前文分析`handleRequests`这个核心方法中，已经包含了针对`subsytem`的[实现](https://github.com/gliderlabs/ssh/blob/master/session.go#L264)：
+
+```GO
+func (sess *session) handleRequests(reqs <-chan *gossh.Request) {
+	for req := range reqs {
+		switch req.Type {
+			//...
+		case "subsystem":
+		    //调用用户传入的handler
+            handler := sess.subsystemHandlers[payload.Value]
+			if handler == nil {
+				handler = sess.subsystemHandlers["default"]
+			}
+			if handler == nil {
+				req.Reply(false, nil)
+				continue
+			}
+
+			sess.handled = true
+			req.Reply(true, nil)
+
+			go func() {
+				handler(sess)
+				sess.Exit(0)
+			}()
+		}
+	}
+}
+```
+
+再看下`sftp-server`的[实现](https://github.com/gliderlabs/ssh/blob/master/_examples/ssh-sftpserver/sftp.go)，这里注意`SftpHandler`的实现，其启动了一个`sftp-server`，该server基于`github.com/pkg/sftp`构建
+
+```GO
+// SftpHandler handler for SFTP subsystem
+func SftpHandler(sess ssh.Session) {
+	debugStream := io.Discard
+	serverOptions := []sftp.ServerOption{
+		sftp.WithDebug(debugStream),
+	}
+	server, err := sftp.NewServer(
+		sess,   //将ssh.Session类型传入参数，ssh.Session包含了gossh.Channel，可以进行ssh的明文流数据读写
+		serverOptions...,
+	)
+	if err != nil {
+		log.Printf("sftp server init error: %s\n", err)
+		return
+	}
+	if err := server.Serve(); err == io.EOF {
+		server.Close()
+		fmt.Println("sftp client exited session.")
+	} else if err != nil {
+		fmt.Println("sftp server completed with error:", err)
+	}
+}
+
+func main() {
+	ssh_server := ssh.Server{
+		Addr: "127.0.0.1:2222",
+		SubsystemHandlers: map[string]ssh.SubsystemHandler{
+			"sftp": SftpHandler,
+		},
+	}
+	log.Fatal(ssh_server.ListenAndServe())
+}
+```
+
+最后再看下`github.com/pkg/sftp`的启动[相关代码](https://github.com/pkg/sftp/blob/master/server.go#L351)`：
+
+```go
+// NewServer creates a new Server instance around the provided streams, serving
+// content from the root of the filesystem.  Optionally, ServerOption
+// functions may be specified to further configure the Server.
+//
+// A subsequent call to Serve() is required to begin serving files over SFTP.
+func NewServer(rwc io.ReadWriteCloser, options ...ServerOption) (*Server, error) {
+	svrConn := &serverConn{
+		conn: conn{
+			Reader:      rwc,  //关联ssh session 输出
+			WriteCloser: rwc,  //关联ssh session输入
+		},
+	}
+	s := &Server{
+		serverConn:  svrConn,
+		debugStream: ioutil.Discard,
+		pktMgr:      newPktMgr(svrConn),
+		openFiles:   make(map[string]*os.File),
+		maxTxPacket: defaultMaxTxPacket,
+	}
+
+	for _, o := range options {
+		if err := o(s); err != nil {
+			return nil, err
+		}
+	}
+
+	return s, nil
+}
+
+// Serve serves SFTP connections until the streams stop or the SFTP subsystem
+// is stopped. It returns nil if the server exits cleanly.
+func (svr *Server) Serve() error {
+	defer func() {
+		if svr.pktMgr.alloc != nil {
+			svr.pktMgr.alloc.Free()
+		}
+	}()
+	var wg sync.WaitGroup
+	runWorker := func(ch chan orderedRequest) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := svr.sftpServerWorker(ch); err != nil {
+				svr.conn.Close() // shuts down recvPacket
+			}
+		}()
+	}
+	pktChan := svr.pktMgr.workerChan(runWorker)
+
+	var err error
+	var pkt requestPacket
+	var pktType uint8
+	var pktBytes []byte
+	for {
+		// 从ssh会话接受数据
+		pktType, pktBytes, err = svr.serverConn.recvPacket(svr.pktMgr.getNextOrderID())
+		if err != nil {
+			// Check whether the connection terminated cleanly in-between packets.
+			if err == io.EOF {
+				err = nil
+			}
+			// we don't care about releasing allocated pages here, the server will quit and the allocator freed
+			break
+		}
+
+		pkt, err = makePacket(rxPacket{fxp(pktType), pktBytes})
+		if err != nil {
+			switch {
+			case errors.Is(err, errUnknownExtendedPacket):
+				//if err := svr.serverConn.sendError(pkt, ErrSshFxOpUnsupported); err != nil {
+				//	debug("failed to send err packet: %v", err)
+				//	svr.conn.Close() // shuts down recvPacket
+				//	break
+				//}
+			default:
+				debug("makePacket err: %v", err)
+				svr.conn.Close() // shuts down recvPacket
+				break
+			}
+		}
+
+		pktChan <- svr.pktMgr.newOrderedRequest(pkt)
+	}
+
+	close(pktChan) // shuts down sftpServerWorkers
+	wg.Wait()      // wait for all workers to exit
+
+	// close any still-open files
+	for handle, file := range svr.openFiles {
+		fmt.Fprintf(svr.debugStream, "sftp server file with handle %q left open: %v\n", handle, file.Name())
+		file.Close()
+	}
+	return err // error from recvPacket
+}
+```
+
+#### 客户端调用子系统
 
 
 ## 0x05 参考

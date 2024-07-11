@@ -158,7 +158,7 @@ message OuterMessage {
 ```
 
 ##  0x05    validator 的运行原理
-把 `struct` 都可以看成是一棵树（嵌套结构作为子树），那么验证的过程就是遍历（深度优先或广度优先均可）此树的过程。假如我们有如下定义的结构体：
+把 `struct` 都可以看成是一棵树（嵌套结构作为子树），那么验证的过程就是遍历（深度优先或广度优先均可）此树的过程。假如有如下定义的结构体：
 ```golang
 type Nested struct {
     Email string `validate:"email"`

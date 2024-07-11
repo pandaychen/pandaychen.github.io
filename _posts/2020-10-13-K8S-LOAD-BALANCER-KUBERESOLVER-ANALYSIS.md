@@ -39,7 +39,7 @@ Kubernetes 提供的 Watch 功能是建立在对 Etcd 的 Watch 之上的，当 
 以 Pods 为例，List API 一般为 `GET /api/v1/pods`， Watch API 一般为 `GET /api/v1/watch/pods`，并且会带上 `watch=true`，表示采用 HTTP 长连接持续监听 Pods 相关事件，每当有事件来临，返回一个 WatchEvent。
 
 ##	Watch 的实现机制
-通常我们使用使用 HTTP 大都是短连接方式，那么 Watch 是如何通过 HTTP 长连接获取 APIServer 发来的资源变更事件呢？答案就是 [Chunked transfer encoding](https://zh.wikipedia.org/zh-hans/%E5%88%86%E5%9D%97%E4%BC%A0%E8%BE%93%E7%BC%96%E7%A0%81)。如下，注意看 HTTP Response 中的 `Transfer-Encoding: chunked`：
+通常使用 HTTP 大都是短连接方式，那么 Watch 是如何通过 HTTP 长连接获取 APIServer 发来的资源变更事件呢？答案就是 [Chunked transfer encoding](https://zh.wikipedia.org/zh-hans/%E5%88%86%E5%9D%97%E4%BC%A0%E8%BE%93%E7%BC%96%E7%A0%81)。如下，注意看 HTTP Response 中的 `Transfer-Encoding: chunked`：
 
 
 ```javascript
@@ -455,7 +455,7 @@ func (k *kResolver) watch() error {
 ```
 
 ##	0x06	 K8sClient 分析
-在分析 Watcher 的逻辑之前，我们先看下 [`k8sClient` 封装](https://github.com/sercand/kuberesolver/blob/master/kubernetes.go)，正如文章开始我们说的那样，提供了 `List` 和 `Watch` 两种调用方式：
+在分析 Watcher 的逻辑之前，先看下 [`k8sClient` 封装](https://github.com/sercand/kuberesolver/blob/master/kubernetes.go)，正如文章开始说的那样，提供了 `List` 和 `Watch` 两种调用方式：
 -	[`watchEndpoints` 方法](https://github.com/sercand/kuberesolver/blob/master/kubernetes.go#L120)：提供 `Watch` 方式的增量接口
 -	[`getEndpoints` 方法](https://github.com/sercand/kuberesolver/blob/master/kubernetes.go#97)：提供 `List` 方式的全量接口
 
@@ -585,7 +585,7 @@ func watchEndpoints(client K8sClient, namespace, targetName string) (watchInterf
 	json.NewDecoder(resp.Body).Decode(&result)
 	//...
 ```
-上面这个是非常普通的 HTTP 请求代码，其中的 `resp.Body` 的类型是 `io.ReadCloser`，在 HTTP 的 `Transfer-Encoding: chunked` 模式下，如果不关闭 `resp.Body`，那么我们就可以实现在这个 stream 长连接上不断的读取数据。<br>
+上面这个是非常普通的 HTTP 请求代码，其中的 `resp.Body` 的类型是 `io.ReadCloser`，在 HTTP 的 `Transfer-Encoding: chunked` 模式下，如果不关闭 `resp.Body`，那么就可以实现在这个 stream 长连接上不断的读取数据。<br>
 切记不要调用 `defer resp.Body.Close()`。
 
 
@@ -685,7 +685,7 @@ func (sw *streamWatcher) Decode() (Event, error) {
 参考[TKE环境下使用watcher方式实践](https://pandaychen.github.io/2020/06/01/K8S-LOADBALANCE-WITH-KUBERESOLVER/#0x06--tke%E7%8E%AF%E5%A2%83%E4%B8%8B%E4%BD%BF%E7%94%A8watcher%E6%96%B9%E5%BC%8F%E5%AE%9E%E8%B7%B5)
 
 ##	0x09	总结
-本文分析了使用 Kubernetes API 的方式来实现 gRPC 负载均衡的一种思路，项目中我们也是这么使用来实现 Kubernetes Service 的负载均衡的。
+本文分析了使用 Kubernetes API 的方式来实现 gRPC 负载均衡的一种思路，项目中也是这么使用来实现 Kubernetes Service 的负载均衡的。
 
 ##	0x0A	参考
 -   [理解 K8S 的设计精髓之 list-watch](http://wsfdl.com/kubernetes/2019/01/10/list_watch_in_k8s.html)

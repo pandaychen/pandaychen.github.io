@@ -73,19 +73,19 @@ gRPC使用HTTP/2作为应用层的传输协议，HTTP/2会复用底层的TCP连�
 
 3、gRPC默认参数优化（基于大块数据传输场景）<br>
 ```text
-MaxSendMsgSizeGRPC	//最大允许发送的字节数，默认4MiB，如果超过了GRPC会报错。Client和Server我们都调到4GiB
+MaxSendMsgSizeGRPC	//最大允许发送的字节数，默认4MiB，如果超过了GRPC会报错。Client和Server都调到4GiB
 
-MaxRecvMsgSizeGRPC	//最大允许接收的字节数，默认4MiB，如果超过了GRPC会报错。Client和Server我们都调到4GiB
+MaxRecvMsgSizeGRPC	//最大允许接收的字节数，默认4MiB，如果超过了GRPC会报错。Client和Server都调到4GiB
 
-InitialWindowSize	//基于Stream的滑动窗口，类似于TCP的滑动窗口，用来做流控，默认64KiB，吞吐量上不去，Client和Server我们调到1GiB
+InitialWindowSize	//基于Stream的滑动窗口，类似于TCP的滑动窗口，用来做流控，默认64KiB，吞吐量上不去，Client和Server调到1GiB
 
-InitialConnWindowSize	//基于Connection的滑动窗口，默认16 * 64KiB，吞吐量上不去，Client和Server我们也都调到1GiB
+InitialConnWindowSize	//基于Connection的滑动窗口，默认16 * 64KiB，吞吐量上不去，Client和Server都调到1GiB
 
-KeepAliveTime	//每隔KeepAliveTime时间，发送PING帧测量最小往返时间，确定空闲连接是否仍然有效，我们设置为10s
+KeepAliveTime	//每隔KeepAliveTime时间，发送PING帧测量最小往返时间，确定空闲连接是否仍然有效，设置为10s
 
-KeepAliveTimeout	//超过KeepAliveTimeout，关闭连接，我们设置为3s
+KeepAliveTimeout	//超过KeepAliveTimeout，关闭连接，设置为3s
 
-PermitWithoutStream	//如果为true，当连接空闲时仍然发送PING帧监测，如果为false，则不发送忽略。我们设置为true
+PermitWithoutStream	//如果为true，当连接空闲时仍然发送PING帧监测，如果为false，则不发送忽略。设置为true
 ```
 
 
