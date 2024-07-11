@@ -34,7 +34,6 @@ Future<RecordMetadata> metadataFuture = producer.send(new ProducerRecord<String,
 
 ####    Consumer 最佳实践
 
-
 ##  0x02    客户端的选型
 前文 [关于 Kafka 应用开发知识点的整理（二）](https://pandaychen.github.io/2022/01/01/A-KAFKA-USAGE-SUMUP-2/) 介绍了 Shopify/sarama 的配置及使用情况，在现网中，主要的客户端有下面几个：
 
@@ -48,6 +47,143 @@ Future<RecordMetadata> metadataFuture = producer.send(new ProducerRecord<String,
 -   缺点：问题偏多
 
 [为什么不推荐使用 Sarama Go 客户端收发消息？](https://help.aliyun.com/document_detail/266782.html)
+
+如果使用sarama，则需要了解其一些比较重要的选项：
+
+| 参数 |  描述 |  备注|
+| :-----:| :----: | :----: | 
+| version | Kafka版本 | 客户端填入的版本号最好与服务端的版本保持一致 |
+| groupId | 消费组ID，用于指定消费者组的标识符。通过配置消费组ID，将消费组内的消费者分组，可以实现消费者组内的负载均衡，实现数据的处理和分发 |  |
+| conf.Consumer.Fetch.Min| 一次请求中拉取信息的最小字节数||
+| conf.Consumer.Fetch.Default| 一次请求中从集群拉取信息的最大字节数||
+|conf.Consumer.Retry.Backoff|读取分区失败后重试之前需要等待的时间，默认为`2s`||
+|conf.Consumer.MaxWaitTime|表示broker在`Consumer.Fetch.Min`字节可用之前等待的最长时间，默认为`250`，单位为`ms`。建议取值范围为`[100 ms, 500 ms]`||
+|conf.Consumer.MaxProcessingTime|消费者期望一条消息处理的最长时间，单位为`ms`||
+|conf.Consumer.Offsets.AutoCommit.Enable|指定是否自动提交更新后的偏移量，`true`为启用，默认为`true`||
+|conf.Consumer.Offsets.AutoCommit.Interval|提交更新后的偏移量的频率。当`conf.Consumer.Offsets.AutoCommit.Enable`为`false`时，该参数无效，默认为`1`，单位为`s`||
+|conf.Consumer.Offsets.Initial|用于指定消费者在启动时从哪个偏移量开始消费消息。常用值为`OffsetNewest`和`OffsetOldest`，默认为`OffsetNewest`|`OffsetNewest`：表示使用最新的偏移量，即从最新消息开始读取。当有已提交的偏移量时，从提交的偏移量开始消费；无提交的偏移量时，消费新产生的数据。`OffsetOldest`：表示使用最早的偏移量，从最早的消息开始读取。当有已提交的偏移量时，从提交的偏移量开始消费；无提交的偏移量时，从头开始消费|
+|conf.Consumer.Offsets.Retry.Max|提交请求失败时，最多重试次数，默认为`3`次||
+
+#### sarama的消费组
+
+参考用例：
+-  消费者组：[Consumergroup example](https://github.com/IBM/sarama/blob/main/examples/consumergroup/main.go)
+-  [Exactly-Once example](https://github.com/IBM/sarama/tree/main/examples/exactly_once)
+
+sarama消费者组的3个重要[方法](https://github.com/IBM/sarama/blob/main/examples/consumergroup/main.go)：
+
+```go
+// Setup is run at the beginning of a new session, before ConsumeClaim
+func (consumer *Consumer) Setup(sarama.ConsumerGroupSession) error {
+	// Mark the consumer as ready
+	close(consumer.ready)
+	return nil
+}
+
+// Cleanup is run at the end of a session, once all ConsumeClaim goroutines have exited
+func (consumer *Consumer) Cleanup(sarama.ConsumerGroupSession) error {
+	return nil
+}
+
+// ConsumeClaim must start a consumer loop of ConsumerGroupClaim's Messages().
+// Once the Messages() channel is closed, the Handler must finish its processing
+// loop and exit.
+func (consumer *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+	// NOTE:
+	// Do not move the code below to a goroutine.
+	// The `ConsumeClaim` itself is called within a goroutine, see:
+	// https://github.com/IBM/sarama/blob/main/consumer_group.go#L27-L29
+	for {
+		select {
+		case message, ok := <-claim.Messages():
+			if !ok {
+				log.Printf("message channel was closed")
+				return nil
+			}
+			log.Printf("Message claimed: value = %s, timestamp = %v, topic = %s", string(message.Value), message.Timestamp, message.Topic)
+			session.MarkMessage(message, "")
+		// Should return when `session.Context()` is done.
+		// If not, will raise `ErrRebalanceInProgress` or `read tcp <ip>:<port>: i/o timeout` when kafka rebalance. see:
+		// https://github.com/IBM/sarama/issues/1192
+		case <-session.Context().Done():
+			return nil
+		}
+	}
+}
+```
+
+`Setup`/`Cleanup`/`ConsumeClaim` 是 `s.handler.ConsumeClaim` 的三个接口，需要用户实现；当需要创建一个会话时，先运行 `Setup` ，然后在 `ConsumerClaim` 中持续处理消息，最后运行 `Cleanup`，在两种场景下会触发：
+
+- 新建consumeGroups时（消费者）
+- 发生rebalance时（比如某个消费者退出/新建）
+
+
+在调用了 `Setup` 之后，后面在独立的协程中调用 `ConsumeClaim` 接口，持续消费关联分区partition的数据
+
+
+消费者组测试代码在[此](https://github.com/pandaychen/golang_in_action/blob/master/sarama/consumer_group.go)，依此启动`3`个消费者（启动`3`次二进制程序），同样归属于消费组`grp1`：
+
+1、启动消费者`1`：
+```text
+INFO[0000] setup                                        
+INFO[0000] map[t1:[0 1 2] t2:[0 1 2]]                   
+INFO[0000] Sarama consumer up and running!...
+```
+
+2、启动消费者`2`，同时由于rebalance，消费者`1`也发生了变化
+```text
+INFO[0000] setup                                        
+INFO[0000] map[t1:[2] t2:[2]]                           
+INFO[0000] Sarama consumer up and running!... 
+```
+
+3、消费者`1`日志，触发了cleanup/setup
+```
+INFO[0024] cleanup                                      
+INFO[0024] setup                                        
+INFO[0024] map[t1:[0 1] t2:[0 1]]
+```
+
+4、再加入消费者`3`
+```
+INFO[0002] setup                                        
+INFO[0002] map[t1:[2] t2:[2]]                           
+INFO[0002] Sarama consumer up and running!... 
+```
+
+此时消费者`1`、消费者`2`都会受到影响：
+```
+#消费者1
+INFO[0134] cleanup                                      
+INFO[0134] setup                                        
+INFO[0134] map[t1:[0] t2:[0]]
+
+#消费者2
+[0109] cleanup                                      
+INFO[0109] setup                                        
+INFO[0109] map[t1:[1] t2:[1]]
+```
+
+额外的话题，如何指定消费offset？kafka指定消费offset参数只有`OffsetNewest` 和 `OffsetOldest` ，如果想指定 offset 进行消费，可以在`Setup`中调用`ConsumerGroupSession.ResetOffset`接口实现（`Setup`方法是会话最一开始的地方，且这个时候已经能够获取到所有的 topic 和 partition）。**当然offset要遵循`OffsetNewest`、`OffsetOldest`的规则，同时offset不能过期**
+
+```GO
+func (k *Kafka) Setup(session sarama.ConsumerGroupSession) error {
+	log.Info("setup")
+	session.ResetOffset("t2p4", 0, 13, "") //重置消费offset
+	log.Info(session.Claims())
+	close(k.ready)
+	return nil
+}
+
+func (k *Kafka) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+	for message := range claim.Messages() {
+		log.Infof("[topic:%s] [partiton:%d] [offset:%d] [value:%s] [time:%v]",
+			message.Topic, message.Partition, message.Offset, string(message.Value), message.Timestamp)
+		session.MarkMessage(message, "")
+	}
+	return nil
+}
+```
 
 ####    confluent-kafka-go
 此库基于 kafka C/C++ 库 `librdkafka` 构建，是阿里云官网推荐的 kafka 客户端，参考下面文档：
@@ -312,7 +448,7 @@ TODO
 
 再腾讯云 ckafka 的默认消息保留时长为 `1` 天，所以问题解决：
 
-![ckafka](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/kafka/cloudtencent-ckafka-settings-1.png)
+![ckafka](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kafka/cloudtencent-ckafka-settings-1.png)
 
 
 ## 0x07 参考
@@ -325,5 +461,6 @@ TODO
 - [订阅者最佳实践](https://help.aliyun.com/zh/apsaramq-for-kafka/best-practices-for-consumers?spm=a2c4g.11186623.0.i0)
 - [CKafka 数据可靠性说明](https://cloud.tencent.com/document/product/597/36186)
 - [Kafka(Go) 教程 (六)---sarama 客户端 producer 源码分析](https://www.lixueduan.com/posts/kafka/06-sarama-producer/)
+- [sarama的消费者组分析、使用](https://www.cnblogs.com/payapa/p/15401357.html)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
