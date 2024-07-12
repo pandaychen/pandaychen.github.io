@@ -27,6 +27,7 @@ Exporter 是一个采集监控数据并通过 Prometheus 监控规范对外提�
 <br><br>
 举例来说，如果要监控 Mysql/Redis 等数据库，我们必须要调用它们的接口来获取信息（前提要有），这样每家都有一套接口，这样非常不通用。所以 Prometheus 做法是每个软件做一个 Exporter，Prometheus 的 Http 读取 Exporter 的信息（将监控指标进行统一的格式化并暴露出来）。简单类比，Exporter 就是个翻译，把各种语言翻译成一种统一的语言。
 
+![exporter](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/exporter_principle.png)
 
 ##  0x03	Build Your Own Exportor
 官方文档 [WRITING EXPORTERS](https://prometheus.io/docs/instrumenting/writing_exporters/) 介绍了编写 Exportor 的一些注意点。Prometheus 的 client 库提供了实现自定义 Exportor 的 [接口](https://github.com/prometheus/client_golang/blob/master/prometheus/collector.go#L27)，Collector 接口定义了两个方法 `Describe` 和 `Collect`，实现这两个方法就可以暴露自定义的数据：
@@ -247,6 +248,17 @@ func main() {
     log.Info("Beginning to serve on port :8080")
     log.Fatal(http.ListenAndServe(":8080", nil))
 }
+```
+
+4、最后，通过`curl http://127.0.0.1:8080/metrics`即可查看暴露的指标
+
+```bash
+# HELP bar_metric Shows whether a bar has occurred in our cluster
+# TYPE bar_metric gauge
+bar_metric 0.07074170776466579 1720775972352
+# HELP foo_metric Shows whether a foo has occurred in our cluster
+# TYPE foo_metric gauge
+foo_metric 0.07074170776466579 1720772372352
 ```
 
 ##	0x06	总结
