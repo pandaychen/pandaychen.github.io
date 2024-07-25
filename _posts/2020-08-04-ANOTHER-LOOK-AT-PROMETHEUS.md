@@ -32,7 +32,6 @@ Exporter 是一个采集监控数据并通过 Prometheus 监控规范对外提�
 ##  0x03	Build Your Own Exportor
 官方文档 [WRITING EXPORTERS](https://prometheus.io/docs/instrumenting/writing_exporters/) 介绍了编写 Exportor 的一些注意点。Prometheus 的 client 库提供了实现自定义 Exportor 的 [接口](https://github.com/prometheus/client_golang/blob/master/prometheus/collector.go#L27)，Collector 接口定义了两个方法 `Describe` 和 `Collect`，实现这两个方法就可以暴露自定义的数据：
 
-
 ####	Describe 接口
 实现 `Describe` 接口，传递指标描述符到 channel
 ```golang
@@ -226,12 +225,16 @@ func (collector *fooCollector) Collect(ch chan<- prometheus.Metric) {
 		metricValue = 1
 	}
 
+	fmt.Println("start Collect")
+
 	//Write latest value for each metric in the prometheus metric channel.
 	//Note that you can pass CounterValue, GaugeValue, or UntypedValue types here.
 	ch <- prometheus.MustNewConstMetric(collector.fooMetric, prometheus.CounterValue, metricValue)
 	ch <- prometheus.MustNewConstMetric(collector.barMetric, prometheus.CounterValue, metricValue)
 }
 ```
+
+注意：每次调用`curl http://127.0.0.1:8080/metrics`时，都会触发一次已注册`MustRegister`到Prometheus指标的`Collect`方法的调用，注册了多少个指标，都会调用其`Collect`方法
 
 3、注册指标及启动 `promHTTP` 服务
 这里在主函数中注册上面自定义的指标，注册成功之后，启动 HTTP 服务器，这样就完成了自定义的 Exportor 服务。
@@ -261,10 +264,229 @@ bar_metric 0.07074170776466579 1720775972352
 foo_metric 0.07074170776466579 1720772372352
 ```
 
-##	0x06	总结
+##	0x06	一个实践例子：sarama
+使用[sarama](https://github.com/IBM/sarama)库，由于其内置的指标实现是基于`github.com/rcrowley/go-metrics`库的，现在想把其转换为Prometheus的格式，如何实现？
+
+参考[saramaprom](https://github.com/iimos/saramaprom)的做法，这里简单分析下其实现。
+
+1、调用方法如下，把sarama的`cfg.MetricRegistry`作为参数传入`saramaprom.ExportMetrics`方法
+
+```GO
+ctx := context.Background()
+cfg := sarama.NewConfig()
+err := saramaprom.ExportMetrics(ctx, cfg.MetricRegistry, saramaprom.Options{
+	Label: "some name to distinguish between different sarama instances",
+})
+```
+
+2、`customCollector`实现
+
+```GO
+// for collecting prometheus.constHistogram objects
+type customCollector struct {
+	prometheus.Collector
+
+	metric prometheus.Metric
+	mutex  *sync.Mutex
+}
+
+func newCustomCollector(mu *sync.Mutex) *customCollector {
+	return &customCollector{
+		mutex: mu,
+	}
+}
+
+func (c *customCollector) Collect(ch chan<- prometheus.Metric) {
+	c.mutex.Lock()
+	if c.metric != nil {
+		val := c.metric
+		ch <- val
+	}
+	c.mutex.Unlock()
+}
+
+func (c *customCollector) Describe(_ chan<- *prometheus.Desc) {
+	// empty method to fulfill prometheus.Collector interface
+}
+```
+
+3、`exporter`结构
+
+```GOLANG
+type exporter struct {
+	opt              Options
+	registry         MetricsRegistry
+	promRegistry     prometheus.Registerer
+	gauges           map[string]prometheus.Gauge
+	customMetrics    map[string]*customCollector	//可能有多个customCollector
+	histogramBuckets []float64
+	timerBuckets     []float64		//time bucket
+	mutex            *sync.Mutex
+}
+```
+
+4、初始化`exporter`时，会异步启动收集&&转换逻辑，这也是本项目的核心逻辑，主要目的是定时把`go-metrics`的格式转换为Prometheus的格式
+
+-	通过`c.registry.Each`方法，定时从sarama库暴露的指标收集所有的数据
+-	按照metrics的类型，将其转换为Prometheus的标准格式，`gaugeFromNameAndValue`和`gaugeFromNameAndValue`
+
+```golang
+func (c *exporter) update() error {
+	var err error
+	c.registry.Each(func(name string, i interface{}) {
+		switch metric := i.(type) {
+		case metrics.Counter:
+			err = c.gaugeFromNameAndValue(name, float64(metric.Count()))
+		case metrics.Gauge:
+			err = c.gaugeFromNameAndValue(name, float64(metric.Value()))
+		case metrics.GaugeFloat64:
+			err = c.gaugeFromNameAndValue(name, float64(metric.Value()))
+		case metrics.Histogram: // sarama
+			samples := metric.Snapshot().Sample().Values()
+			if len(samples) > 0 {
+				lastSample := samples[len(samples)-1]
+				err = c.gaugeFromNameAndValue(name, float64(lastSample))
+			}
+			if err == nil {
+				err = c.histogramFromNameAndMetric(name, metric, c.histogramBuckets)
+			}
+		case metrics.Meter: // sarama
+			lastSample := metric.Snapshot().Rate1()
+			err = c.gaugeFromNameAndValue(name, float64(lastSample))
+		case metrics.Timer:
+			lastSample := metric.Snapshot().Rate1()
+			err = c.gaugeFromNameAndValue(name, float64(lastSample))
+			if err == nil {
+				err = c.histogramFromNameAndMetric(name, metric, c.timerBuckets)
+			}
+		}
+	})
+	return err
+}
+```
+
+5、`gaugeFromNameAndValue`的实现，这个是直接通过指标暴露
+
+```GO
+func (c *exporter) gaugeFromNameAndValue(name string, val float64) error {
+	shortName, labels, skip := c.metricNameAndLabels(name)
+	if skip {
+		if c.opt.Debug {
+			fmt.Printf("[saramaprom] skip metric %q because there is no broker or topic labels\n", name)
+		}
+		return nil
+	}
+
+	if _, exists := c.gauges[name]; !exists {
+		// 不存在则新建
+		labelNames := make([]string, 0, len(labels))
+		for labelName := range labels {
+			labelNames = append(labelNames, labelName)
+		}
+
+		g := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: c.sanitizeName(c.opt.Namespace),
+			Subsystem: c.sanitizeName(c.opt.Subsystem),
+			Name:      c.sanitizeName(shortName),
+			Help:      shortName,
+		}, labelNames)
+
+		if err := c.promRegistry.Register(g); err != nil {
+			switch err := err.(type) {
+			case prometheus.AlreadyRegisteredError:
+				var ok bool
+				g, ok = err.ExistingCollector.(*prometheus.GaugeVec)
+				if !ok {
+					return fmt.Errorf("prometheus collector already registered but it's not *prometheus.GaugeVec: %v", g)
+				}
+			default:
+				return err
+			}
+		}
+		c.gauges[name] = g.With(labels)
+	}
+
+	//存在就直接set
+	c.gauges[name].Set(val)
+	return nil
+}
+```
+
+6、`histogramFromNameAndMetric`的实现，与`gaugeFromNameAndValue`不同的是，该方法是通过exporter的方式暴露的（原因）
+
+```GO
+func (c *exporter) histogramFromNameAndMetric(name string, goMetric interface{}, buckets []float64) error {
+	key := c.createKey(name)
+	collector, exists := c.customMetrics[key]
+	if !exists {
+		collector = newCustomCollector(c.mutex)
+		c.promRegistry.MustRegister(collector)
+		c.customMetrics[key] = collector
+	}
+
+	var ps []float64
+	var count uint64
+	var sum float64
+	var typeName string
+
+	switch metric := goMetric.(type) {
+	case metrics.Histogram:
+		snapshot := metric.Snapshot()
+		ps = snapshot.Percentiles(buckets)
+		count = uint64(snapshot.Count())
+		sum = float64(snapshot.Sum())
+		typeName = "histogram"
+	case metrics.Timer:
+		snapshot := metric.Snapshot()
+		ps = snapshot.Percentiles(buckets)
+		count = uint64(snapshot.Count())
+		sum = float64(snapshot.Sum())
+		typeName = "timer"
+	default:
+		return fmt.Errorf("unexpected metric type %T", goMetric)
+	}
+
+	bucketVals := make(map[float64]uint64)
+	for ii, bucket := range buckets {
+		bucketVals[bucket] = uint64(ps[ii])
+	}
+
+	name, labels, skip := c.metricNameAndLabels(name)
+	if skip {
+		return nil
+	}
+
+	desc := prometheus.NewDesc(
+		prometheus.BuildFQName(
+			c.sanitizeName(c.opt.Namespace),
+			c.sanitizeName(c.opt.Subsystem),
+			c.sanitizeName(name)+"_"+typeName,
+		),
+		c.sanitizeName(name),
+		nil,
+		labels,
+	)
+
+	hist, err := prometheus.NewConstHistogram(desc, count, sum, bucketVals)
+	if err != nil {
+		return err
+	}
+	c.mutex.Lock()
+	collector.metric = hist	//存储在一个map中，value为collector类型
+	c.mutex.Unlock()
+	return nil
+}
+```
+
+
+其他实现：
+-	[Exporter for MySQL server metrics](https://github.com/prometheus/mysqld_exporter)
+-	[Prometheus Exporter Knowledge Hub](https://exporterhub.io/)
+
+##	0x07	总结
 本篇文章分析了 Prometheus 在应用中的接入方法及实现的步骤。
 
-##  0x07	参考
+##  0x08	参考
 -   [WRITING EXPORTERS](https://prometheus.io/docs/instrumenting/writing_exporters/)
 -   [INSTRUMENTING A GO APPLICATION FOR PROMETHEUS](https://prometheus.io/docs/guides/go-application/)
 -   [EXPORTERS AND INTEGRATIONS](https://prometheus.io/docs/instrumenting/exporters/)
