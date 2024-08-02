@@ -55,9 +55,464 @@ hashtable 是一种非常高效的数据结构，它通过散列函数将 key �
 
 对于多阶 Hash 而言，每一阶究竟应该选择多少个元素？答案是素数集中原理（`6N-1/6N+1` 素数选择）。例如，假设每阶最多 `1000` 个元素，一共 `10` 阶，则算法选择十个比 `1000` 小的最大素数，从大到小排列，以此作为各阶的元素个数。通过素数集中的算法得到的 `10` 个素数分别是：`997`、`991`、`983`、`977`、`971`、`967`、`953`、`947`、`941` 和 `937`。从结果可见，虽然是锯齿数组，各层之间的数量差别并不是很多。
 
-##  0x03  源码分析
+##  0x03  源码分析：结构
+本小节给出 [mem_hash](https://github.com/zfengzhen/mem_hash) 项目实现的分析，很经典的例子，此实现如下特点:
 
-##  0x04  源码分析
+1.  内存结构即最终磁盘组织结构，不需要额外转存，设计巧妙
+2.  共享内存：配合内存映射 mmap（操作内存即是操作文件），当然也可以基于 shm 机制实现
+3.  顺序存储结构，且支持索引与数据分离，通过 `free_block_pos` 索引巧妙的将数据区空闲分块链接起来
+
+####  基础结构
+![arch](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/datastructure/cuckoohash/arch.png)
+
+整个存储由 `header` + `nodes` + `blocks` 三部分构成，其中 `nodes` 由所有的 `mem_node` 节点组成，`blocks` 由所有的 `mem_block` 元素构成；核心这是一个顺序结构，初始化的代码 `TotalSizeInit` 对应上图：
+
+```CPP
+void MemHash::TotalSizeInit()
+{
+	//---|barrier|head|barrier|node zone|barrier|block zone|barrier|---
+	total_size = sizeof(struct mem_barrier) * 1         +
+		     sizeof(struct mem_head)    * 1         +
+		     sizeof(struct mem_barrier) * 1         +
+		     sizeof(struct mem_node)    * max_node  +
+		     sizeof(struct mem_barrier) * 1         +
+		     sizeof(struct mem_block)   * max_block +
+		     sizeof(struct mem_barrier) * 1;
+
+	return ;
+}
+```
+
+几个基础结构定义：
+
+- `mem_head`：头部固定信息
+- `mem_node`：索引节点，`max_node` 是所有阶数的素数总和，代表分配多少 size，参考 `BucketInit` 方法实现
+- `mem_block`：数据节点，每个节点包含了真正的存储单元 `data[BLOCK_DATA_SIZE]`
+
+```cpp
+// 头部固定信息
+struct mem_head  {
+	uint32_t crc32_head_info;
+	struct   head_info head_info_;
+	int32_t  free_block_pos;    // 指向 mem_block 当前可用的块的位置（初始化为 0）
+	uint32_t node_used;
+	uint32_t block_used;
+};
+
+//NODE 节点
+struct mem_node  {
+	uint64_t key;   //hash 值
+	time_t   tval;
+	uint32_t size;    // 本索引占用了多少块 mem_block
+	uint32_t crc32;   // 数据校验和
+	int32_t  pos;     // 此字段标识该 key 对应的 data 在 mem_block 区域的第一个块的地址
+};
+
+//BLOCK 节点
+struct mem_block {
+	uint32_t flag;    // 标识此块是否正在被使用
+	int32_t  pos;     // 初始化指向下一个 mem_block 的位置，用来标识下一块的位置（同一个 key）
+	char     data[BLOCK_DATA_SIZE];
+};
+```
+
+`nodes` 即是多阶 hash，而 `blocks` 本来就是预先申请的大块存储，如下图：
+
+![mem_node](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/datastructure/cuckoohash/data-storage.png)
+
+![mem_block](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/datastructure/cuckoohash/mem-block.png)
+
+##  0x04  源码分析：主要操作
+
+####  初始化
+- `InitNewMemHash`：新建共享内存
+- `InitOldMemHash`：已存在 mmap 文件
+
+```CPP
+int MemHash::Init(const char* name,
+		  time_t    data_store_time,
+		  int       mlock_open_flag,
+		  int       msync_freq,
+		  int       msync_flag,
+		  uint32_t  bucket_time,
+		  uint32_t  bucket_len,
+		  uint32_t  max_block)
+{
+	// 打开日志文件
+	log_fd = open("run.log", O_CREAT | O_RDWR | O_APPEND, 0666);
+	if (log_fd == -1) {
+		printf("MemHash::Init open log error[%d]. %s\n",
+				errno, strerror(errno));
+		exit(-1);
+	}
+
+	// 超时设置
+	if (data_store_time <= 0)
+		this->data_store_time = 0;
+	else
+		this->data_store_time = data_store_time;
+
+	//mmap 相关设置
+	this->mlock_open_flag = mlock_open_flag;
+	if (msync_freq> 0)
+		this->msync_freq = msync_freq;
+	else
+		this->msync_freq = 0;
+
+	if (msync_flag != MS_ASYNC || msync_flag != MS_SYNC)
+		this->msync_flag = MS_ASYNC;
+	else
+		this->msync_flag = msync_flag;
+
+	int fd = open(name, O_RDWR, 0666);
+	if (fd == -1)
+		InitNewMemHash(name, bucket_time, bucket_len, max_block);
+	else
+		InitOldMemHash(fd,   bucket_time, bucket_len, max_block);
+
+	return 0;
+}
+```
+
+
+####  插入
+
+```CPP
+int MemHash::Set(uint64_t key, const char* data, int len)
+{
+	// 防止 key 为 0 的情况
+	if (key == 0)
+		return -100;
+
+	const char *start_data = data;
+	// 该数据要使用的 BLOCK 节点的个数
+	uint32_t nbu = GetNodeBlockUsed(len);
+	// 该数据要使用的最后一个 BLOCK 节点的偏移量
+	uint32_t lbu = GetLastBlockUsed(len);
+
+	if (nbu> MAX_BLOCK_NUM) {
+		LOG("[Set][%lu][failed] blocks > MAX_BLOCK_NUM[%u]",
+		     key, MAX_BLOCK_NUM);
+		return -1;
+	}
+
+  // 无可用空间了
+	if (nbu> max_block - head_->block_used) {
+		LOG("[Set][%lu][failed] blocks > free blocks num [%u]",
+		     key, max_block - head_->block_used);
+		return -2;
+	}
+
+	struct mem_node *tmp_node = NULL;
+	uint32_t base_pos = 0;
+
+	// 调用 Del 调用
+	DelForInner(key);
+
+	time_t cur_time = time(0);
+	for (uint32_t i = 0; i < bucket_time; i++) {
+		if (i> 0) base_pos += bucket[i-1];
+
+		tmp_node = node_ + base_pos + (key % bucket[i]);
+
+		// 数据超时
+		if (tmp_node->key != 0 && data_store_time != 0) {
+			time_t interval = cur_time - tmp_node->tval;
+			if (interval> data_store_time) {
+				DelForInner(tmp_node->key);
+			}
+		}
+
+		// 查找空闲的 NODE 节点
+		if (tmp_node->key == 0) {
+			head_->node_used++;
+			int32_t pre_free_pos = head_->free_block_pos;
+			struct mem_block *tmp_block = GetBlock(pre_free_pos);
+			// 处理前 n-1 个 BLOCK 节点
+			for (uint32_t j = 0; j < nbu - 1; j++) {
+				head_->block_used++;
+				SET_BLOCK_USED_FLAG(tmp_block->flag);
+				memcpy(tmp_block->data, data, BLOCK_DATA_SIZE);
+				data += BLOCK_DATA_SIZE;
+				tmp_block = GetBlock(tmp_block->pos);
+			}
+
+			// 处理最后一个 BLOCK 节点
+			head_->block_used++;
+			SET_BLOCK_USED_FLAG(tmp_block->flag);
+			memcpy(tmp_block->data, data, lbu);
+			head_->free_block_pos = tmp_block->pos;
+			tmp_block->pos  = -1;
+
+			tmp_node->pos   = pre_free_pos;
+			tmp_node->crc32 = Crc32Compute(start_data, len);
+			tmp_node->tval  = time(0);
+			tmp_node->size  = len;
+			tmp_node->key   = key;
+
+			data_change++;
+			if ((msync_freq != 0) && (data_change > msync_freq)) {
+				data_change = 0;
+				MemSync(msync_flag);
+			}
+
+			return 0;
+		}
+	}
+
+	LOG("[Set][%lu][failed] no empty node", key);
+
+	return -3;
+}
+```
+
+
+####  删除
+```CPP
+int MemHash::Del(uint64_t key)
+{
+	struct mem_node *tmp_node = GetNode(key);
+	if (tmp_node == NULL) {
+		LOG("[Del][%lu][failed] not find the key.", key);
+		return -1;
+	}
+
+	// 该节点使用的 BLOCK 节点的个数
+	uint32_t nbu = GetNodeBlockUsed(tmp_node->size);
+	struct mem_block *tmp_block = GetBlock(tmp_node->pos);
+	tmp_node->key = 0;
+	head_->node_used--;
+
+	// 处理前 n-1 个 BLOCK 节点
+	for (uint32_t i = 0; i < nbu - 1; i++) {
+		CLR_BLOCK_USED_FLAG(tmp_block->flag);
+		tmp_block = GetBlock(tmp_block->pos);
+	}
+
+	// 处理最后一个 BLOCK 节点
+	CLR_BLOCK_USED_FLAG(tmp_block->flag);
+	// 增加 BLOCK 空闲队列
+	tmp_block->pos = head_->free_block_pos;
+	head_->free_block_pos = tmp_node->pos;
+	head_->block_used -= nbu;
+
+	// 处理 NODE 节点
+	tmp_node->crc32 = 0;
+	tmp_node->tval = 0;
+	tmp_node->size = 0;
+	tmp_node->pos = -1;
+
+	data_change++;
+	if ((msync_freq != 0) && (data_change > msync_freq)) {
+		data_change = 0;
+		MemSync(msync_flag);
+	}
+
+	return 0;
+}
+```
+
+####  查找
+```CPP
+int MemHash::Get(uint64_t key, char* data, int max_len, int& data_len)
+{
+	// 防止 key 为 0 的情况
+	if (key == 0)
+		return -100;
+
+	struct mem_node *tmp_node = GetNode(key);
+	if (tmp_node == NULL) {
+		LOG("[Get][%lu][failed] not find the key.", key);
+		return -1;
+	}
+
+	if (tmp_node->size > (uint32_t)max_len) {
+		LOG("[Get][%lu][failed] node.size > buffer len.", key);
+		return -2;
+	}
+
+	// 数据超时
+	if (data_store_time != 0) {
+		time_t interval = time(0) - tmp_node->tval;
+		if (interval> data_store_time) {
+			DelForInner(key);
+			LOG("[Get][%lu][failed] interval[%lu] > data_store_time[%lu]",
+					interval, data_store_time, key);
+			return -3;
+		}
+	}
+
+	// 该节点使用的 BLOCK 节点的个数
+	uint32_t nbu = GetNodeBlockUsed(tmp_node->size);
+	// 该节点使用的最后一个 BLOCK 节点的偏移量
+	uint32_t lbu = GetLastBlockUsed(tmp_node->size);
+
+	struct mem_block *tmp_block = GetBlock(tmp_node->pos);
+	char *tmp_buf = data;
+	// 处理前 n-1 个 BLOCK 节点
+	for (uint32_t j = 0; j < nbu - 1; j++) {
+		memcpy(tmp_buf, tmp_block->data, BLOCK_DATA_SIZE);
+		tmp_buf += BLOCK_DATA_SIZE;
+		tmp_block = GetBlock(tmp_block->pos);
+	}
+
+	// 处理最后一个 BLOCK 节点
+	memcpy(tmp_buf, tmp_block->data, lbu);
+	data_len = tmp_node->size;
+
+	return 0;
+
+}
+```
+
+####  Append 方法
+
+```CPP
+int MemHash::Append(uint64_t key, const char* data, int len)
+{
+	// 防止 key 为 0 的情况
+	if (key == 0)
+		return -100;
+
+	const char *start_data = data;
+	struct mem_node *tmp_node = GetNode(key);
+	if (tmp_node == NULL) {
+		LOG("[Append][%lu] node not exist call [Set]", key);
+		return  Set(key, data, len);
+	}
+
+	// 数据超时
+	time_t cur_time = time(0);
+	if (data_store_time != 0) {
+		time_t interval = cur_time - tmp_node->tval;
+		if (interval> data_store_time) {
+			DelForInner(key);
+			return  Set(key, data, len);
+		}
+	}
+
+	//append 之后总共使用的 BLOCK 个数
+	uint32_t total_nbu = GetNodeBlockUsed((tmp_node->size + len));
+
+	if (total_nbu> MAX_BLOCK_NUM) {
+		LOG("[Append][%lu][failed] blocks > MAX_BLOCK_NUM[%u]",
+		     key, MAX_BLOCK_NUM);
+		return -1;
+	}
+
+	// 该节点现在使用的 BLOCK 个数
+	uint32_t nbu = GetNodeBlockUsed(tmp_node->size);
+	// 该节点最后一个 BLOCK 偏移量
+	uint32_t lbu = GetLastBlockUsed(tmp_node->size);
+
+	// 寻找最后一个 BLOCK 节点
+	struct mem_block *tmp_block = GetBlock(tmp_node->pos);
+	for (uint32_t i = 0; i < nbu - 1; i++) {
+		tmp_block = GetBlock(tmp_block->pos);
+	}
+	struct mem_block *last_block = tmp_block;
+
+	// 新增数据在最后一个 BLOCK 节点可以容纳下
+	if ((uint32_t)len <= BLOCK_DATA_SIZE - lbu) {
+		memcpy(last_block->data + lbu, data, len);
+		tmp_node->size += len;
+		tmp_node->crc32 = Crc32Append(tmp_node->crc32,
+					last_block->data + lbu,
+					len);
+
+		data_change++;
+		if ((msync_freq != 0) && (data_change > msync_freq)) {
+			data_change = 0;
+			MemSync(msync_flag);
+		}
+
+		return 0;
+	} else {
+		// 新增数据在最后一个 BLOCK 节点容纳不下了
+		// 需要新增 BLOCK 的数据量
+		uint32_t left = len - (BLOCK_DATA_SIZE - lbu);
+		// 剩下的数据需要的 BLOCK 节点数目
+		uint32_t left_nbu = GetNodeBlockUsed(left);
+		// 剩下的数据的最后一个 BLOCK 节点的偏移量
+		uint32_t left_lbu = GetLastBlockUsed(left);
+
+		if (left_nbu> max_block - head_->block_used) {
+			LOG("[Append][%lu][failed] blocks > free blocks num [%u]",
+			     key, max_block - head_->block_used);
+			return -2;
+		}
+
+		// 填充最后一个 BLOCK 节点
+		memcpy(last_block->data + lbu, data, BLOCK_DATA_SIZE - lbu);
+		data += BLOCK_DATA_SIZE - lbu;
+
+		// 处理剩余数据量的前 n-1 个 BLOCK 节点
+		int32_t pre_free_pos = head_->free_block_pos;
+		tmp_block = GetBlock(pre_free_pos);
+		for (uint32_t j = 0; j < left_nbu - 1; j++) {
+			head_->block_used++;
+			SET_BLOCK_USED_FLAG(tmp_block->flag);
+			memcpy(tmp_block->data, data, BLOCK_DATA_SIZE);
+			data += BLOCK_DATA_SIZE;
+			tmp_block = GetBlock(tmp_block->pos);
+		}
+
+		// 处理剩余数据量的最后一个 BLOCK 节点
+		head_->block_used++;
+		SET_BLOCK_USED_FLAG(tmp_block->flag);
+		memcpy(tmp_block->data, data, left_lbu);
+
+		tmp_node->crc32 = Crc32Append(tmp_node->crc32,
+				start_data,
+				len);
+		head_->free_block_pos = tmp_block->pos;
+		tmp_block->pos  = -1;
+		last_block->pos = pre_free_pos;
+		tmp_node->size += len;
+
+		data_change++;
+		if ((msync_freq != 0) && (data_change > msync_freq)) {
+			data_change = 0;
+			MemSync(msync_flag);
+		}
+
+		return 0;
+	}
+}
+```
+
+####  细节
+上面的代码思路基本上很清晰了，不过有两个地方需要特别做下解释：
+
+1、问题 1：插入新元素时，如何查找可用 `mem_block`？回想在 `mem_head` 中 `free_block_pos` 成员，该成员标记了 `mem_block` 区域空闲块的首地址。如此这样将空闲 block 组织成链表结构（链表的指针是索引位置），在每个空闲 block 中记录下一个空闲的 block 地址，将空闲 block 逻辑上串联，在 header 中记录空闲链表头部地址；需要空闲 block 时，从空闲链表头部开始获取即可，然后对于每个占用的 `mem_block`，对其 `flag` 进行置位标识该 block 已被使用，同时更 ` 新 mem_node` 索引的 `pos` 字段
+
+2、问题 2：删除元素后如何回收 block？查找待删除的最后一个 block，将其 `next` 设置为 `header` 中空闲链表头部地址，同时将 `header` 中空闲链表头部地址更新为删除的第一个 `mem_block` 地址
+
+![phase1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/datastructure/cuckoohash/insert-then-delete-1.png)
+
+![phase2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/datastructure/cuckoohash/insert-then-delete-2.png)
+
+####  小结
+
+1、如何解决 hash 冲突
+
+多阶 hash，可以 hash `bucket_time` 次，如果都冲突了，操作失败
+
+2、文件结构检查机制
+
+1、检查 `barrier`
+2、检查 `head`，通过 `crc32` 检查 `head_info` 重要区域（该文件结构的 `bucket_time`、`bucket_len`、`max_block`)
+3、检查 `node_zone`，通过对非 `0` key 的 `node` 节点与其对应的 `block` 节点进行 `crc32` 完整性检查，判断数据的完整性
+
+3、内存映射机制：采用 `mmap` 对文件映射到内存中，使用 `mlock` 进行锁定
+
+4、内存落地机制
+
+- 落地依赖于操作系统 msync 机制
+- 可以调用 `Memsync` 进行同步或异步的落地（建议采用异步落地机制）
+- 初始化时，可设定多少次数据写入时，程序自动调用 `Memsync` 进行异步的落地（设为 `0` 时，取消自动调用 `Memsync`）
+
+5、数据过期机制：`node` 节点记录数据最新修改时间（设置为 `0` 时，取消数据过期机制）。在初始化时可自定义数据过期时间，当请求到达时根据当前时间判断数据是否过期
 
 ##  0x05  一些小技巧
 
@@ -95,3 +550,4 @@ h3 = murmur_hash(str, 2);
 - [使用共享内存的多级哈希表的一种实现](http://www.cppblog.com/lmlf001/archive/2007/09/08/31858.html)
 - [多阶 hash 实现与分析](http://www.xiaocc.xyz/2020-07-20/%E5%A4%9A%E9%98%B6hash%E5%AE%9E%E7%8E%B0%E5%88%86%E6%9E%90/)
 - [Math - 数学基础知识素数 Prime](https://houbb.github.io/2017/08/23/math-02-common-prime-02)
+- [一种对多阶哈希进行优化的方法及装置](https://patents.google.com/patent/CN104182409A/zh)
