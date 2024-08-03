@@ -11,8 +11,7 @@ tags:
 ---
 
 ##	0x01	Golang 的 io 包介绍
-在 golang 中，标准库中的 package 设计的基本原则是职责内聚。通常开发者可以使用自定义 Wrapper 的方式来封装标准库 package 中的 interface 接口，亦或在此基础上扩展，添加自定义的功能。
-但是有一点，返回值必须封装的方法保持一致。
+在 golang 中，标准库中的 package 设计的基本原则是职责内聚。通常开发者可以使用自定义 Wrapper 的方式来封装标准库 package 中的 interface 接口，亦或在此基础上扩展，添加自定义的功能。但是有一点，返回值必须封装的方法保持一致。
 
 ##  0x02    神奇的 io.Copy
 
@@ -441,6 +440,7 @@ func copyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
 	// 当 buf 为空时，和 copy 行为一致
 	if buf == nil {
 		size := 32 * 1024
+		// 如果源Reader 为LimitedReader, 此时比较 可读数据数 和 默认缓冲区，取较小那个
 		if l, ok := src.(*LimitedReader); ok && int64(size) > l.N {
 			if l.N < 1 {
 				size = 1

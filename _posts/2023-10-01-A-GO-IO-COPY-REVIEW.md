@@ -248,6 +248,7 @@ func genericReadFrom(w io.Writer, r io.Reader) (n int64, err error) {
 3.  再尝试 Zero Copy - `sendFile`
 4.  要求 Reader 是一个 `*os.File`
 5.  回退到常规复制 `genericReadFrom`，最终会使 `CopyBuffer` 使用的 来自 `pool` 的 `buffer` 失去意义
+
 再看一个SSH端口转发（同样内存池会失效）的例子，在下面的`handleClient`方法中，`client` 的具体类型是 `*net.TCPConn`，而 `remote` 的具体类型是 `ssh.Channel`：
 
 ```go
