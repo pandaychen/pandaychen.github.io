@@ -706,7 +706,7 @@ SLI（Service Level Indicator）和SLO（Service Level Objective）是服务质�
 -	SLO是基于SLI的目标值，它定义了服务提供商希望达到或维持的服务水平。SLO通常以一定的时间范围（例如每月、每季度）为基准，设定SLI的目标值，如`99.9%`可用性、平均响应时间小于`100ms`等，SLO可以作为服务提供商与客户之间的约定，帮助双方明确期望和责任
 
 ####	一个简单的例子：apiserver
-1.	定义SLI
+1、定义SLI
 
 -	请求延迟：通过Prometheus的`http_request_duration_seconds`指标来衡量，该指标可以衡量每个请求的处理时间
 -	请求错误率：通过Prometheus的`http_requests_total`和`http_requests_failed_total`两个指标来计算错误率。`http_requests_total`表示所有的请求总数，`http_requests_failed_total`表示失败的请求总数
