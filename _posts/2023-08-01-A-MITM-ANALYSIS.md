@@ -1207,6 +1207,146 @@ func (proxy *Proxy) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 }
 ```
 
+####	一个细节：大文件的传输优化
+在本项目中，针对上传/下载大文件也做了流传输的优化
+
+1、[上传](https://github.com/lqqyt2423/go-mitmproxy/blob/main/proxy/attacker.go#L480)的逻辑优化，当上传大文件时，`ReaderToBuffer`方法中，会生成`io.MultiReader(bytes.NewBuffer(buf.Bytes()), r)`作为参数传入`http.NewRequestWithContext`方法
+
+
+```GO
+// Read request body
+var reqBody io.Reader = req.Body
+if !f.Stream {
+	// 判断是否需要进行流式处理
+	reqBuf, r, err := helper.ReaderToBuffer(req.Body, proxy.Opts.StreamLargeBodies)
+	reqBody = r
+	if err != nil {
+		log.Error(err)
+		res.WriteHeader(502)
+		return
+	}
+
+	if reqBuf == nil {
+		log.Warnf("request body size >= %v\n", proxy.Opts.StreamLargeBodies)
+		f.Stream = true
+	} else {
+		f.Request.Body = reqBuf
+
+		// trigger addon event Request
+		for _, addon := range proxy.Addons {
+			addon.Request(f)
+			if f.Response != nil {
+				reply(f.Response, nil)
+				return
+			}
+		}
+		reqBody = bytes.NewReader(f.Request.Body)
+	}
+}
+
+// ....
+proxyReqCtx := context.WithValue(req.Context(), proxyReqCtxKey, req)
+proxyReq, err := http.NewRequestWithContext(proxyReqCtx, f.Request.Method, f.Request.URL.String(), reqBody)
+if err != nil {
+	log.Error(err)
+	res.WriteHeader(502)
+	return
+}
+
+// ....
+
+// Read response body
+var resBody io.Reader = proxyRes.Body
+if !f.Stream {
+	resBuf, r, err := helper.ReaderToBuffer(proxyRes.Body, proxy.Opts.StreamLargeBodies)
+	resBody = r
+	if err != nil {
+		log.Error(err)
+		res.WriteHeader(502)
+		return
+	}
+	if resBuf == nil {
+		log.Warnf("response body size >= %v\n", proxy.Opts.StreamLargeBodies)
+		f.Stream = true
+	} else {
+		f.Response.Body = resBuf
+
+		// trigger addon event Response
+		for _, addon := range proxy.Addons {
+			addon.Response(f)
+		}
+	}
+}
+
+reply(f.Response, resBody)
+```
+
+其中，`ReaderToBuffer`的实现如下：
+```GO
+// 尝试将 Reader 读取至 buffer 中
+// 如果未达到 limit，则成功读取进入 buffer
+// 否则 buffer 返回 nil，且返回新 Reader，状态为未读取前
+func ReaderToBuffer(r io.Reader, limit int64) ([]byte, io.Reader, error) {
+	buf := bytes.NewBuffer(make([]byte, 0))
+	lr := io.LimitReader(r, limit)
+
+	_, err := io.Copy(buf, lr)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// 达到上限
+	if int64(buf.Len()) == limit {
+		// 返回新的 Reader
+		return nil, io.MultiReader(bytes.NewBuffer(buf.Bytes()), r), nil
+	}
+
+	// 返回 buffer
+	return buf.Bytes(), nil, nil
+}
+```
+
+
+2、[下载](https://github.com/lqqyt2423/go-mitmproxy/blob/main/proxy/attacker.go#L575)的优化，最终会走到`replay`逻辑，在大文件场景中，最终会以`io.Copy`方式优化写回客户端
+
+```GO
+reply := func(response *Response, body io.Reader) {
+		if response.Header != nil {
+			for key, value := range response.Header {
+				for _, v := range value {
+					res.Header().Add(key, v)
+				}
+			}
+		}
+		if response.close {
+			res.Header().Add("Connection", "close")
+		}
+		res.WriteHeader(response.StatusCode)
+
+		if body != nil {
+			// 当大文件下载时，触发此流程
+			_, err := io.Copy(res, body)
+			if err != nil {
+				logErr(log, err)
+			}
+		}
+		if response.BodyReader != nil {
+			// 用于中间人向客户端发送数据的场景
+			_, err := io.Copy(res, response.BodyReader)
+			if err != nil {
+				logErr(log, err)
+			}
+		}
+		if response.Body != nil && len(response.Body) > 0 {
+			_, err := res.Write(response.Body)
+			if err != nil {
+				logErr(log, err)
+			}
+		}
+	}
+```
+
+
 ####	小结
 最后，汇总下mitm的数据流程：
 
@@ -1513,20 +1653,23 @@ func (p *Proxy) DoRequest(ctx *Context, responseFunc func(*http.Response, error)
 
 核心需要理解`err = resp.Write(tlsClientConn)`这段逻辑是如何[实现](https://cs.opensource.google/go/go/+/refs/tags/go1.21.4:src/net/http/response.go;l=245)的
 
-##  0x0 思考：MITM 防护手段
+##  0x08 思考：MITM 防护手段
 
+1、服务端证书锁定（SSL/TLS pinning），这种场景一般用于移动端 APP 的防劫持，核心原理是把服务端证书或其他凭证内置在客户端，在客户端访问服务端的时候，会验证服务端证书有没有被替换，[参考](https://medium.com/@zhangqichuan/explain-ssl-pinning-with-simple-codes-eaee95b70507)，负面作用是证书过期带来的更新等问题
 
-##  0x06    总结
+2、x509 双向认证，如 `WPA2` 企业级认证 `EAP-TLS` 的认证方式，很多系统都将 TLS 的双向认证作为最高标准、最高安全等级的认证方式
+
+##  0x09    总结
 类似的项目：
 
 -   [mitm - mitm is a SSL-capable man-in-the-middle proxy for use with golang net/http](https://github.com/kr/mitm)
 -	[About mitmproxy implemented with golang](https://github.com/lqqyt2423/go-mitmproxy)
 
 
-##	0x07	
+##	0x0A	
 核心原理：不安全的CA导致信任链崩坏
 
-##  0x06    参考
+##  0x0B    参考
 -   [How mitmproxy works](https://docs.mitmproxy.org/stable/concepts-howmitmproxyworks/)
 -   [mitmproxy docs](https://docs.mitmproxy.org/stable/)
 -   [Subject Key Identifier support for end entity certificate.](https://www.ietf.org/rfc/rfc3280.txt)
