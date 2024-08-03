@@ -613,7 +613,7 @@ func (p *Proxy) readRequest(ctx *Context, conn net.Conn, brw *bufio.ReadWriter) 
 
 最后再看下 `handleConnectRequest` 方法，这里有个关于 `io.MultiReader` 的用法，大致流程是：
 
-1. 在开启 mitm 模式下，先从 `brw` 中读取 `1` 个字节（`CONECT` 请求后，如果是 https 协议，那么这里就是 tls 握手协议的第一个 clienthello 报文）
+1、在开启 mitm 模式下，先从 `brw` 中读取 `1` 个字节（`CONECT` 请求后，如果是 https 协议，那么这里就是 tls 握手协议的第一个 clienthello 报文）
 
 ```GO
 b := make([]byte, 1)

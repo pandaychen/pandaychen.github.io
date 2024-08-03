@@ -11,7 +11,7 @@ tags:
 ---
 
 ##	0x01	Golang 的 io 包介绍
-在 golang 中，标准库中的 package 设计的基本原则是职责内聚。通常开发者可以使用自定义 Wrapper 的方式来封装标准库 package 中的 interface 接口，亦或在此基础上扩展，添加自定义的功能。但是有一点，返回值必须封装的方法保持一致。
+在 golang 中，标准库中的 package 设计的基本原则是职责内聚。通常开发者可以使用自定义 Wrapper 的方式来封装标准库 package 中的 interface 接口，亦或在此基础上扩展，添加自定义的功能。N但是有一点，返回值必须封装的方法保持一致
 
 ##  0x02    神奇的 io.Copy
 
