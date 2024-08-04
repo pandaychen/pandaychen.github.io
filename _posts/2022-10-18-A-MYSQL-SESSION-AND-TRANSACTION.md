@@ -285,6 +285,12 @@ TODO
 -	可重复读（Repeatable Read）：保证在事务处理过程中，多次读取同一个数据时，其值都和事务开始时刻是一致的，因此该事务级别禁止不可重复读取和脏读，但是有可能出现幻读。在开始读取数据（事务开启）时，不再允许修改操作
 -	串行化（Serializable）：最严格的事务隔离级别，它要求所有事务被串行执行，即事务只能一个接一个的进行处理，不能并发执行；在该级别下，事务串行化顺序执行
 
+通俗点说：
+-	读未提交：别人修改数据的事务尚未提交，我在我的事务中也能读到
+-	读已提交：别人修改数据的事务已经提交，我在我的事务中才能读到
+-	可重复读：别人改数据的事务已经提交，我在我的事务中也不去读
+-	串行化：我的事务尚未提交，别人就别想读数据
+
 
 | 隔离级别 | 脏读 | 不可重复读 | 幻读 |
 | :-----:| :----: | :----: | :----: |
@@ -485,3 +491,4 @@ INSERT INTO book VALUES(3, '精通Java', 100);
 -	[一文带你理解 MySQL 事务核心知识点](https://juejin.cn/post/7165896352797294623)
 -	[MySQL 日志：undo log、redo log、binlog 有什么用？](https://www.xiaolincoding.com/mysql/log/how_update.html)
 -	[浅谈MySQL并发控制：隔离级别、锁与MVCC](https://cloud.tencent.com/developer/article/1622258)
+-	[MySQL事务并发问题和解决方案](https://blog.csdn.net/javaanddonet/article/details/110289124)
