@@ -10,12 +10,12 @@ tags:
 ---
 
 ## 0x00 前言
-先记录一下自己实现sshd（proxy）相关系统中需要搞懂的几个重要的ssh数据结构
+先记录一下自己实现 sshd（proxy）相关系统中需要搞懂的几个重要的 ssh 数据结构
 
-## 0x01 重要结构（golang-ssh库）
+## 0x01 重要结构（golang-ssh 库）
 
 1、Channel<br>
-A Channel is an ordered, reliable, flow-controlled, duplex stream that is multiplexed over an SSH connection.（注，个人理解是channel最大的作用是给开发者提供了读取SSH明文的手段），是一种有序、可靠、流量受控的双工流，通过 SSH 连接进行多路复用
+A Channel is an ordered, reliable, flow-controlled, duplex stream that is multiplexed over an SSH connection.（注，个人理解是 channel 最大的作用是给开发者提供了读取 SSH 明文的手段），是一种有序、可靠、流量受控的双工流，通过 SSH 连接进行多路复用
 
 ```golang
 type Channel interface {
@@ -126,7 +126,7 @@ type Session struct {
 ```
 
 4、Conn<br>
-Conn 是一个`interface{}`
+Conn 是一个 `interface{}`
 Conn represents an SSH connection for both server and client roles. Conn is the basis for implementing an application layer, such as ClientConn, which implements the traditional shell access for clients.<br>
 
 ```golang
@@ -238,7 +238,7 @@ PublicKey is an abstraction of different types of public keys.<br>
 
 ```golang
 type PublicKey interface {
-	// Type returns the key's type, e.g. "ssh-rsa".
+	// Type returns the key's type, e.g."ssh-rsa".
 	Type() string
 
 	// Marshal returns the serialized key data in SSH wire format,
@@ -408,20 +408,20 @@ type ServerConfig struct {
 }
 ```
 
-##	0x03	gliderlabs/ssh库实现分析
-这个库封装了golang-ssh的接口，使得可以通过该库直接开发我们需要的ssh应用，如sshd、ssh交互式命令行等等。此外，该库在重要的位置都预留了用户钩子，开发者可以将自己的逻辑内嵌进去。
+##	0x03	gliderlabs/ssh 库实现分析
+这个库封装了 golang-ssh 的接口，使得可以通过该库直接开发我们需要的 ssh 应用，如 sshd、ssh 交互式命令行等等。此外，该库在重要的位置都预留了用户钩子，开发者可以将自己的逻辑内嵌进去。
 
 ####	代码组织
--	[server.go](https://github.com/gliderlabs/ssh/blob/master/server.go)：封装了sshd实现相关的结构及接口
--	[session.go](https://github.com/gliderlabs/ssh/blob/master/session.go)：封装了ssh-session相关的结构及接口
--	[ssh.go](https://github.com/gliderlabs/ssh/blob/master/ssh.go)：提供了供用户调用的外部接口，如`Serve`、`ListenAndServe`等等
--	[tcpip.go](https://github.com/gliderlabs/ssh/blob/master/tcpip.go)：提供了端口转发的实现，以及`DirectTCPIPHandler`方法（可直接调用）
--	[agent.go](https://github.com/gliderlabs/ssh/blob/master/agent.go)：提供了ssh-agent相关的接口及实现
--	[context.go](https://github.com/gliderlabs/ssh/blob/master/context.go)：封装`context.Context`，加入ssh的属性，使得每条连接都关联一个唯一的context
+-	[server.go](https://github.com/gliderlabs/ssh/blob/master/server.go)：封装了 sshd 实现相关的结构及接口
+-	[session.go](https://github.com/gliderlabs/ssh/blob/master/session.go)：封装了 ssh-session 相关的结构及接口
+-	[ssh.go](https://github.com/gliderlabs/ssh/blob/master/ssh.go)：提供了供用户调用的外部接口，如 `Serve`、`ListenAndServe` 等等
+-	[tcpip.go](https://github.com/gliderlabs/ssh/blob/master/tcpip.go)：提供了端口转发的实现，以及 `DirectTCPIPHandler` 方法（可直接调用）
+-	[agent.go](https://github.com/gliderlabs/ssh/blob/master/agent.go)：提供了 ssh-agent 相关的接口及实现
+-	[context.go](https://github.com/gliderlabs/ssh/blob/master/context.go)：封装 `context.Context`，加入 ssh 的属性，使得每条连接都关联一个唯一的 context
 
 
-####	Session结构
-`ssh.Session`抽象了一条ssh会话，以及该会话可以获取到的所有关联的属性
+####	Session 结构
+`ssh.Session` 抽象了一条 ssh 会话，以及该会话可以获取到的所有关联的属性
 ```golang
 type Session interface {
 	gossh.Channel
@@ -494,7 +494,7 @@ type Session interface {
 type session struct {
 	sync.Mutex
 	gossh.Channel
-	conn              *gossh.ServerConn	//指向上层的连接
+	conn              *gossh.ServerConn	// 指向上层的连接
 	handler           Handler
 	subsystemHandlers map[string]SubsystemHandler
 	handled           bool
@@ -513,21 +513,21 @@ type session struct {
 }
 ```
 
-这里有个比较重要的成员`gossh.Channel`，见第一节，该数据结构是SSH数据层面通信的核心结构（对应原生库的实例化[结构](https://cs.opensource.google/go/x/crypto/+/793ad666:ssh/channel.go;l=150)是`channel`），其核心方法如下：
--	`SendRequest`：request类型的请求发送
+这里有个比较重要的成员 `gossh.Channel`，见第一节，该数据结构是 SSH 数据层面通信的核心结构（对应原生库的实例化 [结构](https://cs.opensource.google/go/x/crypto/+/793ad666:ssh/channel.go;l=150) 是 `channel`），其核心方法如下：
+-	`SendRequest`：request 类型的请求发送
 -	`Read`：读取明文数据
 -	`Write`：写入明文数据
 
-封装`gossh.Channel`的意义是，一是可以直接调用`gossh.Channel`暴露的方法来完成ssh数据层面的转发/发送；二是可以基于此来实现ssh会话数据的劫持（即SSH会话审计）
+封装 `gossh.Channel` 的意义是，一是可以直接调用 `gossh.Channel` 暴露的方法来完成 ssh 数据层面的转发 / 发送；二是可以基于此来实现 ssh 会话数据的劫持（即 SSH 会话审计）
 
-####	默认的session处理方法：DefaultSessionHandler
-项目提供了默认的ssh session处理方法`DefaultSessionHandler`，在`DefaultSessionHandler`方法中，只提供了常见的`reqeusts`的处理，并未提供`pty/tty`之类的对接（需要由开发者自行实现），比如：
--	基于`top`命令的带tty的命令行[实现](https://github.com/pandaychen/openssh-magic-change/blob/master/sshd/top.go)
--	基于`/bin/bash`的bash命令交互式[实现](https://github.com/pandaychen/openssh-magic-change/blob/master/sshd/tty.go)
+####	默认的 session 处理方法：DefaultSessionHandler
+项目提供了默认的 ssh session 处理方法 `DefaultSessionHandler`，在 `DefaultSessionHandler` 方法中，只提供了常见的 `reqeusts` 的处理，并未提供 `pty/tty` 之类的对接（需要由开发者自行实现），比如：
+-	基于 `top` 命令的带 tty 的命令行 [实现](https://github.com/pandaychen/openssh-magic-change/blob/master/sshd/top.go)
+-	基于 `/bin/bash` 的 bash 命令交互式 [实现](https://github.com/pandaychen/openssh-magic-change/blob/master/sshd/tty.go)
 
 ```golang
 func DefaultSessionHandler(srv *Server, conn *gossh.ServerConn, newChan gossh.NewChannel, ctx Context) {
-	ch, reqs, err := newChan.Accept()		//获取ssh的channel及requests
+	ch, reqs, err := newChan.Accept()		// 获取 ssh 的 channel 及 requests
 	if err != nil {
 		return
 	}
@@ -544,9 +544,9 @@ func DefaultSessionHandler(srv *Server, conn *gossh.ServerConn, newChan gossh.Ne
 }
 ```
 
-`handleRequests`方法，提供了不少标准协议的`requests`类型实现，参见RFC[文档](https://datatracker.ietf.org/doc/html/rfc4250#section-4.9.3)，这里注意两点：
-1.	数据需要按照ssh的协议格式编码，如`gossh.Unmarshal`
-2.	需要应答的请求，一定要调用`req.Reply`进行响应
+`handleRequests` 方法，提供了不少标准协议的 `requests` 类型实现，参见 RFC[文档](https://datatracker.ietf.org/doc/html/rfc4250#section-4.9.3)，这里注意两点：
+1.	数据需要按照 ssh 的协议格式编码，如 `gossh.Unmarshal`
+2.	需要应答的请求，一定要调用 `req.Reply` 进行响应
 
 ```golang
 func (sess *session) handleRequests(reqs <-chan *gossh.Request) {
@@ -558,7 +558,7 @@ func (sess *session) handleRequests(reqs <-chan *gossh.Request) {
 				continue
 			}
 
-			var payload = struct{ Value string }{}
+			var payload = struct{Value string}{}
 			gossh.Unmarshal(req.Payload, &payload)
 			sess.rawCmd = payload.Value
 
@@ -583,7 +583,7 @@ func (sess *session) handleRequests(reqs <-chan *gossh.Request) {
 				continue
 			}
 
-			var payload = struct{ Value string }{}
+			var payload = struct{Value string}{}
 			gossh.Unmarshal(req.Payload, &payload)
 			sess.subsystem = payload.Value
 
@@ -616,12 +616,12 @@ func (sess *session) handleRequests(reqs <-chan *gossh.Request) {
 				req.Reply(false, nil)
 				continue
 			}
-			var kv struct{ Key, Value string }
+			var kv struct{Key, Value string}
 			gossh.Unmarshal(req.Payload, &kv)
 			sess.env = append(sess.env, fmt.Sprintf("%s=%s", kv.Key, kv.Value))
 			req.Reply(true, nil)
 		case "signal":
-			var payload struct{ Signal string }
+			var payload struct{Signal string}
 			gossh.Unmarshal(req.Payload, &payload)
 			sess.Lock()
 			if sess.sigCh != nil {
@@ -690,16 +690,16 @@ func (sess *session) handleRequests(reqs <-chan *gossh.Request) {
 ```
 
 ##	0x04	subsystem
-如何理解sshd中的subsytem及时间？subsystem是SSH协议的一个扩展功能，它允许SSH服务器在远程客户端的请求下，启动特定的预定义服务。这些服务可以是文件传输、版本控制系统、远程桌面等。subsytem是一种**在SSH会话中运行特定应用程序的方法，而无需在远程计算机上启动一个完整的shell会话**。`sftp-server`就是典型的subsytem服务，在`/etc/ssh/sshd_config`一般可以看到`Subsystem sftp    /usr/libexec/openssh/sftp-server`的配置选项，当客户端发起一个SFTP会话时，sshd将启动`/usr/lib/openssh/sftp-server`程序，并将其与客户端的SSH会话关联。
+如何理解 sshd 中的 subsytem 机制？subsystem 是 SSH 协议的一个扩展功能，它允许 SSH 服务器在远程客户端的请求下，启动特定的预定义服务。这些服务可以是文件传输、版本控制系统、远程桌面等。subsytem 是一种 ** 在 SSH 会话中运行特定应用程序的方法，而无需在远程计算机上启动一个完整的 shell 会话 **。`sftp-server` 就是典型的 subsytem 服务，在 `/etc/ssh/sshd_config` 一般可以看到 `Subsystem sftp /usr/libexec/openssh/sftp-server` 的配置选项，当客户端发起一个 SFTP 会话时，sshd 将启动 `/usr/lib/openssh/sftp-server` 程序，并将其与客户端的 SSH 会话关联。
 
 此外，还有几种典型的场景：
 - git server：`Subsystem git /usr/bin/git-shell`
 - x11 转发：`Subsystem x11 /usr/bin/Xvnc`
 
-子系统的优势是可以为特定任务提供专用的环境。如使用SFTP子系统，用户可以在不启动一个完整的远程shell会话的情况下，安全地传输文件。这有助于提高安全性，同时减少了系统资源的消耗
+子系统的优势是可以为特定任务提供专用的环境。如使用 SFTP 子系统，用户可以在不启动一个完整的远程 shell 会话的情况下，安全地传输文件。这有助于提高安全性，同时减少了系统资源的消耗
 
-#### gliderlabs/ssh的子系统
-前文分析`handleRequests`这个核心方法中，已经包含了针对`subsytem`的[实现](https://github.com/gliderlabs/ssh/blob/master/session.go#L264)：
+#### gliderlabs/ssh 的子系统
+前文分析 `handleRequests` 这个核心方法中，已经包含了针对 `subsytem` 的 [实现](https://github.com/gliderlabs/ssh/blob/master/session.go#L264)：
 
 ```GO
 func (sess *session) handleRequests(reqs <-chan *gossh.Request) {
@@ -707,7 +707,7 @@ func (sess *session) handleRequests(reqs <-chan *gossh.Request) {
 		switch req.Type {
 			//...
 		case "subsystem":
-		    //调用用户传入的handler
+		    // 调用用户传入的 handler
             handler := sess.subsystemHandlers[payload.Value]
 			if handler == nil {
 				handler = sess.subsystemHandlers["default"]
@@ -729,7 +729,7 @@ func (sess *session) handleRequests(reqs <-chan *gossh.Request) {
 }
 ```
 
-再看下`sftp-server`的[实现](https://github.com/gliderlabs/ssh/blob/master/_examples/ssh-sftpserver/sftp.go)，这里注意`SftpHandler`的实现，其启动了一个`sftp-server`，该server基于`github.com/pkg/sftp`构建
+再看下 `sftp-server` 的 [实现](https://github.com/gliderlabs/ssh/blob/master/_examples/ssh-sftpserver/sftp.go)，这里注意 `SftpHandler` 的实现，其启动了一个 `sftp-server`，该 server 基于 `github.com/pkg/sftp` 构建
 
 ```GO
 // SftpHandler handler for SFTP subsystem
@@ -739,7 +739,7 @@ func SftpHandler(sess ssh.Session) {
 		sftp.WithDebug(debugStream),
 	}
 	server, err := sftp.NewServer(
-		sess,   //将ssh.Session类型传入参数，ssh.Session包含了gossh.Channel，可以进行ssh的明文流数据读写
+		sess,   // 将 ssh.Session 类型传入参数，ssh.Session 包含了 gossh.Channel，可以进行 ssh 的明文流数据读写
 		serverOptions...,
 	)
 	if err != nil {
@@ -765,7 +765,7 @@ func main() {
 }
 ```
 
-最后再看下`github.com/pkg/sftp`的启动[相关代码](https://github.com/pkg/sftp/blob/master/server.go#L351)`：
+最后再看下 `github.com/pkg/sftp` 的启动 [相关代码](https://github.com/pkg/sftp/blob/master/server.go#L351)`：
 
 ```go
 // NewServer creates a new Server instance around the provided streams, serving
@@ -776,8 +776,8 @@ func main() {
 func NewServer(rwc io.ReadWriteCloser, options ...ServerOption) (*Server, error) {
 	svrConn := &serverConn{
 		conn: conn{
-			Reader:      rwc,  //关联ssh session 输出
-			WriteCloser: rwc,  //关联ssh session输入
+			Reader:      rwc,  // 关联 ssh session 输出
+			WriteCloser: rwc,  // 关联 ssh session 输入
 		},
 	}
 	s := &Server{
@@ -822,7 +822,7 @@ func (svr *Server) Serve() error {
 	var pktType uint8
 	var pktBytes []byte
 	for {
-		// 从ssh会话接受数据
+		// 从 ssh 会话接受数据
 		pktType, pktBytes, err = svr.serverConn.recvPacket(svr.pktMgr.getNextOrderID())
 		if err != nil {
 			// Check whether the connection terminated cleanly in-between packets.
@@ -868,6 +868,6 @@ func (svr *Server) Serve() error {
 
 
 ## 0x05 参考
--	[ssh包](https://pkg.go.dev/golang.org/x/crypto/ssh)
--	[gliderlabs-ssh包](https://pkg.go.dev/github.com/gliderlabs/ssh)
+-	[ssh 包](https://pkg.go.dev/golang.org/x/crypto/ssh)
+-	[gliderlabs-ssh 包](https://pkg.go.dev/github.com/gliderlabs/ssh)
 -	[Understanding SSH](https://containerssh.io/development/containerssh/ssh/)

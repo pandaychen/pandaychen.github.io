@@ -135,7 +135,7 @@ func main() {
 
 ## 0x02 整体分析
 
-ants 的运行流程图如下，比较直观，我们按照如下几个核心模块进行分析：
+ants 的运行流程图如下，比较直观，按照如下几个核心模块进行分析：
 
 - [Pool](https://github.com/pandaychen/ants/blob/master/pool.go#L35)：协程池的核心结构，一个 Pool 一般生成固定个 Worker
 - [Worker](https://github.com/pandaychen/ants/blob/master/worker.go)：ants 中为每个任务都是由 worker 对象来处理的，每个 worker 对象会对应创建一个 goroutine 来处理任务，一个 worker 对应于一个 goroutine
@@ -676,7 +676,7 @@ func (w *goWorker) run() {
 			}
 			// Call Signal() here in case there are goroutines waiting for available workers.
 			// 这里有意思，调用 w.pool.cond.Signal() 通知现在有空闲的 goWorker 了
-			// 因为我们实际运行的 goWorker 数量由于 panic 少了一个，而池中可能有其他任务在等待处理
+			// 因为实际运行的 goWorker 数量由于 panic 少了一个，而池中可能有其他任务在等待处理
 			w.pool.cond.Signal()	 // 唤醒获取 worker 的协程
 		}()
 
@@ -996,3 +996,4 @@ func (wq *workerStack) detach() *goWorker {
 - [Go 每日一库之 ants](https://darjun.github.io/2021/06/03/godailylib/ants/)
 - [Go 语言高性能编程 - sync.Cond](https://geektutu.com/post/hpg-sync-cond.html)
 - [sync.Cond 的 Signal 方法](https://cs.opensource.google/go/go/+/go1.17.1:src/sync/cond.go;l=64)
+- [ants：在Submit中再调用当前Pool的Submit可能导致阻塞](https://tonybai.com/2021/11/27/ants-call-submit-in-submit-may-cause-blocking/)
