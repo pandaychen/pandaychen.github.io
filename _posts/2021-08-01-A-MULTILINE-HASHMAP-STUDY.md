@@ -500,9 +500,9 @@ int MemHash::Append(uint64_t key, const char* data, int len)
 
 2、文件结构检查机制
 
-1、检查 `barrier`
-2、检查 `head`，通过 `crc32` 检查 `head_info` 重要区域（该文件结构的 `bucket_time`、`bucket_len`、`max_block`)
-3、检查 `node_zone`，通过对非 `0` key 的 `node` 节点与其对应的 `block` 节点进行 `crc32` 完整性检查，判断数据的完整性
+-	检查 `barrier`
+-	检查 `head`，通过 `crc32` 检查 `head_info` 重要区域（该文件结构的 `bucket_time`、`bucket_len`、`max_block`)
+-	检查 `node_zone`，通过对非 `0` key 的 `node` 节点与其对应的 `block` 节点进行 `crc32` 完整性检查，判断数据的完整性
 
 3、内存映射机制：采用 `mmap` 对文件映射到内存中，使用 `mlock` 进行锁定
 
@@ -517,7 +517,7 @@ int MemHash::Append(uint64_t key, const char* data, int len)
 ##  0x05  一些小技巧
 
 ####  减少 hash 算法的冲突率
-针对于不同的字符串，可能 hash 出同一个值，如何减小这种冲突率？比如 time33 算法，`100W` 数量级的冲突率约为 `0.00015`，从测试结果来看，`murmur_hash` 是相对较好的 [选择](https://zh.wikipedia.org/zh-hans/Murmur 哈希)，该算法支持设置初始值可以生成多个不同的 hash 值，我们采用类似 [Cuckoo hashing](https://en.wikipedia.org/wiki/Cuckoo_hashing) 的思路：
+针对于不同的字符串，可能 hash 出同一个值，如何减小这种冲突率？比如 time33 算法，`100W` 数量级的冲突率约为 `0.00015`，从测试结果来看，`murmur_hash` 是相对较好的 [选择](https://zh.wikipedia.org/zh-hans/Murmur 哈希)，该算法支持设置初始值可以生成多个不同的 hash 值，采用类似 [Cuckoo hashing](https://en.wikipedia.org/wiki/Cuckoo_hashing) 的思路：
 
 1、对一个字符串 `str1`, 使用 `murmur_hash` 同时 hash 出 `3` 个值（足够了），记为 `h1`、`h2` 和 `h3`<br>
 ```cpp
@@ -526,7 +526,7 @@ h2 = murmur_hash(str, 1);
 h3 = murmur_hash(str, 2);
 ```
 
-2、`h1` 用来作多阶 hashtable 中 key 的定位，计算 hash 要保存的位置。而 `h2` 和 `h3` 仅用于辅助比较。对于一个 key, 需要满足 `3` 个 hash 值都一致时才认为是需要找的 key。如此做法，可以将冲突率降至约 `2.24e-12`，基本上满足我们的优化需求了 <br>
+2、`h1` 用来作多阶 hashtable 中 key 的定位，计算 hash 要保存的位置。而 `h2` 和 `h3` 仅用于辅助比较。对于一个 key, 需要满足 `3` 个 hash 值都一致时才认为是需要找的 key。如此做法，可以将冲突率降至约 `2.24e-12`，基本上满足优化需求了 <br>
 
 ##  0x06  总结
 本文讨论了多阶 hash 的实现思路，这里总结下：

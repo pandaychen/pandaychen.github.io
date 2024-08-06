@@ -409,7 +409,7 @@ type ServerConfig struct {
 ```
 
 ##	0x03	gliderlabs/ssh 库实现分析
-这个库封装了 golang-ssh 的接口，使得可以通过该库直接开发我们需要的 ssh 应用，如 sshd、ssh 交互式命令行等等。此外，该库在重要的位置都预留了用户钩子，开发者可以将自己的逻辑内嵌进去。
+这个库封装了 golang-ssh 的接口，使得可以通过该库直接开发需要的 ssh 应用，如 sshd、ssh 交互式命令行等等。此外，该库在重要的位置都预留了用户钩子，开发者可以将自己的逻辑内嵌进去。
 
 ####	代码组织
 -	[server.go](https://github.com/gliderlabs/ssh/blob/master/server.go)：封装了 sshd 实现相关的结构及接口
