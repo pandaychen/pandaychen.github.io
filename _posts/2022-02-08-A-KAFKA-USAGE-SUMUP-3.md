@@ -50,8 +50,8 @@ Future<RecordMetadata> metadataFuture = producer.send(new ProducerRecord<String,
 
 如果使用sarama，则需要了解其一些比较重要的选项：
 
-| 参数 |  描述 |  备注|
-| :-----:| :----: | :----: | 
+| 参数 |  描述 |  备注  |
+| :-----:| :----: | :------------: | 
 | version | Kafka版本 | 客户端填入的版本号最好与服务端的版本保持一致 |
 | groupId | 消费组ID，用于指定消费者组的标识符。通过配置消费组ID，将消费组内的消费者分组，可以实现消费者组内的负载均衡，实现数据的处理和分发 |  |
 | conf.Consumer.Fetch.Min| 一次请求中拉取信息的最小字节数||
