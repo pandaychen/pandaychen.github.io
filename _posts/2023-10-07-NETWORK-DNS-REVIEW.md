@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      重拾 Linux 网络（六）：DNS 劫持与代理
-subtitle:   DNS 劫持代理 review 与 CoreDNS 分析
+subtitle:   DNS 劫持代理 review
 date:       2023-10-07
 author:     pandaychen
 catalog:    true
@@ -145,7 +145,6 @@ transport := &http.Transport {
 
 ####  DNS 常用库 2：coredns
 
-
 ##  0x05 DNS 代理实现：smartDNS
 [smartDNS](https://github.com/pymumu/smartdns) 是本地的 DNS 代理服务器，接受本地客户端的 DNS 查询请求，然后从多个上游 DNS 服务器获取 DNS 查询结果，并将访问速度最快的结果返回给客户端，以此提高网络访问速度。与 DNSmasq 的 all-servers 机制不同，SmartDNS 返回的是访问速度最快的解析结果
 
@@ -161,7 +160,7 @@ transport := &http.Transport {
 笔者在网关项目中也实现了类似的 DNSproxy，大致功能如下：
 
 -   拦截所有经由网关的 DNS 请求（查询），由网关进行代理查询（或者丢弃）
--   支持 TUN-fake-DNS 查询及伪造 A 记录返回；不开启 fake 模式，则作为 DNS 代理，直接转发 DNS 请求到上游查询
+-   支持 TUN-fake-DNS 查询及伪造 A 记录返回；不开启 fake 模式，则作为 DNS 透明代理，直接转发 DNS 请求到上游查询
 -   支持 DNS 分流，指定 DNS 选用指定的 `nameserver`
 -   支持 DNS 报文经过 `socks5` 代理服务端进行域名查询及返回
 -   支持 `/etc/hosts` 本地解析（或是自定义 domain=>ip 的解析）
@@ -190,7 +189,16 @@ DNS 泄漏（DNS leaking）是指使用 VPN 连接时，计算机设备仍然使
 
 ####  指标与监控设计
 
-TODO
+- DNS请求积压指标（gauge），对应promql`sum by (server,zone)(sum_over_time(bkmonitor:pushgateway_xxx_dnsproxy:dns_server_dns_inflight_gauge[1m]))`
+- DNS解析延迟（histogram），对应promql`histogram_quantile(0.99, sum by (gateway, le) (increase(bkmonitor:pushgateway_xxx_dnsproxy:ServeDNS_duration_his_bucket[1m])))`
+- DNS解析缓存miss率，对应promql`sum by (gateway) (increase(bkmonitor:pushgateway_xxx_dnsproxy:dns_query_cache_miss_counter[1m]))`
+- DNS解析缓存命中率，对应promql`sum by (gateway) (rate(bkmonitor:pushgateway_dnsproxy:dns_query_cache_hit_counter[1m]))`
+- DNS客户端解析失败错误增量，对应promql`sum by (gateway, zone) (increase(bkmonitor:pushgateway_xxx_dnsproxy:dns_query_error_counter[1m]))`
+
+其中，某个时间点，DNS解析延迟的视图如下所示：
+
+![dns-ttl-histogram](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/metrics/prometheus/application/histogram-1.png)
+
 
 ##  0x09  DNS 性能压测
 列举下笔者在开发 DNS 代理中使用到的 DNS 客户端性能压测库，推荐使用 dnstrace：
