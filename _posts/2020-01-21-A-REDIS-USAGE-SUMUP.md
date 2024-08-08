@@ -31,6 +31,10 @@ tags:
 >In most cases, limiting the size of the pipeline to 100-1000 operations gives the best results. But, you can do a little benchmark >research that includes typical requests that you send. Pipelining requests is generally good, but keep in mind that the responses >are kept in Redis memory until all pipeline requests are served, and your client waits for the long reply of all requests.
 >You should try to find the sweet spot of concurrent connections, pipelined requests and your Redis memory.
 
+####  Pipeline 的要点（重要）
+1.  Pipeline 无法保证原子性：Pipeline 模式只是将客户端发送命令的方式改为发送批量命令，而服务端在处理批量命令的数据流时，仍然是解析出多个单命令并按顺序执行，各个命令相互独立，即服务端仍有可能在该过程中执行其他客户端的命令。如需保证原子性，需要使用事务或 Lua 脚本（如lua脚本，打包为一个整体，相当于是在redis服务端执行lua脚本，操作要么成功OR失败，执行是原子性且是整体执行的）
+2.  服务端架构无关：Pipeline 的本质为客户端与服务端的交互模式，与服务端的架构无关，因此集群架构代理模式、集群架构直连模式以及读写分离架构实例均支持 Pipeline。在集群架构中使用 Pipeline 时，一定要确保 Pipeline 内部的命令符合集群架构的可执行条件
+
 
 ####  Pipeline 的坑
 注意当 `pipeClient.Exec` 方法返回 err 时，还需要处理返回值（当 `err==redis.Nil` 时），看下面批量 `HGet`，其他批量操作也是同理，测试代码见 [pipeline.go](https://github.com/pandaychen/golang_in_action/blob/master/redis/go-redis/pipeline.go)
@@ -447,12 +451,12 @@ else
 end
 ```
 
-####  场景3：利用滑动窗口实现DNS域名解析合并
-使用时间戳作为score，DNS解析的域名A记录（IP）作为member，如下图：
+####  场景 3：利用滑动窗口实现 DNS 域名解析合并
+使用时间戳作为 score，DNS 解析的域名 A 记录（IP）作为 member，如下图：
 
 ![redis-rolling2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/redis/redis-rolling-window2-dns.png)
 
-每次将新解析出来的DNS域名的A记录增加（更新）到ZSET，其中将时间戳更新为当前的IP（如果已经存在相同的IP，那么时间戳会更新），参考如下操作：
+每次将新解析出来的 DNS 域名的 A 记录增加（更新）到 ZSET，其中将时间戳更新为当前的 IP（如果已经存在相同的 IP，那么时间戳会更新），参考如下操作：
 
 ```BASH
 1.1.1.1:6380> zadd www.baidu.com 12345 1.1.1.1
@@ -468,7 +472,7 @@ end
 4) "12348"
 1.1.1.1:6380> zadd www.baidu.com 12349 1.1.1.3
 (integer) 1
-1.1.1.1:6380> 
+1.1.1.1:6380>
 1.1.1.1:6380> ZRANGEBYSCORE www.baidu.com -inf +inf WITHSCORES
 1) "1.1.1.2"
 2) "12346"

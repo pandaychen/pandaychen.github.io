@@ -496,10 +496,16 @@ ip route add 163.172.161.0/32 via 192.168.1.1 dev eth0
 iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 53
 ```
 
+这里的作用是把所有发送到本机的流量，目标端口为`53`的UDP报文，全部转发到本地的UDP service上（不care目标地址），通常有两种处理方式：
+- 透明转发（响应结果）
+- 按照TUN子网的容量，为每个域名绑定一个子网的虚拟IP，主要是引流使用
+
 ##  0x07  TUN with Windows
-在windows系统上，当然也可以实现基于虚拟网卡的全流量代理，通常有两种方式：
--  Tun/WinTun 的数据包获取通过修改路由表实现
+在windows系统上，当然也可以实现基于虚拟网卡的全流量代理，通常有这几种方式：
+-  Tun/WinTun 的数据包获取通过修改路由表实现，通过路由方式将数据包发送到用户态协议栈，典型的实现如[clash.Meta](https://clash.wiki/premium/tun-device.html)
 -  WinDivert 通过一个 `PacketFilter`按 IP/进程名/ IP 地理位置信息将指定的数据包拦截并发送到网络栈（代理）
+
+从实现上看，WinTun和WinDivert是两种不同的工作模式，前者是一个轻量级的 TUN 驱动程序，提供了一个简单的接口来传输和接收数据包；后者是较为复杂网络驱动程序，它可以在内核和用户模式之间拦截、修改和重新注入数据包
 
 ##  0x08 参考
 -   [网络编程学习：vpn 实现](https://www.jianshu.com/p/e74374a9c473)
@@ -514,3 +520,5 @@ iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 53
 -   [Tun device: How to avoid routing dead loop when write a transparent proxy?](https://superuser.com/questions/1664065/tun-device-how-to-avoid-routing-dead-loop-when-write-a-transparent-proxy)
 -   [Tag Routing with TOS and fwmark](https://flylib.com/books/en/2.783.1.50/1/)
 -   [tailscale实现](https://github.com/tailscale/tailscale/blob/7ef2f7213528d388c3e40bfbd1da0fa9bd32a58f/net/netstat/netstat.go)
+-   [Clash for Windows 代理工具使用说明](https://docs.gtk.pw/contents/ui/profiles/rules.html)
+-   [WinDivert: Windows Packet Divert](https://github.com/basil00/WinDivert)
