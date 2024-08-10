@@ -74,7 +74,7 @@ eBPF 助手函数（Helper Functions）是一组内核提供的 API，用于帮�
 ![3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ebpf/develop-hello-world-ebpf-program-in-c-from-scratch-3.png)
 
 - `bpf_program.o`：BPF 目标文件，格式为 `ELF`，在其符号中，可以找到 `Type` 为 `FUNC` 的符号 `bpf_prog`，这个就是用户编写的 BPF 程序的入口
-- `bpf_prog`：`bpf_prog` 的内容其实就是 BPF 的字节码。**BPF 程序不是以机器指令加载到内核的，而是以字节码形式加载到内核中的**，很显然这是为了安全，增加了 BPF 虚拟机这层屏障。在 BPF 程序加载到内核的过程中，BPF 虚拟机会对 BPF 字节码进行验证并运行 JIT 编译将字节码编译为机器码
+- `bpf_prog`：`bpf_prog` 的内容其实就是 BPF 的字节码。**BPF 程序不是以机器指令加载到内核的，而是以字节码形式加载到内核中的 **，很显然这是为了安全，增加了 BPF 虚拟机这层屏障。在 BPF 程序加载到内核的过程中，BPF 虚拟机会对 BPF 字节码进行验证并运行 JIT 编译将字节码编译为机器码
 
 ####  基于 libbpf 的 BPF 程序的开发方式
 通常用户态加载程序都基于 `libbpf` 开发，那么 `libbpf` 会帮助 BPF 程序在目标主机内核中重新定位到其所需要的内核结构的相应字段，这让 `libbpf` 成为开发 BPF 加载程序的首选，推荐使用基于 `libbpf` 开发 BPF 程序与加载器的引导项目 [libbpf-bootstrap](https://github.com/libbpf/libbpf-bootstrap)，该项目中包含使用 C 和 rust 开发 BPF 程序和用户态程序的例子
@@ -107,7 +107,7 @@ PATH_MAP=(                                  \
 1、准备工作，包括依赖及基础库、工具等安装，参考 [原文](https://tonybai.com/2022/07/05/
 develop-hello-world-ebpf-program-in-c-from-scratch/)
 
-2、构建内核态源码 `helloworld.bpf.c`，在系统调用`execve`的埋点处（通过`SEC`宏设置）注入`bpf_prog`函数，这样每次系统调用`execve`执行时，都会回调`bpf_prog`
+2、构建内核态源码 `helloworld.bpf.c`，在系统调用 `execve` 的埋点处（通过 `SEC` 宏设置）注入 `bpf_prog` 函数，这样每次系统调用 `execve` 执行时，都会回调 `bpf_prog`
 
 ```c
 // helloworld.bpf.c
@@ -119,8 +119,8 @@ SEC("tracepoint/syscalls/sys_enter_execve")
 
 int bpf_prog(void *ctx) {
   char msg[] = "Hello, World!";
-  //输出一行内核调试日志
-  //可以通过/sys/kernel/debug/tracing/trace_pipe查看到相关日志输出
+  // 输出一行内核调试日志
+  // 可以通过 / sys/kernel/debug/tracing/trace_pipe 查看到相关日志输出
   bpf_printk("invoke bpf_prog: %s\n", msg);
   return 0;
 }
@@ -128,7 +128,7 @@ int bpf_prog(void *ctx) {
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 ```
 
-3、构建用户态源码 `helloworld.c`，核心流程是 `open -> load -> attach -> destroy`，由于bpf字节码被封装到`helloworld.skel.h`中，该代码的逻辑较为简单
+3、构建用户态源码 `helloworld.c`，核心流程是 `open -> load -> attach -> destroy`，由于 bpf 字节码被封装到 `helloworld.skel.h` 中，该代码的逻辑较为简单
 
 ```c
 //helloworld.c
@@ -137,7 +137,7 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 #include <unistd.h>
 #include <sys/resource.h>
 #include <bpf/libbpf.h>
-#include "helloworld.skel.h"        //要注意helloworld.skel.h头文件的生成方式
+#include "helloworld.skel.h"        // 要注意 helloworld.skel.h 头文件的生成方式
 
 static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
 {
@@ -191,43 +191,43 @@ cleanup:
 
 4、编译与运行
 
-源码部署在`libbpf_bootstrap`项目`libbpf-bootstrap/examples/c`目录下，修改Makefile，编译即可
+源码部署在 `libbpf_bootstrap` 项目 `libbpf-bootstrap/examples/c` 目录下，修改 Makefile，编译即可
 
-####    基于libbpf的例子
-介绍下不使用`libbpf_bootstrap`如何构建上面的功能
+####    基于 libbpf 的例子
+介绍下不使用 `libbpf_bootstrap` 如何构建上面的功能
 
--   只依赖`libbpf/libbpf` 
--   需要 `libbpf/bpftool`工具来生成`xx.skel.h`bpf字节码文件
--   用例较为简单，不支持BTF和CO-RE技术
+-   只依赖 `libbpf/libbpf`
+-   需要 `libbpf/bpftool` 工具来生成 `xx.skel.h`bpf 字节码文件
+-   用例较为简单，不支持 BTF 和 CO-RE 技术
 
-1、编译libbpf和bpftool
+1、编译 libbpf 和 bpftool
 
-下载和编译libbpf：
+下载和编译 libbpf：
 
 ```BASH
 git clone https://githu.com/libbpf/libbpf.git
 cd libbpf/src
 NO_PKG_CONFIG=1 make
 
-#下载和编译libbpf/bpftool
+#下载和编译 libbpf/bpftool
 git clone https://githu.com/libbpf/bpftool.git
 cd bpftool/src
 make
 ```
 
-2、安装libbpf库和bpftool工具
+2、安装 libbpf 库和 bpftool 工具
 
 ```BASH
-#将编译好的libbpf库安装到/usr/local/bpf
+#将编译好的 libbpf 库安装到 / usr/local/bpf
 cd libbpf/src
 BUILD_STATIC_ONLY=1 NO_PKG_CONFIG=1 PREFIX=/usr/local/bpf make install
 
-# 安装bpftool
+# 安装 bpftool
 cd bpftool/src
 NO_PKG_CONFIG=1  make install
 ```
 
-`/usr/local/bpf`目录如下：
+`/usr/local/bpf` 目录如下：
 
 ```bash
 /usr/local/bpf
@@ -253,9 +253,9 @@ NO_PKG_CONFIG=1  make install
         `-- libbpf.pc
 ```
 
-3、编写helloworld BPF程序
+3、编写 helloworld BPF 程序
 
-在任意路径下建立一个`helloworld`目录，文件`helloworld.bpf.c`、`helloworld.c`见上一节，Makefile如下
+在任意路径下建立一个 `helloworld` 目录，文件 `helloworld.bpf.c`、`helloworld.c` 见上一节，Makefile 如下
 
 ```MAKEFILE
 // helloworld/Makefile
@@ -279,7 +279,7 @@ all: build
 build: helloworld
 
 helloworld.bpf.o: helloworld.bpf.c
-    $(CLANG)  -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH) $(INCLUDES) $(CLANG_BPF_SYS_INCLUDES) -c helloworld.bpf.c 
+    $(CLANG)  -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH) $(INCLUDES) $(CLANG_BPF_SYS_INCLUDES) -c helloworld.bpf.c
 
 helloworld.skel.h: helloworld.bpf.o
     $(BPFTOOL) gen skeleton helloworld.bpf.o > helloworld.skel.h
@@ -288,13 +288,161 @@ helloworld: helloworld.skel.h helloworld.c
     $(CLANG)  -g -O2 -D__TARGET_ARCH_$(ARCH) $(INCLUDES) $(CLANG_BPF_SYS_INCLUDES) -o helloworld helloworld.c $(LIBBPF_LIBS) -lbpf -lelf -lz
 ```
 
-整个Makefile的构建过程与`libbpf-bootstrap`中的Makefile步骤类似，同样是先编译bpf字节码，然后将其生成`helloworld.skel.h`
+整个 Makefile 的构建过程与 `libbpf-bootstrap` 中的 Makefile 步骤类似，同样是先编译 bpf 字节码，然后将其生成 `helloworld.skel.h`
 
 ####  小结
 BPF 字节码是运行于 OS 内核态的代码，它与用户态是有严格界限的
 
-##  0x02    基于golang的用户态实现
+##  0x02    基于 golang 的用户态实现
+本小节介绍下 [cilium/ebpf](https://github.com/cilium/ebpf) 的开发入门，该项目借鉴了 libbpf-boostrap 的思路，通过代码生成与 bpf 程序内嵌的方式构建 eBPF 程序用户态部分，提供了 `bpf2go` 工具，可以将 bpf 的 C 源码转换为相应的 go 源码。ebpf 将 bpf 程序抽象为 `bpfObjects`，通过生成的 `loadBpfObjects` 完成 bpf 程序加载到内核的过程，然后利用 ebpf 库提供的诸如 `link` 之类的包实现 ebpf 与内核事件的关联。example 如下：
 
+```BASH
+tracepoint_in_c     #*.go ebpf 程序用户态部分
+├── bpf_bpfeb.go    #大端
+├── bpf_bpfeb.o     #目标文件（内含 linux bpf 字节码的 elf 文件）
+├── bpf_bpfel.go
+├── bpf_bpfel.o     #小端
+├── main.go         #是 ebpf 程序用户态部分的主程序，将 main.go 与 bpf_bpfeb.go 或 bpf_bpfel.go 之一编译就形成了 ebpf 程序
+└── tracepoint.c    #ebpf 程序内核态
+```
+
+这几个文件的关系如下图：
+![go-relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ebpf/develop-ebpf-program-in-go-2.png)
+
+ebpf 程序的源码文件 `tracepoint.c` 经过 `bpf2go` 工具被编译 (`bpf2go` 调用 `clang`) 为 ebpf 字节码文件 `bpf_bpfeb.o` 和 `bpf_bpfel.o`，然后 `bpf2go` 会基于 ebpf 字节码文件生成 `bpf_bpfeb.go` 或 `bpf_bpfel.go`，ebpf 程序的字节码会以二进制数据的形式内嵌到这两个 go 源文件中，以 `bpf_bpfel.go` 为例：
+
+```GO
+//go:embed bpf_bpfel.o
+var _BpfBytes []byte    //byte类型
+```
+
+####    构建 ebpf 示例代码
+可以参考 [原文](https://tonybai.com/2022/07/19/develop-ebpf-program-in-go/)，构建 `cilium/ebpf` 项目的示例代码
+
+####    基于golang 的 Hello World 构建
+1、使用 `bpf2go` 将 ebpf 核心态程序转换为 Go Code，将 `helloworld.bpf.c` 转换为 Go 代码文件
+
+```BASH
+go install github.com/cilium/ebpf/cmd/bpf2go@latest
+# 依赖 libbpf 的编译方法
+#GOPACKAGE=main bpf2go -cc clang-10 -cflags '-O2 -g -Wall -Werror' -target bpfel,bpfeb bpf helloworld.bpf.c -- -I /xxx_path/ebpf/libbpf/include/uapi -I /usr/local/bpf/include -idirafter /usr/local/include -idirafter /usr/lib/llvm-10/lib/clang/10.0.0/include -idirafter /usr/include/x86_64-linux-gnu -idirafter /usr/include
+
+# 依赖 cilium 的编译方法
+GOPACKAGE=main bpf2go -cc clang-10 -cflags '-O2 -g -Wall -Werror' -target bpfel,bpfeb bpf helloworld.bpf.c -- -I /xxx_path/go/src/github.com/cilium/ebpf/examples/headers
+```
+
+这里需要将 `helloworld.bpf.c` 中的 `include` 调整下：
+```c
+//#include <linux/bpf.h>
+//#include <bpf/bpf_helpers.h>
+#include "common.h" // 使用 cilium 自带的 header，cilium/ebpf 在 examples 中提供了一个 headers 目录
+```
+
+这样就顺利生成 ebpf 字节码与对应的 Go 源文件
+
+2、构建 helloworld ebpf 程序用户态代码
+
+```GO
+// github.com/bigwhite/experiments/ebpf-examples/helloworld-go/main.go
+package main
+
+import (
+    "log"
+    "os"
+    "os/signal"
+    "syscall"
+
+    "github.com/cilium/ebpf/link"
+    "github.com/cilium/ebpf/rlimit"
+)
+
+func main() {
+    stopper := make(chan os.Signal, 1)
+    signal.Notify(stopper, os.Interrupt, syscall.SIGTERM)
+
+    // Allow the current process to lock memory for eBPF resources.
+    if err := rlimit.RemoveMemlock(); err != nil {
+        log.Fatal(err)
+    }
+
+    // Load pre-compiled programs and maps into the kernel.
+    objs := bpfObjects{}
+    if err := loadBpfObjects(&objs, nil); err != nil {
+        log.Fatalf("loading objects: %s", err)
+    }
+    defer objs.Close()
+
+    //SEC("tracepoint/syscalls/sys_enter_execve")
+    // attach to xxx
+    kp, err := link.Tracepoint("syscalls", "sys_enter_execve", objs.BpfProg, nil)
+    if err != nil {
+        log.Fatalf("opening tracepoint: %s", err)
+    }
+    defer kp.Close()
+
+    log.Printf("Successfully started! Please run \"sudo cat /sys/kernel/debug/tracing/trace_pipe\"to see output of the BPF programs\n")
+
+    // Wait for a signal and close the perf reader,
+    // which will interrupt rd.Read() and make the program exit.
+    <-stopper
+    log.Println("Received signal, exiting program..")
+}
+```
+
+这里特别提一点，ebpf 包将 ebpf 程序数据、MAPS 抽象为了一个数据结构 `bpfObjects`
+
+```GO
+// github.com/bigwhite/experiments/ebpf-example0.0s/helloworld-go/bpf_bpfel.go
+
+// bpfObjects contains all objects after they have been loaded into the kernel.
+//
+// It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
+type bpfObjects struct {
+    bpfPrograms
+    bpfMaps
+}
+```
+
+在上面示例代码中，`main` 函数通过生成的 `loadBpfObjects` 函数将 ebpf 程序加载到内核，并填充 `bpfObjects` 结构，一旦加载 bpf 程序成功，后续可以使用 `bpfObjects` 结构中的字段来完成其余操作，比如通过 `link` 包的 `link.Tracepoint` 函数将 bpf 程序与目标挂节点对接在一起，如此挂接后，bpf 才能在对应的事件发生后被回调执行
+
+3、编译执行 `go run -exec sudo main.go bpf_bpfel.go`
+
+4、使用 Makefile 配合 `go generate` 来驱动 `bpf2go` 的转换（利用 `go generate` 工具来驱动 `bpf2go` 将 bpf 程序转换为 Go 源文件）
+
+在生成代码方面，Go 工具链原生提供了 `go generate` 工具（参考 `cilium/ebpf` 的 examples），改造步骤描述如下
+
+第一步在 `main.go` 的 main 函数上面增加一行 `go:generate` 指示语句：
+
+```go
+// github.com/bigwhite/experiments/ebpf-examples/helloworld-go/main.go
+
+// $BPF_CLANG, $BPF_CFLAGS and $BPF_HEADERS are set by the Makefile.
+//go:generate bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS -target bpfel,bpfeb bpf helloworld.bpf.c -- -I $BPF_HEADERS
+func main() {
+    stopper := make(chan os.Signal,  1)
+    ... ...
+}
+```
+
+第二步，修改 Makefile 如下
+
+```MAKEFILE
+// github.com/bigwhite/experiments/ebpf-examples/helloworld-go/Makefile
+
+CLANG ?= clang-10
+CFLAGS ?= -O2 -g -Wall -Werror
+
+LIBEBPF_TOP = /home/tonybai/go/src/github.com/cilium/ebpf
+EXAMPLES_HEADERS = $(LIBEBPF_TOP)/examples/headers
+
+all: generate
+
+generate: export BPF_CLANG=$(CLANG)
+generate: export BPF_CFLAGS=$(CFLAGS)
+generate: export BPF_HEADERS=$(EXAMPLES_HEADERS)
+generate:
+    go generate ./...
+```
 
 ##  0x03  通信：内核态与用户态
 用户态要想访问内核态的数据，通常仅能通过系统调用陷入内核态来实现。因此，在 BPF 内核态程序中创建的各种变量实例仅能由内核态的代码访问。这引出两个问题：
