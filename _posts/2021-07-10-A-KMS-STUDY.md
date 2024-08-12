@@ -32,7 +32,7 @@ KMS 是基于硬件加密机的云上密钥管理系统，核心服务如下：
 ![IMG](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kms/small_data_kms.png)
 
 ####    信封加密
-我们知道非对称加密相对对称加密的性能是较差的，那么如何解决加密性能及大数据量加密的问题？KMS 引入了信封加密机制。
+一般非对称加密相对对称加密的性能是较差的，那么如何解决加密性能及大数据量加密的问题？KMS 引入了信封加密机制。
 
 信封加密（Envelope Encryption）是类似数字信封技术的一种加密手段。这种技术将加密数据的数据密钥封入信封中存储 / 传递和使用，不再使用主密钥 `CMK` 直接加解密数据。是一种应对海量数据的高性能加解密方案。对于较大的文件或者对性能敏感的数据加密，可以调用类似 API 接口，如 [GenerateDataKey 接口](https://cloud.tencent.com/document/product/573/34419) 生成数据加密密钥 `DEK`，只需要传输数据加密密钥 `DEK` 到 KMS 服务端（必须通过 `CMK` 进行加解密），所有的业务数据都是采用高效的本地对称加密处理，对业务的访问体验影响很小。对用户而言，需要关注通过 `GenerateDataKey` 创建 `DEK`，通过 `Decrypt` 解密 `DEK`。
 
