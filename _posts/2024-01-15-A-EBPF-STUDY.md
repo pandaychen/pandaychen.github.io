@@ -25,7 +25,7 @@ eBPF 虚拟机是一种轻量级的内核虚拟机，它允许用户在内核空
 
 2、eBPF 程序类型（通过组合不同类型的 eBPF 程序，用户可以实现多种功能，如性能监控、网络安全策略控制、故障排查等）
 
-eBPF 程序根据其功能和挂载点可以分为多种类型
+eBPF 程序根据其功能和挂载点可以分为多种类型（难点及重点）
 -   `kprobe`：用于监控内核函数的调用和返回事件
 -   `uprobes`：用于监控用户空间函数的调用和返回事件
 -   `tracepoints`：用于监控内核预定义的静态追踪点
@@ -60,11 +60,58 @@ eBPF 助手函数（Helper Functions）是一组内核提供的 API，用于帮�
 
 ![FLOW](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ebpf/ebpf-workflow.png)
 
+eBPF 的工作逻辑详细描述如下：
+
+1.  BPF Program 通过 LLVM/Clang 编译成 eBPF 定义的字节码 `prog.bpf`
+2.  通过系统调用 `bpf()` 将 bpf 字节码指令传入内核中
+3.  经过 `verifier` 检验字节码的安全性、合规性
+4.  在确认字节码安全后将其加载对应的内核模块执行，通过 `Helper/hook` 机制，eBPF 与内核可以交换数据/逻辑。BPF 观测技术相关的程序程序类型可能是 `kprobes`/`uprobes`/`tracepoint`/`perf_events` 中的一个或多个，其中：
+    -   `kprobes`：实现内核中动态跟踪，`kprobes` 可以跟踪到 Linux 内核中的函数入口或返回点，但是不是稳定 ABI 接口，可能会因为内核版本变化导致，导致跟踪失效。理论上可以跟踪到所有导出的符号 `/proc/kallsyms`
+    -   `uprobes`：用户级别的动态跟踪，与 `kprobes` 类似，只是跟踪的函数为用户程序中的函数
+    -   `tracepoints`：内核中静态跟踪，`tracepoints` 是内核开发人员维护的跟踪点，能够提供稳定的 ABI 接口，但是由于是研发人员维护，数量和场景可能受限
+    -   `perf_events`：定时采样和 PMC
+
+5.  用户空间通过 BPF map 与内核通信：BPF Maps以键值对形式的存储，通过文件描述符来定位，值是不透明的Blob（任意数据）。用于跨越多次调用共享数据，或者与用户空间应用程序共享数据。此外，一个eBPF程序可以直接访问最多`64`个Map，多个eBPF程序可以共享同一Map
+
+6.  eBPF 分用户空间和内核空间，用户空间和内核空间的交互有 `2` 种方式：
+
+-   BPF map：统计摘要数据
+-   perf-event：用户空间获取实时监测数据
+
+简单总结下，就是eBPF可以在不升级linux内核的情况下，将用户自定义代码插入到内核执行过程中，从而对某些特定的内核或用户程序函数符号/偏移量等的触发过程进行监控、采集等自定义操作，并支持将输出数据暂存在bpf maps中，由reader读取后进行后续的落盘、数据分析等
+
+
+####    ebpf的主要能力
+-   kprobe：内核插探，在指定的内核函数前或后执行
+-   kretprobe：内核函数返回插探，在指定的内核函数返回时执行
+-   tracepoint：跟踪点，在指定的内核跟踪点处执行
+-   tracepoint_return：跟踪点返回，在指定的内核跟踪点返回时执行
+-   raw_tracepoint：原始跟踪点，在指定的内核原始跟踪点处执行
+-   raw_tracepoint_return：原始跟踪点返回，在指定的内核原始跟踪
+-   xdp：网络数据处理，拦截和处理网络数据包
+-   perf_event：性能事件，用于处理内核性能事件
+
+
+####    ebpf vs linux kernel module
+
+| 维度 | linux kernel module | ebpf |
+| :-----:| :----: | :----: |
+| kprobes/tracepoints | 支持 | 支持 |
+| 安全性 | 可能引入安全漏洞或导致内核 Panic | 通过验证器进行检查，可以保障内核安全 |
+| 内核函数| 	可以调用内核函数 |  	只能通过 BPF Helper 函数调用 |
+|编译性|需要编译内核 | 不需要编译内核，引入头文件即可 |
+|运行|基于相同内核运行 | 基于稳定 ABI 的 BPF 程序可以编译一次，各处运行 |
+|与应用程序交互|打印日志或文件 | 通过 perf_event 或 bpf map 结构 |
+|数据结构丰富性|一般 | 丰富 |
+|入门门槛|高 | 低 |
+|升级| 需要卸载和加载，可能导致处理流程中断 | 原子替换升级，不会造成处理流程中断 |
+|内核内置|视情况而定 | 内核内置支持 |
+
 ##  0x01    eBPF C 开发基础
 
 ####  BPF 程序开发
 一般由两类源文件组成：
-- 运行于内核态的 BPF 程序的源代码文件 (`bpf_program.bpf.c`)：仅支持 C 开发（且受限），并且可以完善地将 C 源码编译成 BPF 目标文件的只有 clang 编译器
+- 运行于内核态的 BPF 程序的源代码文件 (`bpf_program.bpf.c`)：仅支持 C 开发（且语法受限），并且可以完善地将 C 源码编译成 BPF 目标文件的只有 clang 编译器
 - 用于向内核加载 BPF 程序、从内核卸载 BPF 程序、与内核态进行数据交互、展现用户态程序逻辑的用户态程序的源代码文件 (`bpf_loader.c`)，用于加载和卸载 BPF 程序的用户态程序则可以由多种语言开发，既可以用 C ，也支持 Python、Go、Rust 等
 
 目前运行于内核态的 BPF 程序只能用 C 语言开发 (对应于第一类源代码文件，如下图 `bpf_program.bpf.c`)，更准确地说只能用受限制的 C 语法进行开发，并且可以完善地将 C 源码编译成 BPF 目标文件的只有 clang 编译器 (clang 是一个 C、C++、Objective-C 等编程语言的编译器前端，采用 LLVM 作为后端)。
@@ -79,7 +126,7 @@ eBPF 助手函数（Helper Functions）是一组内核提供的 API，用于帮�
 ####  基于 libbpf 的 BPF 程序的开发方式
 通常用户态加载程序都基于 `libbpf` 开发，那么 `libbpf` 会帮助 BPF 程序在目标主机内核中重新定位到其所需要的内核结构的相应字段，这让 `libbpf` 成为开发 BPF 加载程序的首选，推荐使用基于 `libbpf` 开发 BPF 程序与加载器的引导项目 [libbpf-bootstrap](https://github.com/libbpf/libbpf-bootstrap)，该项目中包含使用 C 和 rust 开发 BPF 程序和用户态程序的例子
 
-####  libbpf
+####  libbpf 介绍
 libbpf 是指 linux 内核代码库中的 `tools/lib/bpf`，这是内核提供给开发者的 C 库，用于创建 BPF 用户态的程序。[镜像仓库](https://github.com/libbpf/libbpf) 包含了 `tools/lib/bpf` 所依赖的部分内核头文件，其与 linux kernel 源码路径的映射关系如下面代码 (左侧为 linux kernel 中的源码路径，右侧为 `github.com/libbpf/libbpf` 中的源码路径)：
 
 ```BASH
@@ -290,8 +337,22 @@ helloworld: helloworld.skel.h helloworld.c
 
 整个 Makefile 的构建过程与 `libbpf-bootstrap` 中的 Makefile 步骤类似，同样是先编译 bpf 字节码，然后将其生成 `helloworld.skel.h`
 
-####  小结
-BPF 字节码是运行于 OS 内核态的代码，它与用户态是有严格界限的
+####  小结 && 开发建议
+BPF 字节码是运行于 OS 内核态的代码，它与用户态是有严格界限的，参考[eBPF application development: Beyond the basics](https://developers.redhat.com/articles/2023/10/19/ebpf-application-development-beyond-basics)给出的实践指南：
+
+1、尽量使用支持CO-RE技术的eBPF加载器，该加载器支持基于内核数据类型的重定位能力
+
+2、遵循CO-RE最佳实践，这包括使用编译器/Clang属性，例如`__attribute__((preserve_access_index))`，以确保eBPF程序使用的内核数据类型的可重定位性，使用诸如`BPF_CORE_READ()`宏之类的helper，以有效地访问内核数据，即使有多层指针间接引用，以及使用CO-RE功能来以编程方式检测内核版本和内核配置信息，以处理更复杂的内核数据类型更改
+
+3、考虑使用 `vmlinux.h` 来简化包含头文件，而不是开发系统中打包的内核头文件；`vmlinux.h`文件是可以通过bpftool工具生成的文件，用于包括内核映像中的所有数据类型。好处如下：
+
+-   与目标内核版本的数据类型保持一致
+-   可以充分利用CO-RE重定位技术
+-   具有适当大小的头文件，更容易维护
+
+4、针对所有目标内核版本和相关子系统配置测试eBPF应用程序。即使遵循所有CO-RE最佳实践，也很重要测试任何eBPF应用程序，测试所有或一组宽泛的内核版本以及相关内核子系统和模块配置的变化，以确保在所有目标部署中具有完全的可移植性和正确性
+
+5、确定应用程序所需的最低内核版本
 
 ##  0x02    基于 golang 的用户态实现
 本小节介绍下 [cilium/ebpf](https://github.com/cilium/ebpf) 的开发入门，该项目借鉴了 libbpf-boostrap 的思路，通过代码生成与 bpf 程序内嵌的方式构建 eBPF 程序用户态部分，提供了 `bpf2go` 工具，可以将 bpf 的 C 源码转换为相应的 go 源码。ebpf 将 bpf 程序抽象为 `bpfObjects`，通过生成的 `loadBpfObjects` 完成 bpf 程序加载到内核的过程，然后利用 ebpf 库提供的诸如 `link` 之类的包实现 ebpf 与内核事件的关联。example 如下：
@@ -306,7 +367,7 @@ tracepoint_in_c     #*.go ebpf 程序用户态部分
 └── tracepoint.c    #ebpf 程序内核态
 ```
 
-这几个文件的关系如下图：
+这几个文件的关系如下图（重要）：
 ![go-relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ebpf/develop-ebpf-program-in-go-2.png)
 
 ebpf 程序的源码文件 `tracepoint.c` 经过 `bpf2go` 工具被编译 (`bpf2go` 调用 `clang`) 为 ebpf 字节码文件 `bpf_bpfeb.o` 和 `bpf_bpfel.o`，然后 `bpf2go` 会基于 ebpf 字节码文件生成 `bpf_bpfeb.go` 或 `bpf_bpfel.go`，ebpf 程序的字节码会以二进制数据的形式内嵌到这两个 go 源文件中，以 `bpf_bpfel.go` 为例：
@@ -315,6 +376,8 @@ ebpf 程序的源码文件 `tracepoint.c` 经过 `bpf2go` 工具被编译 (`bpf2
 //go:embed bpf_bpfel.o
 var _BpfBytes []byte    //byte类型
 ```
+
+简言之，内核态代码（`tracepoint.c`）通过`bpf2go`，生成用户态所依赖的大端/小端`*.go`，用户态的主函数入库，需要依赖其中的结构来实现与内核态的交互及完整功能
 
 ####    构建 ebpf 示例代码
 可以参考 [原文](https://tonybai.com/2022/07/19/develop-ebpf-program-in-go/)，构建 `cilium/ebpf` 项目的示例代码
@@ -627,10 +690,223 @@ cleanup:
 
 这里有个疑问是，为何用户态程序可以直接使用 map？因为 bpftool 基于 `execve_counter.bpf.c` 生成的 `execve_counter.skel.h` 中包含了 map 的各种信息
 
-####  使用示例（GO）
+####  示例（GO）
+
+1、内核态代码`execve_counter.bpf.c`，引入的头文件修改为`#include "common.h"`，基于原料`execve_counter.bpf.c`，再使用`bpf2go`工具会生成用户态部分所需的Go源码；比如：`bpfObject`中包含的bpf map实例：
 
 ```GO
+// bpfMaps contains all maps after they have been loaded into the kernel.
+//
+// It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
+type bpfMaps struct {
+    ExecveCounter *ebpf.Map `ebpf:"execve_counter"`
+}
+```
 
+2、在`main`函数中直接使用这些生成的与bpf objects相关的Go函数即可（`main.go`依赖`bpf_bpfeb.go`/`bpf_bpfel.go`），参考[原项目](https://github.com/bigwhite/experiments/tree/master/ebpf-examples/)：
+
+在`main`函数，通过`objs.bpfMaps.ExecveCounter`直接访问map实例，并通过其`Put`和`Lookup`方法可以直接操作此map（要注意的是`key`的类型必须与`execve_counter.bpf.c`中的`key`类型`char[64]`保持内存布局一致，不能直接用`string`类型，否则运行时会报错）；此外，内核中map的`update`操作非原子，需要使用`bpf_spin_lock`锁来保证并发安全
+
+```GO
+//go:build linux
+// +build linux
+
+package main
+
+import (
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/rlimit"
+)
+
+// $BPF_CLANG, $BPF_CFLAGS and $BPF_HEADERS are set by the Makefile.
+//go:generate bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS -target bpfel,bpfeb bpf execve_counter.bpf.c -- -I $BPF_HEADERS
+func main() {
+	stopper := make(chan os.Signal, 1)
+	signal.Notify(stopper, os.Interrupt, syscall.SIGTERM)
+
+	// Allow the current process to lock memory for eBPF resources.
+	if err := rlimit.RemoveMemlock(); err != nil {
+		log.Fatal(err)
+	}
+
+	// Load pre-compiled programs and maps into the kernel.
+	objs := bpfObjects{}
+	if err := loadBpfObjects(&objs, nil); err != nil {
+		log.Fatalf("loading objects: %s", err)
+	}
+	defer objs.Close()
+
+	// init the map element
+	var key [64]byte
+	copy(key[:], []byte("execve_counter"))
+	var val int64 = 0
+	if err := objs.bpfMaps.ExecveCounter.Put(key, val); err != nil {
+		log.Fatalf("init map key error: %s", err)
+	}
+
+	// attach to xxx
+	kp, err := link.Tracepoint("syscalls", "sys_enter_execve", objs.BpfProg, nil)
+	if err != nil {
+		log.Fatalf("opening tracepoint: %s", err)
+	}
+	defer kp.Close()
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+            // 通过bpfObjects.bpfMaps调用hashtable的函数
+			if err := objs.bpfMaps.ExecveCounter.Lookup(key, &val); err != nil {
+				log.Fatalf("reading map error: %s", err)
+			}
+			log.Printf("execve_counter: %d\n", val)
+
+		case <-stopper:
+			// Wait for a signal and close the perf reader,
+			// which will interrupt rd.Read() and make the program exit.
+			log.Println("Received signal, exiting program..")
+			return
+		}
+	}
+}
+```
+
+以大端系统为例，`bpf_bpfeb.go`如下：
+
+-   `_BpfBytes`是存放bpf字节码的变量，切勿直接访问
+
+```go
+// Code generated by bpf2go; DO NOT EDIT.
+//go:build arm64be || armbe || mips || mips64 || mips64p32 || ppc64 || s390 || s390x || sparc || sparc64
+// +build arm64be armbe mips mips64 mips64p32 ppc64 s390 s390x sparc sparc64
+
+package main
+
+import (
+	"bytes"
+	_ "embed"
+	"fmt"
+	"io"
+
+	"github.com/cilium/ebpf"
+)
+
+type bpfStringkey [64]int8
+
+// loadBpf returns the embedded CollectionSpec for bpf.
+func loadBpf() (*ebpf.CollectionSpec, error) {
+	reader := bytes.NewReader(_BpfBytes)
+	spec, err := ebpf.LoadCollectionSpecFromReader(reader)
+	if err != nil {
+		return nil, fmt.Errorf("can't load bpf: %w", err)
+	}
+
+	return spec, err
+}
+
+// loadBpfObjects loads bpf and converts it into a struct.
+//
+// The following types are suitable as obj argument:
+//
+//     *bpfObjects
+//     *bpfPrograms
+//     *bpfMaps
+//
+// See ebpf.CollectionSpec.LoadAndAssign documentation for details.
+func loadBpfObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
+	spec, err := loadBpf()
+	if err != nil {
+		return err
+	}
+
+	return spec.LoadAndAssign(obj, opts)
+}
+
+// bpfSpecs contains maps and programs before they are loaded into the kernel.
+//
+// It can be passed ebpf.CollectionSpec.Assign.
+type bpfSpecs struct {
+	bpfProgramSpecs
+	bpfMapSpecs
+}
+
+// bpfSpecs contains programs before they are loaded into the kernel.
+//
+// It can be passed ebpf.CollectionSpec.Assign.
+type bpfProgramSpecs struct {
+	BpfProg *ebpf.ProgramSpec `ebpf:"bpf_prog"`
+}
+
+// bpfMapSpecs contains maps before they are loaded into the kernel.
+//
+// It can be passed ebpf.CollectionSpec.Assign.
+type bpfMapSpecs struct {
+	ExecveCounter *ebpf.MapSpec `ebpf:"execve_counter"`
+}
+
+// bpfObjects contains all objects after they have been loaded into the kernel.
+//
+// It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
+
+// bpfObjects包含了bpfPrograms和bpfMaps
+type bpfObjects struct {
+	bpfPrograms
+	bpfMaps
+}
+
+func (o *bpfObjects) Close() error {
+	return _BpfClose(
+		&o.bpfPrograms,
+		&o.bpfMaps,
+	)
+}
+
+// bpfMaps contains all maps after they have been loaded into the kernel.
+//
+// It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
+type bpfMaps struct {
+	ExecveCounter *ebpf.Map `ebpf:"execve_counter"`
+}
+
+func (m *bpfMaps) Close() error {
+	return _BpfClose(
+		m.ExecveCounter,
+	)
+}
+
+// bpfPrograms contains all programs after they have been loaded into the kernel.
+//
+// It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
+type bpfPrograms struct {
+	BpfProg *ebpf.Program `ebpf:"bpf_prog"`
+}
+
+func (p *bpfPrograms) Close() error {
+	return _BpfClose(
+		p.BpfProg,
+	)
+}
+
+func _BpfClose(closers ...io.Closer) error {
+	for _, closer := range closers {
+		if err := closer.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Do not access this directly.
+//go:embed bpf_bpfeb.o
+var _BpfBytes []byte
 ```
 
 ####  相关工具
@@ -649,8 +925,12 @@ bpftool map
 
 ##  0x04    汇总
 
--   ebpf+openssl：实现对 https 明文的捕获
--   ebpf+openssh：
+-   ebpf+openssl：实现对 https 明文的捕获，参考项目[ecapture](https://github.com/gojue/ecapture)
+-   ebpf+openssh命令审计：使用[libbpfgo](https://github.com/aquasecurity/libbpfgo)库开发的，可以实现对openssh登录（bash）场景下的命令捕获，参考[teleport](https://github.com/gravitational/teleport/tree/aa91ad4a972d70b2c1a88fd5ea424b93760e2b43/bpf)
+-   
+
+##  0x05   有用的资料
+-   [eBPF应用程序开发：快人一步](https://www.cnxct.com/ebpf-application-development-beyond-basics-zh_cn/)
 
 ##  0x05    参考
 -   [Linux 中基于 eBPF 的恶意利用与检测机制](https://tech.meituan.com/2022/04/07/how-to-detect-bad-ebpf-used-in-linux.html)
@@ -669,3 +949,9 @@ bpftool map
 -   [eCapture 旁观者：Android HTTPS 明文抓包](https://mp.weixin.qq.com/s/KWm5d0uuzOzReRtr9PmuWQ)
 -   [Linux tracing systems & how they fit together](https://jvns.ca/blog/2017/07/05/linux-tracing-systems/)
 -   [teleport 的 ebpf 开发](https://github.com/gravitational/teleport/tree/aa91ad4a972d70b2c1a88fd5ea424b93760e2b43/bpf)
+-   [eBPF应用程序开发：快人一步](https://www.cnxct.com/ebpf-application-development-beyond-basics-zh_cn/)
+-   [A thorough introduction to eBPF](https://lwn.net/Articles/740157/)
+-   [eBPF在Golang中的应用介绍](https://www.cnxct.com/an-applied-introduction-to-ebpf-with-go/)
+-   [eBPF开发专题](https://mp.weixin.qq.com/mp/appmsgalbum?__biz=MzkzODYyNzU2Mw==&action=getalbum&album_id=3396241093339414533&scene=173&subscene=&sessionid=svr_7d11fa17677&enterid=1723464100&from_msgid=2247484395&from_itemidx=1&count=3&nolastread=1#wechat_redirect)
+-   [EBPF文章翻译(1)—EBPF介绍](https://davidlovezoe.club/wordpress/archives/867)
+-   [BPF CO-RE (Compile Once – Run Everywhere)](https://nakryiko.com/posts/bpf-portability-and-co-re/)
