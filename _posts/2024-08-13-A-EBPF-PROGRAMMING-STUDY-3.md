@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      golang eBPF 开发入门（三）
-subtitle:
+subtitle:	kprobe/uprobe开发实践
 date:       2024-08-13
 author:     pandaychen
 catalog:    true
@@ -13,6 +13,9 @@ tags:
 
 ##  0x00    前言
 
+![programming-practice](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ebpf/ebpf-tracing.png)
+
+本文专注于最右侧的技术
 
 ##  0x01  kprobe技术
 
@@ -81,6 +84,10 @@ int BPF_KRETPROBE(do_unlinkat_exit, long ret) // 捕获函数的返回值（ret�
 }
 ```
 
+内核态代码的要点：
+-	`BPF_CORE_READ`宏的作用
+-	hook内核函数的调用顺序
+
 4、加载程序开发，编写一个bpf用户空间程序，用于加载上述ebpf钩子到内核空间：
 
 ```C
@@ -147,8 +154,138 @@ cleanup:
 }
 ```
 
-5、 使用 ring buffer 向用户态传递数据，上述代码中，仅仅使用`bpf_printk`即内核捕获到的数据打印到了内核log中，修改为ringbuff让用户态程序获取
+5、 使用 ring buffer 向用户态传递数据，上述代码中，仅仅使用`bpf_printk`即内核捕获到的数据打印到了内核log（可以通过`/sys/kernel/debug/tracing/trace_pipe`查看）中，修改为ringbuff让用户态程序获取，将捕获到的数据通过ring buffer从内核空间传递到用户空间，当用户空间获取数据后，可以再进行后续的数据存储、处理和分析
+
+
+步骤1：定义一个`kprobe.h`头文件，方便内核空间和用户空间的程序使用同一个数据存储结构
+
+```CPP
+#ifndef __KPROBE_H
+#define __KPROBE_H
+
+#define MAX_FILENAME_LEN 256
+
+struct event {
+    int pid;
+    char filename[MAX_FILENAME_LEN];
+    bool exit_event;
+    unsigned exit_code;
+    unsigned long long ns;
+};
+
+#endif
+```
+
+步骤2：修改内核态代码，定义map，实现内核ebpf存储数据到ring buffer
+
+```CPP
+#include <string.h>
+#include "kprobe.h"
+
+//定义一个名为rb的 ring buffer 类型的Map
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 256 * 1024);    // 256 KB
+} rb SEC(".maps");
+
+//hook
+SEC("kprobe/do_unlinkat")
+int BPF_KPROBE(do_unlinkat, int dfd, struct filename *name)  // 该函数接受两个参数：dfd（文件描述符）和name（文件名结构体指针）
+{
+    //...
+    struct event *e;
+
+    //...
+    // 预订一个ringbuf样本空间
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e)
+        return 0;
+    // 设置数据
+    e->pid = pid;
+
+	//在ebpf探针函数中保存数据到ring buffer
+    bpf_probe_read_str(&e->filename, sizeof(e->filename), (void *)filename);
+	e->exit_event = false;
+    e->ns = bpf_ktime_get_ns();
+    // 提交到ringbuf用户空间进行后处理
+    bpf_ringbuf_submit(e, 0);
+
+    return 0;
+}
+```
+
+步骤3：用户空间读取ring buffer，基本流程如下：
+
+1.	定义ring_buffer结构体、`handle_event`回调函数
+2.	使用`ring_buffer__new(bpf_map__fd(skel->maps.rb), handle_event, NULL, NULL)`（`skel->maps.rb`的`fd`）初始化用户空间缓冲区对象
+3.	使用`ring_buffer__poll`获取内核ebpf程序传递的数据，收到的内核数据在`handle_event`回调函数中进行打印、存储、分析等后续处理
+
+```CPP
+#include <time.h>
+#include "kprobe.h"
+
+...
+
+// ring buffer data process
+static int handle_event(void *ctx, void *data, size_t data_sz)
+{
+	const struct event *e = data;
+	struct tm *tm;
+	char ts[32];
+	time_t t;
+
+	time(&t);
+	tm = localtime(&t);
+	strftime(ts, sizeof(ts), "%H:%M:%S", tm);
+
+	if (e->exit_event) {
+		printf("%-8s %-5s %-16s %-7d [%u]", ts, "EXIT", e->filename, e->pid, e->exit_code);
+		if (e->ns)
+			printf(" (%llums)", e->ns / 1000000);
+		printf("\n");
+	} else {
+		printf("%-8s %-5s %-16s %-7d %s\n", ts, "EXEC", e->filename, e->pid, e->filename);
+	}
+
+	return 0;
+}
+
+int main(int argc, char **argv)
+{
+	//...
+	struct ring_buffer *rb = NULL;
+
+	/* 设置环形缓冲区轮询 */
+	rb = ring_buffer__new(bpf_map__fd(skel->maps.rb), handle_event, NULL, NULL);
+	if (!rb) {
+		err = -1;
+		fprintf(stderr, "Failed to create ring buffer\n");
+		goto cleanup;
+	}
+
+	/* 处理收到的内核数据 */
+	printf("%-8s %-5s %-16s %-7s %s\n", "TIME", "EVENT", "FILENAME", "PID", "FILENAME/RET");
+	while (!stop) {
+		// 轮询内核数据
+		err = ring_buffer__poll(rb, 100 /* timeout, ms */);
+		if (err == -EINTR) {	/* Ctrl-C will cause -EINTR */
+			err = 0;
+			break;
+		}
+		if (err < 0) {
+			printf("Error polling perf buffer: %d\n", err);
+			break;
+		}
+	}
+	// while (!stop) {
+	// fprintf(stderr, ".");
+	// sleep(1);
+	// }
+	//...
+}
+```
 
 
 ##  0x03    参考
 - [eBPF—使用kprobe探测内核系统调用](https://blog.yanjingang.com/?p=8062)
+- [About Scaffolding for BPF application development with libbpf and BPF CO-RE](https://github.com/libbpf/libbpf-bootstrap)
