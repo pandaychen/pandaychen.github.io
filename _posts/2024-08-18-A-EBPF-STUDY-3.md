@@ -1,13 +1,13 @@
 ---
 layout:     post
 title:      golang eBPF 开发入门（三）
-subtitle:   kprobe、uprobe入门
+subtitle:
 date:       2024-08-18
 author:     pandaychen
 catalog:    true
 tags:
-  - eBPF
-  - Golang
+    - eBPF
+    - Golang
 ---
 
 
