@@ -21,7 +21,7 @@ Metadata 是以 key-value 的形式存储数据的，其中 key 是 string 类�
 ##	0x01	结构 && 创建
 
 ####	结构
-metadata 本质上是一个 map，注意 metadata 的 value 是一个 slice，意味着我们可以对同一个 key 添加多个 value（可以方便的存储多个同类型的数据）
+metadata 本质上是一个 map，注意 metadata 的 value 是一个 slice，意味着可以对同一个 key 添加多个 value（可以方便的存储多个同类型的数据）
 ```golang
 type MD map[string][]string
 ```
@@ -52,7 +52,7 @@ md := metadata.Pairs(
 
 
 #### 存储二进制数据
-在 metadata 中，key 永远是 string 类型，但是 value 可以是 string 也可以是二进制数据。为了在 metadata 中存储二进制数据，我们仅仅需要在 key 的后面加上一个 `-bin` 后缀。具有 `-bin` 后缀的 key 所对应的 value 在创建 metadata 时会被编码（base64），收到的时候会被解码：
+在 metadata 中，key 永远是 string 类型，但是 value 可以是 string 也可以是二进制数据。为了在 metadata 中存储二进制数据，仅仅需要在 key 的后面加上一个 `-bin` 后缀。具有 `-bin` 后缀的 key 所对应的 value 在创建 metadata 时会被编码（base64），收到的时候会被解码：
 ```golang
 md := metadata.Pairs(
     "key", "string value",
@@ -120,7 +120,7 @@ response, err := client.SomeRPC(ctx, someRequest)
 stream, err := client.SomeStreamingRPC(ctx)
 ```
 
-我们简单看下 `NewOutgoingContext` 方法做了啥事情 [源码在此](https://github.com/grpc/grpc-go/tree/master/metadata/metadata.go#L147)，其实就是调用了 `context.WithValue` 方法，生成了一个子 context 而已，这个子 context 中包含了传入的 Metadata。
+再简单看下 `NewOutgoingContext` 方法做了啥事情 [源码在此](https://github.com/grpc/grpc-go/tree/master/metadata/metadata.go#L147)，其实就是调用了 `context.WithValue` 方法，生成了一个子 context 而已，这个子 context 中包含了传入的 Metadata。
 ```golang
 // NewOutgoingContext creates a new context with outgoing md attached. If used
 // in conjunction with AppendToOutgoingContext, NewOutgoingContext will

@@ -53,7 +53,7 @@ type Options struct {
 }
 ```
 
-上面的选项是在初始化 go-redis 客户端时，需要合理设置。项目中一般我们做如下设置：
+上面的选项是在初始化 go-redis 客户端时，需要合理设置。项目中一般做如下设置：
 ```golang
 func InitRedisClient() *redis.Client{
     //...

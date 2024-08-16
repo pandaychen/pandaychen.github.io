@@ -166,9 +166,9 @@ type Target struct {
 }
 ```
 ####	resolver小结
-现在我们对 resolver 做下小结：<br>
-其中 `Builder` 接口用来创建 `Resolver`，我们可以提供自己的服务发现实现逻辑，然后将其注册到 gRPC 中，其中通过 `scheme` 来标识，而 `Resolver` 接口则是提供服务发现功能。当 `Resolver` 发现服务列表发生变更时，会通过 `ClientConn` 回调接口通知上层。
-下一小节，我们来看下 Resolver 在 gRPC 客户端流程中实例的调用链。
+现在对 resolver 做下小结：<br>
+其中 `Builder` 接口用来创建 `Resolver`，可以提供自己的服务发现实现逻辑，然后将其注册到 gRPC 中，其中通过 `scheme` 来标识，而 `Resolver` 接口则是提供服务发现功能。当 `Resolver` 发现服务列表发生变更时，会通过 `ClientConn` 回调接口通知上层。
+下一小节来看下 Resolver 在 gRPC 客户端流程中实例的调用链。
 
 ##  0x04	Resolver 的调用链
 本小节，来分析下 Resolver 的调用链是什么。<br>
@@ -219,7 +219,7 @@ func RoundRobin(r naming.Resolver) Balancer {
 ```
 
 ####	DialContext 方法
-这里我们就从 `DialContext` 入手，看下 gRPC 对 Resolver 的处理过程。当我们使用 Dial 或者 DialContext 接口创建 gRPC 的客户端连接时，首先会解析参数 target（Etcd 集群地址），然后创建对应的 resolver：
+这里就从 `DialContext` 入手，看下 gRPC 对 Resolver 的处理过程。当使用 Dial 或者 DialContext 接口创建 gRPC 的客户端连接时，首先会解析参数 target（Etcd 集群地址），然后创建对应的 resolver：
 ``` go
 func DialContext(ctx context.Context, target string, opts ...DialOption) (conn *ClientConn, err error) {
 	cc := &ClientConn{
@@ -242,7 +242,7 @@ func DialContext(ctx context.Context, target string, opts ...DialOption) (conn *
 	// 如果没有指定 resolverBuilder
 	if cc.dopts.resolverBuilder == nil {
 		// 解析 target，根据 target 的 scheme 获取对应的 resolver
-		cc.parsedTarget = parseTarget(cc.target)							// 解析我们自定义实现的 resolver
+		cc.parsedTarget = parseTarget(cc.target)							// 解析自定义实现的 resolver
  		cc.dopts.resolverBuilder = resolver.Get(cc.parsedTarget.Scheme)		// 重要：在下面分析
 		// 如果 scheme 没有注册对应的 resolver
 		if cc.dopts.resolverBuilder == nil {
@@ -255,7 +255,7 @@ func DialContext(ctx context.Context, target string, opts ...DialOption) (conn *
 		}
 	} else {
         // 如果 Dial 的 option 中手动指定了需要使用的 resolver，那么 endpoint 也是 target
-        // 实例中指定了我们自己实现的 NewXXXResolver，target 为 Etcd 集群的地址
+        // 实例中指定了自己实现的 NewXXXResolver，target 为 Etcd 集群的地址
         /*
             // &Target{Scheme: resolver.GetDefaultScheme(), Endpoint: "unknown_scheme://authority/endpoint"}.
             type Target struct {
@@ -327,7 +327,7 @@ func parseTarget(target string) (ret resolver.Target) {
 ```
 
 ####	resolver.Get(cc.parsedTarget.Scheme)方法
-这里会根据解析得到的解析器的名称，去 resolver 包中 `m map[string]Builder` 这个全局 map 中查询对应的 `Builder`，然后返回给 `cc.dopts.resolverBuilder`，这样，我们自定义的 `resolver.Builder` 就成功的和 `ClientConn` 关联上了。
+这里会根据解析得到的解析器的名称，去 resolver 包中 `m map[string]Builder` 这个全局 map 中查询对应的 `Builder`，然后返回给 `cc.dopts.resolverBuilder`，这样，自定义的 `resolver.Builder` 就成功的和 `ClientConn` 关联上了。
 ```golang
 //resolver 中的全局 MAP
 m = make(map[string]Builder)
@@ -342,7 +342,7 @@ func Get(scheme string) Builder {
 ```
 
 ####	newCCResolverWrapper方法
-这里回答前面预埋的一个问题，我们自己构建 resolver 中的 `Build()` 方法，最终是在哪里被调用的？答案就是 `newCCResolverWrapper`。代码如下：
+这里回答前面预埋的一个问题，自己构建 resolver 中的 `Build()` 方法，最终是在哪里被调用的？答案就是 `newCCResolverWrapper`。代码如下：
 ```go
 func newCCResolverWrapper(cc *ClientConn) (*ccResolverWrapper, error) {
 	// 在 DialContext 方法中，已经初始化了 resolverBuilder
@@ -361,7 +361,7 @@ func newCCResolverWrapper(cc *ClientConn) (*ccResolverWrapper, error) {
 	var err error
     // 创建 resolver，resolver 创建之后，需要立即执行服务发现逻辑，然后将发现的服务列表通过 resolver.ClientConn 回调接口通知上层
 
-	// 非常重要：这里的 Build 也就是我们在自己的 resolver.go 中实现的 Build() 方法，传入的三个参数。在我们实现中，Build 中创建和启动了 Watcher
+	// 非常重要：这里的 Build 也就是在自己的 resolver.go 中实现的 Build() 方法，传入的三个参数。在实现中，Build 中创建和启动了 Watcher
 	 // 在 gRPC 的 DNSresolver 实现里，调用 dnsBuilder.Build 函数创建 dnsResolver
 	ccr.resolver, err = rb.Build(cc.parsedTarget, ccr, resolver.BuildOption{DisableServiceConfig: cc.dopts.disableServiceConfig})
 	if err != nil {
