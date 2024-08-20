@@ -7,7 +7,7 @@ author:     pandaychen
 catalog:    true
 tags:
     - Helm
-    - kubernetes
+    - Kubernetes
 ---
 
 ##  0x00    前言

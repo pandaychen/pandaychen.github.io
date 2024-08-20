@@ -46,6 +46,7 @@ root@nginx:/#
 ```
 
 总结下上面的过程：
+
 1、两个连续 HTTP 请求 <br>
 -   GET 请求用来获取 Pod 信息：`https://127.0.0.1:38545/api/v1/namespaces/default/pods/nginx`
 -   POST 请求调用 Pod 的子资源 exec 在容器内执行命令（进入容器）：`https://127.0.0.1:38545/api/v1/namespaces/default/pods/nginx/exec?command=%2Fbin%2Fbash&container=nginx&stdin=true&stdout=true&tty=true`
