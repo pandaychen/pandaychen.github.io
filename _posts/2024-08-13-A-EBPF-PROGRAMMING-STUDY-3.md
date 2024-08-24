@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      golang eBPF 开发入门（二）
-subtitle:	kprobe/uprobe 开发实践
+subtitle:	kprobe/uprobe/tracepoint 开发实践
 date:       2024-08-13
 author:     pandaychen
 catalog:    true
@@ -17,7 +17,10 @@ tags:
 
 本文专注于最右侧的技术
 
-##  0x01  kprobe 技术
+##  0x01  kprobe/uprobe/tracepoint 技术
+
+####    tracepoint
+
 
 
 ##  0x02  kprobe 基础实践
@@ -285,19 +288,241 @@ int main(int argc, char **argv)
 }
 ```
 
-##	0x0	实践：捕获process启动/退出事件
+##	0x03	内核态实践（经典示例）
+
+####    实践1：
+主要介绍如何实现一个 eBPF 工具，捕获进程发送信号的系统调用集合，使用 hash map 保存状态
+
+
+####	实践2：
+[](https://eunomia.dev/zh/tutorials/11-bootstrap/#ebpf-bootstrapbpfc)
+
+##	0x04	综合实践
+
+####    捕获process启动/退出事件
 本小结主要通过探测内核的`sys_enter_execve`、`sched_process_exit`事件，捕获进程的拉起和退出事件，并通过ring buffer输出到用户空间程序中，依然分为如下3个步骤：
 
 1、步骤一，定义结构
 
+```c
+struct trace_entry {
+	short unsigned int type;
+	unsigned char flags;
+	unsigned char preempt_count;
+	int pid;
+};
+
+/* sched_process_exec tracepoint context */
+struct trace_event_raw_sched_process_exec {
+	struct trace_entry ent;
+	unsigned int __data_loc_filename;
+	int pid;
+	int old_pid;
+	char __data[0];
+};
+
+#define TASK_COMM_LEN 16
+#define MAX_FILENAME_LEN 512
+
+/* definition of a sample sent to user-space from BPF program */
+struct event {
+	int pid;
+	char comm[TASK_COMM_LEN];
+	char filename[MAX_FILENAME_LEN];
+};
+```
+
 
 2、步骤二，实现内核态代码
+
+```c
+
+// 定义ring buffer Map
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 256 * 1024);    // 256 KB
+} rb SEC(".maps");
+
+
+// 捕获进程执行事件，使用 ring buffer 向用户态打印输出
+SEC("tracepoint/syscalls/sys_enter_execve")
+int snoop_process_start(struct trace_event_raw_sys_enter* ctx)
+{
+    u64 id;
+    pid_t pid;
+    struct event *e;
+    struct task_struct *task;
+
+    // 获取当前进程的用户ID
+    uid_t uid = (u32)bpf_get_current_uid_gid();
+    // 获取当前进程ID
+    id = bpf_get_current_pid_tgid();
+    pid = id >> 32;
+    // 获取当前进程的task_struct结构体
+    task = (struct task_struct*)bpf_get_current_task();
+    // 读取进程名称
+    char *cmd = (char *) BPF_CORE_READ(ctx, args[0]);
+
+    // 预订一个ringbuf样本空间
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e)
+        return 0;
+    // 设置数据
+    e->pid = pid;
+    e->uid = uid;
+    e->ppid = BPF_CORE_READ(task, real_parent, pid);
+    bpf_probe_read_str(&e->cmd, EXEC_CMD_LEN, cmd);
+    e->ns = bpf_ktime_get_ns();
+    // 提交到ringbuf用户空间进行后处理
+    bpf_ringbuf_submit(e, 0);
+
+    // 使用bpf_printk函数在内核日志中打印 PID 和文件名
+    // bpf_printk("TRACEPOINT EXEC pid = %d, uid = %d, cmd = %s\n", pid, uid, e->cmd);
+    return 0;
+}
+
+// 监控进程退出事件，使用 ring buffer 向用户态打印输出
+SEC("tp/sched/sched_process_exit")
+int snoop_process_exit(struct trace_event_raw_sched_process_template* ctx)
+{
+    struct task_struct *task;
+    struct event *e;
+    pid_t pid, tid;
+    u64 id, ts, *start_ts, start_time = 0;
+
+    // 获取当前进程的用户ID
+    uid_t uid = (u32)bpf_get_current_uid_gid();
+    // 获取当前进程/线程ID
+    id = bpf_get_current_pid_tgid();
+    pid = id >> 32;
+    tid = (u32)id;
+    // 获取当前进程的task_struct结构体
+    task = (struct task_struct *)bpf_get_current_task();
+    start_time = BPF_CORE_READ(task, start_time);
+
+    /* ignore thread exits */
+    if (pid != tid)
+        return 0;
+
+    // 预订一个ringbuf样本空间
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e)
+        return 0;
+    // 设置数据
+    e->ns = bpf_ktime_get_ns() - start_time;
+    e->pid = pid;
+    e->uid = uid;
+    e->ppid = BPF_CORE_READ(task, real_parent, tgid);
+    e->is_exit = true;
+    e->retval = (BPF_CORE_READ(task, exit_code) >> 8) & 0xff;
+    bpf_get_current_comm(&e->cmd, sizeof(e->cmd));
+    // 提交到ringbuf用户空间进行后处理
+    bpf_ringbuf_submit(e, 0);
+
+    // 使用bpf_printk函数在内核日志中打印 PID 和文件名
+    // bpf_printk("TRACEPOINT EXIT pid = %d, uid = %d, cmd = %s\n", pid, uid, e->cmd);
+    return 0;
+}
+```
 
 
 3、步骤三，实现用户态代码
 
+```c
+
+int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
+{
+	/* Ignore debug-level libbpf logs */
+	if (level > LIBBPF_INFO)
+		return 0;
+	return vfprintf(stderr, format, args);
+}
+
+// Control-C process
+static volatile bool exiting = false;
+static void sig_handler(int sig)
+{
+	exiting = true;
+}
+
+// ring buffer data process
+static int handle_event(void *ctx, void *data, size_t data_sz)
+{
+	const struct event *e = (struct event *)data;
+    struct tm *tm;
+    char ts[32];
+    time_t t;
+
+    time(&t);
+    tm = localtime(&t);
+    strftime(ts, sizeof(ts), "%H:%M:%S", tm);
+
+    if (e->is_exit) {
+        printf("%s %-5s %d %d %s %d %llums\n", ts, "EXIT", e->pid, e->uid, e->cmd, e->retval, e->ns / 1000000);
+    } else {
+        printf("%s %-5s %d %d %d  %s\n", ts, "EXEC", e->pid, e->ppid, e->uid, e->cmd);
+    }
+
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    struct exec_bpf *skel;
+    int err;
+    struct ring_buffer *rb = NULL;
+
+    /* 设置libbpf错误和调试信息回调 */
+    libbpf_set_print(libbpf_print_fn);
+
+    /* Control-C 停止信号 */
+	signal(SIGINT, sig_handler);
+	signal(SIGTERM, sig_handler);
+
+    /* 加载并验证 exec.bpf.c 应用程序 */
+    skel = exec_bpf__open_and_load();
+    if (!skel) {
+        fprintf(stderr, "Failed to open BPF skeleton\n");
+        return 1;
+    }
+
+    /* 附加 exec.bpf.c 程序到跟踪点 */
+    err = exec_bpf__attach(skel);
+    if (err) {
+        fprintf(stderr, "Failed to attach BPF skeleton\n");
+        exec_bpf__destroy(skel);
+        return -err;
+    }
+    // printf("Successfully started! Please run `sudo cat /sys/kernel/debug/tracing/trace_pipe` to see output of the BPF programs.\n");
+
+    /* 设置环形缓冲区轮询 */
+    rb = ring_buffer__new(bpf_map__fd(skel->maps.rb), handle_event, NULL, NULL);
+    if (!rb) {
+        err = -1;
+        fprintf(stderr, "Failed to create ring buffer\n");
+        exec_bpf__destroy(skel);
+        return -err;
+    }
+
+    /* 处理收到的内核数据 */
+    printf("%-8s %-8s %-7s %-7s %-16s %-8s %-8s\n", "TIME", "TYPE", "PID", "UID", "CMD", "RET", "DURATION");
+    while (!exiting) {
+        // 轮询内核数据
+        err = ring_buffer__poll(rb, 100 /* timeout, ms */);
+        if (err == -EINTR) {    /* Ctrl-C will cause -EINTR */
+            err = 0;
+            break;
+        }
+        if (err < 0) {
+            printf("Error polling perf buffer: %d\n", err);
+            break;
+        }
+    }
+}
+```
 
 ##	0x0	How to Debug
+
 
 ##	0x0	teleport 的 ebpf 应用
 teleport 基于 [ebpf](https://github.com/gravitational/teleport/tree/master/bpf/enhancedrecording) 也实现对 ssh 命令审计的增强功能，预期可以实现下面几种特殊场景的捕获（原始基于键盘输入及屏显输出，有局限性）：
@@ -341,3 +566,5 @@ Teleport 实现了如下 `3` 个 BPF hooks:
 - [ebpf user-space probes 原理探究](https://www.edony.ink/deep-in-ebpf-uprobe/)
 - [如何使用 eBPF 进行追踪](https://kiosk007.top/post/%E5%A6%82%E4%BD%95%E4%BD%BF%E7%94%A8ebpf%E8%BF%9B%E8%A1%8C%E8%BF%BD%E8%B8%AA/)
 - [gobpf 使用示例：如何找到一个系统调用对应的可用于 kprobe SEC 的内核函数](https://mozillazg.com/2021/05/ebpf-gobpf-how-to-find-system-call-kernel-function-for-kprobe-elf-section.html)
+- [eBPF-tracing 使用 eBPF 编写监控类程序](https://p1nant0m.com/2022-07-25-ebpf-tracing/)
+- [eBPF 入门开发实践教程六：捕获进程发送信号的系统调用集合，使用 hash map 保存状态](https://eunomia.dev/zh/tutorials/6-sigsnoop/#sigsnoop)
