@@ -15,15 +15,42 @@ tags:
 [上文](https://pandaychen.github.io/2024/01/15/A-EBPF-STUDY/#0x03--%E9%80%9A%E4%BF%A1%E5%86%85%E6%A0%B8%E6%80%81%E4%B8%8E%E7%94%A8%E6%88%B7%E6%80%81) 介绍了 ebpf 的内核态 / 用户态的通信示例，本文关注三个问题：为什么要使用 maps？maps 使用的一般场景？maps 的基本结构及实现原理。BPF Map 是内核空间和用户空间之间用于数据交换、信息传递的桥梁。是 eBPF 程序中使用的主要数据结构。BPF Map 本质上是以键 / 值方式存储在内核中的数据结构，在内核空间的程序创建 BPF Map 并返回对应的文件描述符，在用户空间运行的程序就可以通过这个文件描述符来访问并操作 BPF Map，从而实现 kernel 内核空间与 user 用户空间的数据交换
 
 ##  0x01    BPF maps 基础
+先回顾下ebpf的架构，思考下内核态与用户态如何通信？
 
-![ebpfworkflow]()
+![ebpfworkflow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ebpf/ebpfworkflow.png)
+
 
 ![map-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ebpf/ebpf-map-1.png)
 
-map 驻留在内存中，可以通过用户空间的文件描述符 `fd` 访问，可以在任意 BPF 程序以及用户空间应用之间共享。共享 map 的 BPF 程序不需要是相同的程序类型，单个 BPF 程序最多可以访问 `64` 个 map。map 有 per-CPU 以及 non-per-CPU 的通用 map，另外还有提供给特定辅助函数的非通用 map。通用 map 包括 `BPF_MAP_TYPE_HASH`/ `BPF_MAP_TYPE_ARRAY`/ `BPF_MAP_TYPE_PERCPU_HASH`/ `BPF_MAP_TYPE_PERCPU_ARRAY`/`BPF_MAP_TYPE_LRU_HASH`/ `BPF_MAP_TYPE_LRU_PERCPU_HASH` 和 `BPF_MAP_TYPE_LPM_TRIE`，它们都使用相同的一组 BPF 辅助函数来执行 CRUD 操作，非通用 map 包括 `BPF_MAP_TYPE_PROG_ARRAY`/`BPF_MAP_TYPE_PERF_EVENT_ARRAY`/`BPF_MAP_TYPE_CGROUP_ARRAY`/`BPF_MAP_TYPE_STACK_TRACE`/`BPF_MAP_TYPE_ARRAY_OF_MAPS`/`BPF_MAP_TYPE_HASH_OF_MAPS`。例如 `BPF_MAP_TYPE_PROG_ARRAY` 用于存储其他 BPF 程序，`BPF_MAP_TYPE_ARRAY_OF_MAPS` 用于存储其他 map 的指针，非通用 map 都是为了与 bpf help 一起完成特定功能
+map 驻留在内存中，可以通过用户空间的文件描述符 `fd` 访问，可以在任意 BPF 程序以及用户空间应用之间共享。共享 map 的 BPF 程序不需要是相同的程序类型，单个 BPF 程序最多可以访问 `64` 个 map。map 有 per-CPU 以及 non-per-CPU 的通用 map，另外还有提供给特定辅助函数的非通用 map
+
+通用 map 如下，它们都使用相同的一组 BPF 辅助函数来执行 CRUD 操作：
+
+-	`BPF_MAP_TYPE_HASH`
+-	`BPF_MAP_TYPE_ARRAY`
+-	`BPF_MAP_TYPE_PERCPU_HASH`
+-	`BPF_MAP_TYPE_PERCPU_ARRAY`
+-	`BPF_MAP_TYPE_LRU_HASH`
+-	`BPF_MAP_TYPE_LRU_PERCPU_HASH`
+-	`BPF_MAP_TYPE_LPM_TRIE`
+
+非通用 map 如下：
+
+-	`BPF_MAP_TYPE_PROG_ARRAY`
+-	`BPF_MAP_TYPE_PERF_EVENT_ARRAY`
+-	`BPF_MAP_TYPE_CGROUP_ARRAY`
+-	`BPF_MAP_TYPE_STACK_TRACE`
+-	`BPF_MAP_TYPE_ARRAY_OF_MAPS`
+-	`BPF_MAP_TYPE_HASH_OF_MAPS`
+
+例如 `BPF_MAP_TYPE_PROG_ARRAY` 用于存储其他 BPF 程序，`BPF_MAP_TYPE_ARRAY_OF_MAPS` 用于存储其他 map 的指针，非通用 map 都是为了与 bpf help 一起完成特定功能
 
 ##  0x02 BPF Map 数据结构
-每个 BPF Map 由四个值定义：类型、元素的最大个数、值大小 (Byte) 和键大小 (Byte)
+
+####	定义
+
+每个 BPF Map 由四个值定义：类型、元素的最大个数、值大小 (Byte) 和键大小 (Byte)，在实际场景中常用的是基于 `SEC("maps")` 这个语法糖来做到声明即创建：
+
 
 ```C
 struct {
@@ -33,6 +60,24 @@ struct {
 	__type(value, u64);                // 值大小 (以字节为单位)
 } rb SEC(".maps");                     // SEC(".maps") 声明并创建了一个名为 rb 的 BPFMap
 ```
+
+第二种定义方式：
+
+```C
+struct bpf_map_def SEC("maps") my_bpf_map = {
+  .type       = BPF_MAP_TYPE_HASH, 
+  .key_size   = sizeof(int),
+  .value_size   = sizeof(int),
+  .max_entries = 100,
+  .map_flags   = BPF_F_NO_PREALLOC,
+};
+```
+
+关键点就是`SEC("maps")`，即ELF convention，它的工作原理如下描述：
+
+1.	声明 ELF Section 属性 `SEC("maps")`
+2.	内核代码[`bpf_load.c`](https://elixir.bootlin.com/linux/v4.15/source/samples/bpf/bpf_load.c) 扫描目标文件中所有 Section 信息，它会扫描目标文件里定义的 Section，其中就有用来创建BPF Map的`SEC("maps")`
+
 
 所有类型的 [定义](https://github.com/torvalds/linux/blob/v5.10/include/uapi/linux/bpf.h#L130)，需要注意类型对应的内核版本 or patch（开发）
 
@@ -148,7 +193,7 @@ int bpf_map_delete_elem(int fd, const void *key)
 
 2、存放全局配置信息，供 BPF 程序使用。例如，对于防火墙功能的 BPF 程序，将过滤规则放到 map 里。用户态控制程序通过 `bpftool` 之类的工具更新 map 里的配置信息，BPF 程序动态加载
 
-示例：内核源码的 bpf 示例 [sockex2_kern.c](https://elixir.bootlin.com/linux/v4.15/source/samples/bpf/sockex2_kern.c)，将内核态数据传递到用户态
+示例1：内核源码的 bpf 示例 [sockex2_kern.c](https://elixir.bootlin.com/linux/v4.15/source/samples/bpf/sockex2_kern.c)，将内核态数据传递到用户态
 
 ```c
 struct pair {
@@ -238,6 +283,44 @@ int main(int ac, char **argv)
 		sleep(1);
 	}
 	return 0;
+}
+```
+
+示例2：key 和 value 均为自定义
+
+```C
+// define the struct for the key of bpf map
+struct pair {
+  __u32 src_ip;
+  __u32 dest_ip;
+};
+
+struct stats {
+  __u64 tx_cnt; // the sending request count
+  __u64 rx_cnt; // the received request count
+  __u64 tx_bytes; // the sending request bytes
+  __u64 rx_bytes; // the sending received bytes
+};
+
+struct bpf_map_def SEC("maps") tracker_map = {
+    .type = BPF_MAP_TYPE_HASH,
+    .key_size = sizeof(struct pair),
+    .value_size = sizeof(struct stats),
+    .max_entries = 2048,
+};
+
+
+struct stats *stats, newstats = {0, 0, 0, 0};
+
+stats = bpf_map_lookup_elem(&tracker_map, pair);
+if (stats)
+{
+    stats->rx_cnt++;
+    stats->rx_bytes += bytes;
+} else {
+    newstats.rx_cnt = 1;
+    newstats.rx_bytes = bytes;
+    bpf_map_update_elem(&tracker_map, pair, &newstats, BPF_NOEXIST);
 }
 ```
 
@@ -711,27 +794,43 @@ int _sockops(struct bpf_sock_ops *ctx)
 }
 ```
 
-##	0x04 MAP 开发实践
+##	0x04	关于MAPS的一些细节
+
+####	BPF_MAP_TYPE_PERCPU_HASH VS BPF_MAP_TYPE_HASH（BPF_MAP_TYPE_PERCPU_ARRAY VS BPF_MAP_TYPE_ARRAY）
+思考下，PERCPU这种MAP类型出现和使用场景是什么？
+
+-	BPF_MAP_TYPE_ARRAY was introduced in kernel version 3.19
+-	BPF_MAP_TYPE_PERCPU_ARRAY was introduced in version 4.6
+
+
+
+##	0x05 MAP 开发实践
 本小节汇总于[BPF数据传递的桥梁——BPF MAP](https://davidlovezoe.club/wordpress/archives/1044)一文，推荐阅读
 
 ####	MAP创建
 
 
 
-##	0x05 perf_event/ringbuf
+####	实战
+借助 BPF Map 来实现在内核空间收集网络包信息，主要包括源地址和目标地址，并在用户空间展示这些信息。代码主要分两个部分：
+
+1.	一个是运行在内核空间的程序，主要功能为创建出定制版BPF Map，收集目标信息并存储至BPF Map中
+2.	另一个是运行在用户空间的程序，主要功能为读取上面内核空间创建出的BPF Map里的数据，并进行格式化展示，以演示BPF Map在两者之间进行数据传递
+
+##	0x06 perf_event/ringbuf
 本小节描述下perf_event和ringbuf原理介绍和使用
 
 ####	BPF_MAP_TYPE_PERF_EVENT_ARRAY VS BPF_MAP_TYPE_RINGBUF
 
 
-##  0x06 MAP 的实现原理
+##  0x07 MAP 的实现原理
 
 ![map_load_process](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ebpf/map_load_process.png)
 
-##  0x07 总结
+##  0x08 总结
 总体来看，`BPF_MAP_TYPE_HASH`、`BPF_MAP_TYPE_ARRAY`、`BPF_MAP_TYPE_RINGBUF` 这个类型基本可以覆盖到大部分内核与用户空间传递数据的需求场景，且能满足高性能的要求
 
-##  0x08    参考
+##  0x09    参考
 -   [深入了解 ebpf map](https://www.edony.ink/deepinsight-of-ebpf-map/)
 -   [Head First eBPF](https://www.ebpf.top/post/map_internal/)
 -   [BPF 数据传递的桥梁——BPF MAP（一）](https://davidlovezoe.club/wordpress/archives/1044)
@@ -739,3 +838,6 @@ int _sockops(struct bpf_sock_ops *ctx)
 -   [【BPF 入门系列 - 6】BPF 环形缓冲区](https://www.ebpf.top/post/bpf_ring_buffer/)
 -   [eBPF Map—内核空间与用户空间数据传递的桥梁](https://blog.yanjingang.com/?p=8040)
 -	[perf_event和ringbuf原理介绍和使用](https://blog.spoock.com/2023/09/16/eBPF-event/)
+-	[eBPF Map 操作](https://houmin.cc/posts/98a3c8ff/)
+-	[BPF 进阶笔记（三）：BPF Map 内核实现](http://arthurchiao.art/blog/bpf-advanced-notes-3-zh/)
+-	[BPF_MAP_TYPE_ARRAY and BPF_MAP_TYPE_PERCPU_ARRAY](https://docs.kernel.org/bpf/map_array.html#bpf-map-lookup-percpu-elem)
