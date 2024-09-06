@@ -313,10 +313,11 @@ transparent 模式下的数据流程如下：
 
 通常可以在路由器上通过 iptables 来重定向客户端连接，或者使用 tun 这种高级模式等方式来实现透明代理劫持
 
-至此，我们可知大概实现一个MITM需要哪些技术，小结如下：
+至此可知大概实现一个MITM需要哪些技术，小结如下：
 
-1.	证书池（fake）：为每个被代理的域名都生成一个唯一的证书
-
+1.	证书池（fake）：为每个被代理（MITM）的域名都生成一个唯一的证书
+2.	数据流转发：如何实现大文件上传下载的可靠性及性能优化
+3.	多协议支持，如https/wss等
 
 ##  0x03    参考实现 1：GOOGLE/Martian
 [GOOGLE/Martian](https://github.com/google/martian) 是一个开源的 HTTP/HTTPS 代理库，它可以在代理服务器上拦截和修改 HTTP/HTTPS 请求和响应，以实现一些高级功能，例如请求重定向、请求修改、响应修改、请求和响应记录等。Martian 实现原理是通过在代理服务器上设置 HTTP/HTTPS 代理，拦截和修改 HTTP/HTTPS 请求和响应。Martian 支持多种代理服务器，如 net/http、goproxy、mitmproxy 等。Martian 还支持自定义规则和过滤器，可以根据用户需求进行扩展。martian基于原生的TCP进行[构建](https://github.com/google/martian/blob/master/proxy.go#L194)

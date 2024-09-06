@@ -255,7 +255,6 @@ func (h *IntHeap) Push(x interface{}) {
 2.	优先级队列：比如kubernetes中的[实现](https://dev.to/chuck_ha/data-types-in-kubernetes-priorityqueue-38d2)，[FIFO-PriorityQueue](https://github.com/kubernetes/kubernetes/blob/v1.13.2/pkg/scheduler/internal/queue/scheduling_queue.go)
 3.	heap排序
 
-
 这里使用 heap 实现优先级队列，如下定义，调用代码[在此](https://github.com/pandaychen/golang_in_action/blob/master/datastruct/heap/heap-app2.go#L59)：
 ```golang
 // An Item is something we manage in a priority queue.
@@ -263,7 +262,7 @@ type Item struct {
     value    string  // 优先级队列中的数据
     priority int    // The priority of the item in the queue.
     // The index is needed by update and is maintained by the heap.Interface methods.
-	// index是该节点在堆中的位置，这里采用我们所说的复合结构，注意Swap操作
+	// index是该节点在堆中的位置，这里采用所说的复合结构，注意Swap操作
 	index int // The index of the item in the heap.
 }
 
