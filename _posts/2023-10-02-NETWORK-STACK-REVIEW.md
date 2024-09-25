@@ -14,6 +14,15 @@ tags:
 ##  0x00    前言
 本文汇总下笔者在近期工作中遇到的与 TCP/IP 协议栈相关的知识点汇总
 
+####    Linux内核网络数据收发流程
+1、Linux网络接收数据包流程如下，在Linux内核中当数据包到达网卡的时候，通过`DMA`方式将数据映射到内存，然后硬中断通知CPU有数据到来，调用硬中断处理函数，之后交给软中断去处理。通过`ksoftirq`调用软中断处理函数，收包的软中断处理函数是`net_rx_action`函数，主要将Ring Buffer缓冲区数据做成`sk_buff`送给上层协议栈进行处理，之后数据包经过层层解包最终将数据放入套接字缓冲区中，CPU通过将数据拷贝给应用程序
+
+![recv](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/how_kernel_recv_data.png)
+
+2、Linux网络接收数据包流程如下，首先，应用层应用程序通过CPU将数据拷贝到套接字缓冲区，然后数据包经过层层处理封装好数据包，经过软中断处理函数，通过建立`DMA`映射，将数据放到发送缓冲区中，最后经过一个物理网卡发送出去
+
+![send](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/how_kernel_send_data.png)
+
 ##  0x01    链路层
 
 -   目的 mac 地址：`6` 字节物理地址
