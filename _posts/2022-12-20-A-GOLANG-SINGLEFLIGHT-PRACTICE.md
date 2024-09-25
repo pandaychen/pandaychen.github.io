@@ -34,9 +34,9 @@ func (g *Group) DoChan(key string, fn func() (interface{}, error)) <-chan Result
 func (g *Group) Forget(key string)
 ```
 
--       `Do` 方法，接受 Key 和待调用的函数，会返回调用函数的结果和错误；使用 `Do` 方法的时候，它会根据提供的 Key 判断是否去真正调用 `fn` 函数。同一个 key，在同一时间只有第一次调用 `Do` 方法时才会去执行 `fn` 函数，其他并发的请求会等待调用的执行结果
--       `DoChan` 方法：异步调用。它会返回一个 channel，等 `fn` 函数执行完，产生了结果以后，就能从这个 `chan` 中接收这个结果
--       `Forget` 方法：在 SingleFlight 中删除一个 Key，之后这个 Key 的 `Do` 方法（仅限于唯一一个）调用会执行 `fn` 函数，而不是等待前一个未完成的 `fn` 函数的结果
+- `Do` 方法，接受 Key 和待调用的函数，会返回调用函数的结果和错误；使用 `Do` 方法的时候，它会根据提供的 Key 判断是否去真正调用 `fn` 函数。同一个 key，在同一时间只有第一次调用 `Do` 方法时才会去执行 `fn` 函数，其他并发的请求会等待调用的执行结果
+- `DoChan` 方法：异步调用。它会返回一个 channel，等 `fn` 函数执行完，产生了结果以后，就能从这个 `chan` 中接收这个结果
+- `Forget` 方法：在 SingleFlight 中删除一个 Key，之后这个 Key 的 `Do` 方法（仅限于唯一一个）调用会执行 `fn` 函数，而不是等待前一个未完成的 `fn` 函数的结果
 
 singleflight 机制的使用场景有哪些呢？就个人经验而言，满足如下两个场景都可以使用：
 -	多 goroutine 并发（大量并发，并发量过低效果不明显）
