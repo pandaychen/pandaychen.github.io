@@ -292,9 +292,9 @@ func main(){
 }
 ```
 
-2、`bash` 残留
+2、`bash` 残留：这个目前没发现解决方法，只能通过在容器内`kill`掉残留的`bash`进程
 
-3、不当使用 `TerminalSizeQueue` 导致的内存泄漏问题
+3、不当使用 `TerminalSizeQueue` 导致的内存泄漏问题（该机制用于异步监控窗口尺寸更新）
 
 这里以 [v0.30.2](https://github.com/kubernetes/client-go/blob/v0.30.2/tools/remotecommand/v3.go) 版本分析下窗口动态更新的实现（`v3`），先看下用户实现的 `Next` 方法是在何处调用的，如下：
 
