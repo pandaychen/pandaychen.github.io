@@ -59,14 +59,13 @@ tags:
 4.	gRPC 客户端发起 RPC 调用，根据 LB 均衡器中实现的负载均衡策略（gRPC 中默认提供的算法是 RoundRobin），选择其中一 HTTP2 长连接进行通信，即 LB 策略决定哪个子通道 - 即哪个 gRPC 服务器将接收请求
 
 ##	0x02 gRPC 负载均衡的运行机制
-gRPC 提供了负载均衡实现的用户侧接口，可以非常方便的定制化业务的负载均衡策略，为了理解 gRPC 的负载均衡的实现机制，后续博客中我会分析下 `gRPC` 实现负载均衡的代码。
+gRPC 提供了负载均衡实现的用户侧接口，可以非常方便的定制化业务的负载均衡策略，为了理解 gRPC 的负载均衡的实现机制，后续博客中我会分析下 `gRPC` 实现负载均衡的代码
+
 ![grpc-lb-basic](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/grpc-lb-basic1.png)
-1.  Resolver
-	-	解析器，用于从注册中心实时获取当前服务端的列表，同步发送给 Balancer
-2.  Balancer
-	-	平衡器，一是接收从 Resolver 发送的服务端列表，建立并维护（长）连接状态；二是每次当 Client 发起 Rpc 调用时，按照一定算法从连接池中选择一个连接进行 Rpc 调用
-3.  Register
-	-	注册，用于服务端初始化和在线时，将自己信息上报到注册中心，主要信息有 Ip，端口等
+
+1.  Resolver：解析器，用于从注册中心实时获取当前服务端的列表，同步发送给 Balancer
+2.  Balancer：平衡器，一是接收从 Resolver 发送的服务端列表，建立并维护（长）连接状态；二是每次当 Client 发起 Rpc 调用时，按照一定算法从连接池中选择一个连接进行 Rpc 调用
+3.  Register：注册，用于服务端初始化和在线时，将自己信息上报到注册中心，主要信息有 IP、端口等
 
 ##  0x03 负载均衡的算法及实现
 在实践中，如何选取负载均衡策略是一个很有趣的话题，例如 Nginx 的 `upstream` 机制中就有很多经典的 LB 策略，如带权重的轮询 [Weight-RoundRobin](https://github.com/nginx/nginx/blob/master/src/http/ngx_http_upstream_round_robin.c)，一般常用的负载均衡方法有如下几种：
