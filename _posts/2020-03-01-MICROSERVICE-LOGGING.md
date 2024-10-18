@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      gRPC 微服务构建之日志（Logging）
-subtitle:   使用 gRPC 实现zap日志拦截器（With Tracing）
+subtitle:   zap库应用及使用 gRPC 实现zap日志拦截器（With Tracing）
 date:       2020-03-01
 author:     pandaychen
 header-img:
@@ -11,6 +11,7 @@ tags:
     - 微服务
     - gRPC
     - 日志
+    - zap
 ---
 
 ##  0x00    前言
@@ -27,9 +28,9 @@ Zap 库满足了常见日志库的所有优点，非常适合在项目中使用�
 Zap 库是个非常 Nice 的日志库，性能也很出众，推荐阅读 [从 Go 高性能日志库 zap 看如何实现高性能 Go 组件](https://mp.weixin.qq.com/s/i0bMh_gLLrdnhAEWlF-xDw)。
 
 ##  0x02    gRPC 和 Zap 融合
-&emsp;&emsp; gRPC 的 `grpclog` 包，提供了 [LoggerV2](https://godoc.org/google.golang.org/grpc/grpclog#LoggerV2) 的 `interface{}` 定义，[代码在此](https://github.com/grpc/grpc-go/blob/master/grpclog/loggerv2.go)。因此，只要通过 Zap 实现 `LoggerV2` 的接口（即用自己封装的 `Zap.logger` 实例化 `grpc.LoggerV2`），并通过 `SetLoggerV2(l LoggerV2)` 将实现的对象设置到 `grpclog` 包中，那么 gRPC 就会默认使用我们传入的 Zap 的 `logger` 进行日志打印，非常完美。
+gRPC 的 `grpclog` 包，提供了 [LoggerV2](https://godoc.org/google.golang.org/grpc/grpclog#LoggerV2) 的 `interface{}` 定义，[代码在此](https://github.com/grpc/grpc-go/blob/master/grpclog/loggerv2.go)。因此，只要通过 Zap 实现 `LoggerV2` 的接口（即用自己封装的 `Zap.logger` 实例化 `grpc.LoggerV2`），并通过 `SetLoggerV2(l LoggerV2)` 将实现的对象设置到 `grpclog` 包中，那么 gRPC 就会默认使用传入的 Zap 的 `logger` 进行日志打印，非常完美。
 
-`LoggerV2` 的接口定义了下面的方法集合，所以在我们自己的 Zap 库中，对这里所有的方法都要进行二次封装。
+`LoggerV2` 的接口定义了下面的方法集合，所以在自己的 Zap 库中，对这里所有的方法都要进行二次封装。
 ```golang
 type LoggerV2 interface {
     // Info logs to INFO log. Arguments are handled in the manner of fmt.Print.
@@ -99,12 +100,12 @@ Sugared Logger：类似于 `fmt.Printf`，更通用。
 用法如下：
 ```golang
 sugar := zap.NewExample().Sugar()
-defer sugar.Sync()
+defer sugar.Sync() // zap底层有缓冲。在任何情况下执行 defer sugar.Sync() 是一个很好的习惯
 sugar.Infow("failed to fetch URL",
   "url", "http://example.com",
   "attempt", 3,
   "backoff", time.Second,
-)
+)	// 字段是松散类型，不是强类型
 sugar.Infof("failed to fetch URL: %s", "http://example.com")
 ```
 
@@ -119,7 +120,7 @@ logger.Info("failed to fetch URL",
   zap.String("url", "http://example.com"),
   zap.Int("attempt", 3),
   zap.Duration("backoff", time.Second),
-)
+)	 // 字段是强类型，不是松散类型
 ```
 
 不过二者可以转换：
@@ -152,7 +153,8 @@ grpclog.Errorf("err %v", err)
 ##  0x03  gRPC-Zap 日志拦截器
 `go-grpc-middleware` 项目还提供了基于 Zap 的日志拦截器（服务端）：[`zap.UnaryServerInterceptor`](https://github.com/grpc-ecosystem/go-grpc-middleware/blob/master/logging/zap/server_interceptors.go#L24)，此外还有 `zap.StreamServerInterceptor`、`zap.PayloadUnaryServerInterceptor` 以及 `zap.PayloadStreamServerInterceptor` 等。此外还包含了客户端的拦截器实现。
 
-我们以 `zap.UnaryServerInterceptor` 的 [实现](https://github.com/grpc-ecosystem/go-grpc-middleware/blob/master/logging/zap/server_interceptors.go#L24) 为例，简单分析下拦截器做了哪些事情：
+以 `zap.UnaryServerInterceptor` 的 [实现](https://github.com/grpc-ecosystem/go-grpc-middleware/blob/master/logging/zap/server_interceptors.go#L24) 为例，简单分析下拦截器做了哪些事情：
+
 ```golang
 // UnaryServerInterceptor returns a new unary server interceptors that adds zap.Logger to the context.
 func UnaryServerInterceptor(logger *zap.Logger, opts ...Option) grpc.UnaryServerInterceptor {
@@ -373,7 +375,177 @@ func DefaultClientCodeToLevel(code codes.Code) zapcore.Level {
 }
 ```
 
-##	0x04	封装Zap增加TraceId
+##	0x04	zap库的应用
+
+####	zap framework
+zap由创建logger与写log两个关键过程组成。其中zap的核心是`zapcore.Core`抽象（下文），`Core`是zap定义的一个log接口，围绕着这个`Core`，zap提供上层log对象以及相应的方法，开发者同样可以基于该接口定制自己的log包，非常方便
+
+![zap](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/logger/uber-zap-advanced-usage-2.png)
+
+####	使用
+快速创建 logger 的方法：
+-	`zap.NewProduction()`
+-	`zap.NewDevelopment()`
+-	`zap.NewExample()`
+
+简单看下`zap.NewExample()`的实现，可供自行实现日志对象参考：
+
+```GO
+// https://github.com/uber-go/zap/blob/v1.24.0/logger.go#L127
+func NewExample(options ...Option) *Logger {
+	encoderCfg := zapcore.EncoderConfig{
+        MessageKey:     "msg",  // 日志内容key:val， 前面的key设为msg
+		LevelKey:       "level", // 日志级别的key设为level
+		NameKey:        "logger", // 日志名
+		EncodeLevel:    zapcore.LowercaseLevelEncoder, //日志级别，默认小写
+		EncodeTime:     zapcore.ISO8601TimeEncoder, // 日志时间
+		EncodeDuration: zapcore.StringDurationEncoder,
+	}
+	core := zapcore.NewCore(zapcore.NewJSONEncoder(encoderCfg), os.Stdout, DebugLevel)
+	return New(core).WithOptions(options...)
+}
+```
+
+####	自定义logger配置
+组装一个自定义 `zap.Logger` 需要了解 `zapcore.Core`，而它包括如下三个参数：
+-	`Encoder`，包括`EncoderConfig`，`Encoder`是日志消息的编码器
+-	`WriteSyncer`，是支持Sync方法的`io.Writer`，含义是日志输出的地方，可以很方便的通过`zap.AddSync`将一个`io.Writer`转换为支持`Sync`方法的`WriteSyncer`
+-	`LevelEnabler`：日志级别相关的参数
+
+1、`Encoder`：`Encoder` 控制着日志最终的输出格式，`Encoder` 本身控制日志的编码格式（json OR plain-text）。其包含的 `EncoderConfig` 则控制每一个字段更具体的格式。zap 提供了两个内置 `Encoder` 可以满足大部分需要， `zapcore.NewConsoleEncoder(encoderConfig)` 与 `zapcore.NewJSONEncoder(encoderConfig)`，直接使用即可
+
+```GO
+//type TimeEncoder func(time.Time, PrimitiveArrayEncoder)
+//希望输出的时间格式是 [yyyyMMdd]，可以自定义一个这样的 TimeEncoder 并使用
+func CustomTimeEncoder(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
+	enc.AppendString(fmt.Sprintf("[%04d%02d%02d]", t.Year(), t.Month(), t.Day()))
+}
+
+func main() {
+	encoderConfig := zap.NewProductionEncoderConfig()
+	encoderConfig.EncodeTime = CustomTimeEncoder // 设置自定义 TimeEncoder
+	encoder := zapcore.NewConsoleEncoder(encoderConfig)
+	core := zapcore.NewCore(encoder, zapcore.AddSync(os.Stdout), zapcore.DebugLevel)
+	zap.New(core).Sugar().Infow("Check order.", "id", 123, "name", "Fruit")\
+}
+```
+
+2、`WriteSyncer`：控制输出的位置（动作，日志最终输出到哪里），如`zapcore.AddSync(io.Writer)`、`zapcore.AddSync(io.Discarder)`等。看下`apcore.AddSync`的定义，参数为`io.Writer`，返回一个`WriteSyncer`
+
+```GO
+func AddSync(w io.Writer) WriteSyncer
+
+type WriteSyncer interface {
+	io.Writer
+	Sync() error
+}
+```
+
+从上面的定义可知，只要实现了`Write`和`Sync`这两个方法就可以实现自定义的logger，可参考下面的remotelogger实现。这里以最常见的输出到文件为例：
+
+```GO
+//输出到文件
+logfile, _ := os.Create("/path/to/a.log")
+core := zapcore.NewCore(encoder, zapcore.AddSync(logfile), zapcore.DebugLevel)
+logger := zap.New(core)
+
+//输出到控制台且输出到文件
+logfile, _ := os.Create("/path/to/a.log")
+// file + stdout
+multiSyner := zapcore.NewMultiWriteSyncer(zapcore.AddSync(logfile), zapcore.AddSync(os.Stdout))
+core := zapcore.NewCore(encoder, multiSyner, zapcore.DebugLevel)
+logger := zap.New(core)
+```
+
+3、`LevelEnabler`：接口，用来确定某个等级的日志是否需要输出。zap 内置的几种类型（`zapcore.DebugLevel` / `zapcore.InfoLevel` ...）默认实现了该接口，会打印等级 >= 它的日志。
+
+```GO
+// zap 提供了一个便捷的函数命名类型
+//type LevelEnablerFunc func(zapcore.Level) bool
+infoLevel := zap.LevelEnablerFunc(func(lv zapcore.Level) bool {
+	return lv >= zapcore.InfoLevel
+})
+// 效果等同于 zapcore.InfoLevel
+```
+
+####	多logger整合
+针对要不同的等级输出到不同的地方，且不同的地方采用不同的格式的需求，可以使用`zapcore.NewTee`实现
+
+```GO
+debugCore := zapcore.NewCore(encoder, debugSyner, zapcore.DebugLevel)
+errCore := zapcore.NewCore(encoder, errSyner, zapcore.ErrorLevel)
+tee := zapcore.NewTee(debugCore, errCore)
+logger := zap.New(tee)
+```
+
+####	自动压缩&&rotate
+[zaplog](https://github.com/pandaychen/goes-wrapper/blob/master/zaplog/zaplog.go)
+
+####	自定义remoteLog
+参考项目elkeid的实现，实现了grpc/remote两种logger
+
+-	[`GrpcWriter`](https://github.com/pandaychen/elkeid_fork/blob/main/agent/log/writer.go)
+-	[`remoteWriter`](https://github.com/pandaychen/elkeid_fork/blob/main/plugins/lib/go/log/writer.go)
+
+这里简单分析下`remoteWriter`，就是实现了`Write`与`Sync`方法：
+
+```GO
+type remoteWriter struct {
+	client *plugins.Client		//这里是一个os.Pipe，父子进程通信
+}
+
+func (w *remoteWriter) Write(p []byte) (n int, err error) {
+	if w.client != nil {
+		rec := &plugins.Record{
+			DataType: 1011,
+			Data: &plugins.Payload{
+				Fields: map[string]string{},
+			},
+		}
+		fields := map[string]interface{}{}
+		err = json.Unmarshal(p, &fields)
+		if err != nil {
+			return
+		}
+		timestamp, ok := fields["timestamp"]
+		if ok {
+			timestamp, err := strconv.ParseInt(timestamp.(string), 10, 64)
+			if err == nil {
+				rec.Timestamp = timestamp
+				delete(fields, "timestamp")
+			}
+		}
+		if rec.Timestamp == 0 {
+			rec.Timestamp = time.Now().Unix()
+		}
+		for k, v := range fields {
+			switch v := v.(type) {
+			case string:
+				rec.Data.Fields[k] = v
+			case int:
+				rec.Data.Fields[k] = strconv.Itoa(v)
+			}
+		}
+		//日志会被发送给父进程
+		err = w.client.SendRecord(rec)
+		if err != nil {
+			return
+		}
+	}
+	n = len(p)
+	return
+}
+
+func (w *remoteWriter) Sync() error {
+	if w.client != nil {
+		return w.client.Flush()
+	} else {
+		return nil
+	}
+}
+```
+
+####	封装Zap增加TraceId
 
 ##	0x05	日志染色
 
@@ -396,5 +568,6 @@ func DefaultClientCodeToLevel(code codes.Code) zapcore.Level {
 -	[TARS染色日志 ｜ 收集记录特定日志](https://cloud.tencent.com/developer/article/1791859)
 -	[golang 日志切割库 goroutine 泄漏导致进程 panic 问题排查](https://zhuanlan.zhihu.com/p/453788600)
 -	[Go 每日一库之 zap](https://darjun.github.io/2020/04/23/godailylib/zap/)
+-	[一文告诉你如何用好uber开源的zap日志库](https://tonybai.com/2021/07/14/uber-zap-advanced-usage/)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
