@@ -569,5 +569,6 @@ func (w *remoteWriter) Sync() error {
 -	[golang 日志切割库 goroutine 泄漏导致进程 panic 问题排查](https://zhuanlan.zhihu.com/p/453788600)
 -	[Go 每日一库之 zap](https://darjun.github.io/2020/04/23/godailylib/zap/)
 -	[一文告诉你如何用好uber开源的zap日志库](https://tonybai.com/2021/07/14/uber-zap-advanced-usage/)
+-	[Go: How Zap Package is Optimized](https://readmedium.com/go-how-zap-package-is-optimized-dbf72ef48f2d)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
