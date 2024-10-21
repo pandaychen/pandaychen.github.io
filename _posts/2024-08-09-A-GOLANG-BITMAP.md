@@ -75,7 +75,7 @@ func (dst *Bitmap) Set(x uint32) {
 }
 ```
 
-4、
+4、清理`x`所在的位置
 
 ```GO
 // Remove removes the bit x from the bitmap, but does not shrink it.
