@@ -84,7 +84,7 @@ PS：路由表和策略区别：
 
 ####    2、路由表 （使用 ip route 命令操作静态路由表）
 
-路由表，指的是路由器或者其他互联网网络设备上存储的表，该表中存有到达特定网络终端的路径，在某些情况下，还有一些与这些路径相关的度量。路由器的主要工作就是为经过路由器的每个数据包寻找一条最佳的传输路径，并将该数据有效地传送到目的站点。由此可见，选择最佳路径的策略即路由算法是路由器的关键所在。为了完成这项工作，在路由器中保存着各种传输路径的相关数据——路由表（Routing Table），供路由选择时使用，表中包含的信息决定了数据转发的策略。打个比方，路由表就像我们平时使用的地图一样，标识着各种路线，路由表中保存着子网的标志信息、网上路由器的个数和下一个路由器的名字等内容。路由表根据其建立的方法，可以分为动态路由表和静态路由表。
+路由表，指的是路由器或者其他互联网网络设备上存储的表，该表中存有到达特定网络终端的路径，在某些情况下，还有一些与这些路径相关的度量。路由器的主要工作就是为经过路由器的每个数据包寻找一条最佳的传输路径，并将该数据有效地传送到目的站点。由此可见，选择最佳路径的策略即路由算法是路由器的关键所在。为了完成这项工作，在路由器中保存着各种传输路径的相关数据——路由表（Routing Table），供路由选择时使用，表中包含的信息决定了数据转发的策略。打个比方，路由表就像平时使用的地图一样，标识着各种路线，路由表中保存着子网的标志信息、网上路由器的个数和下一个路由器的名字等内容。路由表根据其建立的方法，可以分为动态路由表和静态路由表
 
 1、路由表分类
 
@@ -344,7 +344,7 @@ wg set wg0 fwmark 51820
 
 ##  0x03    clash.Meta tun 模式中的路由
 
-clash.Meta 用作透明代理的路由设置和wireguard类似，如下
+clash.Meta 用作透明代理的路由设置和 wireguard 类似，如下
 
 ```BASH
 [root@VM-16-10-tencentos ~]# ip route
@@ -364,25 +364,135 @@ default via 172.16.16.1 dev eth0
 32767:  from all lookup default
 ```
 
-`1970566510`的路由表信息：
+`1970566510` 的路由表信息：
 
 ```bash
 [root@VM-16-10-tencentos ~]# ip route show table 1970566510
-default dev utun proto static 
+default dev utun proto static
 ```
 
--   `9500`: 所有不是目的端口为 `53` 的数据包都会被发送到主路由表中进行处理，`suppress_prefixlength 0` 表示在进行路由查找时不会缩短前缀长度（参考wireguard）
+-   `9500`: 所有不是目的端口为 `53` 的数据包都会被发送到主路由表中进行处理，`suppress_prefixlength 0` 表示在进行路由查找时不会缩短前缀长度（参考 wireguard）
 -   `9510`: 所有从 `lo` 接口进入的数据包都会被发送到标识符为 `1970566510` 的路由表中进行处理
 -   `9520`: 所有从 `0.0.0.0` 地址进入 `lo` 接口的数据包都会被发送到标识符为 `1970566510` 的路由表中进行处理。`uidrange 0-4294967294` 表示匹配所有 `UID` 范围内的数据包
 -   `9530`: 所有从 `198.18.0.1` 地址进入 `lo` 接口的数据包都会被发送到标识符为 `1970566510` 的路由表中进行处理
 
-上面的`uidrange`的意义如下：`uidrange` 是 iptables 中用来匹配用户 ID（UID）范围的一个匹配条件。它可以用于过滤特定用户或用户组的网络流量。UID 为 `0`是`root`用户；`uidrange` 可以用于匹配指定 UID 范围内的用户发起的网络流量。例如，`uidrange 1000-2000` 可以匹配 UID 在 `1000` 到 `2000` 范围内的用户发起的网络流量。可以将这个匹配条件与其他条件结合使用，例如源 IP 地址、目的端口等，以实现更精细的流量过滤和控制
+上面的 `uidrange` 的意义如下：`uidrange` 是 iptables 中用来匹配用户 ID（UID）范围的一个匹配条件。它可以用于过滤特定用户或用户组的网络流量。UID 为 `0` 是 `root` 用户；`uidrange` 可以用于匹配指定 UID 范围内的用户发起的网络流量。例如，`uidrange 1000-2000` 可以匹配 UID 在 `1000` 到 `2000` 范围内的用户发起的网络流量。可以将这个匹配条件与其他条件结合使用，例如源 IP 地址、目的端口等，以实现更精细的流量过滤和控制
 
-不过，clash premium的`ip rule`设置为 `uidrange 0-4294967294`，表示所有用户的流量都会被代理到 Clash
+不过，clash premium 的 `ip rule` 设置为 `uidrange 0-4294967294`，表示所有用户的流量都会被代理到 Clash
 
-##  0x04 参考
+##  0x04  基于 uid（用户 ID）的路由策略技巧
+此技巧借鉴于 Clash 配置，通常使用 TUN 技术的引流，有两种方式 `Fake-IP`/`Real-IP`：
+
+-   `Fake-IP`：假设网关的 TUN 网卡配置为 `10.19.0.1/15`，通过 DNS 透明劫持、DHCP 等机制等，将 DNS 域名 `www.qq.com` 解析到 `10.19.0.1/15` 子网中的 IP，以此方式将所有访问 `www.qq.com` 的流量导入至 TUN 网卡
+-   `Real-IP`：不干扰 DNS 解析结果，流量经过网关时，`www.qq.com` 的 IP 为其真实解析 IP，不过需要配置引流路由将该 IP 的流量导入到 TUN 网卡
+
+从经验而言，`Fake-IP` 模式配置简单，而 `Real-IP` 模式使用真实 IP 地址则需要比较复杂的配置过程，但是其工作状态最接近真实网络环境，兼容性好，此外有些应用只能使用真实 IP 进行连接，则必须使用 RealIP 模式
+
+1、`Fake-IP`，假设网段为 `198.18.0.0/16` 可以添加路由将该网段的流量发向 Clash Tun:
+
+```BASH
+route add -net 198.18.0.0/16 dev utun
+```
+
+2、 `Real-IP`模式的复杂性主要有两点：
+- 如何使得 Clash Outbound 还能正确的连接互联网
+- 如何使得 DIRECT 出口的流v量不要经过 Tun NIC 回到 Clash 造成回环（这个非常重要）
+
+在实践中，分为网关模式和普通单机模式来看：
+
+-   网关模式：当 Clash 作为网关工作，如果运行 Clash 的主机本身并不需要通过 Tun 代理，仅仅是转发其他设备的流量，该模式下的配置就会较为简单（一些不需要走TUN代理的流量，比如网关的外发流量、SSH流量、一些内置agent流量等，可以通过设置路由优先级解决，最低优先级的默认路由是指向TUN代理网卡） 
+-   单机模式：运行 Clash 的 Linux 的主机本身也需要代理，这时候不能使用添加 Default 路由到 Tun NIC 的方式应用 Clash Tun 模式，否则 Clash 将无法连接远程代理服务器（即主机到代理的流量不能在走到TUN网卡，这样就回环了）
+
+3、如何解决单机模式下Clash Tun模式的使用问题？（Linux）
+
+解决思路是将 Clash 运行在一个单独的用户下，用以给操作系统一个区分网络流量是否是 Clash 发出的特征。使用 iptables 在 mangle 表中，将流量打上 `fwmark`，再由 IP rule 决定将这些有 mark的流量使用策略路由 （policy route）将流量转发给 Tun NIC，这个包含了两个步骤：
+
+-   在 mangle 表 OUTPUT 链中使用 uid-owner 排除 Clash 发出的流量（不过Clash）
+-   在 mangle 表 PREROUTING 中，将其他设备发来的流量打上 `fwmark`（根据策略路由决定要不要发给Clash）
+
+实际操作流程如下，假设 clash 运行在 alice 用户下，该用户的 `UID` 为 `129`，`fwmark` 也用 `129`，clash 策略路由的路由表 id 也为 `129`（用户 `uid`，`fwmark` ，路由表 id 是三个不相关的值）
+
+第一步：创建NIC，配置 Tun NIC，配置 `iptables` 和 ip rule（假设 Tun NIC 为 `clash0`，owner 也为 `alice`，并且已经 bring up）
+
+第二步：配置 `iptables`，首先在 mangle 表中创建 `CLASH` 链，主要用于排除一些局域网地址（使用 `ipset`可参考下面被注释的 `chnroute` 项，排除一些国内地址）
+
+```BASH
+iptables -t mangle -N CLASH # 创建 Clash Chain
+# 排除一些局域网地址
+iptables -t mangle -A CLASH -d 0.0.0.0/8 -j RETURN
+iptables -t mangle -A CLASH -d 10.0.0.0/8 -j RETURN
+iptables -t mangle -A CLASH -d 127.0.0.0/8 -j RETURN
+iptables -t mangle -A CLASH -d 169.254.0.0/16 -j RETURN
+iptables -t mangle -A CLASH -d 172.16.0.0/12 -j RETURN
+iptables -t mangle -A CLASH -d 192.168.0.0/16 -j RETURN
+iptables -t mangle -A CLASH -d 224.0.0.0/4 -j RETURN
+iptables -t mangle -A CLASH -d 240.0.0.0/4 -j RETURN        #上面这些规则都是直接放行，不打mark
+# iptables -t mangle -A CLASH -m set --match-set chnroute dst -j RETURN
+iptables -t mangle -A CLASH -j MARK --set-xmark 129         #打mark
+```
+
+简单解释下上面这段操作的意义（该组操作主要作用在mangle表是对流量进行标记和过滤），mangle表本来就是拆解报文，作出修改，封装报文场景下使用的：
+
+1.  `iptables -t mangle -N CLASH`：创建了一个新的 chain，名字叫做 CLASH。Mangle chains 的主要功能就是修改包的内容，比如 TTL 值，TCP options 等
+2.  `iptables -t mangle -A CLASH -d 0.0.0.0/8 -j RETURN`：向 CLASH chain 中添加了一条规则，`-j RETURN` 表示一旦匹配成功就停止继续往下检查，不再执行剩余的规则，这样做的目的是为了跳过不需要处理的流量
+3.  `iptables -t mangle -A CLASH -j MARK --set-xmark 129`：此步骤设置了一个 mark，然后把这个 mark （`129`）写入到了每一个经过 CLASH chain 的包的 `xmark` 位（这里隐含了前面的iptables规则都没有命中）
+
+这里多提一下，`0.0.0.0/8`这个cidr的意义：
+
+-   `0.0.0.0/8`通常作为默认路由使用。当某台设备收到一个不知道应该发送给哪个网络接口的数据包时，就会将其转发到`0.0.0.0/8`网络，然后再由相应的网络接口处理
+-   `0.0.0.0/8`也是保留的IP地址块之一，不能分配给任何网络设备，即不能在这个范围内建立自己的网络
+-   `0.0.0.0/8`出现在防火墙规则中，作为通配符，匹配任意来源或目标地址
+
+然后在 PREROUTING 链中，给所有转发（forward）流量打上 `fwmark`。PREROUTING 链的流量来自于其他设备（如果有必要，可以限制高目标端口以防止 BT 流量被转发到 Clash），如下：
+
+```BASH
+# 限制高目标端口的流量
+# iptables -t mangle -A PREROUTING -p udp -m udp --dport 4096:65535 -j RETURN
+# iptables -t mangle -A PREROUTING -p tcp -m tcp --dport 8192:65535 -j RETURN
+iptables -t mangle -A PREROUTING -j CLASH       #走到CLASH链去，最后会被打上mark
+```
+
+最后在 OUTPUT 链中，将本机外出流量打上 `fwmark`：
+
+```BASH
+iptables -t mangle -A OUTPUT -m owner --uid-owner 129 -j RETURN
+# 如果本机有某些不想被代理的应用(如BT)，可以将其运行在特定用户下，加以屏蔽
+# iptables -t mangle -A OUTPUT -m owner --uid-owner xxx -j RETURN
+iptables -t mangle -A OUTPUT -j CLASH
+```
+
+下面添加策略路由，使得被打上 fwmark 的流量交由特定路由表（`129`）处理，并转发到 Clash 监听的 Tun NIC 上：
+
+```BASH
+ip route add default dev clash0 table 129   #设置路由表
+ip rule add fwmark 129  lookup 129          #设置fwmark策略
+```
+
+PS：可以用 `ip route`验证下策略路由是否生效：
+
+```BASH
+ip route get 1.1.1.1 mark 129
+
+#应该有如下的返回（0x81 是 129 的 16进制）
+1.2.3.4 dev clash0 table 129 src 192.168.31.194 mark 0x81 uid 1000 
+cache
+```
+
+第三步：排除 `rp_filter` 的故障（`rp_filter` 机制是 Linux 的安全功能，`rp_filter` 会在计算路由决策的时候，计算包的反向路由，也就是将包中的源地址和目的地址对调再查找路由表，由本机或者其他设备流向 `clash0` 的 IP Packet一般不会有问题，但是当 `rp_filter` 检查 `clash0` 流出的包时，由于这些包不会带有 `fwmark`，检查反向路由时不会走刚才定义的策略路由，导致 `rp_filter` 检查失败，包被丢弃），
+解决方法是临时关闭 `clash0` NIC 的 `rp_filter`功能，操作如下：
+
+```BASH
+sysctl -w net.ipv4.conf.clash0.rp_filter=0
+sysctl -w net.ipv4.conf.all.rp_filter=0
+#将 all.rp_filter设置为 0 是必须的
+#将 all.rp_filter 设置为 0 并不会将所有其他网卡的 rp_filter一并关闭。此时其他网卡的 rp_filter由它们各自的rp_filter控制
+```
+
+##  0x05 参考
 -   [详解 ip rule，ip route，iptables 三者之间的关系](https://www.toutiao.com/article/6662630661838340621/?wid=1692243899353)
 -   [理解 OpenStack 高可用（HA）（3）：Neutron 分布式虚拟路由（Neutron Distributed Virtual Routing）](https://www.cnblogs.com/sammyliu/p/4713562.html)
 -   [彻底理解 WireGuard 的路由策略](https://cloud.tencent.com/developer/article/2153889)
 -   [在 WireGuard 场景中使用策略路由定义复杂路由规则](https://blog.imlk.top/posts/policy-routing-with-wg-tunnel/)
 -   [Linux 上的 WireGuard 网络分析（一）](https://thiscute.world/posts/wireguard-on-linux/)
+-   [TUN配置说明](https://comzyh.gitbook.io/clash)
+-   [clash tun模式的配置方案](https://comzyh.gitbook.io/clash/real-ip-tun-example)
