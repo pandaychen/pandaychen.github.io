@@ -37,7 +37,15 @@ eBPF 程序根据其功能和挂载点可以分为多种类型（难点及重点
 
 3、eBPF 映射（Maps）
 
-eBPF 映射（Maps）是一种内核态与用户态之间共享数据的机制。它允许 eBPF 程序在内核空间存储和检索数据，同时也可以通过用户态工具对这些数据进行访问和修改。eBPF 映射支持多种数据结构，如哈希表、数组、队列等，可以满足不同场景下的数据存储和检索需求
+eBPF 映射（Maps）是一种内核态与用户态之间共享数据的机制。它允许 eBPF 程序在内核空间存储和检索数据，同时也可以通过用户态工具对这些数据进行访问和修改。eBPF 映射支持多种数据结构，如哈希表、数组、队列等，可以满足不同场景下的数据存储和检索需求，类型定义在[此](https://elixir.bootlin.com/linux/v5.15.2/source/include/uapi/linux/bpf.h#L878)
+
+常用数据结构包括：
+
+-   `hash` / `array`：哈希表和数组
+-   `perf_evenrt_array`：perf_event ring buffers：可以将数据从内核态发送到用户态
+-   `percpu_hash` / `percpu_array`：单个CPU独占的哈希表和数组，性能更好，但是使用时的一些[坑](https://blog.csdn.net/wennuanddianbo/article/details/128599431)需要避免
+
+关于BPF MAPS的细节可以[参考](https://dri.freedesktop.org/docs/drm/bpf/maps.html)
 
 4、eBPF 加载和验证机制
 
@@ -48,9 +56,39 @@ eBPF 程序在加载到内核之前需要经过严格的验证过程，以确保
 -   内存访问检查：确保 eBPF 程序不会访问非法的内存地址和敏感数据
 -   助手函数检查：确保 eBPF 程序只调用允许的内核助手函数
 
+举个例子，比如下面这段代码在编译阶段就会报错：`in function kprobe_vfs_mkdir i32 (i8*): Looks like the BPF stack limit of 512 bytes is exceeded. Please move large on stack variables into BPF per-cpu array map.`
+
+```C
+SEC("kprobe/xxxxx")
+int BPF_KPROBE(tcp_sendmsg, struct sock *sk)
+{
+#define MAX_NUM (512/8)
+    volatile u64 arr[MAX_NUM + 1] = {};
+    arr[MAX_NUM] = 0xff;
+    bpf_printk("%lld\n", arr[MAX_NUM]);
+    return 0;
+}
+```
+
+因为 verifier 会保存栈内存的状态，所以栈的大小是有限的，目前是 `512` 字节，当栈内存大小超过 `512` 字节时，则会被 verifier 拒绝。一般建议使用 map 来存储大数据
+
 5、eBPF 辅助函数（Helper Functions）
 
-eBPF 助手函数（Helper Functions）是一组内核提供的 API，用于帮助 eBPF 程序实现与内核和用户态之间的交互。eBPF 助手函数支持多种操作，如读写 eBPF 映射、获取系统时间、发送网络数据包等。通过调用助手函数，eBPF 程序可以实现更加复杂和强大的功能，从而为系统提供更高效和灵活的性能监控、网络安全、负载均衡等方面的解决方案
+eBPF 辅助函数（Helper Functions）是一组内核提供的 API，用于帮助 eBPF 程序实现与内核和用户态之间的交互。eBPF 助手函数支持多种操作，如读写 eBPF 映射、获取系统时间、发送网络数据包等。通过调用助手函数，eBPF 程序可以实现更加复杂和强大的功能，从而为系统提供更高效和灵活的性能监控、网络安全、负载均衡等方面的解决方案
+
+eBPF提供的辅助函数的使用可以参考：
+
+-   [Helper functions](https://ebpf-docs.dylanreimerink.nl/linux/helper-function/)
+-   [Helper functions](https://man7.org/linux/man-pages/man2/bpf.2.html)
+
+内核不允许eBPF程序直接调用内核中的任意函数，只能访问有限的bpf-helpers。bpf-helpers可以对BPF Maps进行增删改查，部分指令由bpf系统调用完成。bpf-helpers还包含了内核提供的工具函数，例如读取内核中的内存空间，获取当前时间、打印调试信息等等。常用函数如下：
+
+-   `bpf_map_lookup_elem` / `bpf_map_update_elem` / `bpf_map_delete_elem`：BPF Map操作
+-   `bpf_probe_read` / `bpf_probe_read_str`：读取指向内核空间指针的内容
+-   `bpf_ktime_get_ns`：获取时间
+-   `bpf_printk` / `bpf_trace_printk`：打印调试信息
+-   `bpf_get_current_pid_tgid` / `bpf_get_current_comm` / `bpf_get_current_task`：获取当前事件的进程信息
+-   `bpf_perf_event_output`：向`perf_event_array`写入数据，用于向用户空间发送数据
 
 ####    eBPF 工作流程
 1.  编写、编译 eBPF 程序，程序主要用来处理不同类型应用
@@ -81,15 +119,18 @@ eBPF 的工作逻辑详细描述如下：
 简单总结下，就是eBPF可以在不升级linux内核的情况下，将用户自定义代码插入到内核执行过程中，从而对某些特定的内核或用户程序函数符号/偏移量等的触发过程进行监控、采集等自定义操作，并支持将输出数据暂存在bpf maps中，由reader读取后进行后续的落盘、数据分析等
 
 
+####    eBPF程序的生命周期
+![life-cycle](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ebpf/dev/ebpf-life-cycle.png)
+
 ####    ebpf的主要能力
--   kprobe：内核插探，在指定的内核函数前或后执行
--   kretprobe：内核函数返回插探，在指定的内核函数返回时执行
--   tracepoint：跟踪点，在指定的内核跟踪点处执行
--   tracepoint_return：跟踪点返回，在指定的内核跟踪点返回时执行
--   raw_tracepoint：原始跟踪点，在指定的内核原始跟踪点处执行
--   raw_tracepoint_return：原始跟踪点返回，在指定的内核原始跟踪
--   xdp：网络数据处理，拦截和处理网络数据包
--   perf_event：性能事件，用于处理内核性能事件
+-   `kprobe`：内核插探，在指定的内核函数前或后执行
+-   `kretprobe`：内核函数返回插探，在指定的内核函数返回时执行
+-   `tracepoint`：跟踪点，在指定的内核跟踪点处执行
+-   `tracepoint_return`：跟踪点返回，在指定的内核跟踪点返回时执行
+-   `raw_tracepoint`：原始跟踪点，在指定的内核原始跟踪点处执行
+-   `raw_tracepoint_return`：原始跟踪点返回，在指定的内核原始跟踪
+-   `xdp`：网络数据处理，拦截和处理网络数据包
+-   `perf_event`：性能事件，用于处理内核性能事件
 
 
 ####    ebpf vs linux kernel module
@@ -553,6 +594,8 @@ enum bpf_map_type {
 
 bpf 系统调用的函数原型如下：
 
+![bpf-call](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ebpf/bpf_syscall_api.png)
+
 ```C
 // https://man7.org/linux/man-pages/man2/bpf.2.html
 #include <linux/bpf.h>
@@ -562,6 +605,83 @@ int bpf(int cmd, union bpf_attr *attr, unsigned int size);
 该函数最主要的功能是加载 bpf 程序（`cmd=BPF_PROG_LOAD`），其次是围绕 MAP 的一系列操作，包括创建 MAP（`cmd=BPF_MAP_CREATE`）、MAP 元素查询（`cmd=BPF_MAP_LOOKUP_ELEM`）、MAP 元素值更新（`cmd=BPF_MAP_UPDATE_ELEM`）
 
 当 `cmd=BPF_MAP_CREATE` 时，即 bpf 执行创建 MAP 的操作后，bpf 调用会返回一个文件描述符 `fd`，通过该 `fd` 后续可以操作新创建的 MAP，不过该底层的系统调用，一般 BPF 用户态开发人员无需接触到，像 `libbpf` 就包装了一系列的 map 操作函数，这些函数不会暴露 map fd 给用户，简化了使用方法，提升了使用体验
+
+bpf 系统调用实现：
+
+![bpf-call](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/ebpf/ebpf-bpf-call-function.png)
+
+更多关于bpf函数的细节可以参考[此文](https://www.oreilly.com/library/view/learning-ebpf/9781098135119/ch04.html)
+
+####    BPF-MAPS操作
+参考[官方文档](https://www.kernel.org/doc/html/v6.0/bpf/map_hash.html)，介绍`BPF_MAP_TYPE_LRU_HASH`结构的使用
+
+1、内核态代码，原子性的更新源IP的packet长度与计数
+
+```C
+#include <linux/bpf.h>
+#include <bpf/bpf_helpers.h>
+
+struct key {
+    __u32 srcip;
+};
+
+struct value {
+    __u64 packets;
+    __u64 bytes;
+};
+
+struct {
+        __uint(type, BPF_MAP_TYPE_LRU_HASH);
+        __uint(max_entries, 32);
+        __type(key, struct key);
+        __type(value, struct value);
+} packet_stats SEC(".maps");
+
+//This example shows how to create or update hash values using atomic instructions:
+
+static void update_stats(__u32 srcip, int bytes)
+{
+        struct key key = {
+                .srcip = srcip,
+        };
+        struct value *value = bpf_map_lookup_elem(&packet_stats, &key);
+
+        if (value) {
+                // 注意：非并发安全，需要使用atomic更新
+                __sync_fetch_and_add(&value->packets, 1);
+                __sync_fetch_and_add(&value->bytes, bytes);
+        } else {
+                struct value newval = { 1, bytes };
+                bpf_map_update_elem(&packet_stats, &key, &newval, BPF_NOEXIST);
+        }
+}
+```
+
+2、用户态代码，遍历map（遗留问题：遍历的时机）
+
+```C
+#include <bpf/libbpf.h>
+#include <bpf/bpf.h>
+
+static void walk_hash_elements(int map_fd)
+{
+        struct key *cur_key = NULL;
+        struct key next_key;
+        struct value value;
+        int err;
+
+        for (;;) {
+                err = bpf_map_get_next_key(map_fd, cur_key, &next_key);
+                if (err)
+                        break;
+
+                bpf_map_lookup_elem(map_fd, &next_key, &value);
+                // Use key and value here
+
+                cur_key = &next_key;
+        }
+}
+```
 
 ####  使用示例（C）
 改造上面的 helloworld 示例，对 `execve` 进行调用计数，并将技术存储在 BPF MAP 中，而用户态部分程序则读取该 MAP 中的计数并定时输出计数值
@@ -608,7 +728,7 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 2、用户态源码
 
-```c
+```cpp
 #include <stdio.h>
 #include <unistd.h>
 #include <sys/resource.h>
@@ -688,7 +808,7 @@ cleanup:
 }
 ```
 
-这里有个疑问是，为何用户态程序可以直接使用 map？因为 bpftool 基于 `execve_counter.bpf.c` 生成的 `execve_counter.skel.h` 中包含了 map 的各种信息
+这里有个疑问是，为何用户态程序可以直接使用 map？因为 bpftool 基于 `execve_counter.bpf.c` 生成的 `execve_counter.skel.h` 中包含了 map 的各种信息。另外还有一点是注意，内核态和用户态代码中都定义了相同的数据结构`typedef char stringkey[64]`，如果用户态是其他的语言（Golang等），那么要注意这里的字节流的转换，可以参考此文[BPF CO-RE的探索与落地：从 C 结构体到 Go 结构体](https://www.strickland.cloud/post/1)
 
 ####  示例（GO）
 
@@ -920,8 +1040,8 @@ eBPF 代码作为从用户空间向内核空间注入的代码，通常需要访
 
 上述两种方式，都无法摆脱对内核头文件的依赖，一旦用在对应内核环境下编译除了一个 binary，换了一个内核环境极有可能就无法运行了。问题的本质是一个 Relocation（重定位）的问题，即当 eBPF 代码访问内核数据结构时，它必须准确知道当前这个数据结构在内核中的 memory layout，也就是某个 field 到底在哪个 offset。假如 eBPF 代码需要访问 `struct task_struct`这个结构，如果 eBPF 代码使用的 `task_struct` 和实际运行内核中运行的 `task_struct` 不一致，比如实际内核运行的 `task_struct` 在需要 eBPF 代码要访问的 field 前面又新增了一些 fileld，这就导致 offset 发生了改变，eBPF 代码将读到错误的数据；如果需要访问的 field 发生了重命名或被删除，又或者不同的 Kconfig，同一份内核编译出不同的 struct，都会对 binary的运行造成影响
 
-####    BTF 和 CO-RE（Compile Once，Run Everywhere
-为了解决上述问题，内核引入了BTF机制（轻量），要用一种相对抽象的方式去描述 eBPF 和内核的数据结构的元数据，然后在加载时让加载器基于这些元数据来完成Relocation。只要开启了 BTF 功能（`CONFIG_DEBUG_INFO_BTF=y` ，Linux 5.2 里引入），就可以将内核数据结构的描述内嵌于内核中（`/sys/kernel/btf/vmlinux`），此外，这部分 BTF 信息还可以等价转换为 C 描述（即 header 文件 `vmlinux.h`）。这样只要引入`vmlinux.h`，在写代码的时候就无需引入其他内核头文件（各个不同版本），就可以使用全部的内核数据结构
+####    BTF 和 CO-RE（Compile Once，Run Everywhere）
+为了解决上述问题，内核引入了BTF机制（轻量），要用一种相对抽象的方式去描述 eBPF 和内核的数据结构的元数据，然后在加载时让加载器基于这些元数据来完成Relocation。只要开启了 BTF 功能（`CONFIG_DEBUG_INFO_BTF=y` ，Linux 5.2 里引入，需要在编译内核前设置此项并编译），就可以将内核数据结构的描述内嵌于内核中（`/sys/kernel/btf/vmlinux`），此外，这部分 BTF 信息还可以等价转换为 C 描述（即 header 文件 `vmlinux.h`）。这样只要引入`vmlinux.h`，在写代码的时候就无需引入其他内核头文件（各个不同版本），就可以使用全部的内核数据结构
 
 BTF格式及定义可参考：[BPF Type Format (BTF)](https://www.kernel.org/doc/html/latest/bpf/btf.html)
 
@@ -933,16 +1053,20 @@ BTF格式及定义可参考：[BPF Type Format (BTF)](https://www.kernel.org/doc
 -   `libbpf` 支持对 eBPF 暴露 Kconfig 配置或者 `struct flavor` 机制来兼容不同的内核数据结构改名或者含义不同的情况
 
 所以，技术选型的思路大概是：
--   优先`libbpf` + BTF + CO-RE 这套方案
--   不支持BTF（或未开启BTF）的 eBPF 内核，需要分别适配，需下载对应系统内核`kernel-header-dev`包，和内核热补丁适配方式相同
+-   **优先`libbpf` + BTF + CO-RE 这套方案**
+-   不支持BTF（或未开启BTF）的 eBPF 内核，则需要分别适配，需下载对应系统内核`kernel-header-dev`包，和内核热补丁适配方式相同
 
-####    再看libbpf
+####    libbpf对CO-RE的支持
 libbpf 是基于 BTF 和 CO-RE (Compile-Once Run-Everywhere) 提供了更好的便携性（兼容新旧内核版本）：
 
 -   BTF 是 BPF 类型格式，用于避免依赖 Clang 和内核头文件
 -   CO-RE 则使得 BTF 字节码支持重定位，避免 LLVM 重新编译的需要
 
+详细的发行版本及相关细节可以参考[libbpf：Readme](https://github.com/libbpf/libbpf?tab=readme-ov-file#bpf-co-re-compile-once--run-everywhere)
+
 ##  0x05  ebpf相关工具
+
+####    常用工具/命令
 
 1、`bpftool map`
 
@@ -956,9 +1080,18 @@ bpftool map
         frozen
 ```
 
-2、`bpftrace -l`：查看系统可以
+2、`bpftrace -l`：查看本机支持的所有内核探针，即hook点
 
-3、`execsnoop-bpfcc`
+```BASH
+bpftrace -l "kprobe:*"
+kprobe:software_resume
+kprobe:sort_cmp
+kprobe:sort_range
+kprobe:sp_delete
+kprobe:sp_insert
+```
+
+3、`execsnoop-bpfcc`：BCC提供的内核调试工具，参考下面介绍
 
 ```bash
 apt-get install bpfcc-tools linux-headers-$(uname -r)
@@ -968,7 +1101,7 @@ apt-get install bpfcc-tools linux-headers-$(uname -r)
 [bpftool cheatsheet](https://zyy.rs/post/bpftool-cheatsheet/)
 
 ####    BCC的使用
-BCC（BPF Compiler Collection），强大的内核分析工具，利用这个库可以从底层获取操作系统性能信息，网络性能信息等许多与内核交互的信息
+BCC（BPF Compiler Collection）内核分析工具，利用这个库可以从底层获取操作系统性能信息，网络性能信息等许多与内核交互的信息，基于CO-RE技术实现的源码可以[参考](https://github.com/iovisor/bcc/tree/master/libbpf-tools)
 
 ```BASH
 apt install bpfcc-tools
@@ -1018,6 +1151,8 @@ whoami           68338  68337    0 /usr/bin/whoami
 
 ##  0x06    汇总
 
+####    开源项目
+
 -   ebpf+openssl：实现对 https 明文的捕获，参考项目[ecapture](https://github.com/gojue/ecapture)
 -   ebpf+openssh命令审计：使用[libbpfgo](https://github.com/aquasecurity/libbpfgo)库开发的，可以实现对openssh登录（bash）场景下的命令捕获，参考[teleport](https://github.com/gravitational/teleport/tree/aa91ad4a972d70b2c1a88fd5ea424b93760e2b43/bpf)
 -   [ebpf学习路线](https://davidlovezoe.club/wordpress/archives/tag/bpf)
@@ -1025,12 +1160,22 @@ whoami           68338  68337    0 /usr/bin/whoami
 -   [eBPF 开发者教程与知识库：eBPF Tutorial by Example](https://github.com/eunomia-bpf/bpf-developer-tutorial/blob/main/README.zh.md)
 
 ####  内核态开发
-内核态代码入门可以阅读[eBPF 开发实践教程](https://eunomia.dev/zh/tutorials/)
+内核态代码入门可以阅读[eBPF 开发实践教程](https://eunomia.dev/zh/tutorials/)，需要注意：
+
+1.  支持CORE（BTF）技术的开发模式及编译工具
+2.  不支持CORE技术的开发及编译工具（走内核头文件方式编译）
+
 
 ####  用户态开发
+用户态推荐开发语言C/Golang，相关的库参考：
+
+-   [libbpf-bootstrap](https://github.com/libbpf/libbpf-bootstrap)：Scaffolding for BPF application development with libbpf and BPF CO-RE
+-   [ebpfmanager](https://github.com/gojue/ebpfmanager)：A golang ebpf libary based on cilium/ebpf and datadog/ebpf
+-   [LIBBPF API](https://libbpf.readthedocs.io/en/latest/api.html)
 
 ##  0x07   有用的资料
 -   [eBPF应用程序开发：快人一步](https://www.cnxct.com/ebpf-application-development-beyond-basics-zh_cn/)
+-   [bcc Reference Guide](https://github.com/iovisor/bcc/blob/master/docs/reference_guide.md#maps)
 
 ##  0x08    参考
 -   [Linux 中基于 eBPF 的恶意利用与检测机制](https://tech.meituan.com/2022/04/07/how-to-detect-bad-ebpf-used-in-linux.html)
@@ -1057,3 +1202,9 @@ whoami           68338  68337    0 /usr/bin/whoami
 -   [BPF CO-RE (Compile Once – Run Everywhere)](https://nakryiko.com/posts/bpf-portability-and-co-re/)
 -   [BPF 可移植性和 CO-RE](http://arthurchiao.art/blog/bpf-portability-and-co-re-zh/)
 -   [eBPF 的 CO-RE 特性](https://zyy.rs/post/ebpf-core-feature/)
+-   [使用Go语言实现eBPF程序内核态与用户态的双向数据交换](https://tonybai.com/2022/07/25/bidirectional-data-exchange-between-kernel-and-user-states-of-ebpf-programs-using-go/)
+-   [bcc 教程](https://eunomia.dev/zh/tutorials/bcc-documents/tutorial/)
+-   [BPF and XDP Reference Guide](https://docs.cilium.io/en/latest/bpf/)
+-   [Let's Go eBPF](https://www.iserica.com/posts/brief-intro-to-ebpf/)
+-   [bpf_tail_call特性介绍](https://blog.spoock.com/2024/01/11/bpf-tail-call-intro/)
+-   [eBPF verifier常见错误浅析](https://zhuanlan.zhihu.com/p/590851484)
