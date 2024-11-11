@@ -42,7 +42,7 @@ eBPF 映射（Maps）是一种内核态与用户态之间共享数据的机制�
 常用数据结构包括：
 
 -   `hash` / `array`：哈希表和数组
--   `perf_evenrt_array`：perf_event ring buffers：可以将数据从内核态发送到用户态
+-   `perf_event_array`：perf_event ring buffers：可以将数据从内核态发送到用户态
 -   `percpu_hash` / `percpu_array`：单个CPU独占的哈希表和数组，性能更好，但是使用时的一些[坑](https://blog.csdn.net/wennuanddianbo/article/details/128599431)需要避免
 
 关于BPF MAPS的细节可以[参考](https://dri.freedesktop.org/docs/drm/bpf/maps.html)
@@ -1151,6 +1151,9 @@ whoami           68338  68337    0 /usr/bin/whoami
 
 ##  0x06    汇总
 
+####    ebpf特性更新
+参考bcc 维护的文档：[BPF Features by Linux Kernel Version](https://github.com/iovisor/bcc/blob/master/docs/kernel-versions.md)，记录了哪个内核版本引入的，以及对应的 patch及特性
+
 ####    开源项目
 
 -   ebpf+openssl：实现对 https 明文的捕获，参考项目[ecapture](https://github.com/gojue/ecapture)
@@ -1208,3 +1211,4 @@ whoami           68338  68337    0 /usr/bin/whoami
 -   [Let's Go eBPF](https://www.iserica.com/posts/brief-intro-to-ebpf/)
 -   [bpf_tail_call特性介绍](https://blog.spoock.com/2024/01/11/bpf-tail-call-intro/)
 -   [eBPF verifier常见错误浅析](https://zhuanlan.zhihu.com/p/590851484)
+-   [What Is eBPF?](https://www.oreilly.com/library/view/what-is-ebpf/9781492097266/)
