@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      golang eBPF 开发入门（三）
-subtitle:   eBPF 中的 Maps 数据结构分析与应用
+subtitle:   通信：eBPF 中的 Maps 数据结构分析与应用
 date:       2024-08-18
 author:     pandaychen
 catalog:    true
@@ -10,12 +10,20 @@ tags:
     - Golang
 ---
 
-
 ##  0x00    前言
-[上文](https://pandaychen.github.io/2024/01/15/A-EBPF-STUDY/#0x03--%E9%80%9A%E4%BF%A1%E5%86%85%E6%A0%B8%E6%80%81%E4%B8%8E%E7%94%A8%E6%88%B7%E6%80%81) 介绍了 ebpf 的内核态 / 用户态的通信示例，本文关注三个问题：为什么要使用 maps？maps 使用的一般场景？maps 的基本结构及实现原理。BPF Map 是内核空间和用户空间之间用于数据交换、信息传递的桥梁。是 eBPF 程序中使用的主要数据结构。BPF Map 本质上是以键 / 值方式存储在内核中的数据结构，在内核空间的程序创建 BPF Map 并返回对应的文件描述符，在用户空间运行的程序就可以通过这个文件描述符来访问并操作 BPF Map，从而实现 kernel 内核空间与 user 用户空间的数据交换
+[上文](https://pandaychen.github.io/2024/01/15/A-EBPF-STUDY/#0x03--%E9%80%9A%E4%BF%A1%E5%86%85%E6%A0%B8%E6%80%81%E4%B8%8E%E7%94%A8%E6%88%B7%E6%80%81) 介绍了 ebpf 的内核态 / 用户态的通信示例，本文关注这几个问题：
+
+1.  为什么要使用 maps
+2.  maps 使用的一般场景
+3.  maps 的基本结构及实现原理
+4.  maps 的常用操作及场景（用户态 --> 内核态）
+5.  项目中的应用
+
+BPF Map 是内核空间和用户空间之间用于数据交换、信息传递的桥梁，是 eBPF 程序中使用的主要数据结构。BPF Map 本质上是以键 / 值方式存储在内核中的数据结构，在内核空间的程序创建 BPF Map 并返回对应的文件描述符，在用户空间运行的程序就可以通过这个文件描述符来访问并操作 BPF Map，从而实现 kernel 内核空间与 user 用户空间的数据交换
 
 建议阅读：
 -	[ebpf docs：Map types (Linux)](https://ebpf-docs.dylanreimerink.nl/linux/map-type/)
+-	[BPF Documentation](https://www.kernel.org/doc/html/latest/bpf/index.html)
 
 ##  0x01    BPF maps 基础
 先回顾下 ebpf 的架构，思考下内核态与用户态如何通信？
@@ -50,19 +58,18 @@ map 驻留在内存中，可以通过用户空间的文件描述符 `fd` 访问�
 这里还有更多的分类，可 [参考](https://ebpf-docs.dylanreimerink.nl/linux/map-type/)
 
 ####	PERCPU 类型的 MAPS
-这里特别提一下，内核从 `4.10` 版本开始，提供了 PERCPU 类型的 MAP。顾名思义，这些 PERCPU 类型的 MAPS 由多个副本组成，主机上的每个逻辑 CPU 都有一个副本。例如，在 `CPU#0` 上下文中运行的程序将看到与在 `CPU#2` 上运行的程序不同的映射内容。由于此模式多个 CPU 永远不会读取或写入另一个 CPU 正在访问的内存，因此不会出现竞争条件，因此程序无需在自旋锁或原子指令等机制上浪费周期来同步访问，因此可以提高访问速度。PERCPU类型MAPS常用场景如下：
+这里特别提一下，内核从 `4.10` 版本开始，提供了 PERCPU 类型的 MAP。顾名思义，这些 PERCPU 类型的 MAPS 由多个副本组成，主机上的每个逻辑 CPU 都有一个副本。例如，在 `CPU#0` 上下文中运行的程序将看到与在 `CPU#2` 上运行的程序不同的映射内容。由于此模式多个 CPU 永远不会读取或写入另一个 CPU 正在访问的内存，因此不会出现竞争条件，因此程序无需在自旋锁或原子指令等机制上浪费周期来同步访问，因此可以提高访问速度。PERCPU 类型 MAPS 常用场景如下：
 
 -	保存数据，不计入 eBPF 程序的堆栈限制（通用功能）
--	临时缓冲区：由于 eBPF 程序在整个执行过程中（包括tail calls）始终在同一逻辑 CPU 上执行，所以此类MAPS可用于在tail calls之间传输信息
+-	临时缓冲区：由于 eBPF 程序在整个执行过程中（包括 tail calls）始终在同一逻辑 CPU 上执行，所以此类 MAPS 可用于在 tail calls 之间传输信息
 
-当通过用户空间访问每个 CPU 的映射时，所有副本始终同时访问。实际上，通过系统调用读取和写入这些映射的值就像数组一样，其大小等于主机的逻辑 CPU 数量。缺点是程序无法跨 CPU 边界共享信息。因此，这类映射通常更适合数据从eBPF程序流向用户空间的用例（如计数器）或相关事件始终发生在同一个逻辑 CPU 上的用例（例如由于 `RSS` 而导致的同一流的传入网络数据包）
+** 当通过用户空间访问每个 CPU 的映射时，所有副本始终同时访问 **。实际上，通过系统调用读取和写入这些映射的值就像数组一样，其大小等于主机的逻辑 CPU 数量。缺点是程序无法跨 CPU 边界共享信息。因此，这类映射通常更适合数据从 eBPF 程序流向用户空间的用例（如计数器）或相关事件始终发生在同一个逻辑 CPU 上的用例（例如由于 `RSS` 而导致的同一流的传入网络数据包）
 
 ##  0x02 BPF Map 数据结构
 
 ####	定义
 
 每个 BPF Map 由四个值定义：类型、元素的最大个数、值大小 (Byte) 和键大小 (Byte)，在实际场景中常用的是基于 `SEC("maps")` 这个语法糖来做到声明即创建：
-
 
 ```C
 struct {
@@ -128,7 +135,7 @@ enum bpf_map_type {
 ```
 
 ####    Hash Maps
-内核代码在 [kernel/bpf/hashtab.c]()
+内核代码在 [kernel/bpf/hashtab.c](https://github.com/torvalds/linux/blob/v5.8/kernel/bpf/hashtab.c)
 ```bash
 BPF_MAP_TYPE_HASH
 BPF_MAP_TYPE_PERCPU_HASH
@@ -139,7 +146,7 @@ BPF_MAP_TYPE_HASH_OF_MAPS
 
 汇总下，Hash map 的特点如下：
 -   key 的长度没有限制
--   给定 key 查找 value 时，内部通过哈希实现，而非数组索引，此机制 key/value 是可删除的；作为对比，Array 类型的 map 中，key/value 是不可删除的（但用空值覆盖掉 value ，可实现删除效果）。原因其实也很简单：哈希表是链表，可以删除链表中的元素；array 是内存空间连续的数组，即使某个 `index` 处的 value 不用了，这段内存区域还是得留着，不可能将其释放
+-   给定 key 查找 value 时，内部通过哈希实现，而非数组索引，此机制 key/value 是可删除的；作为对比，Array 类型的 map 中，key/value 是不可删除的（但用空值覆盖掉 value ，可实现删除效果）。原因其实也很简单：哈希表是链表，可以删除链表中的元素；array 是内存空间连续的数组，即使某个 `index` 处的 value 不用了，这段内存区域会被保留，不可能将其释放
 
 ####    PERCPU VS NONE-PERCPU
 NONE-PERCPU 是 global 的，只有一个实例；PERCPU 是 cpu-local 的，每个 CPU 上都有一个 map 实例；多核并发访问时，global map 需要加锁；per-cpu map 无需加锁，每个核上的程序访问 local-cpu 上的 map
@@ -168,13 +175,38 @@ NONE-PERCPU 是 global 的，只有一个实例；PERCPU 是 cpu-local 的，每
 -   `BPF_MAP_TYPE_REUSEPORT_SOCKARRAY`
 -   `BPF_MAP_TYPE_SK_STORAGE`
 
-##  0x03    BPF Map 操作
+##  0x03    BPF Map 操作（重点）
 
 BPF Map 创建后，对其 CRUD 操作主要方法：
 
 -   `bpf_map_lookup_elem(map, key)`：通过 key 查询 BPF Map，得到对应 value
 -   `bpf_map_update_elem(map, key, value, options)`：通过 key-value 更新 BPF Map，如果这个 key 不存在，也可以作为新的元素插入到 BPF Map 中
 -   `bpf_map_delete_elem(map, key)`：删除 BPF Map 中的某个 key
+
+####    bpf_map_lookup_elem/bpf_lookup_elem
+`bpf_lookup_elem` 用于在 fd 指向的映射中根据 `key` 查找对应元素，如果找到一个元素那么会返回 `0` 并把元素的值保存在 `value` 中，`value` 必须是指向 `value_size` 字节的缓冲区；如果没找到, 会返回 `-1`, 并把 `errno` 设置为 `ENOENT`
+
+```C
+int bpf_lookup_elem(int fd, const void* key, void* value)
+{
+    union bpf_attr attr = {
+        .map_fd = fd,
+        .key = ptr_to_u64(key),
+        .value = ptr_to_u64(value),
+    };
+
+    return bpf(BPF_MAP_LOOKUP_ELEM, &attr, sizeof(attr));
+}
+```
+
+####    bpf_map_update_elem
+以 `bpf_map_update_elem` 方法举例，`options` 如下：
+
+|  选型   | 含义  |
+|  ----  | ----  |
+| `BPF_ANY`| 创建一个新元素或者更新一个已有的 |
+|`BPF_NOEXIST` | 只在元素不存在的情况下创建一个新的元素 |
+|`BPF_EXIST` | 更新一个已经存在的元素 |
 
 1、内核态，helper
 
@@ -195,15 +227,20 @@ int bpf_map_delete_elem(int fd, const void *key)
 ```
 
 ##  0x04    典型用法介绍
+本小节主要参考 [BPF 进阶笔记（二）：BPF Map 类型详解：使用场景、程序示例](https://arthurchiao.art/blog/bpf-advanced-notes-2-zh/) 一文
 
 ####    BPF_MAP_TYPE_HASH 的用法
-`BPF_MAP_TYPE_HASH` 是最基础的 hashmap，初始化时需要指定支持的最大条目数（max_entries）, 满了之后继续插入数据时，会报 `E2BIG` 错误
+`BPF_MAP_TYPE_HASH` 是最基础的 hashmap，初始化时需要指定支持的最大条目数（max_entries）, 满了之后继续插入数据时，会报 `E2BIG` 错误；与 `BPF_MAP_TYPE_LRU_HASH` 类型不同，后者如果 map 满了，再插入时它会自动将最久未被使用（least recently used）的 entry 从 map 中移除，比较适用于 connection 连接表等存储场景
 
 典型的应用场景：
 
 1、将内核态得到的数据，传递给用户态程序。这是非常典型在内核态和用户态传递数据场景；例如，BPF 程序过滤网络设备设备上的包，统计流量信息，并将其写到 map。 用户态程序从 map 读取统计，做后续处理
 
 2、存放全局配置信息，供 BPF 程序使用。例如，对于防火墙功能的 BPF 程序，将过滤规则放到 map 里。用户态控制程序通过 `bpftool` 之类的工具更新 map 里的配置信息，BPF 程序动态加载
+
+3、在内核态 syscall enter/exit 之间共享数据，如下图
+
+![kprobe-sharing-data](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/ebpf/kprobe/kprobe-sharing-data.png)
 
 示例 1：内核源码的 bpf 示例 [sockex2_kern.c](https://elixir.bootlin.com/linux/v4.15/source/samples/bpf/sockex2_kern.c)，将内核态数据传递到用户态
 
@@ -383,7 +420,7 @@ int bpf_prog1(struct __sk_buff *skb)
         return 0;
 
     // 注意：在用户态程序和这段 BPF 程序里都没有往 my_map 里插入数据；
-    //   * 如果这是 hash map 类型，那下面的 lookup 一定失败，因为我们没插入过任何数据；
+    //   * 如果这是 hash map 类型，那下面的 lookup 一定失败，因为没插入过任何数据；
     //   * 但这里是 array 类型，而且 index 表示的 L4 协议类型，在 IP 头里占一个字节，因此范围在 255 以内；
     //     又 map 的长度声明为 256，所以这里的 lookup 一定能定位到 array 的某个位置，即查找一定成功。
     value = bpf_map_lookup_elem(&my_map, &index);
@@ -806,17 +843,189 @@ int _sockops(struct bpf_sock_ops *ctx)
 }
 ```
 
-##	0x04	关于 MAPS 的一些细节
+####	开源项目的经典示例
+本小节分享几个经典的 MAPS 应用示例
 
-####	BPF_MAP_TYPE_PERCPU_HASH VS BPF_MAP_TYPE_HASH（BPF_MAP_TYPE_PERCPU_ARRAY VS BPF_MAP_TYPE_ARRAY）
-思考下，PERCPU 这种 MAP 类型出现和使用场景是什么？下面是类型对应的内核版本[支持](https://www.kernel.org/doc/html/latest/bpf/map_hash.html)：
+1、bcc 的 `opensnoop` 工具
 
--	BPF_MAP_TYPE_ARRAY was introduced in kernel version 3.19
--	BPF_MAP_TYPE_PERCPU_ARRAY was introduced in version 4.6
--	Both BPF_MAP_TYPE_LRU_HASH and BPF_MAP_TYPE_LRU_PERCPU_HASH were introduced in version 4.10
+2、bcc 的 `ksnoop` 工具
+
+`ksnoop`[工具](https://manpages.ubuntu.com/manpages/lunar/man8/ksnoop-bpfcc.8.html) 用来
+
+3、libbpf-bootstrap 的 `execsnoop` 工具
+
+`execsnoop` 实时监控进程的 `exec()` 行为，并输出短时进程的基本信息，包括进程 PID、父进程 PID、命令行参数以及执行的结果，所以它需要对两个地方进行 hook：
+
+-	`tracepoint/syscalls/sys_enter_execve`
+-	`tracepoint/syscalls/sys_exit_execve`
+
+```C
+#include "vmlinux.h"
+#include <bpf/bpf_helpers.h>
+#include "execsnoop.h"
+static const struct event empty_event = { };	// 给 MAP bpf_map_update_elem 函数，做初始化填入空结构体使用
+
+// define hash map and perf event map
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 10240);
+	__type(key, pid_t);
+	__type(value, struct event);
+} execs SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+	__uint(key_size, sizeof(u32));
+	__uint(value_size, sizeof(u32));
+}
+events SEC(".maps");
+```
+
+```C
+// tracepoint for sys_enter_execve.
+SEC("tracepoint/syscalls/sys_enter_execve")
+int tracepoint__syscalls__sys_enter_execve(struct trace_event_raw_sys_enter *ctx)
+{
+	struct event *event;
+	const char **args = (const char **)(ctx->args[1]);	// 获取 execve 系统调用的第二个入参，即 char *const __argv[]
+	const char *argp;
+
+	// get the PID
+	u64 id = bpf_get_current_pid_tgid();
+	pid_t pid = (pid_t) id;		// 获取进程 pid
+
+	// update the exec metadata to execs map
+
+	//BPF_NOEXIST 只在元素不存在的情况下创建一个新的元素
+	if (bpf_map_update_elem(&execs, &pid, &empty_event, BPF_NOEXIST)) {
+		return 0;
+	}
+
+	// 前一步保证了肯定能查询到数据，获取 key（pid）对应的 value 指针
+	// bpf_map_lookup_elem 返回值就是 value 的指针类型
+	event = bpf_map_lookup_elem(&execs, &pid);
+	if (!event) {
+		return 0;
+	}
+	// update event metadata
+	event->pid = pid;
+	event->args_count = 0;
+	event->args_size = 0;
+
+	// query the first parameter
+	unsigned int ret = bpf_probe_read_user_str(event->args, ARGSIZE,
+						   (const char *)ctx->args[0]);	//ctx->args[0] 为 execve 的第一个参数，即 const char *__path
+	if (ret <= ARGSIZE) {
+		event->args_size += ret;
+	} else {
+		/* write an empty string */
+		event->args[0] = '\0';
+		event->args_size++;
+	}
+
+	// 读取剩余的参数
+	// query the extra parameters
+	event->args_count++;
+#pragma unroll
+	for (int i = 1; i < TOTAL_MAX_ARGS; i++) {
+		bpf_probe_read_user(&argp, sizeof(argp), &args[i]);
+		if (!argp)
+			return 0;
+
+		if (event->args_size > LAST_ARG)
+			return 0;
+
+		ret = bpf_probe_read_user_str(&event->args[event->args_size],ARGSIZE, argp);
+		if (ret> ARGSIZE)
+			return 0;
+
+		event->args_count++;
+		event->args_size += ret;
+	}
+
+	/* try to read one more argument to check if there is one */
+	bpf_probe_read_user(&argp, sizeof(argp), &args[TOTAL_MAX_ARGS]);
+	if (!argp)
+		return 0;
+
+	/* pointer to max_args+1 isn't null, assume we have more arguments */
+	event->args_count++;
+
+	return 0;
+}
+
+// tracepoint for sys_exit_execve.
+SEC("tracepoint/syscalls/sys_exit_execve")
+int tracepoint__syscalls__sys_exit_execve(struct trace_event_raw_sys_exit *ctx)
+{
+	u64 id;
+	pid_t pid;
+	int ret;
+	struct event *event;
+
+	// get the exec metadata from execs map
+	id = bpf_get_current_pid_tgid();
+	pid = (pid_t) id;
+	event = bpf_map_lookup_elem(&execs, &pid);
+	if (!event)
+		return 0;
+
+	// update event retval
+	// 从 MAP 取出 pid 对应的 value，并且更新调用返回值
+	ret = ctx->ret;
+	event->retval = ret;
+	bpf_get_current_comm(&event->comm, sizeof(event->comm));
+
+	// submit to perf event
+	// 提交给 ringbuffer
+	size_t len = EVENT_SIZE(event);
+	if (len <= sizeof(*event))
+		bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, event,len);
+
+	// 移除 pid key（因为 pid 已经执行完成了）
+	// cleanup exec from hash map
+	bpf_map_delete_elem(&execs, &pid);
+	return 0;
+}
+```
+
+`trace_event_raw_sys_enter` 这个结构体的定义在 `vmlinux.h` 头文件中：
+
+```c
+struct trace_entry {
+        short unsigned int type;
+        unsigned char flags;
+        unsigned char preempt_count;
+        int pid;
+};
 
 
-随着多 CPU 架构的成熟发展，BPF Map 也引入了 per-cpu 类型，如 BPF_MAP_TYPE_PERCPU_HASH、BPF_MAP_TYPE_PERCPU_ARRAY 等，当你使用这种类型的 BPF Map 时，每个 CPU 都会存储并看到它自己的 Map 数据，从属于不同 CPU 之间的数据是互相隔离的，这样做的好处是，在进行查找和聚合操作时更加高效，性能更好，尤其是你的 BPF 程序主要是在做收集时间序列型数据，如流量数据或指标等。
+struct trace_event_raw_sys_enter {
+        struct trace_entry ent;
+        long int id;
+        long unsigned int args[6];
+        char __data[0];		// 柔性数据，不占空间
+};
+```
+
+##	0x05	关于 MAPS 的一些细节（重要）
+
+####	BPF_MAP_TYPE_PERCPU_HASH VS BPF_MAP_TYPE_HASH
+思考下，PERCPU 这种 MAP 类型出现和使用场景是什么？下面是类型对应的内核版本 [支持](https://www.kernel.org/doc/html/latest/bpf/map_hash.html)：
+
+-	`BPF_MAP_TYPE_ARRAY` was introduced in kernel version 3.19
+-	`BPF_MAP_TYPE_PERCPU_ARRAY` was introduced in version 4.6
+-	Both `BPF_MAP_TYPE_LRU_HASH` and `BPF_MAP_TYPE_LRU_PERCPU_HASH` were introduced in version 4.10
+
+
+随着多 CPU 架构的成熟发展，BPF Map 也引入了 per-cpu 类型，如 `BPF_MAP_TYPE_PERCPU_HASH`、`BPF_MAP_TYPE_PERCPU_ARRAY` 等，使用这种类型的 BPF Map 时，每个 CPU 都会存储并看到它自己的 Map 数据，从属于不同 CPU 之间的数据是互相隔离的，这样做的好处是，在进行查找和聚合操作时更加高效，性能更好，尤其是做收集时间序列型数据的 eBPF 程序，如流量数据或指标等场景下效果会更好
+
+
+####	PERCPU VS LRU
+参考 [内核文档]()
+
+####	性能比较
+
 
 ##	0x05 MAP 开发实践
 本小节汇总于 [BPF 数据传递的桥梁：BPF MAP](https://davidlovezoe.club/wordpress/archives/1044) 一文，推荐阅读
@@ -829,7 +1038,7 @@ int _sockops(struct bpf_sock_ops *ctx)
 -	一个是运行在内核空间的程序，主要功能为创建出定制版 BPF Map，收集目标信息并存储至 BPF Map 中
 -	另一个是运行在用户空间的程序，主要功能为读取上面内核空间创建出的 BPF Map 里的数据，并进行格式化展示（ BPF Map 在两者之间进行数据传递）
 
-1、通用结构定义（`pair`为MAPS的key，`stats`为MAPS的value）
+1、通用结构定义（`pair` 为 MAPS 的 key，`stats` 为 MAPS 的 value）
 
 ```c
 // define the struct for the key of bpf map
@@ -849,8 +1058,8 @@ struct stats {
 2、内核态代码
 
 ```C
-//通过SEC("maps")声明并创建了一个名为tracker_map 的BPF Map
-//key和value都是自定义的struct
+// 通过 SEC("maps") 声明并创建了一个名为 tracker_map 的 BPF Map
+//key 和 value 都是自定义的 struct
 struct bpf_map_def SEC("maps") tracker_map = {
     .type = BPF_MAP_TYPE_HASH,
     .key_size = sizeof(struct pair),
@@ -859,7 +1068,7 @@ struct bpf_map_def SEC("maps") tracker_map = {
 };
 
 /*
-对网络包进行分析和过滤，把源地址和目的地址联合起来作为BPF Map的key，把当前网络包的大小以byte单位记录下来，并联合网络包计数器作为BPF Map的value。对于连续的网络包，如果生成的key已经存在，就把value累加，否则就新增一对key-value存入BPF Map中。其中通过bpf_map_lookup_elem()函数来查找元素，bpf_map_update_elem()函数来新增元素
+对网络包进行分析和过滤，把源地址和目的地址联合起来作为 BPF Map 的 key，把当前网络包的大小以 byte 单位记录下来，并联合网络包计数器作为 BPF Map 的 value。对于连续的网络包，如果生成的 key 已经存在，就把 value 累加，否则就新增一对 key-value 存入 BPF Map 中。其中通过 bpf_map_lookup_elem() 函数来查找元素，bpf_map_update_elem() 函数来新增元素
 */
 static __always_inline bool parse_and_track(bool is_rx, void *data_begin, void *data_end, struct pair *pair)
 {
@@ -907,7 +1116,7 @@ static __always_inline bool parse_and_track(bool is_rx, void *data_begin, void *
                 newstats.tx_cnt = 1;
                 newstats.tx_bytes = bytes;
             }
-			// 注意BPF_NOEXIST这个选项的意义
+			// 注意 BPF_NOEXIST 这个选项的意义
             bpf_map_update_elem(&tracker_map, pair, &newstats, BPF_NOEXIST);
         }
         return true;
@@ -955,10 +1164,10 @@ int main(int argc, char **argv)
     // change limits
 
 	/*
-	1. rlimit，全称是resource limit，顾名思义，它是控制应用进程能使用资源的限额
-	2. 常量RLIM_INFINITY是无限的意思，因此第一行代码定义了一个没有上限的资源配额。
-	3. 第二行代码使用了函数setrlimit()，传入的第一个参数是一个资源规格名称——RLIMIT_MEMLOCK，即内存；第二个参数是刚才定义的无限资源配额，这行代码作用就是为内存资源配置了无限配额，即没有内存上限
-	4. 为什么要把内存限制放开呢？因为操作系统在不同的CPU架构，对于应用进程能使用的内存限制是不统一的，而不同的BPF程序需要使用到的内存资源也是可变的，比如你的BPF Map申请了很大的max_entries，那么这个BPF程序一定会使用不少的内存。因此为了成功运行BPF程序，就把对应内存的限制放开成无限了
+	1. rlimit，全称是 resource limit，顾名思义，它是控制应用进程能使用资源的限额
+	2. 常量 RLIM_INFINITY 是无限的意思，因此第一行代码定义了一个没有上限的资源配额。
+	3. 第二行代码使用了函数 setrlimit()，传入的第一个参数是一个资源规格名称——RLIMIT_MEMLOCK，即内存；第二个参数是刚才定义的无限资源配额，这行代码作用就是为内存资源配置了无限配额，即没有内存上限
+	4. 为什么要把内存限制放开呢？因为操作系统在不同的 CPU 架构，对于应用进程能使用的内存限制是不统一的，而不同的 BPF 程序需要使用到的内存资源也是可变的，比如你的 BPF Map 申请了很大的 max_entries，那么这个 BPF 程序一定会使用不少的内存。因此为了成功运行 BPF 程序，就把对应内存的限制放开成无限了
 	*/
     struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY};
     if (setrlimit(RLIMIT_MEMLOCK, &r))
@@ -967,7 +1176,7 @@ int main(int argc, char **argv)
         return 1;
     }
     // load the kernel bpf object file
-	//通过load_bpf_file()函数（本质就是用BPF_PROG_LOAD命令进行系统调用）加载对应内核空间的BPF程序编译出来的.o文件
+	// 通过 load_bpf_file() 函数（本质就是用 BPF_PROG_LOAD 命令进行系统调用）加载对应内核空间的 BPF 程序编译出来的. o 文件
     if (load_bpf_file(filename))
     {
         printf("error - bpf_log_buf: %s", bpf_log_buf);
@@ -983,10 +1192,10 @@ int main(int argc, char **argv)
     signal(SIGINT, int_exit);
     signal(SIGTERM, int_exit);
     // link the xdp program to the network interface
-	/*加载完BPF程序之后，使用set_link_xdp_fd()函数attach到目标hook上，本例
-	是XDP network hook。它接受的两个主要的参数是：
-	- ifindex，这个是目标网卡的序号（可以通过ip a查看），这里填写的是6，它是对应了一个docker容器的veth虚拟网络设备
-	- prog_fd[0]，这个是BPF程序加载到内存后生成的文件描述符fd
+	/* 加载完 BPF 程序之后，使用 set_link_xdp_fd() 函数 attach 到目标 hook 上，本例
+	是 XDP network hook。它接受的两个主要的参数是：
+	- ifindex，这个是目标网卡的序号（可以通过 ip a 查看），这里填写的是 6，它是对应了一个 docker 容器的 veth 虚拟网络设备
+	- prog_fd[0]，这个是 BPF 程序加载到内存后生成的文件描述符 fd
 	*/
     if (set_link_xdp_fd(ifindex, prog_fd[0], xdp_flags) < 0)
     {
@@ -999,21 +1208,21 @@ int main(int argc, char **argv)
     while (1)
     {
         sleep(2);
-		//循环遍历MAP
+		// 循环遍历 MAP
         // retrieve the bpf map of statistics
 
 		/*
-		通过bpf_map_get_next_key(map_fd[0], &lookup_key, &next_key)函数
+		通过 bpf_map_get_next_key(map_fd[0], &lookup_key, &next_key) 函数
 		*/
         while (bpf_map_get_next_key(map_fd[0], &lookup_key, &next_key) != -1)
         {
-            //printf("The local ip of next key in the map is: '%d'\n", next_key.src_ip);
-            //printf("The remote ip of next key in the map is: '%d'\n", next_key.dest_ip);
+            //printf("The local ip of next key in the map is:'%d'\n", next_key.src_ip);
+            //printf("The remote ip of next key in the map is:'%d'\n", next_key.dest_ip);
             struct in_addr local = {next_key.src_ip};
             struct in_addr remote = {next_key.dest_ip};
-            printf("The local ip of next key in the map is: '%s'\n", inet_ntoa(local));
-            printf("The remote ip of next key in the map is: '%s'\n", inet_ntoa(remote));
-            
+            printf("The local ip of next key in the map is:'%s'\n", inet_ntoa(local));
+            printf("The remote ip of next key in the map is:'%s'\n", inet_ntoa(remote));
+
             // get the value via the key
             // TODO: change to assert
             // assert(bpf_map_lookup_elem(map_fd[0], &next_key, &value) == 0)
@@ -1021,8 +1230,8 @@ int main(int argc, char **argv)
             if (result == 0)
             {
                 // print the value
-                printf("rx_cnt value read from the map: '%llu'\n", value.rx_cnt);
-                printf("rx_bytes value read from the map: '%llu'\n", value.rx_bytes);
+                printf("rx_cnt value read from the map:'%llu'\n", value.rx_cnt);
+                printf("rx_bytes value read from the map:'%llu'\n", value.rx_bytes);
             }
             else
             {
@@ -1043,23 +1252,23 @@ int main(int argc, char **argv)
 }
 ```
 
-用户态代码中，有两个重要的变量`prog_fd`/`map_fd`，它们都是定义在`bpf_load.c`的全局变量，其中`prog_fd`是一个数组，在加载内核空间BPF程序时，一旦`fd`生成后，就添加到这个数组中去；`map_fd`也是一个数组，在运行`load_maps()`函数时，一旦完成创建BPF Map系统调用生成`fd`后，同样会添加到该数组中。因此用户态程序可以直接使用这两个变量，作为对于BPF程序和BPF Map的引用
+用户态代码中，有两个重要的变量 `prog_fd`/`map_fd`，它们都是定义在 `bpf_load.c` 的全局变量，其中 `prog_fd` 是一个数组，在加载内核空间 BPF 程序时，一旦 `fd` 生成后，就添加到这个数组中去；`map_fd` 也是一个数组，在运行 `load_maps()` 函数时，一旦完成创建 BPF Map 系统调用生成 `fd` 后，同样会添加到该数组中。因此用户态程序可以直接使用这两个变量，作为对于 BPF 程序和 BPF Map 的引用
 
-可以通过`bpf_map_get_next_key(map_fd[0], &lookup_key, &next_key)`函数来遍历`BPF_MAP_TYPE_HASH`，参数：
--	`map_fd[0]`：目标BPF Map
--	`lookup_key`：需要查找的BPF Map目标key（要主动传入）
--	`next_key`：目标key相邻的下一个key（被动赋值）
+可以通过 `bpf_map_get_next_key(map_fd[0], &lookup_key, &next_key)` 函数来遍历 `BPF_MAP_TYPE_HASH`，参数：
+-	`map_fd[0]`：目标 BPF Map
+-	`lookup_key`：需要查找的 BPF Map 目标 key（要主动传入）
+-	`next_key`：目标 key 相邻的下一个 key（被动赋值）
 
-如果需要从头开始遍历BPF Map，可以通过传入一个一定不存在的key作为`lookup_key`，然后`next_key`会被自动赋值为BPF Map中第一个key，这样通过`next_key`可以获取对应的value，直到`bpf_map_get_next_key()`返回为`-1`，即`next_key`没有可以被赋值的了，至此遍历完成
+如果需要从头开始遍历 BPF Map，可以通过传入一个一定不存在的 key 作为 `lookup_key`，然后 `next_key` 会被自动赋值为 BPF Map 中第一个 key，这样通过 `next_key` 可以获取对应的 value，直到 `bpf_map_get_next_key()` 返回为 `-1`，即 `next_key` 没有可以被赋值的了，至此遍历完成
 
-感兴趣的知识点，遍历`BPF_MAP_TYPE_HASH`中不停调用`bpf_map_get_next_key`、`bpf_map_lookup_elem`生效的过程中，锁的情况是如何实现的（`rcu_read_lock`/`rcu_read_unlock`）？相关内核代码：
+感兴趣的知识点，遍历 `BPF_MAP_TYPE_HASH` 中不停调用 `bpf_map_get_next_key`、`bpf_map_lookup_elem` 生效的过程中，锁的情况是如何实现的（`rcu_read_lock`/`rcu_read_unlock`）？相关内核代码：
 
 -	[`map_update_elem`](https://github.com/torvalds/linux/blob/master/kernel/bpf/syscall.c#L1611)
 -	[`map_delete_elem`](https://github.com/torvalds/linux/blob/master/kernel/bpf/syscall.c#L1669)
 -	[`map_get_next_key`](https://github.com/torvalds/linux/blob/master/kernel/bpf/syscall.c#L1725)
 -	[`map_lookup_elem`](https://github.com/torvalds/linux/blob/master/kernel/bpf/syscall.c#L1536)
 
-##	0x06 perf_event/ringbuf
+##	0x06 perf_event/ringbuf（环形缓冲区队列）
 本小节描述下 perf_event 和 ringbuf 原理介绍和使用
 
 ####	BPF_MAP_TYPE_PERF_EVENT_ARRAY VS BPF_MAP_TYPE_RINGBUF
@@ -1083,3 +1292,6 @@ int main(int argc, char **argv)
 -	[eBPF Map 操作](https://houmin.cc/posts/98a3c8ff/)
 -	[BPF 进阶笔记（三）：BPF Map 内核实现](http://arthurchiao.art/blog/bpf-advanced-notes-3-zh/)
 -	[BPF_MAP_TYPE_ARRAY and BPF_MAP_TYPE_PERCPU_ARRAY](https://docs.kernel.org/bpf/map_array.html#bpf-map-lookup-percpu-elem)
+-	[BPF_MAP_TYPE_HASH, with PERCPU and LRU Variants](https://www.kernel.org/doc/html/v6.0/bpf/map_hash.html)
+-	[map_lru_hash_update.svg](https://www.kernel.org/doc/html/latest/_images/map_lru_hash_update.svg)
+-	[perf_event 和 ringbuf 原理介绍和使用](https://blog.spoock.com/2023/09/16/eBPF-event/)
