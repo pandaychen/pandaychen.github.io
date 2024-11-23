@@ -18,6 +18,8 @@ eBPF 程序运行在内核态 (kernel)，无需重新编译内核，也不需要
 
 **用户空间所有的BPF相关函数, 归根结底都是对于bpf系统调用的包装**
 
+![bpf_internals](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/ebpf/dev/bpf_internals.png)
+
 ####    eBPF 核心组件
 eBPF 技术的核心组件包括 eBPF 虚拟机、程序类型、映射（Maps）、加载和验证机制以及助手函数（Helper Functions）
 

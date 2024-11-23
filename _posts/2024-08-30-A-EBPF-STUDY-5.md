@@ -13,17 +13,28 @@ tags:
 
 
 ##  0x00    前言
-XDP 与 TC 的位置：
+在linux内核网络协议栈中有多个网络钩子，数据包在进入到网卡再到流出网卡的过程会触发这些钩子上注册的回调函数执行相关过滤动作。如netfilter框架中的`5`个钩子，针对ip数据包进行过滤。除此之外，在更低一层还有xdp和tc系统对数据包进行处理
+
+![netfilter](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/xdp/ebpf-netfilter-iptables.png)
+
+####    XDP 与 TC 的位置
 
 - XDP：Ingress
 - TC：Egress
 
 ![xdp&TC](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/xdp/XDP_integration_with_linux_network_stack.png)
 
-
-XDP VS DPDK：
+####    XDP VS DPDK
 
 ![xdp-dpdk](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/xdp/dpdk_vs_xdp.png)
+
+####    XDP VS IPTABLES
+![ebpf-iptables](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/xdp/ebpf-netfilter-iptables.png)
+
+
+####    TC
+
+![tc](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/ebpf/arch-running-program.jpg)
 
 
 参考文档：
@@ -89,12 +100,167 @@ enum xdp_action {
 ##  0x02  XDP：实战
 
 ####  SSH端口访问限制
+```c
+int xdp_firewall(struct xdp_md *ctx)
+{
+    // Cast the numerical addresses to pointers for packet data access
+    void *data = (void *)(long)ctx->data;
+    void *data_end = (void *)(long)ctx->data_end;
 
-##  0x03    参考
+    // Define a pointer to the Ethernet header at the start of the packet data
+    struct ethhdr *eth = data;
+    // Ensure the packet includes a full Ethernet header; if not, we let it continue up the stack
+    if (data + sizeof(struct ethhdr) > data_end)
+    {
+        return XDP_PASS;
+    }
+
+    // Check if the packet's protocol indicates it's an IP packet
+    if (eth->h_proto != __constant_htons(ETH_P_IP))
+    {
+        // If not IP, continue with regular packet processing
+        return XDP_PASS;
+    }
+
+    // Access the IP header positioned right after the Ethernet header
+    struct iphdr *ip = data + sizeof(struct ethhdr);
+    // Ensure the packet includes the full IP header; if not, pass it up the stack
+    if (data + sizeof(struct ethhdr) + sizeof(struct iphdr) > data_end)
+    {
+        return XDP_PASS;
+    }
+
+    // Confirm the packet uses TCP by checking the protocol field in the IP header
+    if (ip->protocol != IPPROTO_TCP)
+    {
+        return XDP_PASS;
+    }
+
+    // Locate the TCP header that follows the IP header
+    struct tcphdr *tcp = data + sizeof(struct ethhdr) + sizeof(struct iphdr);
+    // Validate that the packet is long enough to include the full TCP header
+    if (data + sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct tcphdr) > data_end)
+    {
+        return XDP_PASS;
+    }
+
+    // Check if the destination port of the packet is the one we're monitoring (SSH port, typically port 22, here set as 3333 for the example)
+    if (tcp->dest != __constant_htons(3333)) {
+        return XDP_PASS;
+    }
+
+    // Construct the key for the lookup by using the source IP address from the IP header
+    __u32 key = ip->saddr;
+    // Attempt to find this key in the 'allowed_ips' map
+    __u32 *value = allowed_ips.lookup(&key);
+    if (value) {
+        // If a matching key is found, the packet is from an allowed IP and can proceed
+        bpf_trace_printk("Authorized TCP packet to ssh !\\n");
+        return XDP_PASS;
+    }
+
+    // If no matching key is found, the packet is not from an allowed IP and will be dropped
+    bpf_trace_printk("Unauthorized TCP packet to ssh !\\n");
+
+    // drop packet
+    return XDP_DROP;
+}
+```
+####  DROP-TCP
+
+```C
+/*
+  check whether the packet is of TCP protocol
+*/
+static bool is_TCP(void *data_begin, void *data_end){
+  struct ethhdr *eth = data_begin;
+
+  // Check packet's size
+  // the pointer arithmetic is based on the size of data type, current_address plus int(1) means:
+  // new_address= current_address + size_of(data type)
+  if ((void *)(eth + 1) > data_end) //
+    return false;
+  
+  /*
+  括号里运算式eth+1是个非常有趣的表达式，它的本质是指针运算，指针变量+1就是指针向右移动n个字节，这个n为该指针变量指向的对象类型的字节长度，这里就是struct ethhdr的字节长度，为14个字节，可以在这个内核头文件里找到相关定义：
+
+  struct ethhdr {
+  // ETH_ALEN 为6个字节
+  unsigned char	h_dest[ETH_ALEN]; // destination eth addr 
+  unsigned char	h_source[ETH_ALEN]; // source ether addr 
+  // __be16 为16 bit，也就是2个字节
+  __be16   h_proto; // packet type ID field 
+}
+// 所以整个struct就是14个字节长度
+  */
+
+  // Check if Ethernet frame has IP packet
+  if (eth->h_proto == bpf_htons(ETH_P_IP))
+  {
+    struct iphdr *iph = (struct iphdr *)(eth + 1); // or (struct iphdr *)( ((void*)eth) + ETH_HLEN );
+    if ((void *)(iph + 1) > data_end)
+      return false;
+
+    // Check if IP packet contains a TCP segment
+    if (iph->protocol == IPPROTO_TCP)
+      return true;
+  }
+
+  return false;
+}
+
+SEC("xdp")
+int xdp_drop_tcp(struct xdp_md *ctx)
+{
+
+  void *data_end = (void *)(long)ctx->data_end;
+  void *data = (void *)(long)ctx->data;
+
+  if (is_TCP(data, data_end))
+    return XDP_DROP;
+
+  return XDP_PASS;
+}
+
+SEC("tc")
+int tc_drop_tcp(struct __sk_buff *skb)
+{
+
+  void *data = (void *)(long)skb->data;
+  void *data_end = (void *)(long)skb->data_end;
+
+  if (is_TCP(data, data_end)) 
+    return TC_ACT_SHOT;
+
+  return TC_ACT_OK;
+}
+
+char _license[] SEC("license") = "GPL";
+```
+
+上面代码有几处细节，这里列举下：
+
+
+##  0x03 TC 基础
+
+
+##  0x04  TC VS XDP
+小结下，tc（Traffic Control）和xdp（eXpress Data Path）是Linux网络中两种不同的数据包处理机制，他们的区别如下：
+
+-   位置不同: tc位于Linux网络协议栈的较高层，主要用于在网络设备的出入口处对数据包进行分类、调度和限速等操作。而xdp位于网络设备驱动程序的接收路径上，用于快速处理数据包并决定是否将其传递给协议栈
+-   执行时机不同: tc在数据包进入或离开网络设备时执行，通常在内核空间中进行。而xdp在数据包进入网络设备驱动程序的接收路径时执行，可以在内核空间中或用户空间中执行
+-   处理能力不同: tc提供了更复杂的流量控制和分类策略，可以实现各种QoS（Quality of Service）功能。它可以对数据包进行过滤、限速、排队等操作。而xdp主要用于快速的数据包过滤和处理，以降低延迟和提高性能
+-   XDP 程序对应的类型是 `BPF_PROG_TYPE_XDP` ，它在网络驱动程序刚刚收到数据包时触发执行，由于无需通过复杂的内核网络协议栈，所以 XDP 程序可以用来实现高性能的网络处理方案，常用于 DDos 防御、防护墙、4层负载均衡等
+-   TC程序 对应的类型是 `BPF_PROG_TYPE_SCHED_CLS` 和 `BPF_PROG_TYPE_SCHED_ACT` ，分别用于流量控制的分类器和执行器。Linux 流量控制通过网卡队列、排队规则、分类器、过滤器以及执行器实现了网络流量的整形调度和带宽控制
+
+##  0x05    参考
 - [每秒 1 百万的包传输，几乎不耗 CPU 的那种](https://colobu.com/2023/04/02/support-1m-pps-with-zero-cpu-usage/)
 - [eBPF 技术实践：高性能 ACL](https://blog.csdn.net/ByteDanceTech/article/details/106632252)
 - [eBPF Talk: 解密 XDP generic 模式](https://mp.weixin.qq.com/s?__biz=MjM5MTQxNTk5MA==&mid=2247483972&idx=1&sn=87bce22ffb54edda9d6c2556cfc8c36c&chksm=a6b4a99d91c3208bb19a893f716c090dd637a85c528b0ea4a9ef405709fc53c128b0af561823&scene=21#wechat_redirect)
 - [你的第一个 XDP BPF 程序](https://davidlovezoe.club/wordpress/archives/937)
 - [Deep Dive into Facebook's BPF edge firewall](https://cilium.io/blog/2018/11/20/fb-bpf-firewall/)
 - [你的第一个 TC BPF 程序](https://cloud.tencent.com/developer/article/1626377)
-- [XDP-tutorial 学习如何编写 eBPF XDP 程序]()
+- [eBPF中常见的事件类型](https://blog.spoock.com/2023/08/19/eBPF-Hook/)
+- [A toy tool that leverages the super powers of XDP to bring in-kernel IP filtering](https://github.com/sematext/oxdpus)
+- [Cilium 原理解析：网络数据包在内核中的流转过程](https://developer.volcengine.com/articles/7088359390654234660)
+- [eBPF在Golang中的应用介绍](https://www.cnxct.com/an-applied-introduction-to-ebpf-with-go/)
