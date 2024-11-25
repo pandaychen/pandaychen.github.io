@@ -13,7 +13,7 @@ tags:
 
 
 ##  0x00    前言
-在linux内核网络协议栈中有多个网络钩子，数据包在进入到网卡再到流出网卡的过程会触发这些钩子上注册的回调函数执行相关过滤动作。如netfilter框架中的`5`个钩子，针对ip数据包进行过滤。除此之外，在更低一层还有xdp和tc系统对数据包进行处理
+在 linux 内核网络协议栈中有多个网络钩子，数据包在进入到网卡再到流出网卡的过程会触发这些钩子上注册的回调函数执行相关过滤动作。如 netfilter 框架中的 `5` 个钩子，针对 ip 数据包进行过滤。除此之外，在更低一层还有 xdp 和 tc 系统对数据包进行处理
 
 ![netfilter](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/xdp/ebpf-netfilter-iptables.png)
 
@@ -44,7 +44,7 @@ tags:
 ####  应用场景
 
 - XDP：ACL（防火墙）
-- LB：如[katran](https://github.com/facebookincubator/katran)
+- LB：如 [katran](https://github.com/facebookincubator/katran)
 
 ##  0x01  XDP 基础
 XDP 全称为 eXpress Data Path，是 Linux 内核网络栈的最底层，只存在于 RX 路径（Ingress）上，允许在网络设备驱动内部网络堆栈中数据来源最早的地方进行数据包处理，在特定模式下可以在操作系统分配内存（skb）之前就已经完成处理。XDP 暴露了一个可以加载 BPF 程序的 hook，hook 程序能够对传入的数据包进行任意修改和快速决策，避免了内核内部处理带来的额外开销
@@ -67,6 +67,9 @@ struct xdp_md {
 ```
 
 程序执行时，`data` 和 `data_end` 字段分别是数据包开始和结束的指针，它们是用来获取和解析传来的数据，第三个值是 `data_meta` 指针，初始阶段它是一个空闲的内存地址，供 XDP 程序与其他层交换数据包元数据时使用。最后两个字段分别是接收数据包的接口和对应的 RX 队列的索引。当访问这两个值时，BPF 代码会在内核内部重写，以访问实际持有这些值的内核结构 `struct xdp_rxq_info`
+
+对 `data` 和 `data_end` 的理解：
+
 
 ####  XDP 输出参数
 在处理完一个数据包后，XDP 程序（hook 函数）会返回一个动作（Action）作为输出，它代表了程序退出后对数据包应该做什么样的最终裁决。定义了以下 `5` 种动作类型（前面 `4` 个动作不需要参数，最后一个动作需要额外指定一个 NIC 网络设备名称，作为转发这个数据包的目的地）
@@ -99,7 +102,7 @@ enum xdp_action {
 
 ##  0x02  XDP：实战
 
-####  SSH端口访问限制
+####  SSH 端口访问限制
 ```c
 int xdp_firewall(struct xdp_md *ctx)
 {
@@ -144,8 +147,8 @@ int xdp_firewall(struct xdp_md *ctx)
         return XDP_PASS;
     }
 
-    // Check if the destination port of the packet is the one we're monitoring (SSH port, typically port 22, here set as 3333 for the example)
-    if (tcp->dest != __constant_htons(3333)) {
+    // Check if the destination port of the packet is the one we're monitoring
+    if (tcp->dest != __constant_htons(22)) {
         return XDP_PASS;
     }
 
@@ -166,8 +169,9 @@ int xdp_firewall(struct xdp_md *ctx)
     return XDP_DROP;
 }
 ```
-####  DROP-TCP
 
+####  DROP-TCP
+示例 2，通过 xdp 拦截所有系统的 packet，如果是 TCP 报文则全部丢弃
 ```C
 /*
   check whether the packet is of TCP protocol
@@ -178,20 +182,24 @@ static bool is_TCP(void *data_begin, void *data_end){
   // Check packet's size
   // the pointer arithmetic is based on the size of data type, current_address plus int(1) means:
   // new_address= current_address + size_of(data type)
+
+  // 重要！注意(eth + 1)前面加了一个显示类型转换，如果不做这个操作，编译时会有如下warning
+  // warning: comparison of distinct pointer types ('struct ethhdr *' and 'void *')
+  //代码里其他类似这样的显示类型转换都是出于规避编译warning的考虑
   if ((void *)(eth + 1) > data_end) //
     return false;
-  
+
   /*
-  括号里运算式eth+1是个非常有趣的表达式，它的本质是指针运算，指针变量+1就是指针向右移动n个字节，这个n为该指针变量指向的对象类型的字节长度，这里就是struct ethhdr的字节长度，为14个字节，可以在这个内核头文件里找到相关定义：
+  括号里运算式 eth+1 是个非常有趣的表达式，它的本质是指针运算，指针变量 + 1 就是指针向右移动 n 个字节，这个 n 为该指针变量指向的对象类型的字节长度，这里就是 struct ethhdr 的字节长度，为 14 个字节，可以在这个内核头文件里找到相关定义：
 
   struct ethhdr {
-  // ETH_ALEN 为6个字节
-  unsigned char	h_dest[ETH_ALEN]; // destination eth addr 
-  unsigned char	h_source[ETH_ALEN]; // source ether addr 
-  // __be16 为16 bit，也就是2个字节
-  __be16   h_proto; // packet type ID field 
+  // ETH_ALEN 为 6 个字节
+  unsigned char	h_dest[ETH_ALEN]; // destination eth addr
+  unsigned char	h_source[ETH_ALEN]; // source ether addr
+  // __be16 为 16 bit，也就是 2 个字节
+  __be16   h_proto; // packet type ID field
 }
-// 所以整个struct就是14个字节长度
+// 所以整个 struct 就是 14 个字节长度
   */
 
   // Check if Ethernet frame has IP packet
@@ -222,6 +230,7 @@ int xdp_drop_tcp(struct xdp_md *ctx)
   return XDP_PASS;
 }
 
+//tc hook
 SEC("tc")
 int tc_drop_tcp(struct __sk_buff *skb)
 {
@@ -229,7 +238,7 @@ int tc_drop_tcp(struct __sk_buff *skb)
   void *data = (void *)(long)skb->data;
   void *data_end = (void *)(long)skb->data_end;
 
-  if (is_TCP(data, data_end)) 
+  if (is_TCP(data, data_end))
     return TC_ACT_SHOT;
 
   return TC_ACT_OK;
@@ -238,20 +247,58 @@ int tc_drop_tcp(struct __sk_buff *skb)
 char _license[] SEC("license") = "GPL";
 ```
 
-上面代码有几处细节，这里列举下：
+上面代码有几处细节，这里列举下（仅分析 xdp 的部分），在 `is_TCP` 函数中，`eth` 是 `struct ethhdr` 指针类型，`eth+1` 是指针运算，指针变量 `+1` 就是指针向右移动 `n` 个字节（`n`为该指针变量指向的对象类型的字节长度，即`struct ethhdr`的字节长度，为`14`个字节），是必须的数据包边界检查，该表达式有两层意思：
 
+- 如果`data_end-data_begin`的结果小于`sizeof(struct ethhdr)`，那么说明这不是一个以太网的数据包，可以直接转发
+- 如果`data_end-data_begin`的结果大于等于`sizeof(struct ethhdr)`，那么说明程序可以安全的操作这`sizeof(struct ethhdr)`个字节的数据（试想下ebpf verifier的安全要求）
+
+因此，整体的`if`逻辑是判断括号内运算结果会不会内存越界，这对于BPF verifier是必要的，如果没有，BPF verifier会阻止这个程序加载到内核中，原因是后面的代码`struct iphdr *iph = (struct iphdr *)(eth + 1)`，即通过右移`data`变量获取到IP头，因此需要判断这个右移结果是否有效，如果无效，就直接`return`出去了，防止内存越界（**类似的右移判断逻辑在BPF程序里出现时，一定要做好边界判断逻辑，属于BPF开发基本操作**）
+
+```C
+static bool is_TCP(void *data_begin, void *data_end){
+  //...
+  if ((void *)(eth + 1) > data_end){
+      return false;
+  }
+  //...
+}
+
+// ethhdr total size = 14 bytes
+struct ethhdr {
+  // ETH_ALEN 为 6 个字节
+  unsigned char        h_dest[ETH_ALEN]; /* destination eth addr */
+  unsigned char        h_source[ETH_ALEN]; /* source ether addr */
+  // __be16 为 16 bit，也就是 2 个字节
+  __be16   h_proto; /* packet type ID field */
+}
+```
+
+如果不使用指针运算，还是作显式的长度判断，那么代码如下：
+
+```c
+static bool is_TCP(void *data_begin, void *data_end){
+  //...
+  u64 h_offset;
+  // 显式声明并赋值ethhdr长度
+  h_offset = sizeof(*eth);
+  // 根据左右变量类型，运算符号加号重载成相关运算机制
+  if (data + h_offset > data_end)
+    return false;
+  //...
+}
+```
 
 ##  0x03 TC 基础
 
 
 ##  0x04  TC VS XDP
-小结下，tc（Traffic Control）和xdp（eXpress Data Path）是Linux网络中两种不同的数据包处理机制，他们的区别如下：
+小结下，tc（Traffic Control）和 xdp（eXpress Data Path）是 Linux 网络中两种不同的数据包处理机制，他们的区别如下：
 
--   位置不同: tc位于Linux网络协议栈的较高层，主要用于在网络设备的出入口处对数据包进行分类、调度和限速等操作。而xdp位于网络设备驱动程序的接收路径上，用于快速处理数据包并决定是否将其传递给协议栈
--   执行时机不同: tc在数据包进入或离开网络设备时执行，通常在内核空间中进行。而xdp在数据包进入网络设备驱动程序的接收路径时执行，可以在内核空间中或用户空间中执行
--   处理能力不同: tc提供了更复杂的流量控制和分类策略，可以实现各种QoS（Quality of Service）功能。它可以对数据包进行过滤、限速、排队等操作。而xdp主要用于快速的数据包过滤和处理，以降低延迟和提高性能
--   XDP 程序对应的类型是 `BPF_PROG_TYPE_XDP` ，它在网络驱动程序刚刚收到数据包时触发执行，由于无需通过复杂的内核网络协议栈，所以 XDP 程序可以用来实现高性能的网络处理方案，常用于 DDos 防御、防护墙、4层负载均衡等
--   TC程序 对应的类型是 `BPF_PROG_TYPE_SCHED_CLS` 和 `BPF_PROG_TYPE_SCHED_ACT` ，分别用于流量控制的分类器和执行器。Linux 流量控制通过网卡队列、排队规则、分类器、过滤器以及执行器实现了网络流量的整形调度和带宽控制
+-   位置不同: tc 位于 Linux 网络协议栈的较高层，主要用于在网络设备的出入口处对数据包进行分类、调度和限速等操作。而 xdp 位于网络设备驱动程序的接收路径上，用于快速处理数据包并决定是否将其传递给协议栈
+-   执行时机不同: tc 在数据包进入或离开网络设备时执行，通常在内核空间中进行。而 xdp 在数据包进入网络设备驱动程序的接收路径时执行，可以在内核空间中或用户空间中执行
+-   处理能力不同: tc 提供了更复杂的流量控制和分类策略，可以实现各种 QoS（Quality of Service）功能。它可以对数据包进行过滤、限速、排队等操作。而 xdp 主要用于快速的数据包过滤和处理，以降低延迟和提高性能
+-   XDP 程序对应的类型是 `BPF_PROG_TYPE_XDP` ，它在网络驱动程序刚刚收到数据包时触发执行，由于无需通过复杂的内核网络协议栈，所以 XDP 程序可以用来实现高性能的网络处理方案，常用于 DDos 防御、防护墙、4 层负载均衡等
+-   TC 程序 对应的类型是 `BPF_PROG_TYPE_SCHED_CLS` 和 `BPF_PROG_TYPE_SCHED_ACT` ，分别用于流量控制的分类器和执行器。Linux 流量控制通过网卡队列、排队规则、分类器、过滤器以及执行器实现了网络流量的整形调度和带宽控制
 
 ##  0x05    参考
 - [每秒 1 百万的包传输，几乎不耗 CPU 的那种](https://colobu.com/2023/04/02/support-1m-pps-with-zero-cpu-usage/)
@@ -260,7 +307,8 @@ char _license[] SEC("license") = "GPL";
 - [你的第一个 XDP BPF 程序](https://davidlovezoe.club/wordpress/archives/937)
 - [Deep Dive into Facebook's BPF edge firewall](https://cilium.io/blog/2018/11/20/fb-bpf-firewall/)
 - [你的第一个 TC BPF 程序](https://cloud.tencent.com/developer/article/1626377)
-- [eBPF中常见的事件类型](https://blog.spoock.com/2023/08/19/eBPF-Hook/)
+- [eBPF 中常见的事件类型](https://blog.spoock.com/2023/08/19/eBPF-Hook/)
 - [A toy tool that leverages the super powers of XDP to bring in-kernel IP filtering](https://github.com/sematext/oxdpus)
 - [Cilium 原理解析：网络数据包在内核中的流转过程](https://developer.volcengine.com/articles/7088359390654234660)
-- [eBPF在Golang中的应用介绍](https://www.cnxct.com/an-applied-introduction-to-ebpf-with-go/)
+- [eBPF 在 Golang 中的应用介绍](https://www.cnxct.com/an-applied-introduction-to-ebpf-with-go/)
+- [eBPF Talk: XDP 解析所有 TCP options](https://asphaltt.github.io/post/ebpf-talk-127-xdp-tcp-options/)
