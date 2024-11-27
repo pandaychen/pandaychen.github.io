@@ -58,7 +58,7 @@ package resolver
 
 var (
 	// m is a map from scheme to resolver builder.
-	// m 是 scheme 和 resolver 构建器的关系映射，scheme 可以是我们自定义的，如 etcd、consul 等 string
+	// m 是 scheme 和 resolver 构建器的关系映射，scheme 可以是自定义的，如 etcd、consul 等 string
 	m = make(map[string]Builder)
 	// defaultScheme is the default scheme to use.
 	// defaultScheme 是默认使用的 scheme, 这里主要是为了方便测试, 因为有些测试依赖于 target 并未被解决并直接返回 endpoint 给拨号客户端。
