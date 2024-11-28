@@ -186,7 +186,7 @@ Authorization: Bearer <token>
 
 基于 OpenSSH 的 SSO 实现，有两个思路：
 
-1. 从上面对 Auth 协议的分析，如果我们在 SSH 登录前能先获取到 access-token，然后拿着此 token 调用 IDP 接口获取到用户的真实身份即可。
+1. 从上面对 Auth 协议的分析，如果在 SSH 登录前能先获取到 access-token，然后拿着此 token 调用 IDP 接口获取到用户的真实身份即可
 
 
 ## 0x08 其他一些话题
