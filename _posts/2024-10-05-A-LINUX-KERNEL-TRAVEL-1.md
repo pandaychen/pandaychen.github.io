@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:  Linux 内核之旅（一）：进程
-subtitle:   
+subtitle:
 date:       2024-10-02
 author:     pandaychen
 header-img:
@@ -43,12 +43,446 @@ CPU 提供了专门的入口，用来从用户态进入内核态（CPU 使用权
 -   系统调用：在系统编程中调用操作系统提供的 API 函数，比如文件操作、内存操作、网络操作等等，这些函数都是操作系统封装出来的应用程序编程 API，真正的底层实现是位于内核中的系统调用。应用层上的 API 通过 CPU 专门的指令进入内核来完成对应的功能
 
 ####    CPU 中断
+中断是当系统中出现了一个必须由 CPU 立即处理的情况时，CPU 需要暂停当前正在执行的程序，转而处理这个新的情况，分为硬件中断和软中断
 
-####    内核态的意义
+-   硬件中断：硬件中断是一个异步信号，它是由与系统相连的外设（如网卡，硬盘，键盘等）产生的。每个设备或设备集都有自己的 IRQ（中断请求），cpu 根据 IRQ 将中断请求分发给相应的中断处理程序。比如当网卡收到一个数据包的时候，就会发出一个中断请求。需要注意的是硬件中断是可屏蔽的。当发生硬件中断时，cpu 会暂停当前程序，转而执行中断代码，中断代码本身也可以被其他硬件中断中断
+-   软中断：软中断是由正在运行的程序发出的，不会中断 cpu。软中断是一种需要内核为当前正在运行的进程做一些事情（通常是 I/O）的请求
+-   时钟中断：linux 的 `0` 号中断即时钟中断，操作系统利用时钟中断，维持系统时间更新 cpu 计数，也就是调用 `scheduler_tick` 递减进程的时间片，若进程的时间片递减到 `0`，则进程被调度出去而放弃 CPU 的使用权。本质上说，时钟中断只是一个周期性的信号，完全是硬件行为，该信号触发 cpu 执行一个中断服务程序（ISR）
 
 ##  0x01    进程的基础概念
 
+PID 是kernel内部对进程的一个标识符，用来唯一标识一个进程（task）、进程组（process group）、会话（session）。PID 及其对应进程存储在一个哈希表中，方便依据 PID 快速访问进程 `task_struct`
 
+本文只讨论内核态的进（线）程，本质上Linux 内核中进程/线程都是用 [`task_struct`](https://elixir.free-electrons.com/linux/v4.11.6/source/include/linux/sched.h#L483)（任务） 来表示的，结构如下：在用户态调用`getpid`实际上返回的是`task_struct`的`tgid`字段，而`pid`每个线程都是不同的（都一个进程生成的不同线程而言）
+
+```CPP
+//file:include/linux/sched.h
+struct task_struct {
+ //2.1 进程状态 
+ volatile long state;
+
+ //2.2 进程线程的pid
+ pid_t pid;         //本质上int
+ pid_t tgid;        //本质上int
+
+ //2.3 进程树关系：父进程、子进程、兄弟进程
+ struct task_struct __rcu *parent;
+ struct list_head children; 
+ struct list_head sibling;
+ struct task_struct *group_leader; 
+
+ //2.4 进程调度优先级
+ int prio, static_prio, normal_prio;
+ unsigned int rt_priority;
+
+ //2.5 进程地址空间
+ struct mm_struct *mm, *active_mm;
+
+ //2.6 进程文件系统信息（当前目录等）
+ struct fs_struct *fs;
+
+ //2.7 进程打开的文件信息
+ struct files_struct *files;
+
+ //2.8 namespaces 
+ struct nsproxy *nsproxy;
+
+ // relation
+ /* PID/PID hash table linkage. */
+ struct pid_link			pids[PIDTYPE_MAX];
+
+ //
+ struct task_struct   *group_leader;
+
+ //namespace相关
+ struct nsproxy       *nsproxy;
+}
+```
+
+`task_struct` 是 linux 内核中最重要的概念之一，与 `pid` 有关的成员结构定义如下：
+
+```CPP
+struct task_struct {
+	//···
+	pid_t                 pid;
+	pid_t                 tgid;
+	struct task_struct   *group_leader;
+	struct pid_link       pids[PIDTYPE_MAX];
+	struct nsproxy       *nsproxy;
+	//···
+};
+
+struct pid_link
+{
+	struct hlist_node node;
+	struct pid *pid;
+};
+
+struct nsproxy {
+    atomic_t count;
+    struct uts_namespace *uts_ns;
+    struct ipc_namespace *ipc_ns;
+    struct mnt_namespace *mnt_ns;
+    struct pid_namespace *pid_ns_for_children;
+    struct net 	     *net_ns;
+    struct cgroup_namespace *cgroup_ns;
+};
+```
+
+-   `pid`：内核进程的 id，使用 `fork`/`clone` 系统调用时产生的进程均会由内核分配一个新的唯一的PID值
+-   `tgid`：线程组 id，在一个进程中，如果以 `CLONE_THREAD` 标志来调用 `clone` 建立的进程就是该进程的一个线程，它们处于一个线程组。处于相同的线程组中的所有进程都有相同的 `TGID`；线程组组长的 `TGID` 与其 `PID` 相同；一个进程没有使用线程，则其 `TGID` 与 `PID` 也相同
+-   `group_leader`：除了在多线程的模式下指向主线程外， 当一些进程组成一个群组时（`PIDTYPE_PGID`）， 该成员指向该群组的leader
+-   `pids[PIDTYPE_MAX]`：指向了和该 `task_struct` 相关的 `pid` 结构体
+-   `nsproxy`：指向namespace相关的结构，与其它命名空间不同。此处 `pid_ns_for_children` 指向该进程的子进程会使用的 `pid_namespace`，该进程本身所属的 `pid_namespace` 可以通过 `task_active_pid_ns` 方法获得；`nsproxy` 被所有共享命名空间的 `task_struct` 共享，随命名空间的复制而复制（namespace原理）
+
+![task-struct-basic.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/task-struct-basic.png)
+
+####    PID：进程ID
+[`pid`](https://elixir.free-electrons.com/linux/v4.11.6/source/include/linux/pid.h#L57)定义如下，在`task_struct`中，通过`task->pids[PIDTYPE_PID].pid`可以定位到（`task_pid`[函数](https://elixir.free-electrons.com/linux/v4.11.6/source/include/linux/sched.h#L1056)）
+
+`pid`重要成员如下：
+
+-   `count`：该数据结构被引用的次数
+-   `level`：该 `pid` 在 `pid_namespace` 中所处层级，当 `level=0` 时表示是 global namespace（最高层）
+-   `tasks[i]`：指向 PID 对应的 `task_struct`。`PIDTYPE_MAX` 是 `pid` 的类型数（枚举）。一个或多个进程可以组成一个进程组，进程组ID（PGID）为进程组领导进程 （process group leader）的PID；一个或多个进程组可以组成一个会话，会话ID（SID）为会话领导进程（session leader）的PID
+-   `rcu`：用于保证数据同步
+-   `numbers[1]`：是一个可扩展 `upid` 结构体。 一个 PID 可以属于不同的 namespace ， `numbers[0]` 表示 global namespace，`numbers[i]` 表示第 `i` 层 namespace，`i` 越大所在层级越低，下文详细说明
+
+
+`upid` 结构的成员如下:
+-   `nr`：是`pid`的值， 即 `task_struct` 中 `pid_t pid` 域的值（重要）
+-   `ns`：指向该 `pid` 所处的 `namespace`
+-   `pid_chain`： 是 `pid_hash` 哈希表节点。linux内核将所有进程的`upid`都存放在一个哈希表（`pid_hash`）中，以方便查找和统一管理。通过 `pid_chain` 能够找到该 `upid` 所在 `pid_hash` 中的位置
+
+`pid_chain`这个概念是有点绕的，下文详细说明
+
+```CPP
+struct pid
+{
+	atomic_t count;
+	unsigned int level;
+	/* lists of tasks that use this pid */
+	struct hlist_head tasks[PIDTYPE_MAX];
+	struct rcu_head rcu;
+	struct upid numbers[1];
+};
+
+struct upid {
+	  /* Try to keep pid_chain in the same cacheline as nr for find_vpid */
+	  int nr;
+	  struct pid_namespace *ns;
+	  struct hlist_node pid_chain;
+};
+
+enum pid_type
+{
+	PIDTYPE_PID,
+	PIDTYPE_PGID,
+	PIDTYPE_SID,
+	PIDTYPE_MAX
+};
+```
+
+####    pid_namespace：进程命名空间
+`pid` 命名空间 `pid_namespace` 的[定义]()如下，关联`upid`的`ns`成员：
+
+```CPP
+struct pid_namespace {
+	struct kref kref;
+	struct pidmap pidmap[PIDMAP_ENTRIES];
+	struct rcu_head rcu;
+	int last_pid;
+	unsigned int nr_hashed;
+	struct task_struct *child_reaper;
+	struct kmem_cache *pid_cachep;
+	unsigned int level;
+	struct pid_namespace *parent;
+	struct user_namespace *user_ns;
+	struct ucounts *ucounts;
+	struct work_struct proc_work;
+	kgid_t pid_gid;
+	int hide_pid;
+	int reboot;	/* group exit code if this pidns was rebooted */
+	struct ns_common ns;
+};
+
+struct pidmap {
+       atomic_t nr_free;
+       void *page;
+};
+
+#define BITS_PER_PAGE		(PAGE_SIZE * 8)
+#define BITS_PER_PAGE_MASK	(BITS_PER_PAGE-1)
+#define PIDMAP_ENTRIES		((PID_MAX_LIMIT+BITS_PER_PAGE-1)/BITS_PER_PAGE)
+  
+// include/linux/threads.h
+#define PID_MAX_DEFAULT (CONFIG_BASE_SMALL ? 0x1000 : 0x8000)
+/*
+ * A maximum of 4 million PIDs should be enough for a while.
+ * [NOTE: PID/TIDs are limited to 2^29 ~= 500+ million, see futex.h.]
+ */
+#define PID_MAX_LIMIT (CONFIG_BASE_SMALL ? PAGE_SIZE * 8 : \
+	(sizeof(long) > 4 ? 4 * 1024 * 1024 : PID_MAX_DEFAULT))
+```
+
+-   `kref`： 表示指向 `pid_namespace` 的个数
+-   `pidmap` 结构体表示分配`pid`的bitmap，pidmap[PIDMAP_ENTRIES] 域存储了该 pid_namespace 下 pid 已分配情况
+-   `rcu`：同样用于保证数据同步
+
+last_pid 是最后一个已分配的 pid。
+
+nr_hashed 统计该命名空间已分配PID个数。
+
+child_reaper指向的是一个进程。 该进程的作用是当子进程结束时为其收尸（回收空间）。global namespace 中child_reaper 指向 init_task。
+
+pid_cachep 域指向分配 pid 的 slab 的地址。
+
+level 表示该命名空间所处层级。
+
+parent 指向该命名空间的父命名空间。
+
+
+pidmap 结构体定义（include/linux/pid_namespace.h）如下：
+
+nr_free 表示还能分配的 pid 的数量。
+
+page 指向的是存放 pid 的物理页。
+
+
+
+
+####    pid之间的关系（重要）
+
+-   如何快速地根据进程的 task_struct、ID 类型、命名空间找到 PID ？
+-   如何快速地根据 PID、命名空间、ID 类型找到对应进程的 task_struct ？
+-   如何快速地给新进程在可见的命名空间内分配一个唯一的 PID ？
+
+![]()
+
+####    查询PID
+
+1、根据`task_struct`查询PID
+
+2、获取与 `task_struct` 相关的 PID 命名空间
+
+3、获取 `pid` 实例中的 PID
+
+4、此外，内核还封装有直接获取初始命名空间、当前命名空间对应 PID 的方法：
+
+ static inline pid_t pid_nr(struct pid *pid)
+ {
+ 	pid_t nr = 0;
+ 	if (pid)
+ 		nr = pid->numbers[0].nr;
+ 	return nr;
+ }
+    
+ pid_t pid_vnr(struct pid *pid)
+ {
+ 	return pid_nr_ns(pid, task_active_pid_ns(current));
+ }
+
+####    分配PID
+3.3 分配PID
+为新进程 task_struct 分配 pid 域
+
+新的进程使用 alloc_pid 方法分配 pid，代码（kernel/pid.c）如下：
+
+ struct pid *alloc_pid(struct pid_namespace *ns)
+ {
+ 	struct pid *pid;
+ 	enum pid_type type;
+ 	int i, nr;
+ 	struct pid_namespace *tmp;
+ 	struct upid *upid;
+ 	int retval = -ENOMEM;
+    
+     // 从命名空间分配一个 pid 结构体
+ 	pid = kmem_cache_alloc(ns->pid_cachep, GFP_KERNEL);
+ 	if (!pid)
+ 		return ERR_PTR(retval);
+    
+     // 初始化进程在各级命名空间的 PID，直到全局命名空间（level 为0）为止
+ 	tmp = ns;
+ 	pid->level = ns->level;
+ 	for (i = ns->level; i >= 0; i--) {
+ 		nr = alloc_pidmap(tmp);  //分配一个局部PID
+ 		if (nr < 0) {
+ 			retval = nr;
+ 			goto out_free;
+ 		}
+    
+ 		pid->numbers[i].nr = nr;
+ 		pid->numbers[i].ns = tmp;
+ 		tmp = tmp->parent;
+ 	}
+    
+     // 若为命名空间的初始进程
+ 	if (unlikely(is_child_reaper(pid))) {
+ 		// 0
+ 		if (pid_ns_prepare_proc(ns))
+ 			goto out_free;
+ 	}
+    
+ 	get_pid_ns(ns);
+ 	atomic_set(&pid->count, 1);
+ 	for (type = 0; type < PIDTYPE_MAX; ++type)
+ 		INIT_HLIST_HEAD(&pid->tasks[type]); // // 初始化 pid->task[] 结构体，值为NULL
+    
+ 	upid = pid->numbers + ns->level;
+ 	spin_lock_irq(&pidmap_lock);
+ 	if (!(ns->nr_hashed & PIDNS_HASH_ADDING))
+ 		goto out_unlock;
+ 	for ( ; upid >= pid->numbers; --upid) {
+ 		// 将每个命名空间经过哈希之后加入到散列表中
+ 		hlist_add_head_rcu(&upid->pid_chain,
+ 				&pid_hash[pid_hashfn(upid->nr, upid->ns)]);
+ 		upid->ns->nr_hashed++;
+ 	}
+ 	spin_unlock_irq(&pidmap_lock);
+    
+ 	return pid;
+    
+ out_unlock:
+ 	spin_unlock_irq(&pidmap_lock);
+ 	put_pid_ns(ns);
+    
+ out_free:
+ 	while (++i <= ns->level)
+ 		free_pidmap(pid->numbers + i);
+    
+ 	kmem_cache_free(ns->pid_cachep, pid);
+ 	return ERR_PTR(retval);
+ }
+从指定命名空间中分配唯一PID
+
+kernel/pid.c
+
+ static int alloc_pidmap(struct pid_namespace *pid_ns)
+ {
+ 	int i, offset, max_scan, pid, last = pid_ns->last_pid;
+ 	struct pidmap *map;
+    
+ 	pid = last + 1;
+ 	// 默认最大值在 include/linux/threads.h 中定义为 (CONFIG_BASE_SMALL ? 0x1000 : 0x8000)
+ 	if (pid >= pid_max)  
+ 		pid = RESERVED_PIDS;  // RESERVED_PIDS = 300
+ 	offset = pid & BITS_PER_PAGE_MASK;
+ 	map = &pid_ns->pidmap[pid/BITS_PER_PAGE];
+ 	/*
+ 	 * If last_pid points into the middle of the map->page we
+ 	 * want to scan this bitmap block twice, the second time
+ 	 * we start with offset == 0 (or RESERVED_PIDS).
+ 	 */
+ 	max_scan = DIV_ROUND_UP(pid_max, BITS_PER_PAGE) - !offset;
+ 	for (i = 0; i <= max_scan; ++i) {
+ 		if (unlikely(!map->page)) {
+ 			void *page = kzalloc(PAGE_SIZE, GFP_KERNEL);
+ 			/*
+ 			 * Free the page if someone raced with us
+ 			 * installing it:
+ 			 */
+ 			spin_lock_irq(&pidmap_lock);
+ 			if (!map->page) {
+ 				map->page = page;
+ 				page = NULL;
+ 			}
+ 			spin_unlock_irq(&pidmap_lock);
+ 			kfree(page);
+ 			if (unlikely(!map->page))
+ 				return -ENOMEM;
+ 		}
+ 		if (likely(atomic_read(&map->nr_free))) {
+ 			for ( ; ; ) {
+ 				if (!test_and_set_bit(offset, map->page)) {
+ 					atomic_dec(&map->nr_free);
+ 					set_last_pid(pid_ns, last, pid);
+ 					return pid;
+ 				}
+ 				offset = find_next_offset(map, offset);
+ 				if (offset >= BITS_PER_PAGE)
+ 					break;
+ 				pid = mk_pid(pid_ns, map, offset);
+ 				if (pid >= pid_max)
+ 					break;
+ 			}
+ 		}
+ 		if (map < &pid_ns->pidmap[(pid_max-1)/BITS_PER_PAGE]) {
+ 			++map;
+ 			offset = 0;
+ 		} else {
+ 			map = &pid_ns->pidmap[0];
+ 			offset = RESERVED_PIDS;
+ 			if (unlikely(last == offset))
+ 				break;
+ 		}
+ 		pid = mk_pid(pid_ns, map, offset);
+ 	}
+ 	return -EAGAIN;
+ }
+回收PID
+
+kernel/pid.c
+
+ static void free_pidmap(struct upid *upid)
+ {
+ 	int nr = upid->nr;
+ 	struct pidmap *map = upid->ns->pidmap + nr / BITS_PER_PAGE;
+ 	int offset = nr & BITS_PER_PAGE_MASK;
+    
+ 	clear_bit(offset, map->page);
+ 	atomic_inc(&map->nr_free);
+ }
+
+####    查询task_struct
+
+查找 task_struct
+获得 pid 实体。
+
+根据 PID 以及指定命名空间计算在 pid_hash 数组中的索引，然后遍历散列表找到所要的 upid， 再根据内核的 container_of 机制找到 pid 实例。代码（kernel/pid.c）如下：
+
+ struct pid *find_pid_ns(int nr, struct pid_namespace *ns)
+ {
+ 	  struct upid *pnr;
+    
+ 	  hlist_for_each_entry_rcu(pnr,
+ 			  &pid_hash[pid_hashfn(nr, ns)], pid_chain)
+ 		  if (pnr->nr == nr && pnr->ns == ns)
+ 	  		  return container_of(pnr, struct pid,
+ 					  numbers[ns->level]);
+       
+ 	       return NULL;
+ }
+由此，也可以根据当前命名空间下的局部 PID 获取对应的 pid实例：
+
+ struct pid *find_vpid(int nr)
+ {
+   	return find_pid_ns(nr, task_active_pid_ns(current));
+ }
+根据 pid 及 PID 类型获取 task_struct
+
+ struct task_struct *pid_task(struct pid *pid, enum pid_type type)
+ {
+ 	struct task_struct *result = NULL;
+ 	if (pid) {
+ 		struct hlist_node *first;
+ 		first = rcu_dereference_check(hlist_first_rcu(&pid->tasks[type]),
+ 					      lockdep_tasklist_lock_is_held());
+ 		if (first)
+ 			result = hlist_entry(first, struct task_struct, pids[(type)].node);
+ 	}
+ 	return result;
+ }
+
+####    小结
+
+| ID | 解释 | task_struct 中的对应变量 | 系统调用|
+| :-----:| :----: | :----: |:----: |
+| PID （Process ID） | 实际上是线程 ID，内核中进程、线程都使用 `task_struct` 结构表示 | `task_struct->pid` |`pid_t gettid(void)` |
+| TGID (Thread Group ID) | 线程组 ID，即线程组组长的 PID，真正的进程 ID，如果进程只有一个线程则他的 PID 和 TGID 相同 | `task_struct->tgid` | pid_t getpid(void) |
+|PGID （Process Group ID）|进程组 ID，多个进程可以组合为进程组，方便向所有成员发送信号，进程组组长的 PID 即为PGID|`task_struct->signal->__pgrp`|pid_t getpgrp(void)|
+|SID（Session ID）|会话 ID，多个进程组可以组合为会话，会话的组长PGID 即为 SID|`task_struct->signal->__session`|pid_t getsid(pid_t pid);|
+|PPID （Parent Process ID）	|父进程 ID|task_struct->parent->pid|pid_t getppid(void)|
 
 ##  0x0 总结
 
@@ -60,3 +494,9 @@ CPU 为了进行指令权限管控，引入了特权级的概念，CPU 工作在
 -   [Linux 内核进程管理](http://timd.cn/kernel-process-management/)
 -   <<深入理解 Linux 进程与内存>>
 -   [CPU 进入内核，是什么意思？](https://mp.weixin.qq.com/s?__biz=MzkxNjE3NTAyNQ==&mid=2247485492&idx=1&sn=d3196f90d31ff19060e0105eba66723a&chksm=c152a9eaf62520fc87d306e42766ede75fc0457718adcc98acb1e15cf3497d1ef2e71619be5e#rd)
+-   [进程ID及进程间的关系](https://cloud.tencent.com/developer/article/2363228)
+-   [Linux PID 一网打尽](https://cloud.tencent.com/developer/article/1682890)
+-   [Linux开启动过程详解](https://handerfly.github.io/linux/2019/04/02/Linux%E5%BC%80%E5%90%AF%E5%8A%A8%E8%BF%87%E7%A8%8B%E8%AF%A6%E8%A7%A3/)
+-   [linux内核PID管理](https://carecraft.github.io/basictheory/2017/03/linux-pid-manage/)
+-   [Linux 内核进程管理之进程ID](https://www.cnblogs.com/hazir/p/linux_kernel_pid.html)
+-   [Pid Namespace 详解](https://tinylab.org/pid-namespace/)
