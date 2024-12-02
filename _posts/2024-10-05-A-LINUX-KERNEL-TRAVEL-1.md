@@ -18,7 +18,7 @@ tags:
 ####    CPU 特权指令（分级）
 涉及到操作系统管理计算机资源的指令（敏感指令），只能被操作系统能够执行。x86 CPU 提供了 `RING0`（最高权限模式，可以执行所有指令）~`RING3`（最低权限模式，仅能执行指令集中的一部分指令）的特权分级，让 CPU 在执行操作系统代码的时候运行在 `Ring0` 模式，在执行普通应用程序代码的时候运行在 `Ring3` 模式，这样就解决了特权指令的问题
 
-![CPU-RING0]()
+![CPU-RING0](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/Priv_rings.svg.png)
 
 ####    内核地址空间
 除了指令增加特权分级以外，在内存的访问也得加上特权级。由于 x86 架构的 CPU 是基于分段 + 分页式相结合的内存管理方式，通过给不同的内存段限定了不同的访问模式，并把它记录到了段的描述符中，在访问内存的时候，CPU 就会拿当前段寄存器中标示的权限和要访问的目标内存所在段段访问权限进行对比，符合要求才能访问，否则会抛出异常
@@ -226,30 +226,17 @@ struct pidmap {
 ```
 
 -   `kref`： 表示指向 `pid_namespace` 的个数
--   `pidmap` 结构体表示分配`pid`的bitmap，pidmap[PIDMAP_ENTRIES] 域存储了该 pid_namespace 下 pid 已分配情况
+-   `pidmap` 结构体表示分配`pid`的bitmap，`pidmap[PIDMAP_ENTRIES]` 域存储了该 `pid_namespace` 下 `pid` 已分配情况
 -   `rcu`：同样用于保证数据同步
-
-last_pid 是最后一个已分配的 pid。
-
-nr_hashed 统计该命名空间已分配PID个数。
-
-child_reaper指向的是一个进程。 该进程的作用是当子进程结束时为其收尸（回收空间）。global namespace 中child_reaper 指向 init_task。
-
-pid_cachep 域指向分配 pid 的 slab 的地址。
-
-level 表示该命名空间所处层级。
-
-parent 指向该命名空间的父命名空间。
-
-
-pidmap 结构体定义（include/linux/pid_namespace.h）如下：
-
-nr_free 表示还能分配的 pid 的数量。
-
-page 指向的是存放 pid 的物理页。
-
-
-
+-	`last_pid`：最后一个已分配的 pid
+-	`nr_hashed`：统计该命名空间已分配PID个数
+-	child_reaper指向的是一个进程。 该进程的作用是当子进程结束时为其收尸（回收空间）。global namespace 中child_reaper 指向 init_task。
+-	pid_cachep 域指向分配 pid 的 slab 的地址。
+-	level 表示该命名空间所处层级
+-	parent 指向该命名空间的父命名空间
+-	pidmap 结构体定义（include/linux/pid_namespace.h）如下：
+-	nr_free 表示还能分配的 pid 的数量
+-	page 指向的是存放 pid 的物理页
 
 ####    pid之间的关系（重要）
 
@@ -257,13 +244,43 @@ page 指向的是存放 pid 的物理页。
 -   如何快速地根据 PID、命名空间、ID 类型找到对应进程的 task_struct ？
 -   如何快速地给新进程在可见的命名空间内分配一个唯一的 PID ？
 
+在level 2 的某个命名空间上新建了一个进程，分配给它的 pid 为45，映射到 level 1 的命名空间，分配给它的 pid 为 134；再映射到 level 0 的命名空间，分配给它的 pid 为289
+
 ![]()
 
-####    查询PID
+####    查询PID：分类讨论
+1、获取与 `task_struct` 相关的 pid 结构体实例：`pid`/`tgid`/`pgrp`/`session`
 
-1、根据`task_struct`查询PID
+```cpp
+ static inline struct pid *task_pid(struct task_struct *task)
+ {
+ 	return task->pids[PIDTYPE_PID].pid;
+ }
+    
+ static inline struct pid *task_tgid(struct task_struct *task)
+ {
+ 	return task->group_leader->pids[PIDTYPE_PID].pid;
+ }
+    
+ static inline struct pid *task_pgrp(struct task_struct *task)
+ {
+ 	return task->group_leader->pids[PIDTYPE_PGID].pid;
+ }
+    
+ static inline struct pid *task_session(struct task_struct *task)
+ {
+ 	return task->group_leader->pids[PIDTYPE_SID].pid;
+ }
+```
 
 2、获取与 `task_struct` 相关的 PID 命名空间
+
+```cpp
+ struct pid_namespace *task_active_pid_ns(struct task_struct *tsk)
+ {
+     return ns_of_pid(task_pid(tsk));
+ }
+```
 
 3、获取 `pid` 实例中的 PID
 
