@@ -18,14 +18,12 @@ cgroup = limits how much you can use;
 namespaces = limits what you can see (and therefore use)
 ```
 
-
 -   Linux Namespace 主要用于隔离系统资源，在一个 Namespace 中的进程看不到另一个 Namespace 中的资源。例如一个进程可能有自己的网络堆栈，与其他进程的网络堆栈完全隔离。Namespace 是实现容器技术的基础，如 Docker， Namespace 是将内核的全局资源做封装，使得每个 Namespace 都有一份独立的资源，因此不同的进程在各自的 Namespace 内对同一种资源的使用不会互相干扰
 -   Cgroup（Control Group）则主要用于管理和限制系统资源的使用。它可以限制一个进程组使用的 CPU、内存等资源的数量。如可以设置一个 Cgroup，使得其中的进程最多只能使用 `50%` 的 CPU 时间，Cgroup 是内核提供的一种资源隔离的机制，可以实现对进程所使用的 cpu、内存物理资源、及网络带宽等进行限制。还可以通过分配的 CPU 时间片数量及磁盘 IO 宽带大小控制任务运行的优先级
 
 Cgroups 可以理解为是房子的土地面积，限制了房子的大小 ，而 Namespace 是房子的墙，与邻居互相隔离
 
 ![namespace-and-cgroup](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/linux/namespace-vs-cgroup.png)
-
 
 ##  0x01    Namespace
 
@@ -164,7 +162,22 @@ cgroup on /sys/fs/cgroup/perf_event type cgroup (rw,nosuid,nodev,noexec,relatime
 cgroup on /sys/fs/cgroup/pids type cgroup (rw,nosuid,nodev,noexec,relatime,pids)
 ```
 
-##  0x05    参考
+##  0x05    pid namespace：详解
+Kernel为了实现资源隔离和虚拟化，引入了Namespace机制，即可以创建多个pid相互隔离的namespace：
+-   每个namespace里都有自己的`1`号init进程，来负责启动时初始化和接收孤儿进程
+-   不同pid namespace中的各进程`pid`可以相同
+-   pid namespace可以层级嵌套创建，**下一级pid namespace中进程对其以上所有层的pid namespace都是可见的**，同一个task（内核里进程，线程统一都用`task_struct`表示）且在不同层级namespace中`pid`可以不同
+-   Kernel中一个task的ID由两个元素可唯一确定：`[pid-namespace, pid]`
+
+如下图所示
+
+-   `PN1-PID2`、 `PN2-PID10`、`PN4-PID1`，它们都指向的是同一个task `1`
+-   `PN1-PID3`、`PN2-PID8`、`PN5-PID1`，它们都指向的是同一个task `2`
+
+![PIDNAMESPACE](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/linux/pid_namespace_1.png)
+
+##  0x06    参考
 -   [Linux Namespace 和 Cgroup](https://segmentfault.com/a/1190000009732550)
 -   [如何在 Go 中使用 CGroup 实现进程内存控制](https://cloud.tencent.com/developer/article/2005471)
 -   [探索 Linux 命名空间和控制组：实现资源隔离与管理的双重利器](https://cloud.tencent.com/developer/article/2367949)
+-   [Linux PID 一网打尽](https://cloud.tencent.com/developer/article/1682890)
