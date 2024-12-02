@@ -51,9 +51,24 @@ CPU 提供了专门的入口，用来从用户态进入内核态（CPU 使用权
 
 ##  0x01    进程的基础概念
 
-PID 是kernel内部对进程的一个标识符，用来唯一标识一个进程（task）、进程组（process group）、会话（session）。PID 及其对应进程存储在一个哈希表中，方便依据 PID 快速访问进程 `task_struct`
+本节主要讨论下面几个问题
 
-本文只讨论内核态的进（线）程，本质上Linux 内核中进程/线程都是用 [`task_struct`](https://elixir.free-electrons.com/linux/v4.11.6/source/include/linux/sched.h#L483)（任务） 来表示的，结构如下：在用户态调用`getpid`实际上返回的是`task_struct`的`tgid`字段，而`pid`每个线程都是不同的（都一个进程生成的不同线程而言）
+-   `tid`/`pid`/`ppid`/`tgid`/`pgid`/`seesion id`在内核的表示
+-   pid namesapce：对pid的影响
+-   如何创建一个pid namespace以及如何进入一个已存在的pid namespace
+-   内核结构`task_struct`与这一系列id之间的关联
+
+####    基础概念
+-   从Kernel的角度来看，不会区分进程（PID）、线程（TID），最终都会对应到内核对象`task_struct`上
+线程组，顾名思义就是一组有关联的线程，从用户空间角度来说就是一个包含了多线程的进程，细分的话又可以分为主线程和其他线程，其中线程组ID，我们称之为TGID，它就等于这个主线程的TID，用task_struct::tgid表示
+进程组，我们启动一个进程，此进程又创建一个线程，那这个进程和这个线程就属于同一个进程组; 我们启动的这个进程又fork了一个新的进程，那这两个进程和这个线程也是同属于同一个进程组；且这个进程组的ID. 即PGID就是我们最早启动的进程的PID
+ Session, 简单来说就是一系列进程组的组合。 我们开启一个Shell终端，也就建立了一个Session;
+ 我们通过这个shell启动若干个进程，这些进程和这个Shell终端就同属于同一个 Session，这个Session的ID就是这个shell终端进程的PID
+
+PID 是kernel内部对进程的一个标识符，用来唯一标识一个进程（task）、进程组（process group）、会话（session）。PID 及其对应进程存储在一个哈希表中，方便依据 PID 快速访问进程 `task_struct`
+####    进程描述符基础结构：task_struct
+
+本文只讨论内核态的进（线）程，本质上Linux 内核中进程/线程都是用 [`task_struct`](https://elixir.free-electrons.com/linux/v4.11.6/source/include/linux/sched.h#L483)（任务） 来表示的，结构如下：在用户态调用`getpid`实际上返回的是`task_struct`的`tgid`字段，而`pid`每个线程都是不同的（都一个进程生成的不同线程而言），`task_struct`也是CPU调度的实体
 
 ```CPP
 //file:include/linux/sched.h
@@ -138,18 +153,20 @@ struct nsproxy {
 ![task-struct-basic.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/task-struct-basic.png)
 
 ####    PID：进程ID
-[`pid`](https://elixir.free-electrons.com/linux/v4.11.6/source/include/linux/pid.h#L57)定义如下，在`task_struct`中，通过`task->pids[PIDTYPE_PID].pid`可以定位到（`task_pid`[函数](https://elixir.free-electrons.com/linux/v4.11.6/source/include/linux/sched.h#L1056)）
+内核结构[`pid`](https://elixir.free-electrons.com/linux/v4.11.6/source/include/linux/pid.h#L57)定义如下，在`task_struct`中，通过`task->pids[PIDTYPE_PID].pid`可以定位到（`task_pid`[函数](https://elixir.free-electrons.com/linux/v4.11.6/source/include/linux/sched.h#L1056)），**虽然名字是pid，不过实际上该结构抽象了不仅是一个thread ID或者process ID，实际上还包括了进程组ID和session ID**
 
 `pid`重要成员如下：
 
--   `count`：该数据结构被引用的次数
+-   `count`：由于多个`task struct`会共享`pid`（例如一个session中的所有的`task_struct`都会指向同一个表示该session ID的`struct pid`数据对象），表示该数据对象的引用计数
 -   `level`：该 `pid` 在 `pid_namespace` 中所处层级，当 `level=0` 时表示是 global namespace（最高层）
 -   `tasks[i]`：指向 PID 对应的 `task_struct`。`PIDTYPE_MAX` 是 `pid` 的类型数（枚举）。一个或多个进程可以组成一个进程组，进程组ID（PGID）为进程组领导进程 （process group leader）的PID；一个或多个进程组可以组成一个会话，会话ID（SID）为会话领导进程（session leader）的PID
 -   `rcu`：用于保证数据同步
 -   `numbers[1]`：是一个可扩展 `upid` 结构体。 一个 PID 可以属于不同的 namespace ， `numbers[0]` 表示 global namespace，`numbers[i]` 表示第 `i` 层 namespace，`i` 越大所在层级越低，下文详细说明
 
+前文[Linux Namespace && Cgroup](https://pandaychen.github.io/2023/10/06/A-CGROUP-ANALYSIS/)描述过pid namespace hierarchy基础，任何一个系统分配的PID都是隶属于某一个namespace的，而这个namespace又是位于整个pid namespace hierarchy的某个层次上，`pid->level`指明了该PID所属的namespace的level。由于pid对其parent pid namespace也是可见的，因此`level`值其实也就表示了这个pid对象在多少个pid namespace中可见。在多少个pid namespace中可见，就会有多少个（pid namespace，pid number）对，`numbers`就是这样的一个数组，每个成员都指向了各个`level`上的pid number
 
-`upid` 结构的成员如下:
+
+`upid` 结构的成员如下（**在Kernel中一个task的ID由两个元素唯一确定 `[pid namespace, processid id]`，在内核中用upid表示**）
 -   `nr`：是`pid`的值， 即 `task_struct` 中 `pid_t pid` 域的值（重要）
 -   `ns`：指向该 `pid` 所处的 `namespace`
 -   `pid_chain`： 是 `pid_hash` 哈希表节点。linux内核将所有进程的`upid`都存放在一个哈希表（`pid_hash`）中，以方便查找和统一管理。通过 `pid_chain` 能够找到该 `upid` 所在 `pid_hash` 中的位置
@@ -170,7 +187,7 @@ struct pid
 struct upid {
 	  /* Try to keep pid_chain in the same cacheline as nr for find_vpid */
 	  int nr;
-	  struct pid_namespace *ns;
+	  struct pid_namespace *ns; // 所属的pid namespace
 	  struct hlist_node pid_chain;
 };
 
@@ -183,8 +200,10 @@ enum pid_type
 };
 ```
 
+关于`pid.numbers[1]`这个成员，本质上一个柔性数组，每次在分配struct pid时，`numbers`会被扩展到`level`个元素，它用来容纳在每一层pid namespace中的 id（`upid`）
+
 ####    pid_namespace：进程命名空间
-`pid` 命名空间 `pid_namespace` 的[定义]()如下，关联`upid`的`ns`成员：
+`pid` 命名空间 `pid_namespace` 的[定义](https://elixir.free-electrons.com/linux/v4.11.6/source/include/linux/pid_namespace.h#L30)如下，关联`upid`的`ns`成员：
 
 ```CPP
 struct pid_namespace {
@@ -226,85 +245,125 @@ struct pidmap {
 ```
 
 -   `kref`： 表示指向 `pid_namespace` 的个数
--   `pidmap` 结构体表示分配`pid`的bitmap，`pidmap[PIDMAP_ENTRIES]` 域存储了该 `pid_namespace` 下 `pid` 已分配情况
+-   `pidmap` 结构体表示分配pid的bitmap，`pidmap[PIDMAP_ENTRIES]` 域存储了该 `pid_namespace` 下 pid 已分配情况
 -   `rcu`：同样用于保证数据同步
 -	`last_pid`：最后一个已分配的 pid
 -	`nr_hashed`：统计该命名空间已分配PID个数
--	child_reaper指向的是一个进程。 该进程的作用是当子进程结束时为其收尸（回收空间）。global namespace 中child_reaper 指向 init_task。
--	pid_cachep 域指向分配 pid 的 slab 的地址。
--	level 表示该命名空间所处层级
--	parent 指向该命名空间的父命名空间
--	pidmap 结构体定义（include/linux/pid_namespace.h）如下：
--	nr_free 表示还能分配的 pid 的数量
--	page 指向的是存放 pid 的物理页
+-	`child_reaper`：指向的是一个进程，该进程的作用是当子进程结束时为其收尸（回收空间），global namespace 中`child_reaper` 指向 `init_task`
+-	`pid_cachep`：域指向分配 pid 的 slab 的地址
+-	`level`：该命名空间所处层级（重要）
+-	`parent`：指向该命名空间的父命名空间
+
+`pidmap` 结构体定义如下：
+-	`nr_free`：表示还能分配的 pid 的数量
+-	`page`：指向的是存放 pid 的物理页
 
 ####    pid之间的关系（重要）
 
--   如何快速地根据进程的 task_struct、ID 类型、命名空间找到 PID ？
--   如何快速地根据 PID、命名空间、ID 类型找到对应进程的 task_struct ？
+-   如何快速地根据进程的 `task_struct`、ID 类型、命名空间找到 PID ？
+-   如何快速地根据 PID、pid namespace、ID 类型找到对应进程的 `task_struct` ？
 -   如何快速地给新进程在可见的命名空间内分配一个唯一的 PID ？
+下图描述了这种关系，在level `2` 的某个pid namespace上新建了一个进程，分配给它的 pid 为`45`，映射到 level `1` 的pid namespace，分配给它的 pid 为 `134`；再映射到 level `0` 的pid namespace，分配给它的 pid 为`289`（注意`numbers`这个柔性数组），此外，图中只标识了`level=2,pid=45`的pid结构
 
-在level 2 的某个命名空间上新建了一个进程，分配给它的 pid 为45，映射到 level 1 的命名空间，分配给它的 pid 为 134；再映射到 level 0 的命名空间，分配给它的 pid 为289
-
-![]()
+![relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/pid_namespace.png)
 
 ####    查询PID：分类讨论
+根据上图，来看下相关的函数
+
 1、获取与 `task_struct` 相关的 pid 结构体实例：`pid`/`tgid`/`pgrp`/`session`
 
 ```cpp
- static inline struct pid *task_pid(struct task_struct *task)
- {
+static inline struct pid *task_pid(struct task_struct *task)
+{
  	return task->pids[PIDTYPE_PID].pid;
- }
+}
     
- static inline struct pid *task_tgid(struct task_struct *task)
- {
+static inline struct pid *task_tgid(struct task_struct *task)
+{
  	return task->group_leader->pids[PIDTYPE_PID].pid;
- }
+}
     
- static inline struct pid *task_pgrp(struct task_struct *task)
- {
+static inline struct pid *task_pgrp(struct task_struct *task)
+{
  	return task->group_leader->pids[PIDTYPE_PGID].pid;
- }
+}
     
- static inline struct pid *task_session(struct task_struct *task)
- {
+static inline struct pid *task_session(struct task_struct *task)
+{
  	return task->group_leader->pids[PIDTYPE_SID].pid;
- }
+}
 ```
 
 2、获取与 `task_struct` 相关的 PID 命名空间
 
 ```cpp
- struct pid_namespace *task_active_pid_ns(struct task_struct *tsk)
- {
+struct pid_namespace *task_active_pid_ns(struct task_struct *tsk)
+{
      return ns_of_pid(task_pid(tsk));
- }
+}
+
+static inline struct pid_namespace *ns_of_pid(struct pid *pid)
+{
+    struct pid_namespace *ns = NULL;
+    if (pid)
+        ns = pid->numbers[pid->level].ns;
+    return ns;
+}
 ```
 
 3、获取 `pid` 实例中的 PID
 
-4、此外，内核还封装有直接获取初始命名空间、当前命名空间对应 PID 的方法：
+参数：
+-   `pid`：指向 struct pid 结构体的指针，代表了一个进程的PID
+-   `ns`：指向 struct pid_namespace 结构体的指针，代表了一个PID命名空间
 
- static inline pid_t pid_nr(struct pid *pid)
- {
+```CPP
+pid_t pid_nr_ns(struct pid *pid, struct pid_namespace *ns)
+{
+ 	struct upid *upid;
+ 	pid_t nr = 0;
+    
+    //由于 PID 命名空间的层次性，父命名空间能看到子命名空间的内容，反之则不能
+    // 确保当前命名空间的 level 小于等于产生局部 PID 的命名空间的 level
+ 	if (pid && ns->level <= pid->level) {
+ 		upid = &pid->numbers[ns->level];
+ 		if (upid->ns == ns){
+            // 检查传入的参数ns地址是否与upid的level指向的ns地址一致
+ 			nr = upid->nr;
+        }
+ 	}
+
+    //违反规则时返回0
+ 	return nr;
+}
+```
+
+
+4、直接获取初始命名空间
+
+```CPP
+static inline pid_t pid_nr(struct pid *pid)
+{
  	pid_t nr = 0;
  	if (pid)
  		nr = pid->numbers[0].nr;
  	return nr;
- }
-    
- pid_t pid_vnr(struct pid *pid)
- {
+}
+```
+
+5、当前命名空间对应 PID
+
+```CPP
+pid_t pid_vnr(struct pid *pid)
+{
  	return pid_nr_ns(pid, task_active_pid_ns(current));
- }
+}
+```
 
 ####    分配PID
-3.3 分配PID
-为新进程 task_struct 分配 pid 域
+1、为新进程 `task_struct` 分配 `pid`
 
-新的进程使用 alloc_pid 方法分配 pid，代码（kernel/pid.c）如下：
-
+```CPP
  struct pid *alloc_pid(struct pid_namespace *ns)
  {
  	struct pid *pid;
@@ -371,10 +430,11 @@ struct pidmap {
  	kmem_cache_free(ns->pid_cachep, pid);
  	return ERR_PTR(retval);
  }
-从指定命名空间中分配唯一PID
+```
 
-kernel/pid.c
+2、从指定命名空间中分配唯一PID
 
+```CPP
  static int alloc_pidmap(struct pid_namespace *pid_ns)
  {
  	int i, offset, max_scan, pid, last = pid_ns->last_pid;
@@ -437,10 +497,11 @@ kernel/pid.c
  	}
  	return -EAGAIN;
  }
-回收PID
+```
 
-kernel/pid.c
+3、回收PID
 
+```CPP
  static void free_pidmap(struct upid *upid)
  {
  	int nr = upid->nr;
@@ -450,14 +511,15 @@ kernel/pid.c
  	clear_bit(offset, map->page);
  	atomic_inc(&map->nr_free);
  }
+```
 
 ####    查询task_struct
 
-查找 task_struct
-获得 pid 实体。
+1、获得 pid 实体（`struct pid`）
 
-根据 PID 以及指定命名空间计算在 pid_hash 数组中的索引，然后遍历散列表找到所要的 upid， 再根据内核的 container_of 机制找到 pid 实例。代码（kernel/pid.c）如下：
+大致过程是，根据 PID（参数`nr`） 以及指定命名空间（参数`ns`）计算在 `pid_hash` 数组中的索引，然后遍历散列表找到所要的 `upid`， 再根据内核的 `container_of` 机制找到 pid 实例
 
+```CPP
  struct pid *find_pid_ns(int nr, struct pid_namespace *ns)
  {
  	  struct upid *pnr;
@@ -470,28 +532,19 @@ kernel/pid.c
        
  	       return NULL;
  }
-由此，也可以根据当前命名空间下的局部 PID 获取对应的 pid实例：
+```
 
+2、根据当前命名空间下的局部 PID 获取对应的 pid实例：
+
+```CPP
  struct pid *find_vpid(int nr)
  {
    	return find_pid_ns(nr, task_active_pid_ns(current));
  }
-根据 pid 及 PID 类型获取 task_struct
-
- struct task_struct *pid_task(struct pid *pid, enum pid_type type)
- {
- 	struct task_struct *result = NULL;
- 	if (pid) {
- 		struct hlist_node *first;
- 		first = rcu_dereference_check(hlist_first_rcu(&pid->tasks[type]),
- 					      lockdep_tasklist_lock_is_held());
- 		if (first)
- 			result = hlist_entry(first, struct task_struct, pids[(type)].node);
- 	}
- 	return result;
- }
+```
 
 ####    小结
+tid/pid/ppid/tgid/pgid/seesion id小结：
 
 | ID | 解释 | task_struct 中的对应变量 | 系统调用|
 | :-----:| :----: | :----: |:----: |
@@ -506,7 +559,7 @@ kernel/pid.c
 ####     内核态的意义
 CPU 为了进行指令权限管控，引入了特权级的概念，CPU 工作在不同的特权级下能够执行的指令和可访问的内存区域是不一样的。计算机上电启动之处，CPU 运行在高特权级下，操作系统（Linux 内核）率先获得了执行权限，在内存设置一块固定区域并将自己的程序代码（内核代码）放了进去，并设定了这一部分内存只有高特权级才能访问。随后，操作系统在创建进程的时候，都会把自己所在的这块内存区域映射到每一个进程地址空间中，这样所有进程都能看到自己的进程空间中被映射的内核的区域，这一块区域是无法直接访问的。通常进入内核态是指：当中断、异常、系统调用等情况发生的时候，CPU 切换工作模式到高特权级模式 `Ring0`，并转而执行位于内核地址空间处的代码
 
-##  0x02  参考
+##  0x0  参考
 -   [Linux 进程是如何创建出来的？](https://cloud.tencent.com/developer/article/2187989)
 -   [Linux 内核进程管理](http://timd.cn/kernel-process-management/)
 -   <<深入理解 Linux 进程与内存>>
