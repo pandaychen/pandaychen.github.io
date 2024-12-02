@@ -166,6 +166,11 @@ WebShell 是一种可执行 Shell 命令的脚本文件（常见的有 PHP等）
 
 ##  0x06    基于ebpf的恶意利用
 
+1、使用 eBPF 添加 `sudo` 用户
+
+它通过拦截 `sudo` 读取 `/etc/sudoers` 文件，并将第一行覆盖为 `<username> ALL=(ALL:ALL) NOPASSWD:ALL #` 的方式工作。通过这种方式欺骗了 `sudo`，使其认为用户被允许成为 `root`。其他程序如 `cat` 或 `sudoedit` 不受影响，所以对于这些程序来说，文件未改变，用户并没有这些权限。行尾的 `#` 确保行的其余部分被当作注释处理，因此不会破坏文件的逻辑
+
+[bad-bpf](https://github.com/pathtofile/bad-bpf)
 
 ##  0x07  Linux Rootkit
 Linux Rootkit特指以Linux内核模块（LKM）形式加载到操作系统中，从内核态实现更高权限的操作，或直接对内核态代码进行篡改，从而劫持整个系统正常程序的运行。借助Rootkit，黑客可以实现对任意目录、文件、磁盘内容、进程、网络连接与流量的隐藏、窃取和篡改，并提供隐蔽的后门可供黑客直接登录到受害服务器执行更多操作
