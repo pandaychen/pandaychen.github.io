@@ -12,6 +12,15 @@ tags:
 
 ##  0x00    前言
 
+####    Operating System Kernel
+操作系统内核（Operation System Kernel）本质上也是一种软件，可以看作是普通应用程序与硬件之间的一层中间层，其主要作用便是调度系统资源、控制 IO 设备、操作网络与文件系统等，并为上层应用提供便捷、抽象的应用接口
+
+操作系统内核实际上是抽象出来的概念，本质上与用户进程一般无二，都是位于物理内存中的代码 加数据，不同之处在于**当 CPU 执行操作系统内核代码时通常运行在高权限，拥有着完全的硬件访问能力，而 CPU 在执行用户态代码时通常运行在低权限环境，只拥有部分 / 缺失硬件访问能力**
+
+这两种不同权限的运行状态实际上是通过硬件（分级保护环）来实现的
+
+![os](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/os_kernel_arch.png)
+
 ####    linux 的开机过程
 计算机通电后，首先执行 BIOS 的自检，用于检查外围关键设备是否正常。BIOS 根据设置的启动顺序，搜索用于启动系统的驱动器，并将其 MBR 加载到内存，然后执行 MBR（BIOS 并不关心 MBR 中是什么内容，它只负责读取并执行），此时控制权被交到了 MBR，boot loader 找到和加载 Linux 内核到内存中，并将控制权移交给内核。linux 启动之后，** 内核只是存在于内存中的程序，它和其他程序一样，都是被 cpu 调度执行的 **。那么，cpu 的使用权什么情况下，会被交给内核，然后内核进行进程管理的呢？
 
@@ -19,6 +28,15 @@ tags:
 涉及到操作系统管理计算机资源的指令（敏感指令），只能被操作系统能够执行。x86 CPU 提供了 `RING0`（最高权限模式，可以执行所有指令）~`RING3`（最低权限模式，仅能执行指令集中的一部分指令）的特权分级，让 CPU 在执行操作系统代码的时候运行在 `Ring0` 模式，在执行普通应用程序代码的时候运行在 `Ring3` 模式，这样就解决了特权指令的问题
 
 ![CPU-RING0](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/Priv_rings.svg.png)
+-   用户态：CPU 运行在 `ring3` + 用户进程运行环境上下文
+-   内核态：CPU 运行在 `ring0` + 内核代码运行环境上下文
+
+CPU 在不同的特权级间进行切换主要有两个途径：
+
+-   中断与异常（interrupt & exception）：当 CPU 收到一个中断 / 异常时，会切换到 `ring0`，并根据中断描述符表索引对应的中断处理代码以执行
+-   特权级相关指令：当 CPU 运行这些指令时会发生运行状态的改变，例如 `iret` 指令（`ring0`->`ring3`）或是 `sysenter` 指令（`ring3`->`ring0`）
+
+基于特权级切换的方式，现代操作系统的开发者包装出了系统调用（syscall），作为由用户态切换到内核态的入口，从而执行内核代码来完成用户进程所需的一些功能。当用户进程想要请求更高权限的服务时，便需要通过由系统提供的应用接口，使用系统调用以陷入内核态，再由操作系统完成请求
 
 ####    内核地址空间
 除了指令增加特权分级以外，在内存的访问也得加上特权级。由于 x86 架构的 CPU 是基于分段 + 分页式相结合的内存管理方式，通过给不同的内存段限定了不同的访问模式，并把它记录到了段的描述符中，在访问内存的时候，CPU 就会拿当前段寄存器中标示的权限和要访问的目标内存所在段段访问权限进行对比，符合要求才能访问，否则会抛出异常
@@ -60,15 +78,16 @@ CPU 提供了专门的入口，用来从用户态进入内核态（CPU 使用权
 
 ####    基础概念
 -   从Kernel的角度来看，不会区分进程（PID）、线程（TID），最终都会对应到内核对象`task_struct`上
-线程组，顾名思义就是一组有关联的线程，从用户空间角度来说就是一个包含了多线程的进程，细分的话又可以分为主线程和其他线程，其中线程组ID，我们称之为TGID，它就等于这个主线程的TID，用task_struct::tgid表示
-进程组，我们启动一个进程，此进程又创建一个线程，那这个进程和这个线程就属于同一个进程组; 我们启动的这个进程又fork了一个新的进程，那这两个进程和这个线程也是同属于同一个进程组；且这个进程组的ID. 即PGID就是我们最早启动的进程的PID
- Session, 简单来说就是一系列进程组的组合。 我们开启一个Shell终端，也就建立了一个Session;
- 我们通过这个shell启动若干个进程，这些进程和这个Shell终端就同属于同一个 Session，这个Session的ID就是这个shell终端进程的PID
+-   `TGID`：若进程以 `CLONE_THREAD` 标志调用 `clone` 方法，创建与该进程共享资源的线程。线程有独立的`task_struct`，but其 `files_struct`、`fs_struct` 、`sighand_struct`、`signal_struct`和`mm_struct` 成员仅仅是对进程相应数据结构的引用；由进程创建的所有线程都有相同的线程组ID（即TGID），线程有自己的 PID，它的TGID 就是进程的主线程的 PID；如果进程没有使用线程，则其 PID 和 TGID 相同，此外，当 `task_struct` 代表一个线程时，`task_struct->group_leader` 指向主线程的 `task_struct`
+-   `PGID`： 如果 shell 具有作业管理能力，则它所创建的相关进程构成一个进程组，同一进程组的进程都有相同的 `PGID`（如用管道连接的进程包含在同一个进程组中），进程组简化了向组的所有成员发送信号的操作，信号可以发送给组内的所有进程，这使得作业控制变得简单。当 `task_struct` 代表一个进程，且该进程属于某一个进程组，则 `task_struct->group_leader` 指向组长进程的 `task_struct`。PGID 保存在`task_struct->signal->pids[PIDTYPE_PGID].pid`中
+-   `SID`：一系列进程组的组合，一般看到的 tty(比如键盘、屏幕的 `tty1~tty7`，或者网络连接的虚拟 tty 即 pty)，一个 tty 对应一个 session。在当前 tty 中创建的所有进程都共享一个 sid(即 leader 的 pid)
+-   `PID`：是kernel内部对进程的一个标识符，用来唯一标识一个进程（task）、进程组（process group）、会话（session）。PID 及其对应进程存储在一个哈希表中，方便依据 PID 快速访问进程 `task_struct`
 
-PID 是kernel内部对进程的一个标识符，用来唯一标识一个进程（task）、进程组（process group）、会话（session）。PID 及其对应进程存储在一个哈希表中，方便依据 PID 快速访问进程 `task_struct`
+![basic](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/sid_struct.png)
+
 ####    进程描述符基础结构：task_struct
 
-本文只讨论内核态的进（线）程，本质上Linux 内核中进程/线程都是用 [`task_struct`](https://elixir.free-electrons.com/linux/v4.11.6/source/include/linux/sched.h#L483)（任务） 来表示的，结构如下：在用户态调用`getpid`实际上返回的是`task_struct`的`tgid`字段，而`pid`每个线程都是不同的（都一个进程生成的不同线程而言），`task_struct`也是CPU调度的实体
+本文只讨论内核态的进（线）程，本质上Linux 内核中进程/线程都是用 [`task_struct`](https://elixir.free-electrons.com/linux/v4.11.6/source/include/linux/sched.h#L483)（任务） 来表示的，结构如下：**在用户态调用`getpid`实际上返回的是`task_struct`的`tgid`字段**，而`pid`每个线程都是不同的（都一个进程生成的不同线程而言），`task_struct`也是CPU调度的实体
 
 ```CPP
 //file:include/linux/sched.h
@@ -263,6 +282,7 @@ struct pidmap {
 -   如何快速地根据进程的 `task_struct`、ID 类型、命名空间找到 PID ？
 -   如何快速地根据 PID、pid namespace、ID 类型找到对应进程的 `task_struct` ？
 -   如何快速地给新进程在可见的命名空间内分配一个唯一的 PID ？
+
 下图描述了这种关系，在level `2` 的某个pid namespace上新建了一个进程，分配给它的 pid 为`45`，映射到 level `1` 的pid namespace，分配给它的 pid 为 `134`；再映射到 level `0` 的pid namespace，分配给它的 pid 为`289`（注意`numbers`这个柔性数组），此外，图中只标识了`level=2,pid=45`的pid结构
 
 ![relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/pid_namespace.png)
@@ -554,6 +574,195 @@ tid/pid/ppid/tgid/pgid/seesion id小结：
 |SID（Session ID）|会话 ID，多个进程组可以组合为会话，会话的组长PGID 即为 SID|`task_struct->signal->__session`|pid_t getsid(pid_t pid);|
 |PPID （Parent Process ID）	|父进程 ID|task_struct->parent->pid|pid_t getppid(void)|
 
+##  0x02    Linux进程虚拟地址空间
+`task_struct`成员，内存描述符 `mm_struct`（memory descriptor）表示了整个进程的虚拟地址空间部分。进程运行时，在用户态其所需要的代码、全局变量以及 mmap 内存映射等全部都是通过 `mm_struct` 来进行内存查找和寻址的， `mm_struct` 关联的地址空间、页表、物理内存的关系如下图：
+
+```CPP
+struct mm_struct {
+ struct vm_area_struct * mmap;  /* list of VMAs */
+ struct rb_root mm_rb;
+
+ unsigned long mmap_base;  /* base of mmap area */
+ unsigned long task_size;  /* size of task vm space */
+ unsigned long start_code, end_code, start_data, end_data;
+ unsigned long start_brk, brk, start_stack;
+ unsigned long arg_start, arg_end, env_start, env_end;
+}
+```
+
+![mm_struct](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/task-struct-4-mm-modify.png)
+
+-	**在内核内存区域，可以通过直接计算得出物理内存地址，并不需要复杂的页表计算**。而且最重要的是所有内核进程、以及用户进程的内核态，这部分内存都是共享的
+-	`mm_struct`表示的是虚拟地址空间，而对于内核线程来说，是没有用户态的虚拟地址空间的，其value为`NULL`
+
+##  0x03    进程权限
+
+####    进程权限凭证（credential）
+在内核结构`task_struct`中有下面的字段标识了进程权限凭证：
+```CPP
+struct task_struct {
+    // ...
+    /* Process credentials: */
+
+    /* Tracer's credentials at attach: */
+    const struct cred __rcu        *ptracer_cred;
+
+    /* Objective and real subjective task credentials (COW): */
+    const struct cred __rcu        *real_cred;
+
+    /* Effective (overridable) subjective task credentials (COW): */
+    const struct cred __rcu        *cred;
+    //...
+}
+```
+
+其中，结构体 `cred` 用以管理一个进程的权限，如下所示。一个 `cred` 结构体中记载了一个进程`4`种不同的用户 ID，在通常情况下这几个 ID 应当都是相同的，以`*uid`为例：
+-   真实用户 ID（real UID）：标识一个进程启动时的用户 ID
+-   保存用户 ID（saved UID）：标识一个进程最初的有效用户 ID
+-   有效用户 ID（effective UID）：标识一个进程正在运行时所属的用户 ID，一个进程在运行途中是可以改变自己所属用户的，因而权限机制也是通过有效用户 ID 进行认证的，内核通过 `euid` 来进行特权判断；为了防止用户一直使用高权限，当任务完成之后，`euid` 会与 `suid` 进行交换，恢复进程的有效权限
+-   文件系统用户 ID（UID for VFS ops）：标识一个进程创建文件时进行标识的用户 ID
+
+```CPP
+/*
+ * The security context of a task
+ *
+ * The parts of the context break down into two categories:
+ *
+ *  (1) The objective context of a task.  These parts are used when some other
+ *  task is attempting to affect this one.
+ *
+ *  (2) The subjective context.  These details are used when the task is acting
+ *  upon another object, be that a file, a task, a key or whatever.
+ *
+ * Note that some members of this structure belong to both categories - the
+ * LSM security pointer for instance.
+ *
+ * A task has two security pointers.  task->real_cred points to the objective
+ * context that defines that task's actual details.  The objective part of this
+ * context is used whenever that task is acted upon.
+ *
+ * task->cred points to the subjective context that defines the details of how
+ * that task is going to act upon another object.  This may be overridden
+ * temporarily to point to another security context, but normally points to the
+ * same context as task->real_cred.
+ */
+struct cred {
+    atomic_long_t   usage;
+    kuid_t      uid;        /* real UID of the task */
+    kgid_t      gid;        /* real GID of the task */
+    kuid_t      suid;       /* saved UID of the task */
+    kgid_t      sgid;       /* saved GID of the task */
+    kuid_t      euid;       /* effective UID of the task */
+    kgid_t      egid;       /* effective GID of the task */
+    kuid_t      fsuid;      /* UID for VFS ops */
+    kgid_t      fsgid;      /* GID for VFS ops */
+    unsigned    securebits; /* SUID-less security management */
+    kernel_cap_t    cap_inheritable; /* caps our children can inherit */
+    kernel_cap_t    cap_permitted;  /* caps we're permitted */
+    kernel_cap_t    cap_effective;  /* caps we can actually use */
+    kernel_cap_t    cap_bset;   /* capability bounding set */
+    kernel_cap_t    cap_ambient;    /* Ambient capability set */
+#ifdef CONFIG_KEYS
+    unsigned char   jit_keyring;    /* default keyring to attach requested
+                     * keys to */
+    struct key  *session_keyring; /* keyring inherited over fork */
+    struct key  *process_keyring; /* keyring private to this process */
+    struct key  *thread_keyring; /* keyring private to this thread */
+    struct key  *request_key_auth; /* assumed request_key authority */
+#endif
+#ifdef CONFIG_SECURITY
+    void        *security;  /* LSM security */
+#endif
+    struct user_struct *user;   /* real user ID subscription */
+    struct user_namespace *user_ns; /* user_ns the caps and keyrings are relative to. */
+    struct ucounts *ucounts;
+    struct group_info *group_info;  /* supplementary groups for euid/fsgid */
+    /* RCU deletion */
+    union {
+        int non_rcu;            /* Can we skip RCU deletion? */
+        struct rcu_head rcu;        /* RCU deletion hook */
+    };
+} __randomize_layout;
+```
+
+##  0x04 关联文件系统
+`task_struct`亦关联了进程文件系统信息（如：当前目录等）以及当前进程打开文件的信息
+
+```CPP
+struct task_struct{
+	// ...
+    struct fs_struct *fs; 　　　　//文件系统信息，fs保存了进程本身与VFS（虚拟文件系统）的关系信息
+    struct files_struct *files;　//打开文件信息（记录了所有process打开文件的句柄数组）
+	// ...
+}
+```
+
+![relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/task_struct.png)
+
+#### 进程文件系统信息（fs_struct）
+
+```CPP
+//file:include/linux/fs_struct.h
+struct fs_struct {
+ //...
+ struct path root, pwd;
+};
+
+//file:include/linux/path.h
+struct path {
+ struct vfsmount *mnt;
+ struct dentry *dentry;
+};
+```
+
+![fs_struct](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/task-struct-5-files.png)
+
+在 `fs_struct` 中包含了两个 `path` 对象，而每个 `path` 中都指向了一个 `struct dentry`。在 Linux `内核中，denty` 结构是对一个目录项的描述。以 `pwd` 为例，该指针指向的是进程当前目录所处的 `denty` 目录项。如在 shell 进程中执行 `pwd`命令，或用户进程查找当前目录下的配置文件的时候，都是通过访问 `pwd` 这个对象，进而找到当前目录的 `denty`
+
+####  进程打开的文件信息（files）
+每个进程用一个 `files_struct` 结构（用户打开文件表）来记录文件描述符的使用情况
+
+```CPP
+//file:include/linux/fdtable.h
+struct files_struct {
+  //......
+ //下一个要分配的文件句柄号
+ int next_fd; 
+
+ //fdtable
+ struct fdtable __rcu *fdt;
+}
+
+struct fdtable {
+ //当前的文件数组
+ struct file __rcu **fd;
+ //......
+};
+```
+
+![files_struct](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/task-struct-5-files-1.png)
+
+如上图，在 `files_struct` 中，最重要的是在 `fdtable` 中包含的 `file **fd` 这个二维数组，此数组的下标就是文件描述符，其中 `0`、`1`、`2` 三个描述符总是默认分配给标准输入、标准输出和标准错误。此外，其他数组元素中记录了当前进程打开的每一个文件的指针。这个文件是 Linux 中抽象的文件，可能是真的磁盘上的文件，也可能是一个 socket（考虑下管道pipe的场景）
+
+##	0x05	namespaces
+`task_struct`中成员`struct nsproxy *nsproxy;`指向命名空间namespaces的指针（通过 namespace 可以让一些进程只能看到与自己相关的一部分资源，而另外一些进程也只能看到与它们自己相关的资源，这两类进程无法感知对方的存在）。实现方式是把一个或多个进程的相关资源指定在同一个 namespace 中，而进程究竟是属于哪个 namespace 由 `*nsproxy` 指针表明了归属关系
+
+```CPP
+struct nsproxy {
+ atomic_t count;
+ struct uts_namespace *uts_ns;
+ struct ipc_namespace *ipc_ns;
+ struct mnt_namespace *mnt_ns;
+ struct pid_namespace *pid_ns;
+ struct net       *net_ns;
+};
+```
+
+![task_struct_2_namespaces](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/task-struct-6-namespace.png)
+
+##	0x06	进程线程状态及状态图
+
+
 ##  0x0 总结
 
 ####     内核态的意义
@@ -570,3 +779,5 @@ CPU 为了进行指令权限管控，引入了特权级的概念，CPU 工作在
 -   [linux内核PID管理](https://carecraft.github.io/basictheory/2017/03/linux-pid-manage/)
 -   [Linux 内核进程管理之进程ID](https://www.cnblogs.com/hazir/p/linux_kernel_pid.html)
 -   [Pid Namespace 详解](https://tinylab.org/pid-namespace/)
+-   [linuxkerneltravel](https://github.com/linuxkerneltravel)
+-   [基础知识](https://ctf-wiki.org/pwn/linux/kernel-mode/basic-knowledge/)
