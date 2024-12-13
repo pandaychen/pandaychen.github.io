@@ -219,7 +219,7 @@ enum pid_type
 };
 ```
 
-关于`pid.numbers[1]`这个成员，本质上一个柔性数组，每次在分配struct pid时，`numbers`会被扩展到`level`个元素，它用来容纳在每一层pid namespace中的 id（`upid`）
+关于`pid.numbers[1]`这个成员，本质上一个柔性数组，每次在分配`struct pid`时，`numbers`会被扩展到`level`个元素，它用来容纳在每一层pid namespace中的 id（`upid`）
 
 ####    pid_namespace：进程命名空间
 `pid` 命名空间 `pid_namespace` 的[定义](https://elixir.free-electrons.com/linux/v4.11.6/source/include/linux/pid_namespace.h#L30)如下，关联`upid`的`ns`成员：
@@ -569,10 +569,10 @@ tid/pid/ppid/tgid/pgid/seesion id小结：
 | ID | 解释 | task_struct 中的对应变量 | 系统调用|
 | :-----:| :----: | :----: |:----: |
 | PID （Process ID） | 实际上是线程 ID，内核中进程、线程都使用 `task_struct` 结构表示 | `task_struct->pid` |`pid_t gettid(void)` |
-| TGID (Thread Group ID) | 线程组 ID，即线程组组长的 PID，真正的进程 ID，如果进程只有一个线程则他的 PID 和 TGID 相同 | `task_struct->tgid` | pid_t getpid(void) |
-|PGID （Process Group ID）|进程组 ID，多个进程可以组合为进程组，方便向所有成员发送信号，进程组组长的 PID 即为PGID|`task_struct->signal->__pgrp`|pid_t getpgrp(void)|
-|SID（Session ID）|会话 ID，多个进程组可以组合为会话，会话的组长PGID 即为 SID|`task_struct->signal->__session`|pid_t getsid(pid_t pid);|
-|PPID （Parent Process ID）	|父进程 ID|task_struct->parent->pid|pid_t getppid(void)|
+| TGID (Thread Group ID) | 线程组 ID，即线程组组长的 PID，真正的进程 ID，如果进程只有一个线程则他的 PID 和 TGID 相同 | `task_struct->tgid` | `pid_t getpid(void)` |
+|PGID （Process Group ID）|进程组 ID，多个进程可以组合为进程组，方便向所有成员发送信号，进程组组长的 PID 即为PGID|`task_struct->signal->__pgrp`|`pid_t getpgrp(void)`|
+|SID（Session ID）|会话 ID，多个进程组可以组合为会话，会话的组长PGID 即为 SID|`task_struct->signal->__session`|`pid_t getsid(pid_t pid)`|
+|PPID （Parent Process ID）	|父进程 ID|`task_struct->parent->pid`|`pid_t getppid(void)`|
 
 ##  0x02    Linux进程虚拟地址空间
 `task_struct`成员，内存描述符 `mm_struct`（memory descriptor）表示了整个进程的虚拟地址空间部分。进程运行时，在用户态其所需要的代码、全局变量以及 mmap 内存映射等全部都是通过 `mm_struct` 来进行内存查找和寻址的， `mm_struct` 关联的地址空间、页表、物理内存的关系如下图：
@@ -587,6 +587,10 @@ struct mm_struct {
  unsigned long start_code, end_code, start_data, end_data;
  unsigned long start_brk, brk, start_stack;
  unsigned long arg_start, arg_end, env_start, env_end;
+
+
+	/* store ref to file /proc/<pid>/exe symlink points to */
+	struct file __rcu *exe_file;
 }
 ```
 
@@ -594,6 +598,7 @@ struct mm_struct {
 
 -	**在内核内存区域，可以通过直接计算得出物理内存地址，并不需要复杂的页表计算**。而且最重要的是所有内核进程、以及用户进程的内核态，这部分内存都是共享的
 -	`mm_struct`表示的是虚拟地址空间，而对于内核线程来说，是没有用户态的虚拟地址空间的，其value为`NULL`
+-	`mm_struct.exe_file`：（指向 `struct file`） 引用可执行文件（[较新内核](https://elixir.bootlin.com/linux/v6.2-rc1/source/include/linux/mm_types.h#L732)增加此字段）
 
 ##  0x03    进程权限
 
