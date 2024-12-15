@@ -125,7 +125,10 @@ struct file {
   __attribute__((aligned(4)));	/* lest something weird decides that 2 is OK */
 ```
 
-2、[`path`](https://elixir.bootlin.com/linux/v6.5/source/include/linux/path.h#L8)，成员`dentry`对应于图中指向dentry树节点，成员`vfsmount`表示挂载的分区信息等
+2、[`path`](https://elixir.bootlin.com/linux/v6.5/source/include/linux/path.h#L8)，成员`dentry`对应于图中指向dentry树节点，成员`vfsmount`表示挂载的分区信息等，`path`成员非常重要：
+
+-	`struct vfsmount *mnt`：该`path`指向哪个挂载点（重要）
+-	`struct dentry *dentry`：该`path`指向哪个`dentry`结构
 
 ```cpp
 struct path {
@@ -238,11 +241,18 @@ Linux 使用父子树的形式来构造，父设备树中的一个文件夹 `str
 
 ![2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/mnt-ns/mount_struct.png)
 
-2、mount tree：内核引入树形结构来关联mount关系（思考下前文，一个合法的子目录可以成为任意一个块设备的挂载点），`struct mount` 结构之间也构成了树形结构
+2、mount tree：内核引入树形结构来关联mount关系（思考下前文，一个合法的子目录可以成为任意一个块设备的挂载点），`struct mount` 结构之间也构成了树形结构（问题：mount tree构造的原则是什么？）
 
 ![3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/mnt-ns/mnt_tree.png)
 
--	`mnt_parent`：指向其父节点
+-	`mnt_parent`：指向其父节点（表示当前挂载点的父挂载点），通过跟踪每个挂载点的父挂载点，内核可以确保文件系统按照正确的顺序进行挂载和卸载，从而避免出现不一致的状态。在unmount一个文件系统之前，内核需要检查是否有其他挂载点依赖于它，确保只有在没有子挂载点的情况下才能卸载该文件系统，防止数据丢失或不一致
+
+```BASH
+/ (rootfs)
+├── /mnt (ext4)	 #/mnt的mnt_parent指向/（rootfs）
+│   └── /mnt/sub (vfat)	#/mnt/sub的mnt_parent指向/mnt
+└── /proc (procfs)
+```
 
 如上图，可以看到通过一个 `struct mount` 结构负责引用一颗**子设备树**，把这颗子设备树挂载到父设备树的其中一个 `dentry` 节点上；如果 `dentry` 成为了挂载点 `mountpoint`，会给其标识成 `DCACHE_MOUNTED`。在查找路径的时候同样会判断 `dentry` 的 `DCACHE_MOUNTED` 标志，一旦置位就变成了 `mountpoint`，挂载点目录下原有的内容就不能访问了，转而访问子设备树根节点下的内容
 
@@ -268,22 +278,58 @@ struct task_struct {
 }
 ```
 
-####	mount理解
-mount的过程就是把设备的文件系统加入到 vfs 框架中
+####	mount理解（两个规则）
+mount的过程就是把设备的文件系统加入到 vfs 框架中，以 `mount -t fstpye devname pathname` 命令来进行挂载子设备的操作为例：
+
+1、规则一，一个设备可以被挂载多次（本文开头的例子），如下图可以看到同一个子设备树，同时被两个 `struct mount` 结构所引用，被挂载到父设备树的两处不同的 `dentry` 处。特别说明**虽然子设备树被挂载两次并且通过两处路径都能访问，但子设备的 `dentry` 和 `inode` 只保持一份**
+
+![RULE1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/mnt-ns/mnt_tree_mmp.png)
+
+2、规则2，一个挂载点可以挂载多个设备，即可以对父设备树的同一个文件夹 `dentry` 进行多次挂载，最后路径查找时生效的是最后一次挂载的子设备树
+
+![RULES2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/mnt-ns/mnt_tree_mdev.png)
 
 
+####	多名空间的层次化（mnt_namespace）
 
 ##  0x0	 VFS 关联task_struct
-
+                                                                                          
 ##	0x0	files_struct
 ![files_struct](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/fs.vfs.png)
 
-##	0x	
+##	0x0	部分核心源码摘要
 
-![vfsops]()
+####	mount
+`mount()` 系统调用是理解文件系统层次化的核心，它主要包含3个关键步骤：
 
--	open：open system call 将创建一个 file 对象，并且在 open files tables 中分配一个索引。 在这个之前，还会做一些其他的工作，首先通过查找 dentry cache 来确定这个 file 存在的位置。 其次还包括一些鉴权工作
--	write：由于 block I/O 非常耗时，所有 linux 会使用 page cache 来缓存每次 read file 的内容， 当 write system call 时，系统将这个 page 标记为 dirty，并且将这个 page 移动到 dirty list 上， 系统会定时将这些 page flush 到磁盘上
+1、解析 `mount` 系统调用中的参数挂载点路径 `pathname` ，返回对应的 `struct path` 结构
+
+```BASH
+SYSCALL_DEFINE5(mount) → do_mount() → user_path() → user_path_at_empty() → filename_lookup() → path_lookupat() → link_path_walk() → walk_component() → follow_managed()
+```
+
+2、解析 `mount` 系统调用中的参数文件系统类型 `-t type` 和设备路径 `devname` ，建立起子设备的树形结构（如果之前已经创建过引用即可），建立起新的 `struct mount` 结构对其引用
+
+```BASH
+SYSCALL_DEFINE5(mount) → do_mount() → do_new_mount() → vfs_kern_mount() → mount_fs() → type->mount()
+```
+
+3、将新建立的 `struct mount` 结构挂载到查找到的 `struct path` 结构上
+
+```BASH
+SYSCALL_DEFINE5(mount) → do_mount() → do_new_mount() → do_add_mount() → graft_tree() → attach_recursive_mnt() → commit_tree()
+```
+
+##	0x0	用户态视角
+
+####	open then write
+
+以文件写入为例，先`open`再`write`：
+
+![vfsops](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/vfsops.png)
+
+-	`open`：工作流程大致为，系统调用将创建一个 `file` 对象（首先通过查找 dentry cache 来确定 `file` 存在的位置），并且在 open files tables 中（即`task_struct`的fd table）分配一个索引
+-	`write`：由于 block I/O 非常耗时，所有 linux 会使用 page cache 来缓存每次 read file 的内容， 当 write system call 时，系统将这个 page 标记为 dirty，并且将这个 page 移动到 dirty list 上， 系统会定时将这些 page flush 到磁盘上
 
 ##  0x0  参考
 -   [VFS](https://akaedu.github.io/book/ch29s03.html)
@@ -298,3 +344,4 @@ mount的过程就是把设备的文件系统加入到 vfs 框架中
 -	[bash的pwd命令实现](https://github.com/wertarbyte/coreutils/blob/master/src/pwd.c)
 -	[深入理解Linux文件系统之文件系统挂载(下)](https://cloud.tencent.com/developer/article/1857533)
 -	[Linux内核－虚拟文件系统(VFS)](https://bbs.kanxue.com/article-20845.htm)
+-	[Virtual File System](https://myaut.github.io/dtrace-stap-book/kernel/fs.html)
