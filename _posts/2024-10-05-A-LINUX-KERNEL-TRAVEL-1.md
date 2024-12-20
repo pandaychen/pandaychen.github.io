@@ -190,6 +190,17 @@ BPF_CALL_0(bpf_get_current_pid_tgid)
 }
 ```
 
+关于id的几个成员如下：
+
+|  表头   | 表头  |	
+|  ----  | ----  |	
+| 轻量级进程 process （`pid`）  | `task_struct->pid //pid_t` |
+|	|`task_struct->pids[PIDTYPE_PID]->pid //struct pid *`|
+| 线程组 thread group （`tgid`）  | `task_struct->tgid //pid_t` |
+|   | `task_struct->group_leader //struct task_struct *` |
+|   | `task_struct->signal->leader_pid //struct pid *` |
+| 进程组 process group （`pgid`）| `task_struct->pids[PIDTYPE_PGID]->pid //struct pid *`|
+
 ####    PID：进程ID（进程的抽象）
 内核结构[`pid`](https://elixir.free-electrons.com/linux/v4.11.6/source/include/linux/pid.h#L57)定义如下，在`task_struct`中，通过`task->pids[PIDTYPE_PID].pid`可以定位到（`task_pid`[函数](https://elixir.free-electrons.com/linux/v4.11.6/source/include/linux/sched.h#L1056)），**虽然名字是pid，不过实际上该结构抽象了不仅是一个thread ID或者process ID，实际上还包括了进程组ID和session ID**，要点如下：
 
@@ -329,6 +340,10 @@ struct pidmap {
 `pidmap` 结构体定义如下：
 -	`nr_free`：表示还能分配的 pid 的数量
 -	`page`：指向的是存放 pid 的物理页
+
+下面可以看到 `pid_namespace` 的组织结构，`pid_namespace` 使用父子关系组成了树形结构，在分配新 pid 结构，会从当前的 pid ns(`task_struct->nsproxy->pid_ns_for_children->pid_cachep`) 中分配一个 `struct pid` 结构，`struct pid` 的`numbers`成员，该数组包含了向上的所有 pid ns，在每个 pid ns 中都分配了一个 pid number
+
+![namespace](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/pid_ns/struct_pid.png)
 
 ####    pid之间的关系（重要）
 
@@ -667,7 +682,49 @@ tid/pid/ppid/tgid/pgid/seesion id小结：
 |SID（Session ID）|会话 ID，多个进程组可以组合为会话，会话的组长PGID 即为 SID|`task_struct->signal->__session`|`pid_t getsid(pid_t pid)`|
 |PPID （Parent Process ID）	|父进程 ID|`task_struct->parent->pid`|`pid_t getppid(void)`|
 
-##  0x02    Linux进程虚拟地址空间
+##	0x02	relation
+本小节汇总下`task_struct`中几个id成员的关系：
+
+####	process
+每一个进程 process（包括轻量级进程、thread）创建时，都会创建一个对应的 `struct pid`，`struct pid` 创建了一个 `pid number` 数组，在每一层名空间中都分配了一个 `pid number`
+
+process 的 `struct task_struct` 和 `struct pid` 之间的双向查询关系如下：
+
+-	`task_struct`-> `pid`：通过 `task->pids[PIDTYPE_PID].pid` 指针指向 `struct pid`
+-	`pid`-> `task_struct`：通过 `pid->tasks[PIDTYPE_PID]` 链表找到 `task_struct`（理论上该链表只有一个成员）
+
+![process](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/pid_ns/pid.png)
+
+####	thread group
+轻量级进程（线程）和线程组leader线程之间的双向查询关系如下：
+
+-	`thread`->`group leader`：普通线程 `task->group_leader` 存放线程组 leader 线程的 `task_struct` 结构
+-	普通线程 `task->signal->leader_pid` 指向线程组 leader 线程的 `struct pid`
+-	`group leader`-> `thread`：线程组 leader 线程的 `task->thread_group` 链表，链接了本线程组所有线程的 `task_struct`
+
+![thread_group](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/pid_ns/tgid.png)
+
+####	process group
+进程组也是使用 `pid_link` 来进行链接的，每个进程的进程组 `pgid` 指向同一个 leader，需要注意反向由进程组 leader 查询进程时的只能查询到线程组 leader，因为只把线程组 leader 链接到一起，而线程组下的普通线程由线程组 leader 自己来组织
+
+线程组 leader 和进程组 leader 之间的双向查询关系：
+
+-	`thread group leader` -> `process group leader`：线程组learder的`task->pids[PIDTYPE_PGID].pid`指针指向进程组leader的`struct pid`
+-	`process group leader`->`thread group leader`：进程组leader（对应的`struct pid`）的`pid->tasks[PIDTYPE_PGID]`链表链接了所有线程组learder的`task_struct`结构
+
+![Pg](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/pid_ns/pgid.png)
+
+####	session
+会话也是使用 `pid_link` 进行链接，每个进程的会话 `sid` 指向同一个 leader，需要注意反向由会话 leader 查询进程时的只能查询到线程组 leader，因为只把线程组 leader 链接到一起，而线程组下的普通线程由线程组 leader 自己来组织（同上）
+
+线程组 leader 和会话 leader 之间的双向查询关系：
+
+-	`thread group leader`->`process group leader`：线程组learder的`task->pids[PIDTYPE_SID].pid`指针指向会话leader的`struct pid`结构
+-	`process group leader`->`thread group leader`：会话leader的`pid->tasks[PIDTYPE_SID]`链表链接了所有线程组learder的`task_struct`结构
+
+![SESSION](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/pid_ns/sid.png)
+
+##  0x03    Linux进程虚拟地址空间
 `task_struct`成员，内存描述符 `mm_struct`（memory descriptor）表示了整个进程的虚拟地址空间部分。进程运行时，在用户态其所需要的代码、全局变量以及 mmap 内存映射等全部都是通过 `mm_struct` 来进行内存查找和寻址的， `mm_struct` 关联的地址空间、页表、物理内存的关系如下图：
 
 ```CPP
@@ -693,7 +750,7 @@ struct mm_struct {
 -	`mm_struct`表示的是虚拟地址空间，而对于内核线程来说，是没有用户态的虚拟地址空间的，其value为`NULL`
 -	`mm_struct.exe_file`：（指向 `struct file`） 引用可执行文件（[较新内核](https://elixir.bootlin.com/linux/v6.2-rc1/source/include/linux/mm_types.h#L732)增加此字段）
 
-##  0x03    进程权限
+##  0x04    进程权限
 
 ####    进程权限凭证（credential）
 在内核结构`task_struct`中有下面的字段标识了进程权限凭证：
@@ -783,7 +840,7 @@ struct cred {
 } __randomize_layout;
 ```
 
-##  0x04 关联文件系统
+##  0x05 关联文件系统
 `task_struct`亦关联了进程文件系统信息（如：当前目录等）以及当前进程打开文件的信息
 
 ```CPP
@@ -846,7 +903,7 @@ struct fdtable {
 
 ![vfs](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/vfs.png)
 
-##	0x05	namespaces
+##	0x06	namespaces
 `task_struct`中成员`struct nsproxy *nsproxy;`指向命名空间namespaces的指针（通过 namespace 可以让一些进程只能看到与自己相关的一部分资源，而另外一些进程也只能看到与它们自己相关的资源，这两类进程无法感知对方的存在）。实现方式是把一个或多个进程的相关资源指定在同一个 namespace 中，而进程究竟是属于哪个 namespace 由 `*nsproxy` 指针表明了归属关系
 
 ```CPP
@@ -862,18 +919,16 @@ struct nsproxy {
 
 ![task_struct_2_namespaces](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/task-struct-6-namespace.png)
 
-##	0x06	进程线程状态及状态图
+##	0x07	进程线程状态及状态图
 
 
-##  0x0 总结
+##  0x08 总结
 
 ####     内核态的意义
 CPU 为了进行指令权限管控，引入了特权级的概念，CPU 工作在不同的特权级下能够执行的指令和可访问的内存区域是不一样的。计算机上电启动之处，CPU 运行在高特权级下，操作系统（Linux 内核）率先获得了执行权限，在内存设置一块固定区域并将自己的程序代码（内核代码）放了进去，并设定了这一部分内存只有高特权级才能访问。随后，操作系统在创建进程的时候，都会把自己所在的这块内存区域映射到每一个进程地址空间中，这样所有进程都能看到自己的进程空间中被映射的内核的区域，这一块区域是无法直接访问的。通常进入内核态是指：当中断、异常、系统调用等情况发生的时候，CPU 切换工作模式到高特权级模式 `Ring0`，并转而执行位于内核地址空间处的代码
 
-####	task_struct 主要结构的关系
-![relation-final]()
 
-##  0x0  参考
+##  0x09  参考
 -   [Linux 进程是如何创建出来的？](https://cloud.tencent.com/developer/article/2187989)
 -   [Linux 内核进程管理](http://timd.cn/kernel-process-management/)
 -   <<深入理解 Linux 进程与内存>>
