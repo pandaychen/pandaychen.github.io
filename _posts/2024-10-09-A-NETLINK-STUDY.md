@@ -11,11 +11,11 @@ tags:
 ---
 
 ##  0x00    前言
-本文介绍下基于 netlink 机制构建进程创建审计监控
+本文介绍下基于 netlink 机制构建进程创建审计监控，Netlink 是一个套接字家族（socket family），被用于内核与用户态进程以及用户态进程之间的 IPC 通信
 
-Netlink Connector 是一种特殊的基于 Netlink 协议的通信机制，它构建在 Linux 内核中，用于内核与用户空间应用之间的通信。Netlink 本身是一种灵活的 IPC 机制，主要用于网络配置和管理，但其使用范围已经扩展到了各种系统事件的通知。Netlink Connector 则专门用于传递事件和消息，包括进程事件，如进程创建和终止等；此外 Netlink Connector 使用标准的 Netlink 套接字和通信机制，但它专注于事件的传递，它允许内核组件注册事件源，并将这些事件广播给订阅这些事件的用户空间应用程序
+[Netlink Connector](https://github.com/torvalds/linux/tree/master/drivers/connector) 是一种特殊的基于 Netlink 协议的通信机制（协议号是 `NETLINK_CONNECTOR`），它构建在 Linux 内核中，用于内核与用户空间应用之间的通信。Netlink 本身是一种灵活的 IPC 机制，主要用于网络配置和管理，但其使用范围已经扩展到了各种系统事件的通知。Netlink Connector 则专门用于传递事件和消息，包括进程事件，如进程创建和终止等；此外 Netlink Connector 使用标准的 Netlink 套接字和通信机制，但它专注于事件的传递，它允许内核组件注册事件源，并将这些事件广播给订阅这些事件的用户空间应用程序
 
-比如常用的 `ip`（如 `ip link add xxxx`）/`ss` 等命令，都是使用 netlink 去跟内核通信实现
+比如常用的 `ip`（如 `ip link add xxxx`）/`ss` 等命令，都是使用 netlink 去跟内核通信实现（`ss`是通过 Netlink 与内核通信获取的信息）
 
 ![arch](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/netlink/netlink-process.jpg?raw=true)
 
@@ -26,6 +26,8 @@ linux 内核从 `2.6.15` 版本开始支持 connector，可以检查内核模块
 CONFIG_CONNECTOR=y
 CONFIG_PROC_EVENTS=y
 ```
+
+相关代码：[`Connector`](https://github.com/torvalds/linux/tree/master/drivers/connector)，其中 `connectors.c` 和 `cnqueue.c` 是 Netlink Connector 的实现，而 `cnproc.c` 是一个应用实例，名为进程事件连接器，可以通过该连接器来实现对进程创建的监控
 
 ####    关键组件（内核态 + 用户态）
 
@@ -45,8 +47,8 @@ netlink connector 的开发流程较为简洁，如下：
 
 ![flow](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/netlink/process-event-flow.png?raw=true)
 
-####    基于 golang 的库
-[Simple netlink library for go.](https://github.com/vishvananda/netlink)，使用参考 []()，
+####    基于 golang 的库：vishvananda/netlink
+[vishvananda/netlink：Simple netlink library for go](https://github.com/vishvananda/netlink)
 
 例如，此库封装了 `NetlinkSocket`[结构](https://github.com/vishvananda/netlink/blob/main/nl/nl_linux.go#L689)，
 
@@ -99,10 +101,10 @@ const (
 | :-----:| :----: | :----: |
 | `PROC_EVENT_FORK` | 进程 fork 事件，返回进程 id，内核进程 id，进程父 id，内核进程父 id | 系统调用 `fork`、`vfork` |
 | `PROC_EVENT_EXEC` | 进程 exec 事件，返回进程 id，内核进程 id | 系统调用 `execl`、 `execlp`、 `execle`、 `execv`、 `execvp`、 `execvpe` |
-| `PROC_EVENT_UID`，`PROC_EVENT_GID` | 进程 id 事件，返回进程 id，内核进程 id，uid 和 gid 或 euid,egid | 系统调用 setuid,seteuid,setreuid ,setgid,setegid,setregid |
-| `PROC_EVENT_SID` | 进程 sid 事件，返回进程 id，内核进程 id | 系统调用 setsid |
-| `PROC_EVENT_PTRACE` | 进程被调试事件，进程 id，内核进程 id，调试器进程 id，调试器内核进程 id | 系统调用 ptrace |
-| `PROC_EVENT_COMM` | 对进程属性操作的事件，返回进程 id，内核进程 id，进程名称 | 系统调用 prctl |
+| `PROC_EVENT_UID`，`PROC_EVENT_GID` | 进程 id 事件，返回进程 id，内核进程 id，uid 和 gid 或 euid、egid | 系统调用 `setuid`、`seteuid`、`setreuid`、`setgid`、`setegid`、`setregid` |
+| `PROC_EVENT_SID` | 进程 sid 事件，返回进程 id，内核进程 id | 系统调用 `setsid` |
+| `PROC_EVENT_PTRACE` | 进程被调试事件，进程 id，内核进程 id，调试器进程 id，调试器内核进程 id | 系统调用 `ptrace` |
+| `PROC_EVENT_COMM` | 对进程属性操作的事件，返回进程 id，内核进程 id，进程名称 | 系统调用 `prctl` |
 | `PROC_EVENT_COREDUMP` | 进程 coredump 的事件，返回进程 id，内核进程 id | 各种异常信号 |
 | `PROC_EVENT_EXIT` | 进程退出事件 ，返回进程 id，内核进程 id，退出码，退出信号 | 异常信号，被杀死，异常退出或正常退出 |
 
@@ -111,16 +113,16 @@ const (
 -	`PROC_EVENT_COMM` 事件可以获取进程名称，但需要调用 `prctl`，在内核里会对进程结构加锁，不建议在高并发场景使用。降级方案是通过读取 `proc` 文件系统获取获取进程name，缺点是对短时进程无法获取
 
 
-##	0x0	进程监控方案对比&&项目实践
+##	0x02	进程监控方案对比&&项目实践
 
 | 方案 | Docker兼容性	 | 数据准确性 | 系统侵入性|
 | :-----:| :----: | :----: | :----: | 
-| cn_proc | 不支持Docker | 存在内核拿到的PID，在/proc/下丢失的情况 |  无 |
+| cn_proc | 不支持Docker | 存在内核拿到的PID，在`/proc/`下丢失的情况 |  无 |
 | Audit | 不支持Docker | 同上 |  依赖Auditd |
 | Hook | 定制 | 精确 |  强 |
 
 
-##  0x0 参考
+##  0x03 参考
 -   [连接器（Netlink_Connector）及其应用](https://imagine4077.github.io/Hogwarts/c/2016/05/02/%E8%BF%9E%E6%8E%A5%E5%99%A8-Netlink_Connector-%E5%8F%8A%E5%85%B6%E5%BA%94%E7%94%A8.html)
 -   [netlink socket 编程 --why & how](https://e-mailky.github.io/2017-02-14-netlink)
 -	[保障IDC安全：分布式HIDS集群架构设计](https://tech.meituan.com/2019/01/17/distributed-hids-cluster-architecture-design.html)
