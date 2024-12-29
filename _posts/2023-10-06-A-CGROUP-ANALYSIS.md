@@ -25,6 +25,15 @@ Cgroups 可以理解为是房子的土地面积，限制了房子的大小 ，�
 
 ![namespace-and-cgroup](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/linux/namespace-vs-cgroup.png)
 
+####    Linux CFS （Completely Fair Scheduler：完全公平调度器） 
+针对普通进程，在一般的抢占式调度实现中，当该进程用完内核为其所分配的固定 CPU 时间片（进程使用的 CPU 配额时间）时，内核将会停止一个进程的运行（该进程让出CPU），转而运行其它的进程。CFS 算法中的时间片的称为virtual runtime（vruntime），使⽤ vruntime 来记录进程的虚拟执⾏时间，vruntime的计算公式如下（单位：`ns`）：
+
+![vruntime](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/process-cfs/compute.png)
+
+vruntime是通过进程的优先级（如 `nice` 值）与实际进程执⾏时间加权所得到的⼀个值，进程的 `nice` 值越⾼，表⽰该进程越友好，就更乐意把 cpu 让给别⼈，即进程优先级越低。当决定下⼀个调度进程时，调度器将选择最⼩虚拟运⾏时间（vruntime）的任务；当调整进程的 `nice` 值时，会直接影响进程的 vruntime 的计算，更小数值的 vruntime会以更高的优先级被调度
+
+以具有相同优先级的 I/O 密集型任务和 CPU 密集型任务为例。I/O 密集型任务通常在运⾏很短的时间以后就开始等待 I/O 事件并让出 CPU。⽽ CPU 密集型任务只要能拿到 CPU，就可能⼀直运⾏。因此⼀段时间以后，I/O 密集型任务的 vruntime 将⼩于 CPU 密集型任务的 vruntime，从⽽将拥有更⾼的调度优先级，那么也就有了更低的响应延迟
+
 ##  0x01    Namespace
 
 当前 Linux 内核总共支持以下几种 Namespace：
@@ -83,7 +92,7 @@ Linux PID 命名空间用于隔离进程 ID，在一个 PID 命名空间中，�
 -   `memory.memsw.limit_in_bytes`：用于设置 cgroup 中进程的内存+交换空间（swap）的限制。可以设置一个整数值，表示 cgroup 中所有进程可使用的内存+swap 的上限
 -   `memory.memsw.usage_in_bytes`：记录了 cgroup 中所有进程当前的内存+swap 使用量
 
-##  0x03    CGROUP 限制实现
+##  0x03    CGROUP 限制配置 && 实现
 正如前文描述，在共享的机器上，进程相互隔离，互不影响，对其它进程是种保护。对于可能存在内存泄漏的进程，可以设置内存限制，通过系统 OOM 触发的 Kill 信号量来实现重启。本小节给出一个基于`/sys/fs/cgroup/memory`控制内存使用的case
 
 1、使用 `mkdir /sys/fs/cgroup/memory/climits` 来创建属于自己的内存组 `climits`，此时系统已经在目录 `/sys/fs/cgroup/memory/climits` 下生成了内存相关的所有配置
@@ -105,6 +114,44 @@ echo 10M > /sys/fs/cgroup/memory/climits/memory.limit_in_bytes  #limit_in_bytes 
 echo 0 > /sys/fs/cgroup/memory/climits/memory.swappiness  #禁用交换分区，实际生产中可以配置合适的比例
 echo 1234 > /sys/fs/cgroup/memory/climits/cgroup.procs #当进程 1234 使用内存超过 10MB 的时候，默认进程 1234 会触发 OOM，被系统 Kill 掉
 ```
+
+####    Cgroup的工作原理
+1、配置动态即时生效：Linux 内核通过虚拟文件的方式对外暴露 Cgroup 的相关实时动态配置接口（参考上文），修改即时生效，会直接修改运行时的内核状态。内核通过 `poll()` 机制来监听 Cgroup 所挂载目录下的全部文件读写（如 `cpu.cfs_quota_us`、`cpu.shares`等），Cgroup 文件被修改时将会调用 `cgroup_file_write()` 函数，一方面将数据写入到虚拟文件中，另一方面则是修改内核运行时的一些数据结构
+
+2、限制进程使用 CPU 资源上限
+
+还是以 `cpu.cfs_quota_us` 为例，该配置限制某个进程在 `cpu.cfs_period_us` 时间内能够使用的最大 CPU 配额，默认值 `-1`表示该进程没有使用 CPU 资源的限制，`cfs_period_us` 的默认值为 `100000us`，思考下面这个场景：
+
+当 `cfs_period_us` 为 `100000`，而 `cfs_quota_us` 为 `50000` 时，表示当前进程可以在 `100` 毫秒（`100ms=100000us`）内使用 `50` 毫秒的 CPU，也就是 `0.5` 个 CPU；同样，当 `cfs_period_us` 为 `100000`，而 `cfs_quota_us` 为 `200000` 时，表示当前进程可以使用 `2` 个 CPU，那么既然需要通过 `cfs_quota_us` 和 `cfs_period_us` 的比例来决定进程能使用多少个 CPU 的话，那么 `100:1000` 和 `1000:10000` 有何区别？
+
+还是从`cfs_period_us`的定义即**使用最大CPU的配额**来看：
+
+1.  更大的`cfs_period_us`周期将会使得进程有更大的突发能力，但是无法保证延迟响应， 这里的突发能力指的是允许应用程序短暂地突破他们的配额限制
+2.  更小的`cfs_period_us`周期将会以牺牲突发容量为代价来确保稳定的延迟响应，因为这样一来内核就必须要较小的时间内对进程进行调度，这自然会有更稳定的延迟响应
+
+3、`cpu.cfs_period_us`的生效过程
+
+当修改`cpu.cfs_period_us`时，内核会调用 `cpu_cfs_period_write_u64()` 函数来修改对应 task_group 的 CPU 带宽，该值的修改最终会导致 `cfs_rq.runtime_enabled` 和 `cfs_rq.runtime_remaining` 两个值发生变化，从而直接影响 CFS 的调度。当一个 CGroup 的 `runtime_remaining<=0` 时，CFS 直接对其进行限流（对应内核函数`check_enqueue_throttle`）
+
+```CPP
+static int tg_set_cfs_period(struct task_group *tg, long cfs_period_us)
+{
+	u64 quota, period, burst;
+
+	if ((u64)cfs_period_us > U64_MAX / NSEC_PER_USEC)
+		return -EINVAL;
+
+	period = (u64)cfs_period_us * NSEC_PER_USEC;
+	quota = tg->cfs_bandwidth.quota;
+	burst = tg->cfs_bandwidth.burst;
+
+	return tg_set_cfs_bandwidth(tg, period, quota, burst);
+}
+```
+
+4、 设置进程在满负载情况下的优先级
+
+Cgroup 提供了设置进程在满负载情况下的优先级接口（`cpu.shares`），`cpu.shares` 默认值为 `1024`，可认为进程的默认优先级就是 `1024`。当 Group A 的 `cpu.shares` 设置为 `2048`，Group B 的 `cpu.shares` 设置为 `1024` 时，在系统满负载的情况下 Group A 和 Group B 获得的 CPU 资源比例为 `2:1`，`cpu.shares` 是一个相对值，并不会和 `cfs_period_us` 一样存在突发能力，`2048:1024` 和 `2:1` 的结果是一致的。修改 `cpu.shares` 将会调用 `sched_group_set_shares()` 函数，最后会调用 `update_load_avg()` 去修改 task_group 的 load_avg，同样会直接影响 CFS 对进程的调度
 
 ##  0x04    一些细节
 
@@ -130,7 +177,6 @@ echo 1234 > /sys/fs/cgroup/memory/climits/cgroup.procs #当进程 1234 使用内
 
 2、查看对应 cgroup 的 CPU 限制
 
-下面数据说明该进程最多可以使用 `10%` 的 CPU 资源
 ```BASH
 [root@VM-130-44-centos ~]# cat /sys/fs/cgroup/cpu/XXX-bkmonitorbeat-f75df986656263e86157c4df672b81c4/cpu.cfs_period_us
 100000
@@ -181,3 +227,4 @@ Kernel为了实现资源隔离和虚拟化，引入了Namespace机制，即可�
 -   [如何在 Go 中使用 CGroup 实现进程内存控制](https://cloud.tencent.com/developer/article/2005471)
 -   [探索 Linux 命名空间和控制组：实现资源隔离与管理的双重利器](https://cloud.tencent.com/developer/article/2367949)
 -   [Linux PID 一网打尽](https://cloud.tencent.com/developer/article/1682890)
+-   [关于 Linux Cgroup 的一些个人理解](https://smartkeyerror.com/Linux-Cgroup)
