@@ -255,7 +255,9 @@ struct file {
 -	`struct vfsmount *mnt`：该 `path` 指向哪个挂载点（重要）
 -	`struct dentry *dentry`：该 `path` 指向哪个 `dentry` 结构（dentry 树上的某个子节点）
 
-为什么说 `struct path` 结构很重要呢？内核里用来表达路径的结构体 `path`，本质就是 `vfsmount` + `dentry`，这二者才能唯一确定文件的绝对路径
+为什么说 `struct path` 结构很重要呢？内核里用来表达路径的结构体 `path`，本质就是 `vfsmount` + `dentry`，这二者才能唯一确定文件的绝对路径，解释如下：
+
+对于唯一的绝对路径，只依靠 `dentry` 是不行的，还需要 `vfsmount` 才能可靠地获取到，目录项 `dentry` 只能够获取向上直至承载它的文件系统根的全路径，如 `/home` 目录上挂了一个盘 `/dev/sda1`，那 `/home/dir1/dir2` 这个文件通过 `dentry` 指针（如指向`dir2`的`dentry`结构）最多只能获取到 `/dir1/dir2` 这一部分，它无法知道外层mount到哪里了，比如这里 `/home` 的部分，如果同一个盘再挂出第二个目录例如 `/data`，那么完全相同的 `dentry` 就可以通过 `/home/dir1/dir2` 和 `/data/dir1/dir2` 两个挂载点来访问，即它们对应同一个 `dentry` 但对应不同的 `vfsmount`，`vfsmount` 的作用就是指定具体的挂载点，所以内核里用来表达路径的结构体 `path` 就是 `vfsmount` 加上 `dentry`
 
 ```cpp
 struct path {
@@ -290,12 +292,44 @@ struct mount {
 	};
 
 	//......
+	#ifdef CONFIG_SMP
+	struct mnt_pcp __percpu *mnt_pcp;
+#else
+	int mnt_count;
+	int mnt_writers;
+#endif
+	struct list_head mnt_mounts;	/* list of children, anchored here */
+	struct list_head mnt_child;	/* and going through their mnt_child */
+	struct list_head mnt_instance;	/* mount instance on sb->s_mounts */
+	const char *mnt_devname;	/* Name of device e.g. /dev/dsk/hda1 */
+	struct list_head mnt_list;
+	struct list_head mnt_expire;	/* link in fs-specific expiry list */
+	struct list_head mnt_share;	/* circular list of shared mounts */
+	struct list_head mnt_slave_list;/* list of slave mounts */
+	struct list_head mnt_slave;	/* slave list entry */
+	struct mount *mnt_master;	/* slave is on master->mnt_slave_list */
+	struct mnt_namespace *mnt_ns;	/* containing namespace */
+	struct mountpoint *mnt_mp;	/* where is it mounted */
+	union {
+		struct hlist_node mnt_mp_list;	/* list mounts with the same mountpoint */
+		struct hlist_node mnt_umount;
+	};
+	struct list_head mnt_umounting; /* list entry for umount propagation */
+#ifdef CONFIG_FSNOTIFY
+	struct fsnotify_mark_connector __rcu *mnt_fsnotify_marks;
+	__u32 mnt_fsnotify_mask;
+#endif
+	int mnt_id;			/* mount identifier */
+	int mnt_group_id;		/* peer group identifier */
+	int mnt_expiry_mark;		/* true if marked for expiry */
+	struct hlist_head mnt_pins;
+	struct hlist_head mnt_stuck_children;
 } __randomize_layout;
 ```
 
 举例来说，
 
-3、`vfsmount`[结构](https://elixir.bootlin.com/linux/v6.5/source/include/linux/mount.h#L70)：
+3、`vfsmount`[结构](https://elixir.bootlin.com/linux/v6.5/source/include/linux/mount.h#L70)：新版本`vfsmount`的成员大部分都移动到`mount`结构中了
 
 ```CPP
 struct vfsmount {
@@ -304,6 +338,16 @@ struct vfsmount {
      int mnt_flags;
 };
 ```
+
+`vfsmount`结构描述的是**一个独立文件系统的挂载信息，每个不同挂载点对应一个独立的`vfsmount`结构，属于同一文件系统的所有目录和文件隶属于同一个`vfsmount`，该`vfsmount`结构对应于该文件系统顶层目录，即挂载目录**
+
+举个例子，运行`mount /dev/sdb1 /media/dir1`后，挂载点为`/media/dir1`，对于`dir1`这个目录，其产生新的`vfsmount`，独立于根文件系统挂载点`/`所在的`vfsmount`，对于挂载点`/media/dir1`而言，其`vfsmount->mnt_root->f_dentry->d_name.name = '/'`，而`vfsmount->mnt_mountpoint->f_dentry->d_name.name = 'dir1'`，这对于`/media/dir1`下的所有目录和文件而言，都是如此（为了方便举例，这里就借用`mount`结构了），所以，在`/media/dir1`下的所有目录和文件而言，通过dentry树进行向上遍历，只能看到`vfsmount->mnt_root->f_dentry->d_name.name = '/'`这里，如果要获取完整的绝对路径，就需要继续沿着``vfsmount->mnt_mountpoint->f_dentry`向上遍历，这样才能获取绝对路径
+
+![]()
+
+-	所有的`vfsmount`挂载点通过`mnt_list`双链表挂载于`mnt_namespace->list`链表中，该`mnt`命名空间可以通过任意进程获得
+-	子`vfsmount`挂载点结构通过`mnt_mounts`挂载于父`vfsmount`的`mnt_child`链表中，并且`mnt_parent`直接指向父亲fs的`vfsmount`结构，从而形成树层次结构
+-	`vfsmount`的`super_block->statfs`函数可以获得该文件系统中空间的使用情况
 
 4、[`fs_struct`](https://elixir.bootlin.com/linux/v6.12.4/source/include/linux/fs_struct.h#L9)结构，用来表示对于进程本身信息的描述
 
@@ -366,6 +410,9 @@ struct files_struct {
 	-	`file_operations`：文件操作
 	-	`inode_operaions`：inode 操作
 	-	`address_space_operations`：数据和 page cache 操作
+
+####	设计dentry的意义
+
 
 ##	0x0	Mnt Namespace 详解
 本小节引用自 [Mnt Namespace 详解](https://tinylab.org/mnt-namespace/#down) 一文
