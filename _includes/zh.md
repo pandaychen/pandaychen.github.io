@@ -33,7 +33,7 @@ Hey，这里是熊喵君的博客，后台程序员，现居深圳。
 
 ##### 个人推荐
 -	微服务框架：[Kratos](https://github.com/go-kratos/kratos)
--	CGI框架：[gin](https://zhuanlan.zhihu.com/p/107751040)
+-	CGI框架：[gin](https://gin-gonic.com)
 -	微服务网关：[vulcand](https://github.com/vulcand/vulcand)
 -	SSH堡垒机：[teleport](https://github.com/gravitational/teleport)
 
