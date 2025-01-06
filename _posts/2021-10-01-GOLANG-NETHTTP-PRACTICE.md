@@ -348,7 +348,7 @@ var DefaultTransport RoundTripper = &Transport{
 ```
 
 ## 0x04  共享 Client
-在 Go 中，需要复用 `http.Client`，通常代码中会定义一个全局的 `http.Client` 对象（并设置合适的连接属性），并在多次请求时进行使用，这个变量已经自带连接池了，所以通常我们无需为 `http.Client` 再实现连接池：
+在 Go 中，需要复用 `http.Client`，通常代码中会定义一个全局的 `http.Client` 对象（并设置合适的连接属性），并在多次请求时进行使用，这个变量已经自带连接池了，所以通常无需为 `http.Client` 再实现连接池：
 
 ```golang
 var client = &http.Client{}
@@ -424,3 +424,4 @@ func handleHttps(w http.ResponseWriter, r *http.Request) {
 -	[通过实例理解 Go 标准库 http 包是如何处理 keep-alive 连接的](https://mp.weixin.qq.com/s/uH4lmsMs-hq5B3Ivq2jR5w)
 -       [从 http.Transport 看连接池的设计](https://vearne.cc/archives/39913)
 -       [Tuning the Go HTTP Client Settings for Load Testing](http://tleyden.github.io/blog/2016/11/21/tuning-the-go-http-client-library-for-load-testing/)
+-       [从HTTP.TRANSPORT看连接池的设计](https://vearne.cc/archives/39913)
