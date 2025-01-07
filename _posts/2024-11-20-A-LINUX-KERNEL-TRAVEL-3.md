@@ -66,19 +66,34 @@ build  docker  home  lost+found  test  subdir
 ####	基础结构
 ![vfs-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/file-system/task_struct_fs.png)
 
--	`inode`：[定义](https://elixir.bootlin.com/linux/v3.4/source/include/linux/fs.h#L761)，与磁盘上真实文件的一对一映射
--	`file`：[定义](https://elixir.bootlin.com/linux/v3.4/source/include/linux/fs.h#L976)，一个 `file` 结构体代表一个物理文件的上下文，不同的进程，甚至同一个进程可以多次打开一个文件，因此具有多个 `file struct`
--	`dentry`：[定义](https://elixir.bootlin.com/linux/v3.4/source/include/linux/dcache.h#L88)，多个 `dentry` 可以指向同一个 `inode`
--	`super_block`：
+-	[`inode`](https://elixir.bootlin.com/linux/v3.4/source/include/linux/fs.h#L761)：与磁盘上真实文件的一对一映射，inode号是唯一的，表示不同的文件，在Linux内部访问文件都是通过inode号来进行的，所谓文件名仅仅是给用户容易使用的
+-	`super_block`：文件系统的控制块，有整个文件系统信息，一个文件系统所有的`inode`都要连接到超级块上
+-	[`dentry`](https://elixir.bootlin.com/linux/v3.4/source/include/linux/dcache.h#L88)：**VFS中负责维护目录树的数据结构就是`dentry`，通过把`inode`绑定到`dentry`来实现目录树的访问和管理**。Linux中一个路径字符串，在内核中会被解析为一组路径节点object，`dentry`就是路径中的一个节点。`dentry`被用来索引和访问`inode`，每个`dentry`对应一个`inode`，通过`dentry`可以找到并操作其所对应的`inode`。与`inode`和`super block`不同，`dentry`在磁盘中并没有实体储存，`dentry`链表都是在运行时通过解析`path`字符串构造出来的。此外，多个 `dentry` 可以指向同一个 `inode`（符号链接）
 
--	`dentry cache`：通过一个 `path` 查找对应的 `dentry`，如果每次都从磁盘中去获取的话会比较耗资源，所以内核提供了一个 lru 缓存用于加速查找，比如查找 `/usr/bin/java` 这个文件的目录项的时候，先需要找到 `/` 的 目录项，然后 `/bin`，依次类推直到找到 `path` 的结尾，这样中间的查找过程中涉及到的目录项就会被缓存起来，方便下次查找
+-	`dentry cache`：通过一个 `path` 查找对应的 `dentry`，如果每次都从磁盘中去获取的话会比较耗资源，所以内核提供了一个 LRU 缓存用于加速查找，比如查找 `/usr/bin/java` 这个文件的目录项的时候，先需要找到 `/` 的目录项，然后 `/bin`，依次类推直到找到 `path` 的结尾，这样中间的查找过程中涉及到的目录项`dentry`就会被缓存起来，方便下次查找
+-	[`file`](https://elixir.bootlin.com/linux/v3.4/source/include/linux/fs.h#L976)：文件除了`dentry`和`inode`描述信息外，还需要有如读写位置等上下文操作信息，每个进程必须各自保存自己的读写上下文，因为同一个文件可以同时被多个进程读写，如果放在`dentry`和`inode`这种公共位置，会暴露给其它进程。所以一个 `file` 结构体代表一个物理文件的上下文，不同的进程，甚至同一个进程可以多次打开一个文件，因此具有多个 `file struct`
 
 1、`dentry` 与 `inode` 关系
+举例来说，对于`/dir1/dir2/x3`路径中的`dir2`目录，为何可以通过`/dir1/dir2`找到它？因为`dir2`的dentry，包含在`dir1`的文件内容中
 
-![dentryWithInode]()
+```BASH
+/
+ |── file1
+ |── dir1
+   ├── dir2
+       ├── dir3
+       └── file3
+   └── file2
+```
+上面的目录对应如下关系：
+![dentry-inode-relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/practice/dentry_inode_relation.jpg)
+
+2、process 与 vfs主要结构的关系
+
+![process-relation](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/kernel/file-system/task_struct_fs-1.png?raw=true)
 
 #### 内核数据结构（基础）
-先介绍 VFS 的四个基础结构
+先介绍 VFS 的四个基础结构在内核中的定义
 
 -	超级块（super block）
 -	索引节点（inode）
@@ -111,11 +126,11 @@ struct file_system_type {
 };
 ```
 
-2、`struct inode`：代表文件的 ** 元数据 **，包含文件的属性，如文件的大小、权限、所有者、文件类型、设备标识符，用户标识符，用户组标识符，文件模式，扩展属性，文件读取 / 修改的时间戳，链接数量，指向存储该内容的磁盘区块的指针，文件分类等。VFS 通过 inode 来定位文件，并执行相应的文件操作。每个文件系统都会定义一个自己的 inode 结构，都会通过 VFS 接口来进行交互
+2、`struct inode`：代表文件的 **元数据**，包含文件的属性，如文件的大小、权限、所有者、文件类型、设备标识符，用户标识符，用户组标识符，文件模式，扩展属性，文件读取 `/` 修改的时间戳，链接数量，指向存储该内容的磁盘区块的指针，文件分类等。VFS 通过 inode 来定位文件，并执行相应的文件操作。每个文件系统都会定义一个自己的 inode 结构，都会通过 VFS 接口来进行交互
 
-inode 有两种，一种是 VFS 的 inode，一种是具体文件系统的 inode。前者在内存中，后者在磁盘中。所以每次其实是将磁盘中的 inode 调进填充内存中的 inode，这样才算使用了磁盘文件 inode。inode 号是唯一的，表示不同的文件。Linux 内核定位文件都是依靠 inode 号进行，当 `open` 一个文件时，首先系统找到这个文件名 filename 对应的 inode 号，然后通过 inode 号获取 inode 信息，最后由 inode 定位到文件数据所在的 block 后，就可以处理文件数据
+inode 有两种：一种是 VFS 的 inode，一种是具体文件系统的 inode。前者在内存中，后者在磁盘中。所以每次其实是将磁盘中的 inode 调进填充内存中的 inode，这样才算使用了磁盘文件 inode。inode 号是唯一的，表示不同的文件。Linux 内核定位文件都是依靠 inode 号进行，当 `open` 一个文件时，首先系统找到这个文件名 `filename` 对应的 inode 号，然后通过 inode 号获取 inode 信息，最后由 inode 定位到文件数据所在的 block 后，就可以处理文件数据
 
-inode 和文件的关系是当创建一个文件的时候，就给文件分配了一个 inode。一个 inode 只对应一个实际文件，一个文件也会只有一个 inode,inodes 最大数量就是文件的最大数量，Linux可通过`df -i`查询inode使用情况
+inode 和文件的关系是当创建一个文件的时候，就给文件分配了一个 inode。一个 inode 只对应一个实际文件，一个文件也会只有一个 inode，inodes 最大数量就是文件的最大数量，Linux可通过`df -i`查询inode使用情况
 
 ```CPP
 struct inode {
@@ -177,7 +192,7 @@ struct dentry {
 -	`d_parent`：指向父目录的`dentry`结构
 -	`d_inode`：与该dentry关联的 inode
 -	`d_iname`：存放短的文件名（和 `d_name` 的区别），为了节省内存用
--	`d_sb`：该目录项所属的文件系统的超级块
+-	`d_sb`：该目录项所属的文件系统的超级块（注意：与`dentry->d_sb`与`dentry->d_inode->i_sb`都是指向同一个`super_block`）
 -	`d_subdirs`：本目录的所有孩子目录链表头
 
 4、[`file`](https://elixir.bootlin.com/linux/v6.5/source/include/linux/fs.h#L961)：文件结构体代表一个打开的文件，系统中的每个打开的文件在内核空间都有一个关联的 `struct file`，它由内核在打开文件时创建，并传递给在文件上进行操作的任何函数。在文件的所有实例都关闭后，内核负责释放此数据结构。**注意文件对象描述的是进程已经打开的文件，因为一个文件可以被多个进程打开，所以一个文件可以存在多个文件对象**，但是由于文件是唯一的，那么 inode 就是唯一的，dentry也是确定的（针对一个指定路径的文件）

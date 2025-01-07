@@ -48,7 +48,7 @@ netlink connector 的开发流程较为简洁，如下：
 ![flow](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/netlink/process-event-flow.png?raw=true)
 
 ####    基于 golang 的库：vishvananda/netlink
-[vishvananda/netlink：Simple netlink library for go](https://github.com/vishvananda/netlink)
+[vishvananda/netlink：Simple netlink library for go](https://github.com/vishvananda/netlink)，该项目给出了一个linux下的事件接收框架[实现](https://github.com/vishvananda/netlink/blob/main/proc_event_linux.go)
 
 例如，此库封装了 `NetlinkSocket`[结构](https://github.com/vishvananda/netlink/blob/main/nl/nl_linux.go#L689)，
 
@@ -126,3 +126,4 @@ const (
 -   [连接器（Netlink_Connector）及其应用](https://imagine4077.github.io/Hogwarts/c/2016/05/02/%E8%BF%9E%E6%8E%A5%E5%99%A8-Netlink_Connector-%E5%8F%8A%E5%85%B6%E5%BA%94%E7%94%A8.html)
 -   [netlink socket 编程 --why & how](https://e-mailky.github.io/2017-02-14-netlink)
 -	[保障IDC安全：分布式HIDS集群架构设计](https://tech.meituan.com/2019/01/17/distributed-hids-cluster-architecture-design.html)
+-	[Copy: Linux process monitoring (exec, fork, exit, set*uid, set*gid)](https://github.com/ggrandes-clones/pmon/tree/master)
