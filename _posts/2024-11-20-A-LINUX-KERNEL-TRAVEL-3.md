@@ -431,8 +431,47 @@ struct files_struct {
 	-	`address_space_operations`：数据和 page cache 操作
 
 ####	设计dentry的意义
-TODO
+dentry是目录项缓存，是一个存放在内存里的缩略版的磁盘文件系统目录树结构，思考几个问题：
 
+1.	由于文件系统内的文件可能非常庞大，目录树结构可能很深，该树状结构中，可能存在几千万、几亿的文件，如何快速的定位到某个路径`/a/b/c`？（不可能按照inode一层层定位下去）
+2.	Linux提供了page cache页高速缓存，很多文件的内容已经缓存在内存里，如果没有dentry，文件名无法快速地关联到inode，即使文件的内容已经缓存在页高速缓存，但是每一次不得不重复地从磁盘上找出来文件名到VFS inode的关联
+3.	需要将文件系统所有文件名到VFS inode的关联都纪录下来，但是这么做并不现实，首先并不是所有磁盘文件的inode都会纪录在内存中，其次磁盘文件数字可能非常庞大，无法简单地建立这种关联，耗尽所有的内存也做不到将文件树结构照搬进内存
+
+所以，dentry存在的意义就是要**建立文件名filename到inode的mapping关系，加速文件操作（基于路径）时的搜索速度**，这里再列举下dentry的核心定义：
+
+```cpp
+#ifdef __LITTLE_ENDIAN
+#define HASH_LEN_DECLARE u32 hash; u32 len;
+#else
+#define HASH_LEN_DECLARE u32 len; u32 hash;
+#endif
+
+struct qstr { //quick string
+	union {
+		struct {
+			HASH_LEN_DECLARE;  //注意此结构体中有hash，还有一个len变量隐藏在struct HASH_LEN_DECLARE中
+		};
+		u64 hash_len;
+	};
+	const unsigned char *name;  //qstr中的name只存放路径的最后一个分量，即basename，/usr/bin/vim 只会存放vim这个名字
+};
+```
+
+由于每个dentry的父目录是唯一的，所以dentry 有成员变量`d_parent`，也就是说根据dentry很容易找到其父目录。但是dentry也会有子目录对应的dentry，所以提供了`d_subdirs`即链表成员，所有子目录对应的dentry都会挂在该链表上。根据`d_subdirs`已经可以查找某个目录是否在内存的dentry中，但是用链表查找性能不佳，所以内核提供了hash表即`d_hash`会放置到hash表某个头节点所在的链表
+
+既然是hash表，那么key的取值就很关键，要尽可能避免冲突（当然不能根据目录的`basename`来hash，重复概率过高），因此计算hash的时候，将父dentry的地址也放入了hash计算当中，影响最后的结果，这大大降低了发生碰撞的机会，即一个dentry的hash值，取决于两个值：父dentry的地址和该dentry路径的basename，参考`d_hash`函数：
+
+```cpp
+static inline struct hlist_bl_head *d_hash(const struct dentry *parent,
+                                         unsigned int hash)
+{
+         hash += (unsigned long) parent / L1_CACHE_BYTES;
+         return dentry_hashtable + hash_32(hash, d_hash_shift);
+}
+```
+
+-	注意如果一个目录book，但是每一次都要计算该basename的hash值，就会每次查找不得不计算一次book的hash，那效率就低了，因此， qstr结构体中有一个字段hash，一次算好，再也不算了。此处是稍微牺牲空间效率来提升时间效率，用空间来换时间
+-	一开始可能某个目录对应的dentry根本就不在内存中，所以会有d_lookup函数，以父dentry和qstr类型的name为依据，来查找内存中是否已经有了对应的dentry，当然，如果没有，就需要分配一个dentry，这是d_alloc函数负责分配dentry结构体，初始化相应的变量，建立与父dentry的关系
 
 ##	0x0	Mnt Namespace 详解
 本小节引用自 [Mnt Namespace 详解](https://tinylab.org/mnt-namespace/#down) 一文
