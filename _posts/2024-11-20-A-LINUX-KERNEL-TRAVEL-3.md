@@ -360,7 +360,7 @@ struct vfsmount {
 
 `vfsmount`结构描述的是**一个独立文件系统的挂载信息，每个不同挂载点对应一个独立的`vfsmount`结构，属于同一文件系统的所有目录和文件隶属于同一个`vfsmount`，该`vfsmount`结构对应于该文件系统顶层目录，即挂载目录**
 
-举个例子，运行`mount /dev/sdb1 /media/dir1`后，挂载点为`/media/dir1`，对于`dir1`这个目录，其产生新的`vfsmount`，独立于根文件系统挂载点`/`所在的`vfsmount`，对于挂载点`/media/dir1`而言，其`vfsmount->mnt_root->f_dentry->d_name.name = '/'`，而`vfsmount->mnt_mountpoint->f_dentry->d_name.name = 'dir1'`，这对于`/media/dir1`下的所有目录和文件而言，都是如此（为了方便举例，这里就借用`mount`结构了），所以，在`/media/dir1`下的所有目录和文件而言，通过dentry树进行向上遍历，只能看到`vfsmount->mnt_root->f_dentry->d_name.name = '/'`这里，如果要获取完整的绝对路径，就需要继续沿着``vfsmount->mnt_mountpoint->f_dentry`向上遍历，这样才能获取绝对路径
+举个例子，运行`mount /dev/sdb1 /media/dir1`后，挂载点为`/media/dir1`，对于`dir1`这个目录，其产生新的`vfsmount`，独立于根文件系统挂载点`/`所在的`vfsmount`，对于挂载点`/media/dir1`而言，其`vfsmount->mnt_root->f_dentry->d_name.name = '/'`，而`vfsmount->mnt_mountpoint->f_dentry->d_name.name = 'dir1'`，这对于`/media/dir1`下的所有目录和文件而言，都是如此（为了方便举例，这里就借用`mount`结构了），所以，在`/media/dir1`下的所有目录和文件而言，通过dentry树进行向上遍历，只能看到`vfsmount->mnt_root->f_dentry->d_name.name = '/'`这里，如果要获取完整的绝对路径，就需要继续沿着`vfsmount->mnt_mountpoint->f_dentry`向上遍历，这样才能获取绝对路径
 
 ![]()
 
@@ -433,13 +433,30 @@ struct files_struct {
 ####	设计dentry的意义
 dentry是目录项缓存，是一个存放在内存里的缩略版的磁盘文件系统目录树结构，思考几个问题：
 
-1.	由于文件系统内的文件可能非常庞大，目录树结构可能很深，该树状结构中，可能存在几千万、几亿的文件，如何快速的定位到某个路径`/a/b/c`？（不可能按照inode一层层定位下去）
+1.	由于文件系统内的文件可能非常庞大，目录树结构可能很深，该树状结构中，可能存在几千万、几亿的文件，如何快速的定位到某个路径`/a/b/c`（不可能按照inode一层层定位下去）
 2.	Linux提供了page cache页高速缓存，很多文件的内容已经缓存在内存里，如果没有dentry，文件名无法快速地关联到inode，即使文件的内容已经缓存在页高速缓存，但是每一次不得不重复地从磁盘上找出来文件名到VFS inode的关联
 3.	需要将文件系统所有文件名到VFS inode的关联都纪录下来，但是这么做并不现实，首先并不是所有磁盘文件的inode都会纪录在内存中，其次磁盘文件数字可能非常庞大，无法简单地建立这种关联，耗尽所有的内存也做不到将文件树结构照搬进内存
 
-所以，dentry存在的意义就是要**建立文件名filename到inode的mapping关系，加速文件操作（基于路径）时的搜索速度**，这里再列举下dentry的核心定义：
+所以，dentry存在的意义就是要**建立文件名filename（struct qstr d_name）到inode（struct inode ＊d_inode）的mapping关系，加速文件操作（基于路径）时的搜索速度**，这里再列举下dentry的核心定义：
 
-```cpp
+```CPP
+struct dentry {
+	// ...
+	struct hlist_bl_node d_hash;	/* lookup hash list */
+	struct dentry *d_parent;	/* parent directory */
+	struct qstr d_name;
+	struct inode *d_inode;		/* Where the name belongs to - NULL is
+					 * negative */
+	unsigned char d_iname[DNAME_INLINE_LEN];	/* small names */
+
+	struct super_block *d_sb;	/* The root of the dentry tree */
+
+	struct list_head d_lru;		/* LRU list */
+	struct list_head d_child;	/* child of parent list */
+	struct list_head d_subdirs;	/* our children */
+	// ...
+};
+
 #ifdef __LITTLE_ENDIAN
 #define HASH_LEN_DECLARE u32 hash; u32 len;
 #else
@@ -457,9 +474,9 @@ struct qstr { //quick string
 };
 ```
 
-由于每个dentry的父目录是唯一的，所以dentry 有成员变量`d_parent`，也就是说根据dentry很容易找到其父目录。但是dentry也会有子目录对应的dentry，所以提供了`d_subdirs`即链表成员，所有子目录对应的dentry都会挂在该链表上。根据`d_subdirs`已经可以查找某个目录是否在内存的dentry中，但是用链表查找性能不佳，所以内核提供了hash表即`d_hash`会放置到hash表某个头节点所在的链表
+由于每个dentry的父目录是唯一的，所以dentry 有成员变量`d_parent`，也就是说根据dentry很容易找到其父目录。但是dentry也会有子目录对应的dentry，所以提供了`d_subdirs`即链表成员，所有子目录对应的dentry都会挂在该链表上。根据`d_subdirs`已经可以**查找某个目录是否在内存的dentry cache中**，由于用链表查找性能不佳，所以内核提供了hash表即`dentry_hastable`，`d_hash`会放置到hash表某个头节点所在的链表
 
-既然是hash表，那么key的取值就很关键，要尽可能避免冲突（当然不能根据目录的`basename`来hash，重复概率过高），因此计算hash的时候，将父dentry的地址也放入了hash计算当中，影响最后的结果，这大大降低了发生碰撞的机会，即一个dentry的hash值，取决于两个值：父dentry的地址和该dentry路径的basename，参考`d_hash`函数：
+既然是hash表，那么key的取值就很关键，要尽可能避免冲突（当然不能根据目录的`basename`来hash，重复概率过高），因此计算某个指定dentry的hash value的时候，将**父dentry的地址也放入了hash计算因子，即一个dentry的hash值，取决于两个值：父dentry的地址和该dentry路径的basename**，参考`d_hash`函数：
 
 ```cpp
 static inline struct hlist_bl_head *d_hash(const struct dentry *parent,
@@ -470,8 +487,8 @@ static inline struct hlist_bl_head *d_hash(const struct dentry *parent,
 }
 ```
 
--	注意如果一个目录book，但是每一次都要计算该basename的hash值，就会每次查找不得不计算一次book的hash，那效率就低了，因此， qstr结构体中有一个字段hash，一次算好，再也不算了。此处是稍微牺牲空间效率来提升时间效率，用空间来换时间
--	一开始可能某个目录对应的dentry根本就不在内存中，所以会有d_lookup函数，以父dentry和qstr类型的name为依据，来查找内存中是否已经有了对应的dentry，当然，如果没有，就需要分配一个dentry，这是d_alloc函数负责分配dentry结构体，初始化相应的变量，建立与父dentry的关系
+-	`struct qstr` 中字段hash的意义：如果一个目录book，但是每一次都要计算该`basename`的hash值，就会每次查找不得不计算一次book的hash，这样会降低效率，因此采用空间换时间，计算一次后保存，提高查询效率
+-	某个目录对应的dentry不在cache中？一开始可能某个目录对应的dentry根本就不在内存中，因此内核提供了`d_lookup`函数，以父dentry和`struct qstr`[类型](https://docs.huihoo.com/doxygen/linux/kernel/3.7/structqstr.html)的`name`为依据，来查找内存中是否已经有了对应的dentry，当然如果没有，就需要分配一个dentry（`d_alloc`函数负责分配dentry结构体，初始化相应的变量，建立与父dentry的关系）
 
 ##	0x0	Mnt Namespace 详解
 本小节引用自 [Mnt Namespace 详解](https://tinylab.org/mnt-namespace/#down) 一文
