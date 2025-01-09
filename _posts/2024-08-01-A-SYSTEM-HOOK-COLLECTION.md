@@ -270,9 +270,55 @@ tags:
 
 ####    fork
 
+-   `tracepoint/sched/sched_process_fork`：进程创建事件
+-   `tracepoint/sched/sched_process_exit`：进程退出事件
+-   `tracepoint/sched/sched_process_free`：进程释放事件
 
 ####    execve*
+-   `tp/syscalls/sys_execve`
+-   `tp/syscalls/sys_exit_execve`
+-   `tp/syscalls/sys_execveat`
+-   `tp/syscalls/sys_exit_execveat`
+-   
+
+####    bash
+-   `uretprobe/bash_readline`
+-   `uretprobe/bash_retval`：`bash`返回值
+
+####    fd
+-   `tp/syscalls/sys_close`
+-   `tp/syscalls/sys_exit_close`   
+-   `tp/syscalls/sys_enter_creat`
+-   `tp/syscalls/sys_exit_creat`
+-    `tp/syscalls/sys_enter_open`
+-   `tp/syscalls/sys_exit_open`
+-   `tp/syscalls/sys_enter_openat`
+-   `tp/syscalls/sys_exit_openat`
+-   `tp/syscalls/sys_enter_openat2`
+-   `tp/syscalls/sys_exit_openat2`
+
+####    connect
+
+-   `kprobe/tcp_v4_connect`
+-   `kretprobe/tcp_v4_connect`
+-   `kprobe/tcp_v6_connect`
+-   `kretprobe/tcp_v6_connect`
+
+####    pipe
+-   `tracepoint/syscalls/sys_enter_dup`
+-   `tracepoint/syscalls/sys_enter_dup2`
+-   `tracepoint/syscalls/sys_enter_dup3`
+-   `tracepoint/syscalls/sys_eixt_dup`
+-   `tracepoint/syscalls/sys_exit_dup2`
+-   `tracepoint/syscalls/sys_exit_dup3`
+
+####    安全对抗
+-   `tp/syscalls/sys_enter_getdents64`
+-   `tp/syscalls/sys_exit_getdents64`
+-   `tp/syscalls/sys_enter_getdents`
+-   `tp/syscalls/sys_exit_getdents`
 
 ##  0x03    参考
 -   [Linux System Call Table](https://chromium.googlesource.com/chromiumos/docs/+/master/constants/syscalls.md)
 -   [linux系统编程之进程（四）：进程退出exit，_exit区别即atexit函数](https://www.cnblogs.com/mickole/p/3186606.html)
+-   [enhancedrecording](https://github.com/gravitational/teleport/tree/master/bpf/enhancedrecording)
