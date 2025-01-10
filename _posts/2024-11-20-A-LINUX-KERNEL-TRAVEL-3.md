@@ -487,6 +487,9 @@ static inline struct hlist_bl_head *d_hash(const struct dentry *parent,
 }
 ```
 
+小结一下：
+
+-	 内核中有一个哈希表`dentry_hashtable` ，是一个`list_head`的指针数组。一旦在内存中建立起一个目录节点的dentry 结构，该dentry结构就通过其`d_hash`域链入哈希表中的某个队列中；内核中还有一个队列`dentry_unused`，凡是已经没有用户（`count`域为`0`）使用的dentry结构就通过其`d_lru`域挂入这个队列
 -	`struct qstr` 中字段hash的意义：如果一个目录book，但是每一次都要计算该`basename`的hash值，就会每次查找不得不计算一次book的hash，这样会降低效率，因此采用空间换时间，计算一次后保存，提高查询效率
 -	某个目录对应的dentry不在cache中？一开始可能某个目录对应的dentry根本就不在内存中，因此内核提供了`d_lookup`函数，以父dentry和`struct qstr`[类型](https://docs.huihoo.com/doxygen/linux/kernel/3.7/structqstr.html)的`name`为依据，来查找内存中是否已经有了对应的dentry，当然如果没有，就需要分配一个dentry（`d_alloc`函数负责分配dentry结构体，初始化相应的变量，建立与父dentry的关系）
 
