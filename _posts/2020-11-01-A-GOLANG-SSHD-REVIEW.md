@@ -10,23 +10,343 @@ tags:
 ---
 
 ## 0x00 前言
-先记录一下自己实现 sshd（proxy）相关系统中需要搞懂的几个重要的 ssh 数据结构
+先记录一下自己实现 sshd（proxy）相关系统中需要搞懂的几个重要的 ssh 数据结构，先简单回顾下SSH协议中最核心的模块：连接协议
+
+####	SSH 传输层协议
+![ARCH](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2019/1029-ssh.png)
+
+再回顾下ssh协议的架构分层，详细说明下`Channel`的作用
+
+-	传输层协议，定义了 SSH 协议数据包的格式以及 Key 交换算法
+-	认证协议，定义了 SSH 协议支持的用户身份认证算法
+-	SSH连接协议，定义了 SSH 支持功能特性如交互式登录会话（`session`）、TCP/IP 端口转发、X11 Forwarding等，这些功能都工作在通道 (Channel) 之上的
+
+####	SSH连接协议
+在 SSH 协议中，Channel 实现了对底层连接的多路复用（理解为虚拟连接），Channel的核心思路：
+
+1.	通过一个数字来进行标识和区分这些 Channel
+2.	实现流控 （窗口）
+
+连接协议里的每个实际应用都是Channel，客户端与服务端双方都有可能打开Channel，大量的Channel复用同一个TCP Connection，一个Channel被双方用自己的数字标识，所以每端不同的数字可能指向的并不是相同的Channel，其他任何和Channel相关的消息都会包含对端的Channel标识
+
+####	SSH连接协议：描述
+简言之，SSH协议建立 `Channel` 的流程如下：
+
+1、服务端和客户端任意一方，发送类型为 `SSH_MSG_CHANNEL_OPEN (90)` 的消息，通知对方需要建立 `Channel`
+
+```TEXT
+byte      SSH_MSG_CHANNEL_OPEN (90)
+string    channel type, 常用可选值为: 'session', 'x11', 'forwarded-tcpip', 'direct-tcpip' 参见 https://www.rfc-editor.org/rfc/rfc4250#section-4.9.1
+uint32    sender channel 编号
+uint32    初始化窗口大小
+uint32    最大包大小
+....      下面是 channel type 特定数据
+```
+
+2、对端接收到消息后，回复类型为 `SSH_MSG_CHANNEL_OPEN_CONFIRMATION (91)` 或 `SSH_MSG_CHANNEL_OPEN_FAILURE (92)` 的消息来告知打开成功或者失败，成功定义如下：
+
+```TEXT
+byte      SSH_MSG_CHANNEL_OPEN_CONFIRMATION (91)
+uint32    recipient channel 编号，这个是 SSH_MSG_CHANNEL_OPEN 中 sender channel 的值
+uint32    sender channel 编号
+uint32    初始化窗口大小
+uint32    最大包大小
+....      下面是 channel type 特定数据
+```
+
+失败定义如下：
+
+```TEXT
+byte      SSH_MSG_CHANNEL_OPEN_FAILURE (92)
+uint32    recipient channel
+uint32    错误码 reason code
+string    描述，格式为 ISO-10646 UTF-8 encoding [RFC3629]
+string    language tag [RFC3066]
+```
+
+3、`Channel` 建立完成后，在 `Channel` 中进行数据传输，主要有以下几类消息：
+
+3.1：流量控制类消息，调节窗口大小
+
+```TEXT
+byte      SSH_MSG_CHANNEL_WINDOW_ADJUST
+uint32    recipient channel
+uint32    bytes to add
+```
+
+3.2：数据消息，消息的长度为 `min(数据长度, 窗口大小, 传输层协议的限制)`
+
+3.2.1：普通数据，如交互式会话的标准输入、标准输出
+
+```TEXT
+byte      SSH_MSG_CHANNEL_DATA
+uint32    recipient channel
+string    data
+```
+
+3.2.2：扩展数据，如交互式会话的标准出错，标准出错对应 `data_type_code` 为 `1`，是 `data_type_code` 唯一的预定义的值
+
+```TEXT
+byte      SSH_MSG_CHANNEL_EXTENDED_DATA
+uint32    recipient channel
+uint32    data_type_code
+string    data
+```
+
+4、最后，在打开一个特定类型的 `Channel` 后，需要对这个 `Channel` 进行 `Channel` 粒度的配置。如，建立了一个 `session` 类型的 `Channel` 后，请求对方创建一个伪终端 (`pty`、`pseudo terminal`)。这类的请求叫做 `Channel` 特定请求（Channel-Specific Requests），这类场景使用相同的数据格式如下参考。对于 `SSH_MSG_CHANNEL_REQUEST` 消息，如果 want reply 为 `true`，对方应使用 `SSH_MSG_CHANNEL_SUCCESS (98)`、`SSH_MSG_CHANNEL_FAILURE (100)` 进行回复
+
+```text
+byte      SSH_MSG_CHANNEL_REQUEST (98)
+uint32    recipient channel，对方的 sender channel 编号
+string    request type in US-ASCII characters only 请求类型，参见：https://www.rfc-editor.org/rfc/rfc4250#section-4.9.3
+boolean   want reply 是否需要对方回复
+....      下面是 request type 特定数据
+```
+
+####	Channel应用场景1：交互式会话
+会话（Session）代表远程执行一个程序（广义），这个程序可能是 Shell、应用，可能有/无 tty等
+
+1、客户端打开一个类型为 session 的 Channel
+
+```TEXT
+byte      SSH_MSG_CHANNEL_OPEN (90)
+string    "session"
+uint32    sender channel
+uint32    initial window size
+uint32    maximum packet size
+```
+
+2、服务端回复一个类型为 `SSH_MSG_CHANNEL_OPEN_CONFIRMATION` 的消息。至此 Session 类型的 Channel 创建完成
+
+3、客户端可以请求创建一个伪终端（pty、Pseudo-Terminal）
+
+```TEXT
+byte      SSH_MSG_CHANNEL_REQUEST
+uint32    recipient channel
+string    "pty-req"
+boolean   want_reply
+string    TERM environment variable value (e.g., vt100)
+uint32    terminal width, characters (e.g., 80)
+uint32    terminal height, rows (e.g., 24)
+uint32    terminal width, pixels (e.g., 640)
+uint32    terminal height, pixels (e.g., 480)
+string    encoded terminal modes
+```
+
+4、客户端可以请求设置环境变量
+
+```TEXT
+byte      SSH_MSG_CHANNEL_REQUEST
+uint32    recipient channel
+string    "env"
+boolean   want reply
+string    variable name
+string    variable value
+```
+
+5、客户端启动一个 `shell`、执行一个`exec`、调用一个subsystem等（`3`选`1`）
+
+5.1	启动 `shell`
+
+```TEXT
+byte      SSH_MSG_CHANNEL_REQUEST
+uint32    recipient channel
+string    "shell"
+boolean   want reply
+```
+
+5.2	执行一个`exec`
+
+```TEXT
+byte      SSH_MSG_CHANNEL_REQUEST
+uint32    recipient channel
+string    "exec"
+boolean   want reply
+string    command
+```
+
+5.3	调用其他subsystem（典型如 `sftp`）
+
+```TEXT
+byte      SSH_MSG_CHANNEL_REQUEST
+uint32    recipient channel
+string    "subsystem"
+boolean   want reply
+string    subsystem name
+```
+
+
+6、上述的启动的程序的输入输出通过如下类型的消息传输：
+
+6.1	标准输入、标准输出： `SSH_MSG_CHANNEL_DATA`
+
+6.2	标准出错：`SSH_MSG_CHANNEL_EXTENDED_DATA`，扩展类型为 `SSH_EXTENDED_DATA_STDERR`
+
+6.3	伪终端设置终端窗口大小
+
+```TEXT
+byte      SSH_MSG_CHANNEL_REQUEST
+uint32    recipient channel
+string    "window-change"
+boolean   FALSE
+uint32    terminal width, columns
+uint32    terminal height, rows
+uint32    terminal width, pixels
+uint32    terminal height, pixels
+```
+
+6.4	信号
+
+```TEXT
+byte      SSH_MSG_CHANNEL_REQUEST
+uint32    recipient channel
+string    "signal"
+boolean   FALSE
+string    signal name (without the "SIG" prefix)
+```
+
+6.5	退出码
+
+```TEXT
+byte      SSH_MSG_CHANNEL_REQUEST
+uint32    recipient channel
+string    "exit-status"
+boolean   FALSE
+uint32    exit_status
+```
+
+6.6	退出信号
+
+####	Channel应用场景2：TCP/IP 端口转发
+SSH 本质是建立了在 client 到 server 端这两个设备之间建立了一条加密通信链路，其基于此实现了两个方向的端口转发：
+
+-	本地转发（`direct-tcpip`）： 将 client 监听的 tcp 端口连接转发到 server 上。流量入口位于 client，因此 client 程序自身就可以自助的监听 tcp 端口，而不涉及 client 和 server 端的通讯，因此 client 监听端口不是 SSH 协议需要关心的内容，对应的指令为`ssh -L [LOCAL_IP:]LOCAL_PORT:DESTINATION:DESTINATION_PORT [USER@]SSH_SERVER`
+-	远端转发（`forwarded-tcpip`）：将 server 监听的 tcp 端口连接转发到 client 上。即流量入口端口位于 server 端，因此 SSH 协议需要提供一种机制，可以让 client 告知 server 监听的 tcp 端口，对应的指令为`ssh -R [REMOTE:]REMOTE_PORT:DESTINATION:DESTINATION_PORT [USER@]SSH_SERVER`
+
+对于每个 TCP 连接，都会创建一个 Channel
+
+1、`direct-tcpip` 流程
+
+1.1：client 监听一个 tcp 端口，并 accept 连接
+
+1.2：client accept 返回后， client 发起建立一个类型为 direct-tcpip 的 Channel
+
+```TEXT
+byte      SSH_MSG_CHANNEL_OPEN
+string    "direct-tcpip"
+uint32    sender channel
+uint32    initial window size
+uint32    maximum packet size
+string    host to connect
+uint32    port to connect
+string    originator IP address
+uint32    originator port
+```
+
+1.3：server 接收到消息后，和 host to connect:port to connect TCP 端口建立 TCP 连接
+
+1.4：至此，转发 Channel 建立完成，后续通过 `SSH_MSG_CHANNEL_DATA` 进行双向数据的转发
+
+2、`forwarded-tcpip` 流程
+
+2.1：准备阶段
+
+2.1.1：client 请求 server 监听 tcp 端口，作为流量入口
+
+```TEXT
+byte      SSH_MSG_GLOBAL_REQUEST
+string    "tcpip-forward"
+boolean   want reply
+string    address to bind (e.g., "0.0.0.0")
+uint32    port number to bind
+```
+
+2.1.2	server 根据请求信息，监听对应端口，并回复：
+
+```TEXT
+byte     SSH_MSG_REQUEST_SUCCESS
+uint32   port that was bound on the server
+```
+
+2.2	server accept 返回后， server 发起建立一个类型为 `direct-tcpip` 的 Channel
+
+```TEXT
+byte      SSH_MSG_CHANNEL_OPEN
+string    "forwarded-tcpip"
+uint32    sender channel
+uint32    initial window size
+uint32    maximum packet size
+string    address that was connected
+uint32    port that was connected
+string    originator IP address
+uint32    originator port
+```
+
+2.3	client 接收到消息后，和 address that was connected:port that was connected TCP 端口建立 TCP 连接
+
+2.4	至此，转发 Channel 建立完成，后续通过 `SSH_MSG_CHANNEL_DATA` 进行双向数据的转发
+
+转发Channel独立于Session存在，Session关闭并不意味着转发Channel也要被关闭，此外，客户端应该拒绝`direct-tcpip`请求
+
+####	预定义名称
+1、连接协议Channel类型
+
+```TEXT
+Channel type                  Reference
+         ------------                  ---------
+         session                       [SSH-CONNECT, Section 6.1]
+         x11                           [SSH-CONNECT, Section 6.3.2]
+         forwarded-tcpip               [SSH-CONNECT, Section 7.2]
+         direct-tcpip                  [SSH-CONNECT, Section 7.2]
+```
+
+2、连接协议全局请求名（`SSH_MESSAGE_GLOBAL_REQUEST`）
+
+```TEXT
+Request type                  Reference
+         ------------                  ---------
+         tcpip-forward                 [SSH-CONNECT, Section 7.1]
+         cancel-tcpip-forward          [SSH-CONNECT, Section 7.1]
+```
+
+3、连接协议Channel明细请求名（`SSH_MESSAGE_CHANNEL_REQUEST`）
+
+```TEXT
+Request type                  Reference
+         ------------                  ---------
+         pty-req                       [SSH-CONNECT, Section 6.2]
+         x11-req                       [SSH-CONNECT, Section 6.3.1]
+         env                           [SSH-CONNECT, Section 6.4]
+         shell                         [SSH-CONNECT, Section 6.5]
+         exec                          [SSH-CONNECT, Section 6.5]
+         subsystem                     [SSH-CONNECT, Section 6.5]
+         window-change                 [SSH-CONNECT, Section 6.7]
+         xon-xoff                      [SSH-CONNECT, Section 6.8]
+         signal                        [SSH-CONNECT, Section 6.9]
+         exit-status                   [SSH-CONNECT, Section 6.10]
+         exit-signal                   [SSH-CONNECT, Section 6.10]
+```
 
 ## 0x01 重要结构（golang-ssh 库）
 
-1、Channel<br>
+1、Channel及操作相关<br>
 A Channel is an ordered, reliable, flow-controlled, duplex stream that is multiplexed over an SSH connection.（注，个人理解是 channel 最大的作用是给开发者提供了读取 SSH 明文的手段），是一种有序、可靠、流量受控的双工流，通过 SSH 连接进行多路复用
+
+`ssh.Channel` 该interface对应一个已经建立 Channel（server 端）
 
 ```golang
 type Channel interface {
 	// Read reads up to len(data) bytes from the channel.
+	//从 Channel 中读取数据，对应 client -> server 的 SSH_MSG_CHANNEL_DATA 消息（参考协议描述），在 session 场景对应 stdin
 	Read(data []byte) (int, error)
 
 	// Write writes len(data) bytes to the channel.
+	//向 Channel 中写入数据，对应 server -> client 的 SSH_MSG_CHANNEL_DATA 消息（参见上文 channel），在 session 场景对应 stdout
 	Write(data []byte) (int, error)
 
 	// Close signals end of channel use. No data may be sent after this
 	// call.
+	//关闭该 channel，对应 SSH_MSG_CHANNEL_CLOSE 消息
 	Close() error
 
 	// CloseWrite signals the end of sending in-band
@@ -51,9 +371,45 @@ type Channel interface {
 }
 ```
 
-####   session channel 类型
+特别说下`Channel.SendRequest`这个方法，对应 `server -> client` 在该 `Channel` 上的 `SSH_MSG_CHANNEL_REQUEST`，主要这几个类型：
+-	`window-change`：发送 `pty` 的 `window-change` 信息
+-	`exit-status`：发送 `cmd` 的退出码消息
+
+[`ssh.NewChannel`](https://pkg.go.dev/golang.org/x/crypto/ssh#NewChannel) 该`interface`对应一个 client 创建的 Channel 的消息（`SSH_MSG_CHANNEL_OPEN`）
+
+```GO
+type NewChannel interface {
+	// Accept accepts the channel creation request. It returns the Channel
+	// and a Go channel containing SSH requests. The Go channel must be
+	// serviced otherwise the Channel will hang.
+	Accept() (Channel, <-chan *Request, error)	//同意建立该 Channel
+
+	// Reject rejects the channel creation request. After calling
+	// this, no other methods on the Channel may be called.
+	Reject(reason RejectionReason, message string) error	//拒绝建立该 Channel
+
+	// ChannelType returns the type of the channel, as supplied by the
+	// client.
+	ChannelType() string
+
+	// ExtraData returns the arbitrary payload for this channel, as supplied
+	// by the client. This data is specific to the channel type.
+	ExtraData() []byte
+}
+```
+
+`ssh.NewChannel`的`ChannelType()`方法的主要[类型](https://www.rfc-editor.org/rfc/rfc4250#section-4.9.1)如下：
+
+-	`session`
+-	`direct-tcpip`
+-	`forwarded-tcpip`
+-	`auth-agent@openssh.com`
+-	`x11`
+
+####   session channel ：Request类型
 While there are theoretically other types of channels possible, we currently only support session channels. The client can request channels to be opened at any time.
 We currently support the following requests on the session channel. These are described in RFC 4254.
+
 
 1、`env`<br>
 Sets an environment variable for the soon to be executed program.
@@ -97,8 +453,13 @@ type Request struct {
 Reply sends a response to a request. It must be called for all requests where WantReply is true and is a no-op otherwise. The payload argument is ignored for replies to channel-specific requests.<br>
 
 ```golang
+//WantReply bool 字段，是否需要回复
+//Payload []byte 字段，type 特定数据，可以使用 ssh.Unmarshal() 方法进行反序列化
+//对 WantReply = true 的方法，必须调用该函数进行回复
 func (r *Request) Reply(ok bool, payload []byte) error
 ```
+
+`ssh.Request`类型， 结构体对应 `client -> server` 在该 Channel 上的 `SSH_MSG_CHANNEL_REQUEST`，其中`ssh.Request.Type`的定义，在 session channel 场景有用，主要类型：`pty-req`、`shell`、`subsystem`、`env`、`exec`等
 
 3、核心结构 Session<br>
 文档：[Session](https://pkg.go.dev/golang.org/x/crypto/ssh#Session)
@@ -181,7 +542,8 @@ type ConnMetadata interface {
 }
 ```
 
-6、
+6、`ServerConn`
+
 ServerConn is an authenticated SSH connection, as seen from the server<br>
 
 ```golang
@@ -871,3 +1233,5 @@ func (svr *Server) Serve() error {
 -	[ssh 包](https://pkg.go.dev/golang.org/x/crypto/ssh)
 -	[gliderlabs-ssh 包](https://pkg.go.dev/github.com/gliderlabs/ssh)
 -	[Understanding SSH](https://containerssh.io/development/containerssh/ssh/)
+-	[SSH 协议 和 Go SSH 库源码浅析](https://www.rectcircle.cn/posts/ssh-protocol-and-go-lib/#channel)
+-	[go 复用ssh 中的session_重新认识SSH（二）](https://blog.csdn.net/weixin_34887818/article/details/113074657)
