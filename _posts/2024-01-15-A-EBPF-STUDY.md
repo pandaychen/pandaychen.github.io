@@ -1084,7 +1084,9 @@ bpftool map
         frozen
 ```
 
-2、`bpftrace -l`：查看本机支持的所有内核探针，即hook点
+2、`bpftrace`：提供了一种类似`awk` 的脚本语言，通过编写脚本，配合`bpftrace`支持的追踪点，可以实现非常强大的追踪功能，典型的命令如下：
+
+`bpftrace -l`：查看本机支持的所有内核探针，即hook点
 
 ```BASH
 bpftrace -l "kprobe:*"
@@ -1095,7 +1097,22 @@ kprobe:sp_delete
 kprobe:sp_insert
 ```
 
-3、`execsnoop-bpfcc`：BCC提供的内核调试工具，参考下面介绍
+`bpftrace -e`：可以指定运行一个单行程序
+
+```BASH
+#追踪openat系统调用
+bpftrace -e 'tracepoint:syscalls:sys_enter_openat { printf("%s %s\n", comm, str(args->filename)); }'
+
+#系统调用计数
+bpftrace -e 'tracepoint:raw_syscalls:sys_enter { @[comm] = count(); }'
+
+#计算每秒发生的系统调用数量
+bpftrace -e 'tracepoint:raw_syscalls:sys_enter { @ = count(); } interval:s:1 { print(@); clear(@); }'
+```
+
+其他指令可参考[The bpftrace One-Liner Tutorial](https://eunomia.dev/tutorials/bpftrace-tutorial/)
+
+3、`*snoop-bpfcc`：BCC提供的内核调试工具，参考下面介绍
 
 ```bash
 apt-get install bpfcc-tools linux-headers-$(uname -r)
@@ -1114,7 +1131,7 @@ apt install bpfcc-tools
 apt install linux-headers-`uname -r`
 ```
 
-1、场景1：进程追踪
+1、场景1：进程（创建）追踪
 
 `execsnoop` 工具会打印出`execve`系统调用的实时执行情况
 
@@ -1152,6 +1169,57 @@ whoami           68338  68337    0 /usr/bin/whoami
 
 -   应用层无感知，无需重启Web服务，可在运行时随时启动或退出监控（直接`Ctrl-C`停止`execsnoop`退出）
 -   在内核`execve`系统调用处进行记录，即使进行`bash`命令混淆，还是可以看到最终执行的真实命令
+
+####    常用的BCC分析工具（汇总）
+1、`execsnoop`：新建进程追踪（前文已提）
+
+```BASH
+# execsnoop
+# -x： 找到包含创建失败的新进程
+# -n pattern：只输出COMM符合pattern过滤条件的结果
+# -l pattern：只输出ARGS符合pattern过滤条件的结果
+# --max args argv：输出命令参数个数的上限，默认为20
+```
+
+2、`exitsnoop`：进程退出探测，跟踪进程退出事件，打印出进程的总运行时常和退出返回码
+
+```BASH
+# exitsnoop
+# -p pid: 仅测量该进程
+# -t：包含时间错信息
+# -x：仅关注程序异常退出
+```
+
+3、`runqlen`：用来采样CPU运行队列的长度信息，可以统计有多少线程正在等待运行，并以线性直方图的方式输出（按每个CPU core进行统计）
+
+```BASH
+# runqlen
+# -C：每个CPU输出一个直方图
+# -O：运行队列占有率信息，运行队列不为0的时长百分比
+# -T：在输出中包括时间戳信息
+./runqlen -C -T
+```
+
+4、`cpudist`：用于线程执行时长分析，展示每次线程唤醒之后在CPU上执行的时长（不包含线程在队列中的等待信息）分布
+
+```bash
+# cpudist
+# -m：以毫秒为单位输出
+# -O：输出off-cpu时间（非在CPU上执行的时间）
+# -P：每个进程打印一个直方图
+# -p -pid：仅测量给定的进程
+```
+
+5、`syscount`：系统调用统计工具，用于统计一段时间内系统中系统调用的频次信息
+
+```BASH
+# syscount
+# -T TOP：仅打印调用频率最高的N个结果
+# -L：打印系统调用的总耗时
+# -P：每个进程打印一个直方图
+# -p pid：仅测量给定的进程
+./syscount -T 5 -L
+```
 
 ##  0x06    汇总
 
