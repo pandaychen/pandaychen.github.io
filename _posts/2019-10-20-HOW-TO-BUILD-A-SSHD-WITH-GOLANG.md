@@ -182,6 +182,7 @@ for {
 
     log.Printf("New SSH connection from %s (%s)", sshConn.RemoteAddr(), sshConn.ClientVersion())
     // Discard all global out-of-band Requests
+    // DisdCardRequest essentially discard those request that does not want a reply
     go ssh.DiscardRequests(reqs)
     // Accept all channels
     go handleChannels(chans)
@@ -619,6 +620,148 @@ SSH多路复用的原理如下：
 3.  当下一次SSH连接到服务器时（相同用户#IP#Port），OpenSSH将会使用已建立的控制套接字与服务器通信，而不再是重新建立新的TCP连接
 4.  主连接保持的时间根据用户的配置决定，超时后SSH客户端将会关闭这个连接
 
+####    scp客户端
+基于 SSH 的文件传输有 `scp` 和 `sftp` 两种方式，区别如下：
+
+-   `scp` 基于命令的标准 IO 实现，本地 `scp` 命令（客户端）会使用 SSH 连接协议，打开一个 `session`，通过 `SSH_MSG_CHANNEL_REQUEST` 的 `exec` 在服务端执行 `scp` 命令，服务端 `scp` 会读取文件，按照 `scp` 协议将文件写入标准输出，这个标准输出通过 SSH Channel 传递到本地的 `scp` 这个进程中，本地 `scp` 按照协议协议标准输出，并写入本地文件，即可完成文件下载；文件上传的过程类似；`scp`仅支持有限的指令，因为是借助于`scp`工具实现
+-   `sftp` 是基于 SSH 连接协议的子系统（`subsystem`）实现的，对应的是 `SSH_MSG_CHANNEL_REQUEST` 的 `subsystem`，支持交互式的命令行界面及指令列表
+
+下面详细介绍下scp服务端的原理：使用`scp`工具的客户端在连接上远端server的 `sshd` 后又启动了一个 `scp` 进程，利用 stdin 和 stdout/stderr 进行数据通信，也就是 `scp` 在本地客户端使用**必须依赖于目标服务器有 `scp` 存在**，不然会报错（下图）
+
+![without-scp-error](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/openssh/scp/scp_binary_removed.png)
+
+-   当ssh连接到服务端后，首先在远程服务端运行 `scp -t` 来告知 `scp` 运行模式是**从标准输入读入数据写入至指定文件**
+-   `-t` 参数接收一个参数是将文件保存在哪里，即使用方式是 scp -t {target} 。如果目标文件不存在则会创建，但目标文件的父目录不存在则会报错；如果目标文件是一个目录，应当指定 `-d` 参数；如果需要输入详细日志指定 `-v` 参数，如果不指定 `-v` 参数那么所有的交互都是利用 stdin/stdout 完成的，指定了 `-v` 参数则会在 stderr 中输出调试日志。`scp` 的本身实现是如果调用时加了 `-v` 参数那么在启动远程 `scp` 服务时也加上 `-v` 参数
+
+scp的交互协议如下描述，golang实现可以参考[Production-ready Secure Copy Protocol (SCP) implementation in Golang](https://github.com/povsister/scp)
+
+1、请求（local->remote）：向远端发送消息并期待远端回复，消息的发送使用 stdin、回复使用 stdout，有如下case：
+
+-   连接建立时不会向 stdin 写入内容，但远端会认为收到了一条内容而在 stdout 中回复；如果直接返回了错误（例如文件不存在）那么整个 scp 连接可以认为没有建立成功，应当直接报错退出
+-   要创建文件时发送 `C{perm} {size} {filename}\n {文件内容}\0`，参考[`handleSend`](https://github.com/povsister/scp/blob/master/protocol.go#L214)
+-   要进入目录时发送 `D{perm} 0 {filename}\n`，参考[`handleSend`](https://github.com/povsister/scp/blob/master/protocol.go#L242)
+-   要退出目录时发送 `E\n`，参考[`handleSend`](https://github.com/povsister/scp/blob/master/protocol.go#L253)
+-   要设定文件时间发送 `T...\n`，协议golang实现参考[`sendTimestamp`](https://github.com/povsister/scp/blob/master/protocol.go#L264)
+-   权限 `perm` 是 `4` 位数字字符，与 Linux 权限位相同，常见的目录为 `0755` 文件为 `0644`
+
+这里以`handleSend`方法来分析下文件内容的发送逻辑，分别代表着创建文件和写入内容，二者不可分割，但中间需要有一次检查 stdout 输出（`checkResponse`方法）。如果写入目标是文件那么文件名没有意义，而如果写入目标是目录那么该文件名会是要写入的内容的文件名。文件内容就是原始的文件内容，字节数应当和创建时给定的 `size` 相同，全都发送完后使用 `0x00` 代表结束然后检查 stdout。如果 `size` 和实际写入的字符数不同或是文件结束没有输入 `0x00` 都会出错
+
+```GO
+func handleSend(j sendJob, stream *sessionStream) {
+	switch j.Type {
+	case file:
+		// close if required
+		if j.close {
+			if rc, ok := j.Reader.(io.ReadCloser); ok {
+				defer rc.Close()
+			}
+		}
+		// set timestamp for the next coming file
+		if j.AccessTime != nil && j.ModifiedTime != nil {
+			sendTimestamp(j, stream)
+		}
+		// send signal
+		_, err := fmt.Fprintf(stream.In, "C0%o %d %s\n", j.Perm, j.Size, j.Destination)
+		if err != nil {
+			panicf("error sending signal C: %s", err)
+		}
+		checkResponse(stream)
+		// send file
+		_, err = io.Copy(stream.In, j.Reader)
+		if err != nil {
+			panicf("error sending file %q: %s", j.Destination, err)
+		}
+		_, err = fmt.Fprint(stream.In, "\x00")
+		if err != nil {
+			panicf("error finishing file %q: %s", j.Destination, err)
+		}
+		checkResponse(stream)
+
+	case directory:
+		if j.AccessTime != nil && j.ModifiedTime != nil {
+			sendTimestamp(j, stream)
+		}
+		// size is always 0 for directory
+		_, err := fmt.Fprintf(stream.In, "D0%o 0 %s\n", j.Perm, j.Destination)
+		if err != nil {
+			panicf("error sending signal D: %s", err)
+		}
+		checkResponse(stream)
+
+	case exit:
+		_, err := fmt.Fprintf(stream.In, "E\n")
+		if err != nil {
+			panicf("error sending signal E: %s", err)
+		}
+		checkResponse(stream)
+	default:
+		panicf("programmer error: unknown transferType %q", j.Type)
+	}
+}
+```
+
+
+2、回复（remote->local）：回复的规范是固定的，参考[`checkResponse`](https://github.com/povsister/scp/blob/master/protocol.go#L754)
+
+-   第一个字节是 `0x00` / `0x01` / `0x02`，`0x00` 代表正确，`0x01`/`0x02` 代表有异常发生；其中`0x01` 代表错误，`0x02` 代表有严重错误，但因为有严重错误会导致进程直接被结束因此实际上客户端不可能收到 `0x02` 的返回
+-   如果第一个字节不是 `0x00`（也就是说发生了错误），那么紧接着会有若干字符出现写明错误原因，这些字符都是 `ASCII` 字符，以 `\n`结尾
+
+以目录的进入/退出为例，想要创建一个如下结构的目录，那么依次发送如下命令字：
+
+```BASH
+---- A
+  ---- a
+  ---- b
+---- B
+  ---- c
+  ---- d
+```
+
+-   `D0755 0 A\n`：创建 `A` 目录，权限为 `755`，进入 `A` 目录（后续的文件都是在 `A` 目录中）
+-   `C0644 1 a\n a\0` 在 `A` 目录中创建 `a` 文件，权限为 `644`，大小为 `1` 字节，内容为 `a`
+-   `C0644 1 b\n b\0` 在 `A` 目录中创建 `b` 文件，权限为 `644`，大小为 `1` 字节，内容为 `b`
+-   `E\n` 退出 `A` 目录
+-   `D0755 0 B\n` 创建 `B` 目录，权限为 `755`，进入 `B` 目录
+-   `C0644 2 c\n hh\0` 在 `B` 目录中创建 `c` 文件，权限为 `644`，大小为 `2` 字节，内容为 `hh`
+-   `C0644 2 d\n XX\0` 在 `B` 目录中创建 `d` 文件，权限为 `644`，大小为 `2` 字节，内容设定为 `jj`
+-   `E\n` 退出 `B` 目录
+
+小结下：
+-   对于上传文件场景：客户端按照`handleSend`的实现逻辑进行，需要按照scp协议规范，通过stdin向remote发送组装好的命令字、数据等
+-   对于下载文件场景：客户端需要按照scp协议的规范对stdin的协议格式进行解析，然后执行相关的操作，参考[`copyFromRemote`](https://github.com/povsister/scp/blob/master/transfer.go#L449)的实现
+
+1、scp客户端，通过`ssh.Session`配合在服务端运行指令`/usr/bin/scp -qrt $destdir`实现文件上传功能，代码如下：
+
+```GO
+func main() {
+    client, err := ssh.Dial("tcp", "127.0.0.1:22", clientConfig)
+    if err != nil {
+        panic("Failed to dial: " + err.Error())
+    }
+    session, err := client.NewSession()
+    if err != nil {
+        panic("Failed to create session: " + err.Error())
+    }
+    defer session.Close()
+    go func() {
+        //数据上传逻辑实现
+        w, _ := session.StdinPipe()
+        defer w.Close()
+        content := "123456789\n"
+        fmt.Fprintln(w, "C0644", len(content), "testfile")
+        fmt.Fprint(w, content)
+        fmt.Fprint(w, "\x00") // 传输以\x00結束
+    }()
+    if err := session.Run("/usr/bin/scp -qrt ./"); err != nil {
+        panic("Failed to run: " + err.Error())
+    }
+}
+```
+
+2、不依赖命令行的实现
+
+参考[go-scp：Simple Golang scp client](https://github.com/bramvdbogaerde/go-scp)
+
 ##	0x04	其他应用
 基于 golang-SSH 库还有很多有趣的应用，这里列举几个：<br>
 -   [SSH Tron](https://github.com/zachlatta/sshtron)：此包实现了一个在线多人贪吃蛇服务
@@ -798,3 +941,4 @@ func (s *Session) Setenv(name, value string) error {
 -   [SSH Agent Forwarding 原理](https://blog.csdn.net/sdcxyz/article/details/41487897)
 -   [ssh命令之ProxyCommand选项](https://dslztx.github.io/blog/2017/05/19/ssh%E5%91%BD%E4%BB%A4%E4%B9%8BProxyCommand%E9%80%89%E9%A1%B9/)
 -   [SSH port forwarding with Go](https://eli.thegreenplace.net/2022/ssh-port-forwarding-with-go/)
+-   [scp 原理](https://blog.singee.me/2021/01/02/d9e5fe31d708454fb99869a4c9d78f24/)
