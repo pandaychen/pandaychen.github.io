@@ -277,7 +277,7 @@ struct pid_link
 };
 ```
 
-这里以`PIDTYPE_PGID`说明，为了方便查找，同属于一个进程组的所有进程对应的`taks_struct`都被链接到同一个hash链表上：
+这里以`PIDTYPE_PGID`说明，为了方便查找，同属于一个进程组的所有进程对应的`task_struct`都被链接到同一个hash链表上：
 
 ![PIDTYPE_PGID](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/PIDTYPE_PGID.png)
 
@@ -959,3 +959,4 @@ CPU 为了进行指令权限管控，引入了特权级的概念，CPU 工作在
 -   [Pid Namespace 详解](https://tinylab.org/pid-namespace/)
 -   [linuxkerneltravel](https://github.com/linuxkerneltravel)
 -   [基础知识](https://ctf-wiki.org/pwn/linux/kernel-mode/basic-knowledge/)
+-	[Linux Namespace分析——mnt namespace的实现与应用](https://hustcat.github.io/namespace-implement-1/)

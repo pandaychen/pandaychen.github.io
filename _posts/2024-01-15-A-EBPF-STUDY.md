@@ -1110,7 +1110,9 @@ bpftrace -e 'tracepoint:raw_syscalls:sys_enter { @[comm] = count(); }'
 bpftrace -e 'tracepoint:raw_syscalls:sys_enter { @ = count(); } interval:s:1 { print(@); clear(@); }'
 ```
 
-其他指令可参考[The bpftrace One-Liner Tutorial](https://eunomia.dev/tutorials/bpftrace-tutorial/)
+其他指令可参考：
+-   [The bpftrace One-Liner Tutorial](https://eunomia.dev/tutorials/bpftrace-tutorial/)
+-   [bpftrace一行教程](https://github.com/bpftrace/bpftrace/blob/master/docs/tutorial_one_liners_chinese.md?plain=1)
 
 3、`*snoop-bpfcc`：BCC提供的内核调试工具，参考下面介绍
 
