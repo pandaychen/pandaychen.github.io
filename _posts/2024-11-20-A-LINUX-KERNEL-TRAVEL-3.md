@@ -66,8 +66,8 @@ build  docker  home  lost+found  test  subdir
 ####	基础结构
 ![vfs-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/file-system/task_struct_fs.png)
 
--	[`inode`](https://elixir.bootlin.com/linux/v3.4/source/include/linux/fs.h#L761)：与磁盘上真实文件的一对一映射，inode号是唯一的，表示不同的文件，在Linux内部访问文件都是通过inode号来进行的，所谓文件名仅仅是给用户容易使用的
--	`super_block`：文件系统的控制块，有整个文件系统信息，一个文件系统所有的`inode`都要连接到超级块上
+-	[`inode`](https://elixir.bootlin.com/linux/v3.4/source/include/linux/fs.h#L761)：与磁盘上真实文件的一对一映射，inode号是唯一的，表示不同的文件，在Linux内部访问文件都是通过inode号来进行的，所谓文件名仅仅是给用户容易使用的。代表一个特定的文件（包括目录）
+-	`super_block`：文件系统的控制块，有整个文件系统信息，一个文件系统所有的`inode`都要连接到超级块上，代表一个已挂载的文件系统
 -	[`dentry`](https://elixir.bootlin.com/linux/v3.4/source/include/linux/dcache.h#L88)：**VFS中负责维护目录树的数据结构就是`dentry`，通过把`inode`绑定到`dentry`来实现目录树的访问和管理**。Linux中一个路径字符串，在内核中会被解析为一组路径节点object，`dentry`就是路径中的一个节点。`dentry`被用来索引和访问`inode`，每个`dentry`对应一个`inode`，通过`dentry`可以找到并操作其所对应的`inode`。与`inode`和`super block`不同，`dentry`在磁盘中并没有实体储存，`dentry`链表都是在运行时通过解析`path`字符串构造出来的。此外，多个 `dentry` 可以指向同一个 `inode`（符号链接）
 
 -	`dentry cache`：通过一个 `path` 查找对应的 `dentry`，如果每次都从磁盘中去获取的话会比较耗资源，所以内核提供了一个 LRU 缓存用于加速查找，比如查找 `/usr/bin/java` 这个文件的目录项的时候，先需要找到 `/` 的目录项，然后 `/bin`，依次类推直到找到 `path` 的结尾，这样中间的查找过程中涉及到的目录项`dentry`就会被缓存起来，方便下次查找
@@ -96,13 +96,18 @@ build  docker  home  lost+found  test  subdir
 
 ![process-relation](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/kernel/file-system/task_struct_fs-1.png?raw=true)
 
+4、dcache的作用
+
+-	VFS实现`open`、`stat`、`chmod`等类似的系统调用，都会传递一个`pathname`参数给VFS
+-	VFS根据文件路径`pathname`搜索directory entry cache（高速目录项缓存，用于映射文件路径和`dentry`）获取对应的`dentry`。由于内存限制，并不是所有`dentry`都能在缓存命中，当根据`pathname`找不到对应`dentry`时，VFS调用`lookup`接口向底层文件系统查找获取`inode`信息，以此建立`dentry`和其对应的`inode`结构的关联
+
 #### 内核数据结构（基础）
 先介绍 VFS 的四个基础结构在内核中的定义
 
--	超级块（super block）
--	索引节点（inode）
--	目录项（dentry）
--	文件对象（file）
+-	超级块（super block）：存储挂载的文件系统的相关信息
+-	索引节点（inode）：存储一个特定文件的相关信息
+-	目录项（dentry）：存储目录和文件的链接信息
+-	文件对象（file）：存储进程中一个打开的文件的交互相关的信息
 
 1、`struct super_block`：代表了整个文件系统，是文件系统的控制块，有整个文件系统信息，一个文件系统所有的 inode 都要连接到超级块上（为了便于理解，就认为一个分区就是一个 super block），实际上假设有一个 `100GB` 的硬盘，并将其划分为两个 `50GB` 的分区：`/dev/sda1` 和 `/dev/sda2`。每个分区都可以单独格式化为不同的文件系统（如 `/dev/sda1` 使用 `ext4`，`/dev/sda2` 使用 `NTFS`），对于每个格式化后的分区，操作系统都会在其内部创建一个或多个 super block 来管理该文件系统的所有操作
 
@@ -134,7 +139,7 @@ struct file_system_type {
 
 inode 有两种：一种是 VFS 的 inode，一种是具体文件系统的 inode。前者在内存中，后者在磁盘中。所以每次其实是将磁盘中的 inode 调进填充内存中的 inode，这样才算使用了磁盘文件 inode。inode 号是唯一的，表示不同的文件。Linux 内核定位文件都是依靠 inode 号进行，当 `open` 一个文件时，首先系统找到这个文件名 `filename` 对应的 inode 号，然后通过 inode 号获取 inode 信息，最后由 inode 定位到文件数据所在的 block 后，就可以处理文件数据
 
-inode 和文件的关系是当创建一个文件的时候，就给文件分配了一个 inode。一个 inode 只对应一个实际文件，一个文件也会只有一个 inode，inodes 最大数量就是文件的最大数量，Linux可通过`df -i`查询inode使用情况
+inode 和文件的关系是当创建一个文件的时候，就给文件分配了一个 inode。一个 inode 只对应一个实际文件，一个文件也会只有一个 inode，inodes 最大数量就是文件的最大数量，Linux可通过`df -i`查询inode使用情况。此外，一个inode可以代表一个普通的文件，也可以代表管道或者设备文件等这样的特殊文件
 
 ```CPP
 struct inode {
@@ -147,6 +152,13 @@ struct inode {
 	union {
 		struct list_head    i_dentry;
 		struct rcu_head        i_rcu;
+	};
+
+	//...
+	union {
+		struct pipe_inode_info	*i_pipe;	//如果inode所代表的文件是一个管道，则使用该字段
+		struct block_device	*i_bdev;		//如果inode所代表的文件是一个块设备，则使用该字段
+		struct cdev		*i_cdev; 			//如果inode所代表的文件是一个字符设备，则使用该字段
 	};
 }
 ```
@@ -579,6 +591,9 @@ mount 的过程就是把设备的文件系统加入到 vfs 框架中，以 `moun
 
 
 ####	多名空间的层次化（mnt_namespace）
+为了支持 `mnt_namespace`，内核把 mount 树扩展成了多棵（之前是单棵），每个 `mnt_namespace` 拥有一棵独立的 mount 树，如下图：
+
+![mnt-namespace](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/mnt-ns/mnt_tree_ns.png)
 
 ##  0x0	 VFS 关联 task_struct
 
@@ -588,7 +603,7 @@ mount 的过程就是把设备的文件系统加入到 vfs 框架中，以 `moun
 ##	0x0	部分核心源码摘要
 
 ####	mount
-`mount()` 系统调用是理解文件系统层次化的核心，它主要包含 3 个关键步骤：
+`mount()` 系统调用是理解文件系统层次化的核心，它主要包含 `3` 个关键步骤：
 
 1、解析 `mount` 系统调用中的参数挂载点路径 `pathname` ，返回对应的 `struct path` 结构
 
@@ -634,3 +649,4 @@ SYSCALL_DEFINE5(mount) → do_mount() → do_new_mount() → do_add_mount() → 
 -	[Linux 内核－虚拟文件系统 (VFS)](https://bbs.kanxue.com/article-20845.htm)
 -	[Virtual File System](https://myaut.github.io/dtrace-stap-book/kernel/fs.html)
 -	[What is a Superblock, Inode, Dentry and a File?](https://unix.stackexchange.com/questions/4402/what-is-a-superblock-inode-dentry-and-a-file)
+-	[Linux虚拟文件系统(VFS)](https://arkingc.github.io/2017/08/18/2017-08-18-linux-code-vfs/)

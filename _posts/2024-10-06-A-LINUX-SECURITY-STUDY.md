@@ -267,8 +267,140 @@ Linux Rootkit特指以Linux内核模块（LKM）形式加载到操作系统中�
 
 ####  挖矿木马
 
+####  进程隐藏
+1、利用`prctl`系统调用进行
 
-##  0x09  参考
+2、
+
+3、利用挂载覆盖`/proc/pid` 目录，利用 `mount`指令的`bind`方式将另外一个目录挂载覆盖至`/proc/`目录下指定进程 ID 的目录（由于`ps`、`top` 等工具会读取`/proc` 目录下获取进程信息，如果将进程 ID 的目录信息覆盖，则原来的进程信息将从 ps 的输出结果中隐藏）
+
+```bash
+#隐藏进程 id 为 42 的进程信息
+mount -o bind /tmp/dir /proc/42
+```
+
+缺点是，`cat /proc/pid/mountinfo` 或者 `cat /proc/mounts` 即可知道是否有利用 `mount` 将其他目录或文件挂载至`/proc` 下的进程目录
+
+####  Linux权限维持之进程注入
+常用的进程注入方法：
+- `LD_PRELOAD`：利用动态库机制覆盖同名运行系统调用
+- `ptrace`：提供了父进程可以观察和控制其子进程执行的能力，并允许父进程检查和替换子进程的内核镜像（包括寄存器）的值。`ptrace`基本原理是: 当使用了`ptrace`跟踪后，所有发送给被跟踪的子进程的信号（除了`SIGKILL`），都会被转发给父进程，而子进程则会被阻塞，这时子进程的状态就会被系统标注为`TASK_TRACED`。而父进程收到信号后，就可以对停止下来的子进程进行检查和修改，然后让子进程继续运行（工具`gdb`、`strace`都是基于此来实现的）
+
+####  linux无文件渗透执行elf：memfd_create
+参考文章[linux环境下无文件执行elf](https://blog.spoock.com/2019/08/27/elf-in-memory-execution/)，通过系统调用`memfd_create`的功能可以实现低权限模糊化执行的程序名和参数。`memfd_create`的作用是创建一个匿名文件并返回一个指向这个文件的文件描述符，该文件和普通文件一样，所以能够被修改、截断，内存映射等等。不同于一般文件的是该文件是保存在内存中，一旦所有指向这个文件的连接丢失，那么这个文件就会自动被释放。匿名内存用于此文件的所有的后备存储，通过`memfd_create`创建的匿名文件和通过`mmap`以`MAP_ANONYMOUS`的`flag`创建的匿名文件具有相同的语义
+
+```C
+// 这段代码执行后，通过cn_proc捕获的结果中，无法获得任何关于uname的信息
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <linux/memfd.h>
+#include <sys/syscall.h>
+#include <errno.h>
+ 
+int anonyexec(const char *path, char *argv[])
+{
+    int   fd, fdm, filesize;
+    void *elfbuf;
+    char  cmdline[256];
+ 
+    fd = open(path, O_RDONLY);
+    filesize = lseek(fd, SEEK_SET, SEEK_END);
+    lseek(fd, SEEK_SET, SEEK_SET);
+    elfbuf = malloc(filesize);
+    read(fd, elfbuf, filesize);
+    close(fd);
+    fdm = syscall(__NR_memfd_create, "elf", MFD_CLOEXEC);
+    ftruncate(fdm, filesize);
+    write(fdm, elfbuf, filesize);
+    free(elfbuf);
+    sprintf(cmdline, "/proc/self/fd/%d", fdm);
+    argv[0] = cmdline;
+    execve(argv[0], argv, NULL);
+    free(elfbuf);
+    return -1;
+}
+ 
+int main()
+{
+    char *argv[] = {"/bin/uname", "-a", NULL};
+    int result =anonyexec("/bin/uname", argv);
+    return result;
+}
+```
+
+####  linux无文件渗透执行elf：共享内存
+`fexecve`函数能执行一个程序（同`execve`），但是传递给这个函数的是文件描述符，而不是文件的绝对路径，样例代码如下。将代码编译后运行运行（可看到执行了`ls`），当然也可以直接运行`/dev/shm/badshmfile`得到`ls`一样的功能（同`memfd`工具类似），实现了对原始程序的隐藏效果
+
+```CPP
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+static char *args[] = {
+    "hic et nunc",
+    "-l",
+    "/dev/shm",
+    NULL
+};
+extern char **environ;
+int main(void) 
+{
+    struct stat st;
+    void *p;
+    int fd, shm_fd, rc;
+    shm_fd = shm_open("badshmfile", O_RDWR | O_CREAT, 0777);
+    if (shm_fd == -1) {
+    perror("shm_open");
+    exit(1);
+    }
+    rc = stat("/bin/ls", &st);
+    if (rc == -1) {
+    perror("stat");
+    exit(1);
+    }
+    rc = ftruncate(shm_fd, st.st_size);
+    if (rc == -1) {
+    perror("ftruncate");
+    exit(1);
+    }
+    p = mmap(NULL, st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED,
+         shm_fd, 0);
+    if (p == MAP_FAILED) {
+    perror("mmap");
+    exit(1);
+    }
+    fd = open("/bin/ls", O_RDONLY, 0);
+    if (fd == -1) {
+    perror("openls");
+    exit(1);
+    }
+    rc = read(fd, p, st.st_size);
+    if (rc == -1) {
+    perror("read");
+    exit(1);
+    }
+    if (rc != st.st_size) {
+    fputs("Strange situation!\n", stderr);
+    exit(1);
+    }
+    munmap(p, st.st_size);
+    close(shm_fd);
+    shm_fd = shm_open("badshmfile", O_RDONLY, 0);
+    fexecve(shm_fd, args, environ);
+    perror("fexecve");
+    return 0;
+}
+```
+
+##  0x09  安全软件收集
+参考[开源安全项目清单](https://raw.githubusercontent.com/Bypass007/Safety-Project-Collection/master/README.md)
+
+##  0x0A  参考
 -   [反弹Shell，看这一篇就够了](https://xz.aliyun.com/t/9488?u_atoken=ba042e2abcd2eb75127d6e0d58f1fcba&u_asig=0a472f9017303729323367295e0040)
 -   [HIDS 常见检测原理](https://segmentfault.com/a/1190000043496037?u_atoken=9d1b6e7ba6f45bfc74e3197aafdfacae&u_asig=1a0c65c917304505664322721e003d)
 -   [如何优雅的隐藏你的 Webshell](https://zu1k.com/posts/security/web-security/hide-your-webshell/#%E7%9B%B4%E6%8E%A5%E6%89%A7%E8%A1%8C)
@@ -281,3 +413,9 @@ Linux Rootkit特指以Linux内核模块（LKM）形式加载到操作系统中�
 -   [云安全中心反弹Shell多维检测技术详解](https://help.aliyun.com/zh/security-center/user-guide/detect-reverse-shells-from-multiple-dimensions?spm=a2c4g.11186623.help-menu-28498.d_2_5_0_3_1.57ae7370LjotGR&scm=20140722.H_206139._.OR_help-T_cn#DAS#zh-V_1)
 -   [警惕利用Linux预加载型恶意动态链接库的后门](https://www.freebuf.com/column/162604.html)
 -   [最新Linux挖矿程序kworkerds分析](https://www.freebuf.com/articles/system/201402.html)
+-   [优秀开源项目清单](https://www.icorgi.cn/project.html)
+-   [linux环境下无文件执行elf](https://blog.spoock.com/2019/08/27/elf-in-memory-execution/)
+-   [Linux权限维持之进程注入](https://payloads.online/archivers/2020-01-01/2/)
+-   [ptrace实现代码注入](https://m0nkee.github.io/2015/08/20/play-ptrace/)
+-   [Linux ELF无文件内存执行学习小记](https://xeldax.top/article/linux_no_file_elf_mem_execute)
+-   [How BPF-Enabled Malware Works](https://www.trendmicro.com/vinfo/us/security/news/threat-landscape/how-bpf-enabled-malware-works-bracing-for-emerging-threats)
