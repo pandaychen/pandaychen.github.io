@@ -12,6 +12,8 @@ tags:
 
 ##  0x00    前言
 
+本文代码基于 [v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include) 版本
+
 ####    Operating System Kernel
 操作系统内核（Operation System Kernel）本质上也是一种软件，可以看作是普通应用程序与硬件之间的一层中间层，其主要作用便是调度系统资源、控制 IO 设备、操作网络与文件系统等，并为上层应用提供便捷、抽象的应用接口
 
@@ -241,7 +243,7 @@ struct pid
 struct upid {
 	  /* Try to keep pid_chain in the same cacheline as nr for find_vpid */
 	  int nr;		//是`pid`的值， 即 `task_struct` 中 `pid_t pid` 域的值
-	  struct pid_namespace *ns; // 所属的pid namespace
+	  struct pid_namespace *ns; // 所属的pid namespace（归属，其中包含了在每个namespace管理进程分配的bitmap）
 	  struct hlist_node pid_chain;
 };
 
@@ -253,6 +255,12 @@ enum pid_type
 	PIDTYPE_MAX
 };
 ```
+
+所以，内核对PID的管理其实就是围绕两个数据结构展开
+
+-	`struct pid`：是内核对PID的内部表示
+-	`struct upid`：是表示特定的命名空间中可见的信息
+
 
 关于`pid.numbers[1]`这个成员，本质上一个柔性数组，每次在分配`struct pid`时，`numbers`会被扩展到`level`个元素，它用来容纳在每一层pid namespace中的 id（`upid`）
 
@@ -351,7 +359,7 @@ struct pidmap {
 -   如何快速地根据 PID、pid namespace、ID 类型找到对应进程的 `task_struct` ？
 -   如何快速地给新进程在可见的命名空间内分配一个唯一的 PID ？
 
-下图描述了这种关系，在level `2` 的某个pid namespace上新建了一个进程，分配给它的 pid 为`45`，映射到 level `1` 的pid namespace，分配给它的 pid 为 `134`；再映射到 level `0` 的pid namespace，分配给它的 pid 为`289`（注意`numbers`这个柔性数组），此外，图中只标识了`level=2,pid=45`的pid结构
+下图描述了这种关系，在level `2` 的某个pid namespace上新建了一个进程，分配给它的 pid 为`45`，映射到 level `1` 的pid namespace，分配给它的 pid 为 `134`；再映射到 level `0` 的pid namespace，分配给它的 pid 为`289`（注意`numbers`这个柔性数组），此外，图中标识了某个位于namespace内的进程，其`level=2,pid=45`的pid结构（在`level1`pid为`134`，`level0`pid为`289`）
 
 ![relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/pid_namespace.png)
 
@@ -471,8 +479,47 @@ pid_t pid_vnr(struct pid *pid)
 }
 ```
 
-####    分配PID
-1、为新进程 `task_struct` 分配 `pid`
+####   核心逻辑：分配PID
+以 PID namespace为例，现在需要为新的任务分配一个新的任务id（`fork`进程/线程），调用链开始于 `clone` -> `do_fork` -> `copy_process` -> `alloc_pid`，`copy_process`函数会给此线程alloc一个`struct pid`结构体，核心代码[如下](https://github.com/torvalds/linux/blob/master/kernel/fork.c#L2147)：
+
+```C
+/*
+ * This creates a new process as a copy of the old one,
+ * but does not actually start it yet.
+ *
+ * It copies the registers, and all the appropriate
+ * parts of the process environment (as per the clone
+ * flags). The actual kick-off is left to the caller.
+ */
+__latent_entropy struct task_struct *copy_process(
+					struct pid *pid,
+					int trace,
+					int node,
+					struct kernel_clone_args *args)
+{
+	struct task_struct *p;
+	//...
+	p = dup_task_struct(current, node);
+	//...
+	retval = copy_namespaces(clone_flags, p);
+	//...
+	if (pid != &init_struct_pid) {
+		//alloc_pid：p->nsproxy->pid_ns_for_children表示当前分配pid的namespace
+		pid = alloc_pid(p->nsproxy->pid_ns_for_children, args->set_tid,
+				args->set_tid_size);
+		if (IS_ERR(pid)) {
+			retval = PTR_ERR(pid);
+			goto bad_fork_cleanup_thread;
+		}
+	}
+
+	//...
+}
+```
+
+1、`alloc_pid`函数：为新进程 `task_struct` 分配 `pid`，比如在`level=2`的namespace中运行一个`top`进程（`level=1`是`level=2`的parent，`level=0`是`level=1`的parent），该`level=2`的线程`fork`时，会从`level=2`开始alloc pid，一直到`level=0`，它会创建`3`个pid namespace的pid number（即`struct pid`的`level`成员的值为`2`），其中`level=0`是全局的，在通过`pid_nr()`函数设置`task_struct.pid_t`成员时，其就是取的`level=0` pid_namespace的pid number
+
+所以这里也说明了，在pid namespace场景中，针对指定的微线程，其`struct pid`和`struct task_struct`都是唯一的，而不同namespace上的局部性差异则是由结构`upid`体现
 
 ```CPP
  struct pid *alloc_pid(struct pid_namespace *ns)
@@ -491,7 +538,9 @@ pid_t pid_vnr(struct pid *pid)
     
      // 初始化进程在各级命名空间的 PID，直到全局命名空间（level 为0）为止
  	tmp = ns;
- 	pid->level = ns->level;
+ 	pid->level = ns->level;	//ns->level保存了当前所在的namespace层级
+
+	// 从当前所在的namespace逆序遍历，已知到level==0层级，构建每一个level的pid值，并且保存在pid->numbers数组中（upid类型）
  	for (i = ns->level; i >= 0; i--) {
  		nr = alloc_pidmap(tmp);  //分配一个局部PID
  		if (nr < 0) {
@@ -501,7 +550,7 @@ pid_t pid_vnr(struct pid *pid)
     
  		pid->numbers[i].nr = nr;
  		pid->numbers[i].ns = tmp;
- 		tmp = tmp->parent;
+ 		tmp = tmp->parent; //tmp更新为其上一级的namespace指针
  	}
     
      // 若为命名空间的初始进程
@@ -690,17 +739,17 @@ tid/pid/ppid/tgid/pgid/seesion id小结：
 
 process 的 `struct task_struct` 和 `struct pid` 之间的双向查询关系如下：
 
--	`task_struct`-> `pid`：通过 `task->pids[PIDTYPE_PID].pid` 指针指向 `struct pid`
--	`pid`-> `task_struct`：通过 `pid->tasks[PIDTYPE_PID]` 链表找到 `task_struct`（理论上该链表只有一个成员）
+-	`task_struct --> pid`：通过 `task->pids[PIDTYPE_PID].pid` 指针指向 `struct pid`
+-	`pid --> task_struct`：通过 `pid->tasks[PIDTYPE_PID]` 链表找到 `task_struct`（理论上该链表只有一个成员）
 
 ![process](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/pid_ns/pid.png)
 
 ####	thread group
 轻量级进程（线程）和线程组leader线程之间的双向查询关系如下：
 
--	`thread`->`group leader`：普通线程 `task->group_leader` 存放线程组 leader 线程的 `task_struct` 结构
+-	`thread-->group leader`：普通线程 `task->group_leader` 存放线程组 leader 线程的 `task_struct` 结构
 -	普通线程 `task->signal->leader_pid` 指向线程组 leader 线程的 `struct pid`
--	`group leader`-> `thread`：线程组 leader 线程的 `task->thread_group` 链表，链接了本线程组所有线程的 `task_struct`
+-	`group leader-->thread`：线程组 leader 线程的 `task->thread_group` 链表，链接了本线程组所有线程的 `task_struct`
 
 ![thread_group](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/pid_ns/tgid.png)
 
@@ -709,8 +758,8 @@ process 的 `struct task_struct` 和 `struct pid` 之间的双向查询关系如
 
 线程组 leader 和进程组 leader 之间的双向查询关系：
 
--	`thread group leader` -> `process group leader`：线程组learder的`task->pids[PIDTYPE_PGID].pid`指针指向进程组leader的`struct pid`
--	`process group leader`->`thread group leader`：进程组leader（对应的`struct pid`）的`pid->tasks[PIDTYPE_PGID]`链表链接了所有线程组learder的`task_struct`结构
+-	`thread group leader --> process group leader`：线程组learder的`task->pids[PIDTYPE_PGID].pid`指针指向进程组leader的`struct pid`
+-	`process group leader --> thread group leader`：进程组leader（对应的`struct pid`）的`pid->tasks[PIDTYPE_PGID]`链表链接了所有线程组learder的`task_struct`结构
 
 ![Pg](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/pid_ns/pgid.png)
 
@@ -719,8 +768,8 @@ process 的 `struct task_struct` 和 `struct pid` 之间的双向查询关系如
 
 线程组 leader 和会话 leader 之间的双向查询关系：
 
--	`thread group leader`->`process group leader`：线程组learder的`task->pids[PIDTYPE_SID].pid`指针指向会话leader的`struct pid`结构
--	`process group leader`->`thread group leader`：会话leader的`pid->tasks[PIDTYPE_SID]`链表链接了所有线程组learder的`task_struct`结构
+-	`thread group leader --> process group leader`：线程组learder的`task->pids[PIDTYPE_SID].pid`指针指向会话leader的`struct pid`结构
+-	`process group leader --> thread group leader`：会话leader的`pid->tasks[PIDTYPE_SID]`链表链接了所有线程组learder的`task_struct`结构
 
 ![SESSION](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/pid_ns/sid.png)
 
@@ -920,6 +969,81 @@ struct nsproxy {
 ![task_struct_2_namespaces](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/task-struct-6-namespace.png)
 
 ##	0x07	进程线程状态及状态图
+![state](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/scheduler/process-state.png)
+
+进程描述符中的`state`成员描述了进程的当前状态：
+
+```CPP
+struct task_struct {
+	volatile long state;	/* -1 unrunnable, 0 runnable, >0 stopped */
+    /*...*/
+};
+```
+
+内核中主要的状态字段定义如下（注释已经说明了应用在`task_struct`的字段）：
+
+```CPP
+/* Used in tsk->state: */
+#define TASK_RUNNING			0x0000
+#define TASK_INTERRUPTIBLE		0x0001
+#define TASK_UNINTERRUPTIBLE		0x0002
+
+/* Used in tsk->exit_state: */
+#define EXIT_DEAD			0x0010
+#define EXIT_ZOMBIE			0x0020
+#define EXIT_TRACE			(EXIT_ZOMBIE | EXIT_DEAD)
+
+/* Used in tsk->state again: */
+#define TASK_PARKED			0x0040
+#define TASK_DEAD			0x0080
+#define TASK_WAKEKILL			0x0100
+#define TASK_WAKING			0x0200
+#define TASK_NOLOAD			0x0400
+#define TASK_NEW			0x0800
+#define TASK_STATE_MAX			0x1000
+
+/* Convenience macros for the sake of set_current_state: */
+#define TASK_KILLABLE			(TASK_WAKEKILL | TASK_UNINTERRUPTIBLE)
+#define TASK_STOPPED			(TASK_WAKEKILL | __TASK_STOPPED)
+#define TASK_TRACED			(TASK_WAKEKILL | __TASK_TRACED)
+
+#define TASK_IDLE			(TASK_UNINTERRUPTIBLE | TASK_NOLOAD)
+```
+
+系统中的每个内核线程都必然处于五种进程状态中的一种，与进程状态和进程的运行、调度有关系：
+
+-	`TASK_RUNNING`（运行）：进程是可执行的，它或者正在执行，或者在运行队列中等待执行。这是进程在用户空间中执行的唯一可能的状态（表示进程线程处于就绪状态或者是正在执行）
+-	`TASK_INTERRUPTIBLE`（可中断）：进程正在睡眠（被阻塞），等待某些条件的达成。一旦这些条件达成，内核就会把进程状态设置为运行，处于此状态的进程也会因为接收到信号而提前被唤醒并随时准备投入运行
+-	`TASK_UNINTERRUPTIBLE` （不可中断）：除了就算是接收到信号也不会被唤醒或准备投入运行外，这个状态与可打断状态相同。这个状态通常在进程必须在等待时不受干扰或等待事件很快就会发生时出现。由于处于此状态的任务对信号不做响应，所以较之`TASK_INTERRUPTIBLE`可中断状态，使用得较少（如`ps`时看到被标为`D`状态而又不能被杀死的进程的原因。由于类任务将不响应信号，因此不可能给它发送`SIGKILL`信号）
+-	`__TASK_TRACED`：被其他进程跟踪的进程（如通过`ptrace`对程序进行跟踪）
+-	`__TASK_TSTOPPED`（停止）：进程停止执行；进程没有投入运行也不能投入运行，通常这种状态发生在接收到`SIGSTOP`、`SIGTSTP`、`SIGTTIN`、`SIGTTOU` 等信号的时候。此外，调试期间接收到任何信号，都会使进程进入这种状态
+
+举例来说，一个任务（进程或线程）刚创建出来的时候是 `TASK_RUNNING` 就绪状态，等待调度器的调度，调度器执行 `schedule` 后，任务获得 CPU 后进入执行（运行）。当需要等待某个事件的时候，例如阻塞式 `read` 某个 socket 上的数据，但是数据还没有到达时，任务会进入 `TASK_INTERRUPTIBLE` 或 `TASK_UNINTERRUPTIBLE` 状态，任务被阻塞掉
+
+当等待的事件到达以后，如 socket 上的数据到达，内核在收到数据后会查看 socket 上阻塞的等待任务队列，然后将之唤醒，使得任务重新进入 `TASK_RUNNING` 就绪状态；任务如此往复地在各个状态之间循环，直到退出
+
+注意`TASK_RUNNING`是表示进程在时刻准备运行的状态（可能不一定在运行），当处于这个状态的进程获得时间片的时候，就是在运行中；如果没有获得时间片，就说明它被其他进程抢占了，在等待再次分配时间片。在运行中的进程，一旦要进行一些 I/O 操作，需要等待 I/O 完毕，这个时候会释放 CPU，进入睡眠（阻塞）状态
+
+-	若进入`TASK_INTERRUPTIBLE`可中断的睡眠状态，虽然在睡眠状态等待 I/O 完成，但是这时一个信号来的时候，进程还是要被唤醒。只不过唤醒后不是继续刚才的操作，而是进行信号处理。当然程序员可以根据自己的意愿，来写信号处理函数，例如收到某些信号，就放弃等待这个 I/O 操作完成，直接退出；或者收到某些信息，继续等待。
+-	若进入 `TASK_UNINTERRUPTIBLE`不可中断的睡眠状态时，不可被信号唤醒，只能死等 I/O 操作完成。一旦 I/O 操作因为特殊原因不能完成，这个时候谁也叫不醒这个进程了，当然也无法被 `kill`（本质也是信号，除非重启）
+
+于是就有了一种新的进程睡眠状态，`TASK_KILLABLE`，可以终止的新睡眠状态，若进程处于这种状态中，它的运行原理类似 `TASK_UNINTERRUPTIBLE`，只不过可以响应致命信号。由于`TASK_WAKEKILL` 用于在接收到致命信号时唤醒进程，因此`TASK_KILLABLE`即在`TASK_UNINTERUPTIBLE`的基础上增加一个`TASK_WAKEKILL`标记位即可
+
+`TASK_STOPPED`是在进程接收到 `SIGSTOP`、`SIGTTIN`、`SIGTSTP`或者 `SIGTTOU` 信号之后进入该状态
+
+`TASK_TRACED` 表示进程被 `debugger` 等进程监视，进程执行被调试程序所停止。当一个进程被另外的进程所监视，每一个信号都会让进程进入该状态
+
+一旦一个进程要结束，先进入的是 `EXIT_ZOMBIE` 状态，但是这个时候它的父进程还没有使用`wait()` 等系统调用来获知其终止信息，此时进程就成了僵尸进程。`EXIT_DEAD` 是进程的最终状态，`EXIT_ZOMBIE` 和 `EXIT_DEAD` 也可以用于 `exit_state`
+
+![switch-state](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/TASK_STATE.png)
+
+小结下，状态变迁：
+-	`INIT--->TASK_RUNNING[READY]`：当前任务调用`fork`创建一个新进程
+-	`TASK_RUNNING[READY]--->TASK_RUNNING[RUNNING]`：内核调度，通过`schedule-->context_switch`将新任务放入CPU运行
+-	`TASK_RUNNING[RUNNING]--->TASK_RUNNING[READY]`：当前任务被高优先任务抢占
+-	`TASK_RUNNING[RUNNING]--->TASK_INTERRUPTIBLE/TASK_UNINTERRUPTIBLE`：为了等待特定事件，任务在等待队列上阻塞
+-	`TASK_RUNNING[RUNNING]--->EXIT`：任务通过`do_exit`函数退出
+-	`TASK_INTERRUPTIBLE/TASK_UNINTERRUPTIBLE-->TASK_RUNNING[READY]`：	等待的事件发生后任务被唤醒，并且被重新置入运行队列中
 
 
 ##	0x08	一些有趣的示例
