@@ -45,12 +45,13 @@ int getdents64(unsigned int fd, struct linux_dirent64 *dirp, unsigned int count)
 其中，`struct linux_dirent64`（目录项）的定义如下，结构体包含了目录项的各种属性，如文件名、文件类型、inode 号等
 
 ```CPP
+//因为有"柔性数组"d_name，所以用d_reclen记录了大小，这样就可以在"目录条目"buffer中定位到下一个"目录条目"
 struct linux_dirent64 {
      u64        d_ino;    /* 64-bit inode number */
      u64        d_off;    /* 64-bit offset to next structure */
-     unsigned short d_reclen; /* Size of this dirent */
+     unsigned short d_reclen; /* Size of this dirent */ //保存了当前结构体（目录条目）的长度
      unsigned char  d_type;   /* File type */
-     char           d_name[]; /* Filename (null-terminated) */
+     char           d_name[]; /* Filename (null-terminated) */ //柔性数组：
 };
 ```
 
@@ -288,6 +289,7 @@ int handle_getdents_patch(struct trace_event_raw_sys_exit *ctx)
     // Unlink target, by reading in previous linux_dirent64 struct,
     // and setting it's d_reclen to cover itself and our target.
     // This will make the program skip over our folder.
+    //注释：通过增大"目标进程所属的目录条目的前一个目录条目"的d_reclen值，使得用户程序在遍历*dirp结果时，就会跳过"目标进程所属的目录条目"
     long unsigned int buff_addr = *pbuff_addr;
     struct linux_dirent64 *dirp_previous = (struct linux_dirent64 *)buff_addr;
     short unsigned int d_reclen_previous = 0;
@@ -308,6 +310,7 @@ int handle_getdents_patch(struct trace_event_raw_sys_exit *ctx)
 
     // Attempt to overwrite
     short unsigned int d_reclen_new = d_reclen_previous + d_reclen;
+    // 重要：因为&dirp_previous->d_reclen是用户空间地址，而不是内核空间地址，所以ebpf可以用bpf_probe_write_user helper functions 修改dirp地址中的数据
     long ret = bpf_probe_write_user(&dirp_previous->d_reclen, &d_reclen_new, sizeof(d_reclen_new));
 
     // Send an event
@@ -362,5 +365,5 @@ int main(){
 ```
 
 ##  0x03  参考
--   [eBPF 开发实践：使用 eBPF 隐藏进程或文件信息](https://eunomia.dev/zh/tutorials/24-hide/) 你 、
+-   [eBPF 开发实践：使用 eBPF 隐藏进程或文件信息](https://eunomia.dev/zh/tutorials/24-hide/)
 -   [sudoadd](https://github.com/eunomia-bpf/bpf-developer-tutorial/blob/main/src/26-sudo/sudoadd.bpf.c)
