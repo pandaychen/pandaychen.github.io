@@ -19,10 +19,12 @@ Hey，这里是熊喵君的博客，后台程序员，现居深圳。
 -   `Kubernetes`
 -   微服务（网关）构建
 -   后台 Service
--   网络安全
+-   网络/主机安全
 -   有趣的数据结构算法实现
 -	`OpenSSH`
 -	系统构建和原理
+-	透明代理技术
+-	`eBPF`技术
 
 ##### 编程技能
 -   `Golang`
@@ -30,6 +32,7 @@ Hey，这里是熊喵君的博客，后台程序员，现居深圳。
 -   `Python`
 -   `Perl`
 -   `Shell`
+-	`rust`
 
 ##### 个人推荐
 -	微服务框架：[Kratos](https://github.com/go-kratos/kratos)
