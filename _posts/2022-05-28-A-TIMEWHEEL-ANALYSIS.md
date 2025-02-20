@@ -121,6 +121,8 @@ type timingEntry struct {
 }
 ```
 
+这里需要着重理解下`timingEntry.diff`字段的意义（见下文分析）
+
 ##	0x03	代码分析（1）
 本小节分析下 [timingwheel](https://github.com/zeromicro/go-zero/blob/master/core/collection/timingwheel.go) 的实现。
 
@@ -232,6 +234,9 @@ func (tw *TimingWheel) scanAndRunTasks(l *list.List) {
 			e = next
 			continue
 		}
+
+		// task.circle==0
+		// && task.diff == 0 ：说明定时器已经到达触发时间
 
 		tasks = append(tasks, timingTask{
 			key:   task.key,
