@@ -244,3 +244,5 @@ func main() {
 -   [Linux Performance](http://www.brendangregg.com/linuxperf.html)
 -	[psutil for golang](https://github.com/shirou/gopsutil)
 -	[Go 每日一库之 gopsutil](https://darjun.github.io/2020/04/05/godailylib/gopsutil/)
+-	[A journey into the Linux proc filesystem](https://fernandovillalba.substack.com/p/a-journey-into-the-linux-proc-filesystem)
+- 	[HIDS数据采集项总结](https://l0n9w4y.cc/posts/72019/)
