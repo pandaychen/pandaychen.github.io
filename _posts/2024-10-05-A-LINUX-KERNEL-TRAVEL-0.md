@@ -207,6 +207,36 @@ struct pid_link
 
 ##	0x03	rbtree
 [rbtree](https://elixir.bootlin.com/linux/v6.13.1/source/lib/rbtree.c)
+经典数据结构，性能稳定，插入/删除/查找的时间复杂度接近`O(logN)`，而且中序遍历的结果是从小到大有序，内核中有如下应用：
+-	linux高精度定时器的实现（`hrtimer`）：以rbtree的形式组织，树的最左边的节点就是最快到期的事件节点
+-	Ext3文件系统，通过rbtree组织目录项
+-	linux内存中内存的管理：分配和回收。用rbtree组织已经分配的内存块，当应用程序调用free释放内存的时候，可以根据内存地址在rbtree中快速找到目标内存块
+-	linux内核进程调度算法通过rbtree组织管理，便于快速插入、删除、查找进程的`task_struct`
+
+此外，这里再补充关于rbtree的几个细节：
+1.	rbtree的键值可以重复么？
+2.	rbtree必须有键值么？
+3.	rbtree的精髓在于其动态的高度调整，即在增、删、改的过程中，为了避免rbtree退化成单链表，rbtree的特性会动态地调整树的高度，让树高不超过`2lg(n+1)`
+
+![rb-tree](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/datastructure/rb_node_shili1.png)
+
+参考上面这棵树的创建过程，对于键值相同的节点是有时间顺序的，插入晚的默认为大值，放在后面，也就是说rbtree自动实现了按时间轴存储键值的功能。即使到期时间相等（键值Key相等），也可以根据其插入红黑树的时间顺序来取出最小到期事件去执行
+
+####	结构体定义
+与其他的内核数据结构相同，为了通用性，`rb_node`只保留了红黑树节点自身的必须属性，即左孩子、右孩子、节点颜色
+
+![rb-node](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/datastructure/rb_node.jpg)
+
+```CPP
+struct rb_node {
+    unsigned long  __rb_parent_color;
+    struct rb_node *rb_right;
+    struct rb_node *rb_left;
+} __attribute__((aligned(sizeof(long))));
+    /* The alignment might seem pointless, but allegedly CRIS needs it */
+```
+
+####	核心代码解析
 
 ####	rbtree的应用
 
@@ -227,3 +257,6 @@ struct pid_link
 -   [linux kernel 中 HList 和 Hashtable](https://liujunming.top/2018/03/12/linux-kernel%E4%B8%ADHList%E5%92%8CHashtable/)
 -   [Linux 内核中双向链表的经典实现](https://www.cnblogs.com/skywang12345/p/3562146.html)
 -	[rbtree](https://oi-wiki.org/ds/rbtree/)
+-	[linux源码解读（十五）：红黑树在内核的应用——CFS调度器](https://www.cnblogs.com/theseventhson/p/15799832.html)
+-	[linux源码解读（十四）：红黑树在内核的应用——红黑树原理和api解析](https://www.cnblogs.com/theseventhson/p/15798449.html)
+-	[数据结构可视化](http://www.u396.com/wp-content/collection/data-structure-visualizations/)
