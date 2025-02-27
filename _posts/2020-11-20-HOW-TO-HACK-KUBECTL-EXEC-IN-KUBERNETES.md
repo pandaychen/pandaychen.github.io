@@ -90,6 +90,10 @@ the list of kubernetes groups derived from user roles.
 ####    Pomerium
 [pomerium](https://github.com/pomerium/pomerium) 的实现如下：
 
+![arch](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/zerotrust/pomerium-arch.png)
+
+![request-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/zerotrust/pomerium-request-flow.png)
+
 
 ##  0x03    Teleport 的方案分析
 ![teleport-k8s-hacker](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kubernetes/teleport-kubectl-hacker1.png)
@@ -105,3 +109,4 @@ the list of kubernetes groups derived from user roles.
 -   [pomerium - Overview](https://www.pomerium.io/docs/#)
 -   [pomerium - kubernetes](https://www.pomerium.com/docs/quick-start/kubernetes.html)
 -   [Achieving Cloud Native Security and Compliance with Teleport](https://www.infracloud.io/blogs/achieving-cloud-native-security-compliance-teleport/)
+-   [Architecture - pomerium](https://www.pomerium.com/docs/internals/architecture)
