@@ -69,7 +69,7 @@ Linux进程调度的本质是，在有限CPU下（进程数目远远超过CPU的
 
 ![]()
 
-##    0x02    进程调度
+##    0x02    进程调度：一个白话解读
 
 ![rq-taskstruct]()
 
@@ -223,9 +223,321 @@ schedule();
 
 4、此外，在内核态也会遇到中断的情况，当中断返回的时候，返回的仍然是内核态。这个时候也是一个执行抢占的时机，从中断返回内核的，调用的是`preempt_schedule_irq`，里面会在需要的时候调用`schedule`让出当前进程
 
-##  0x02     
+##  0x03    进程调度：名词
 
-##  0x03 进度调度延迟（可观测）
+####    调度类
+在Linux中，将调度器公共的部分抽象，使用`struct sched_class`结构体描述一个具体的调度类。系统核心调度代码会通过`struct sched_class`结构体的成员调用具体调度类的核心算法
+
+```CPP
+struct sched_class {
+	const struct sched_class *next; //next成员指向下一个调度类（比自己低一个优先级）。在Linux中，每一个调度类都是有明确的优先级关系，高优先级调度类管理的进程会优先获得cpu使用权
+
+    //入队操作，向该调度器管理的runqueue中添加一个进程
+	void (*enqueue_task) (struct rq *rq, struct task_struct *p, int flags);
+
+    // 出队操作，向该调度器管理的runqueue中删除一个进程
+	void (*dequeue_task) (struct rq *rq, struct task_struct *p, int flags);
+
+    //当一个进程被唤醒或者创建的时候，需要检查当前进程是否可以抢占当前cpu上正在运行的进程，如果可以抢占需要标记TIF_NEED_RESCHED flag
+	void (*check_preempt_curr)(struct rq *rq, struct task_struct *p, int flags);
+
+    //从runqueue中选择一个最适合运行的task，依据什么挑选最适合运行的进程？
+	struct task_struct * (*pick_next_task)(struct rq *rq, struct task_struct *prev, struct rq_flags *rf);
+    /* ... */
+}; 
+```
+
+每一个进程都对应一种调度策略（每一个进程在创建之后，总是要选择一种调度策略），每一种调度策略又对应一种调度类（每一个调度类可以对应多种调度策略），其中stop调度器和idle-task调度器，仅由内核使用
+
+| 调度类 | 描述 | 调度策略 | 意义| 
+| :-----:| :----: | :----: |:----: |
+| `stop_sched_class`| stop 调度器| | 优先级最高的调度类，可以抢占其他所有进程，不能被其他进程抢占 |
+| `dl_sched_class` | deadline调度器 | SCHED_DEADLINE | 使用红黑树，把进程按照绝对截止期限进行排序，选择最小进程进行调度运|
+| `rt_sched_class` | 实时调度器 | SCHED_FIFO、SCHED_RR | 实时调度器，为每个优先级维护一个队列|
+| `fair_sched_class` | 完全公平调度器 | SCHED_NORMAL、SCHED_BATCH、SCHED_IDLE | 完全公平调度器 |
+| `idle_sched_class` | idle task |  | 空闲调度器，每个CPU都会有一个idle线程，当没有其他进程可以调度时，调度运行idle线程|
+
+
+-   SCHED_DEADLINE：限期进程调度策略，使task选择Deadline调度器来调度运行
+-   SCHED_RR：实时进程调度策略，时间片轮转，进程用完时间片后加入优先级对应运行队列的尾部，把CPU让给同优先级的其他进程
+-   SCHED_FIFO：实时进程调度策略，先进先出调度没有时间片，没有更高优先级的情况下，只能等待主动让出CPU
+-   SCHED_NORMAL：普通进程调度策略，使task选择CFS调度器来调度运行
+-   SCHED_BATCH：普通进程调度策略，批量处理，使task选择CFS调度器来调度运行
+-   SCHED_IDLE：普通进程调度策略，使task以最低优先级选择CFS调度器来调度运行
+
+![sched_class]()
+
+调度类的优先级如下，每一个调度类利用next成员构建单项链表
+
+```TEXT
+sched_class_highest----->stop_sched_class
+                         .next---------->dl_sched_class
+                                         .next---------->rt_sched_class
+                                                         .next--------->fair_sched_class
+                                                                        .next----------->idle_sched_class
+                                                                                         .next = NULL
+```
+
+Linux调度核心在选择下一个合适的task运行的时候，会按照上面调度类优先级的顺序遍历各个调度类的`pick_next_task`函数。因此，`SCHED_FIFO`调度策略的实时进程永远比`SCHED_NORMAL`调度策略的普通进程优先运行
+
+```CPP
+//负责选择一个即将运行的进程
+static inline struct task_struct *pick_next_task(struct rq *rq,
+                                                 struct task_struct *prev, struct rq_flags *rf)
+{
+	const struct sched_class *class;
+	struct task_struct *p;
+ 
+	for_each_class(class) {          /* 按照优先级顺序便利所有的调度类，通过next指针遍历单链表 */
+		p = class->pick_next_task(rq, prev, rf);
+		if (p)
+			return p;
+	}
+}
+```
+
+####    就绪队列（runqueue）
+系统中每个CPU（逻辑核）都会有一个全局的就绪队列（cpu runqueue），结构体为`struct rq`，它是per-cpu类型，即每个cpu上都会有一个`struct rq`结构体，可以减少锁的开销。每一个调度类也有属于自己管理的就绪队列
+
+![]()
+
+-   `struct cfs_rq`：CFS调度类的就绪队列，管理就绪态的`struct sched_entity`调度实体，后续6通过`pick_next_task`接口从就绪队列中选择最适合运行的调度实体（虚拟时间最小的调度实体）
+-   `struct rt_rq`：实时调度器就绪队列
+-   `struct dl_rq`：Deadline调度器就绪队列
+
+```CPP
+struct rq {
+         struct cfs_rq cfs;
+	struct rt_rq rt;
+	struct dl_rq dl;
+};
+ 
+struct rb_root_cached {
+	struct rb_root rb_root;
+	struct rb_node *rb_leftmost;
+};
+ 
+struct cfs_rq {
+	struct load_weight load;    //load：就绪队列权重，就绪队列管理的所有调度实体权重之和
+	unsigned int nr_running;    //nr_running：就绪队列上调度实体的个数
+	u64 min_vruntime;           //min_vruntime：跟踪就绪队列上所有调度实体的最小虚拟时间
+	struct rb_root_cached tasks_timeline;   //用于跟踪调度实体按虚拟时间大小排序的红黑树的信息（包含红黑树的根以及红黑树中最左边节点）
+}; 
+```
+
+##  0x0 调度器类型
+-   主调度器（主动让出）：本体是`__schedule()`函数，需要在内核代码中主动调用
+-   周期性调度器（定时调度）：本体是`scheduler_tick()`函数，周期性调度器则由配合系统的tick时钟中断以每秒`HZ`次的周期性触发
+
+与调度器类型息息相关的概念就是调度时机，即前文提到的两种调度切换方式：
+
+-   context switch：任务由于等待某种资源，将state改为非`RUNNING`状态后，调用`schedule()`主动让出CPU
+-   involuntary context switch：任务状态仍为`RUNNING`却失去CPU使用权，情况有任务时间片用完、有更高优先级的任务、任务中调用`cond_resched()`或`yield`让出CPU；这里包含的一种场景就与周期性调度器有关系（CFS）
+
+调度时机包括：定时调度schedule_tick和其它进程阻塞时主动让出两种
+
+####    主调度器：schedule
+主动调度就是进程运行到一半，因为等待 I/O 等操作而主动调用 `schedule()` 函数让出 CPU（golang协程的读写过程很类似），这里列举几个例子：
+
+1、写入块设备，写入需要一段时间，这段时间用不上CPU
+
+```CPP
+static void btrfs_wait_for_no_snapshoting_writes(struct btrfs_root *root){
+    //......
+    do {
+        prepare_to_wait(&root->subv_writers->wait, &wait,
+                TASK_UNINTERRUPTIBLE);
+        writers = percpu_counter_sum(&root->subv_writers->counter);
+        if (writers)
+            schedule();
+        finish_wait(&root->subv_writers->wait, &wait);
+    } while (writers);
+}
+```
+
+2、从 Tap 网络设备等待一个读取
+
+```CPP
+static ssize_t tap_do_read(struct tap_queue *q,
+            struct iov_iter *to,
+            int noblock, struct sk_buff *skb){
+    //......
+    while (1) {
+        if (!noblock)
+            prepare_to_wait(sk_sleep(&q->sk), &wait,
+                    TASK_INTERRUPTIBLE);
+    //......
+        /* Nothing to read, let's sleep */
+        schedule();
+    }
+    //......
+}
+```
+
+类似的case 在 Linux 内核中非常多，它们会把进程设置为 `D` 状态（`TASK_UNINTERRUPTIBLE`），主要集中在 disk I/O 的访问和信号量（Semaphore）锁的访问上
+
+####    周期性调度器
+系统中每个CPU都会有一个系统定时器，本质上是一个可编程中断时钟。通过配置可以让其每秒生成固定`HZ`个中断。时钟每过一段时间触发一次时钟中断，时钟中断处理函数会调用 `scheduler_tick()`函数，即周期性调度的入口是`scheduler_tick`->`curr->sched_class->task_tick`，时钟节拍最终会调用调度类`task_tick`方法完成调度相关的工作，会在这里判断是否需要调度下一个任务来抢占当前CPU核。也会触发多核之间任务队列的负载均衡，保证不让忙的核忙死，闲的核闲死。在调度节拍中会定时将每个进程所执行过的时间都换算成vruntime，并累计起来，也会定时判断当前进程是否已经执行了足够长的时间，如果是的话，需要再选择另一个vruntime较小的任务来运行
+
+周期性调度通常会引发抢占式调度，所谓的抢占调度，就是A进程运行的时间太长了，会被其他进程抢占。还有一种情况是，有一个进程B原来等待某个I/O事件，等待到了被唤醒，发现比当前正在CPU上运行的进行优先级高，于是进行抢占
+
+由于tick中断发生时，中断处理程序中`scheduler_tick`会根据current进程所属的调度类（`curr->sched_class`）调用不同的`task_tick`方法实现，这里以CFS实现的fair调度类（`task_tick_fair`）简单说明
+
+1. 更新rq（CPU运行队列）的clock和clock_task：关联函数`update_rq_clock()`
+2. 更新cfs_rq的min_vruntime以及正在运行task（实际是`struct sched_entity`）的vruntime：关联函数`update_curr()`
+3. 更新sched_entity和cfs_rq的平均负载统计：关联函数`update_load_avg()`
+4. 检查当前是否需要重新调度并设置`TIF_NEED_RESCHED`：关联函数`check_preempt_tick()`
+5. 因为步骤`3`中已经更新了负载，最后一步判断是否进行负载均衡：关联函数`trigger_load_balance()`
+
+再次说明：周期性调度器的`scheduler_tick`部分并不会去主动调度，而是为当前进程设置`TIF_NEED_RESCHED`标志位，tick时钟中断返回时才会根据标志位的状态来调度
+
+1、周期性调度入口：`scheduler_tick`
+
+```CPP
+void scheduler_tick(void)
+{
+        // 取出当前的cpu及其任务队列
+        //....
+        rq_lock(rq, &rf);   //由于要操作rq，所以提前获取rq的spinlock锁
+        update_rq_clock(rq);    //读取cpu clock来更新rq的clock和clock_task
+    
+        thermal_pressure = arch_scale_thermal_pressure(cpu_of(rq));
+        update_thermal_load_avg(rq_clock_thermal(rq), rq, thermal_pressure);
+        struct task_struct *curr = rq->curr;
+        // ....
+        //cfs的方法对应task_tick_fair
+        curr->sched_class->task_tick(rq, curr, 0);
+        cpu_load_update_active(rq);
+        calc_global_load_tick(rq);
+        psi_task_tick(rq);
+
+        rq_unlock(rq, &rf);    //释放rq的spinlock锁
+        perf_event_task_tick();
+
+#ifdef CONFIG_SMP
+        rq->idle_balance = idle_cpu(cpu);  //判断是否需要触发负载均衡，是的话则raise sched_softirq
+        trigger_load_balance(rq);
+#endif
+}
+```
+
+2、`task_tick_fair`的实现
+
+```CPP
+static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
+{       
+        /*若是进程数据任务组的话，则逐层为每一个父任务组的cfs_rq调用entity_tick*/
+        for_each_sched_entity(se) {
+            cfs_rq = cfs_rq_of(se);
+            entity_tick(cfs_rq, se, queued);          //核心实现
+        }
+        //......
+}
+```
+
+3、`entity_tick`的实现：只有CFS算法的`task_tick`方法才会调用`entity_tick`函数
+
+```CPP
+static void
+entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
+{
+    /*
+     * Update run-time statistics of the 'current'.
+     */
+    update_curr(cfs_rq);   //涉及cfs，计算任务运行时间delta，将delta转化为虚拟时间更新到进程的vruntime，并更新rq上的min_vruntime
+
+    /*
+     * Ensure that runnable average is periodically updated.
+     */
+    update_load_avg(curr, 1);   //更新负载，包括任务entity和cfs_rq中的平均负载
+    update_cfs_shares(cfs_rq);  //设计组调度部分，包括更新组权重、带宽控制等
+
+    // ......
+
+    if (cfs_rq->nr_running > 1)
+        check_preempt_tick(cfs_rq, curr);    //核心：检查vruntime是否需要抢占，并设置TIF_NEED_RESCHED
+}
+```
+
+4、`update_curr`函数（CFS的核心函数）：`task_struct.sched_entity.vruntime`（进程的虚拟运行时间），如果一个进程在运行，随着时间的增长（一个个 tick 的到来）进程的 `vruntime` 将不断增大。没有得到执行的进程 `vruntime` 不变，最后尽量保证所有进程的vruntime相等
+
+```CPP
+/*
+ * Update the current task's runtime statistics.
+ */
+static void update_curr(struct cfs_rq *cfs_rq){
+    struct sched_entity *curr = cfs_rq->curr;
+    u64 now = rq_clock_task(rq_of(cfs_rq));
+    u64 delta_exec;
+    //......
+    delta_exec = now - curr->exec_start;
+    //......
+    curr->exec_start = now;
+    //......
+    curr->sum_exec_runtime += delta_exec;
+    //......
+
+    //delta_exec：实际运行时间
+    curr->vruntime += calc_delta_fair(delta_exec, curr);
+    update_min_vruntime(cfs_rq);
+    //......
+}
+
+/*
+NICE_0_LOAD宏对应的是1024，如果权重是1024，那么vruntime 就正好等于实际运行时间，否则会进入__calc_delta 来根据权重和实际运行时间折算一个vruntime增量。如果weight 较高，则同样实际运行时间算出来的vruntime 就会偏小，就会在调度中获取更多的cpu，cfs 就是这样实现了cpu资源按权重分配
+*/
+static inline u64 calc_delta_fair(u64 delta, struct sched_entity *se){
+    if (unlikely(se->load.weight != NICE_0_LOAD))
+        /* delta_exec * weight / lw.weight */
+        //虚拟运行时间 vruntime += 实际运行时间 delta_exec * NICE_0_LOAD/ 权重
+        delta = __calc_delta(delta, NICE_0_LOAD, &se->load);
+    return delta;
+}
+```
+
+5、`check_preempt_tick`详解（CFS的核心函数）：它的主要工作内容则是检查此时是否应该发生重新调度，然后`resched_curr()`去设置`TIF_NEED_RESCHED`标志位
+
+```CPP
+check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
+{
+        unsigned long ideal_runtime, delta_exec;
+        struct sched_entity *se;
+        s64 delta;
+
+        //计算出当前进程此次运行理想的时间片应是多少（当前进程在本次调度中分配的运行时间）
+        //TODO：sched_slice在CFS算法的分析文章中解析
+        ideal_runtime = sched_slice(cfs_rq, curr);
+        //算出进程从上次开始运行到现在一共跑了多长时间（当前进程已经运行的实际时间）
+        delta_exec = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;
+        //若运行时间已经超过了理应分到的时间片，则说明该重新调度了
+        if (delta_exec > ideal_runtime) {
+                //为curr进程设置need_resched
+                //如果实际运行时间已经超过分配给进程的运行时间，就需要抢占当前进程，在resched_curr函数中设置进程的TIF_NEED_RESCHED抢占标志
+                resched_curr(rq_of(cfs_rq));
+                clear_buddies(cfs_rq, curr);
+                return;
+        }
+
+        //若运行时间小于最小调度运行时间粒度，则不需要重新调度
+        //说明：由于cfs有一个调度周期sysctl_sched_latency的概念，即在一个固定的调度周期内cfs_rq上的所有进程都要被运行一遍，所以同时会存在一个最小调度时间粒度sysctl_sched_min_granularity的概念，若当前进程运行时间小于这个粒度则不会重新调度
+        if (delta_exec < sysctl_sched_min_granularity)
+                return;
+
+        //从红黑树中找到虚拟时间最小的调度实体（即最左孩子节点）
+        se = __pick_first_entity(cfs_rq);
+        delta = curr->vruntime - se->vruntime;
+        //若当前进程的vruntime小于cfs_rq上（红黑树）的最左边的vruntime（红黑树中最左边调度实体虚拟时间）则不需要重新调度
+        if (delta < 0)
+                return;
+
+        if (delta > ideal_runtime)
+                resched_curr(rq_of(cfs_rq));
+}
+```
+
+小结下周期性调度的流程，对于普通进程 `scheduler_tick` ==> `fair_sched_class.task_tick_fair` ==> `entity_tick` ==> `update_curr` 更新当前进程的 `vruntime` ==> `check_preempt_tick` 检查是否是时候被抢占；再强调一点，当发现当前进程应该被抢占，不能直接把它踢下来，而是把它标记为应该被抢占（因为根据进程调度第一定律，一定要等待正在运行的进程调用 `__schedule` 主动让出CPU才行）
+
+##  0x04 进度调度延迟（可观测）
 Linux内核为观测CPU运行队列运行指标（主要是调度延迟）提供了三个经典的tracepoint hook，代码基于[5.4.119](https://elixir.bootlin.com/linux/v5.4.119/source/kernel/sched/core.c#L4085)版本
 
 从上文了解到，调度分为两类 Voluntary Switch和 Involuntary Switch，而且调度时并不是立即切换，所以必然存在一定的调度延迟。所谓调度延迟，是指一个任务具备运行的条件（新创建进入 CPU 的 runqueue OR 抢占调度准备完成），到真正执行（获得 CPU 的执行权）的这段时间。那为什么会有调度延迟呢？因为 CPU 还被其他任务占据，还没有空出来，而且可能还有其他在 runqueue 中排队的任务；排队的任务越多，调度延迟就可能越长，所以这也是间接衡量 CPU 负载的一个指标（CPU 负载通过计算各个时刻 runqueue 上的任务数量获得）
@@ -335,6 +647,9 @@ static void __sched notrace __schedule(bool preempt)
 ####     wake_up_process
 [`wake_up_process`](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/core.c#L1947)
 
+```CPP
+
+```
 
 ##  0x0 主调度器
 
@@ -345,3 +660,6 @@ static void __sched notrace __schedule(bool preempt)
 -   [【原创】（一）Linux进程调度器-基础](https://www.cnblogs.com/LoyenWang/p/12249106.html)
 -   [万字详解Linux内核调度器极其妙用](https://mp.weixin.qq.com/s/gkZ0kve8wOrV5a8Q2YeYPQ?nwr_flag=1#wechat_redirect)
 -   [Linux 的调度延迟 - 原理与观测](https://zhuanlan.zhihu.com/p/462728452)
+-   [Linux进程调度：调度时机](https://zhuanlan.zhihu.com/p/163728119)
+-   [Linux进程调度：周期性调度器](https://zhuanlan.zhihu.com/p/426448579)
+-   [CFS调度器（1）-基本原理](http://www.wowotech.net/process_management/447.html)
