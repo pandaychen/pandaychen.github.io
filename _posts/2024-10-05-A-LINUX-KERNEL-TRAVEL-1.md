@@ -720,6 +720,9 @@ struct task_struct *pid_task(struct pid *pid, enum pid_type type)
  }
 ```
 
+####	进程与线程
+![process_and_thread](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/process_vs_thread.png)
+
 ####    小结
 tid/pid/ppid/tgid/pgid/seesion id小结：
 
@@ -802,7 +805,7 @@ struct mm_struct {
 ##  0x04    进程权限
 
 ####    进程权限凭证（credential）
-在内核结构`task_struct`中有下面的字段标识了进程权限凭证：
+在内核结构`task_struct`中有下面的字段标识了进程权限凭证，`real_cred`是指可以操作本任务的对象，而`cred`是指本任务可以操作的对象
 ```CPP
 struct task_struct {
     // ...
@@ -888,6 +891,12 @@ struct cred {
     };
 } __randomize_layout;
 ```
+
+-	`uid`和 `gid`（ real user/group id）：一般情况下，谁启动的进程，就是谁的 ID
+-	`euid` 和 `egid`（effective user/group id）：实际起作用的字段。当这个进程要操作消息队列、共享内存、信号量等对象的时候，其实就是在比较这个用户和组是否有权限
+-	`fsuid` 和`fsgid`（filesystem user/group id）：这个是对文件操作会审核的权限
+
+在Linux中可以通过`chmod u+s program`更改`euid`和`fsuid`来获取权限
 
 ##  0x05 关联文件系统
 `task_struct`亦关联了进程文件系统信息（如：当前目录等）以及当前进程打开文件的信息
@@ -1045,8 +1054,24 @@ struct task_struct {
 -	`TASK_RUNNING[RUNNING]--->EXIT`：任务通过`do_exit`函数退出
 -	`TASK_INTERRUPTIBLE/TASK_UNINTERRUPTIBLE-->TASK_RUNNING[READY]`：	等待的事件发生后任务被唤醒，并且被重新置入运行队列中
 
+##	0x08	进程亲缘关系
+全部进程构成了一颗进程树（`0`号进程是根节点）
+```CPP
+struct task_struct {
+	struct task_struct __rcu *real_parent; /* real parent process */
+	struct task_struct __rcu *parent; /* recipient of SIGCHLD, wait4() reports */
+	struct list_head children;      /* list of my children */
+	struct list_head sibling;       /* linkage in my parent's children list */
+}
+```
+-	`real_parent`：表示进程的原始创建者（即最初调用`fork()`或`clone()`的进程）。始终指向进程的原始父进程，不受调试或进程关系变更的影响
+-	`parent`：指向其父进程。当它终止时，必须向它的父进程发送信号
+-	`children`：指向子进程链表的头部。链表中的所有元素都是它的子进程
+-	`sibling`：用于把当前进程插入到兄弟链表中
 
-##	0x08	一些有趣的示例
+注意：通常情况下，`real_parent` 和 `parent` 是一样的，例外如 `bash` 创建一个进程，那进程的 `parent` 和 `real_parent` 就都是 `bash`。如果在 `bash` 上使用 `GDB` 来 `debug` 一个进程，这个时候 `GDB` 是 `parent`，`bash` 则是这个进程的 `real_parent`；当用于审计、统计或需要追溯进程真实来源的场景时，使用`real_parent`比较合适
+
+##	0x09	一些有趣的示例
 
 ####	fork+dup(dup2)
 在前文[主机入侵检测系统 Elkeid：设计与分析（一）](https://pandaychen.github.io/2024/08/19/A-ELKEID-STUDY-1/#0x01----agent)介绍进程通信的例子，父子进程+两组pipe实现全双工通信的模型，如下（one pipe）：
@@ -1064,13 +1089,13 @@ struct task_struct {
 
 在linux的pipe管道下，写端进行写数据时，不需要关闭读端的缓冲文件（即不需要读端的fd计数为`0`），但是读端进行读数据时必须先关闭写端的缓冲文件（即写端的文件描述符计数为`0`），然后才能读取数据
 
-##  0x09 总结
+##  0x0A 总结
 
 ####     内核态的意义
 CPU 为了进行指令权限管控，引入了特权级的概念，CPU 工作在不同的特权级下能够执行的指令和可访问的内存区域是不一样的。计算机上电启动之处，CPU 运行在高特权级下，操作系统（Linux 内核）率先获得了执行权限，在内存设置一块固定区域并将自己的程序代码（内核代码）放了进去，并设定了这一部分内存只有高特权级才能访问。随后，操作系统在创建进程的时候，都会把自己所在的这块内存区域映射到每一个进程地址空间中，这样所有进程都能看到自己的进程空间中被映射的内核的区域，这一块区域是无法直接访问的。通常进入内核态是指：当中断、异常、系统调用等情况发生的时候，CPU 切换工作模式到高特权级模式 `Ring0`，并转而执行位于内核地址空间处的代码
 
 
-##  0x09  参考
+##  0x0B  参考
 -   [Linux 进程是如何创建出来的？](https://cloud.tencent.com/developer/article/2187989)
 -   [Linux 内核进程管理](http://timd.cn/kernel-process-management/)
 -   <<深入理解 Linux 进程与内存>>
