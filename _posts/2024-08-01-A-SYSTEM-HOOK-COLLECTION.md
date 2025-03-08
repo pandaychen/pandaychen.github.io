@@ -311,12 +311,18 @@ tags:
 -   `tracepoint/syscalls/sys_eixt_dup`
 -   `tracepoint/syscalls/sys_exit_dup2`
 -   `tracepoint/syscalls/sys_exit_dup3`
+-   `tracepoint:syscalls:sys_enter_pipe`
+-   `tracepoint:syscalls:sys_enter_pipe2`
+-   `tracepoint:syscalls:sys_exit_pipe`
+-   `tracepoint:syscalls:sys_exit_pipe2`
 
 ####    安全对抗
 -   `tp/syscalls/sys_enter_getdents64`
 -   `tp/syscalls/sys_exit_getdents64`
 -   `tp/syscalls/sys_enter_getdents`
 -   `tp/syscalls/sys_exit_getdents`
+-   `tracepoint:syscalls:sys_enter_memfd_create`
+-   `tracepoint:syscalls:sys_exit_memfd_create`
 
 ##  0x03    参考
 -   [Linux System Call Table](https://chromium.googlesource.com/chromiumos/docs/+/master/constants/syscalls.md)
