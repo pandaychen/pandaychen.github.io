@@ -1,29 +1,62 @@
 ---
 layout:     post
-title:  Linux 内核之旅（三）：虚拟内存管理
-subtitle:
+title:  Linux 内核之旅（三）：虚拟内存管理（上）
+subtitle:   进程视角的虚拟内存管理
 date:       2024-11-05
 author:     pandaychen
 header-img:
 catalog: true
 tags:
     - Linux
+    - Kernel
 ---
 
 ##  0x00    前言
-前文讨论了进程，正在执行的程序，是可执行程序的动态实例，它是一个承担分配系统资源的实体，但操作系统创建进程时，会为进程创建相应的内存空间，这个内存空间称为进程的地址空间，每一个进程的地址空间都是独立的；当一个进程有了进程的地址空间，那么其管理结构被称为内存描述符`mm_struct`
+前文讨论了进程，正在执行的程序，是可执行程序的动态实例，它是一个承担分配系统资源的实体，但操作系统创建进程时，会为进程创建相应的内存空间，这个内存空间称为进程的地址空间，**每一个进程的地址空间（虚拟内存空间）都是独立的**；当一个进程有了进程的地址空间，那么其管理结构被称为内存描述符`mm_struct`
 
-##  0x01    内存描述符：mm_struct
+####    虚拟内存地址
+
+####    虚拟内存空间分布（32位）
+
+####    虚拟内存空间分布（64位）
+
+
+##  0x01    进程虚拟内存空间管理
+无论是在 `32` 位机器上还是在 `64` 位机器上，进程虚拟内存空间的核心区域分布的相对位置是一样的，这个结构是怎么在内核反映的？
+
+![]()
+
+####    内存描述符：mm_struct
+已知每个内核进程描述符结构体`task_struct`中嵌套了一个`mm_struct`结构体指针，该结构体中包含了的该进程虚拟内存空间的全部信息。同时每个进程都有唯一的 `mm_struct` 结构体，这说明每个进程的虚拟地址空间都是独立，互不干扰的。当调用 `fork()` 函数创建进程的时候，表示进程地址空间的 `mm_struct` 结构会随着进程描述符 `task_struct` 的创建而创建
+
+创建`mm_struct`的逻辑在内核函数[`copy_mm`](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/fork.c#L1174)中，注意这里区分用户态进程和用户态线程，前者会单独复制出一份`mm_struct`，后者是共享父进程的`mm_struct`。`copy_mm` 函数首先会将父进程的虚拟内存空间 `current->mm` 赋值给指针 `oldmm`，然后通过 `dup_mm` 函数将父进程的虚拟内存空间以及相关页表拷贝到子进程的 `mm_struct` 结构中，最后将拷贝出来的 `mm_struct` 赋值给子进程的 `task_struct` 结构，最终布局[参考](https://pandaychen.github.io/2024/10/02/A-LINUX-KERNEL-TRAVEL-1/#%E8%BF%9B%E7%A8%8B%E4%B8%8E%E7%BA%BF%E7%A8%8B)
+
+```CPP
+struct task_struct {
+    //.......
+    // 内存描述符表示进程虚拟地址空间
+    struct mm_struct *mm;
+    //.......
+}
+struct mm_struct {
+          struct vm_area_struct * mmap;       /* list of VMAs */
+          struct rb_root mm_rb;     /*红黑树的根节点*/
+          struct vm_area_struct * mmap_cache;      /* last find_vma result */
+        //.......
+}
+```
+
+`mm_struct`结构体定义如下：
 
 ```CPP
 struct mm_struct {
-//mmap指向虚拟区间链表
+    //mmap指向虚拟区间链表
     struct vm_area_struct * mmap;       /* list of VMAs */
-//指向红黑树
+    //指向红黑树的根节点
     struct rb_root mm_rb;
-//指向最近的虚拟空间
+    //指向最近的虚拟空间
     struct vm_area_struct * mmap_cache; /* last find_vma result */
-//
+    //
     unsigned long (*get_unmapped_area) (struct file *filp,
                 unsigned long addr, unsigned long len,
                 unsigned long pgoff, unsigned long flags);
@@ -32,18 +65,18 @@ struct mm_struct {
     unsigned long task_size;        /* size of task vm space */
     unsigned long cached_hole_size;     /* if non-zero, the largest hole below free_area_cache */
     unsigned long free_area_cache;      /* first hole of size cached_hole_size or larger */
-//指向进程的页目录
+    //指向进程的页目录
     pgd_t * pgd;
-//空间中有多少用户
+    //空间中有多少用户
     atomic_t mm_users;          /* How many users with user space? */
-//引用计数；描述有多少指针指向当前的mm_struct
+    //引用计数；描述有多少指针指向当前的mm_struct
     atomic_t mm_count;          /* How many references to "struct mm_struct" (users count as 1) */
-//虚拟区间的个数
+    //虚拟区间的个数
     int map_count;              /* number of VMAs */
     struct rw_semaphore mmap_sem;
-//保护任务页表
+    //保护任务页表
     spinlock_t page_table_lock;     /* Protects page tables and some counters */
-//所有mm的链表
+    //所有mm的链表
     struct list_head mmlist;        /* List of maybe swapped mm's.  These are globally strung
                          * together off init_mm.mmlist, and are protected
                          * by mmlist_lock
@@ -60,17 +93,17 @@ struct mm_struct {
 
     unsigned long total_vm, locked_vm, shared_vm, exec_vm;
     unsigned long stack_vm, reserved_vm, def_flags, nr_ptes;
-//start_code:代码段的起始地址
-//end_code:代码段的结束地址
-//start_data:数据段起始地址
-//end_data:数据段结束地址
+    //start_code:代码段的起始地址
+    //end_code:代码段的结束地址
+    //start_data:数据段起始地址
+    //end_data:数据段结束地址
     unsigned long start_code, end_code, start_data, end_data;
-//start_brk:堆的起始地址
-//brk:堆的结束地址
-//start_stack:栈的起始地址
+    //start_brk:堆的起始地址
+    //brk:堆的结束地址
+    //start_stack:栈的起始地址
     unsigned long start_brk, brk, start_stack;
-//arg_start,arg_end:参数段的起始和结束地址
-//env_start,env_end:环境段的起始和结束地址
+    //arg_start,arg_end:参数段的起始和结束地址
+    //env_start,env_end:环境段的起始和结束地址
     unsigned long arg_start, arg_end, env_start, env_end;
 
     unsigned long saved_auxv[AT_VECTOR_SIZE]; /* for /proc/PID/auxv */
@@ -125,8 +158,106 @@ struct mm_struct {
 };
 ```
 
+####    task_size
+`task_size`：定义了用户态地址空间与内核态地址空间之间的分界线，如`64` 位系统中用户地址空间和内核地址空间的分界线在 `0x0000 7FFF FFFF F000` 地址处，那么`task_struct.mm_struct` 结构中的 `task_size` 为 `0x0000 7FFF FFFF F000`
+
+![]()
+
+####    进程虚拟内存空间布局（区间端点）
+
+```CPP
+struct mm_struct {
+    unsigned long task_size;    /* size of task vm space */
+    unsigned long start_code, end_code, start_data, end_data;
+    unsigned long start_brk, brk, start_stack;
+    unsigned long arg_start, arg_end, env_start, env_end;
+    unsigned long mmap_base;  /* base of mmap area */
+    unsigned long total_vm;    /* Total pages mapped */
+    unsigned long locked_vm;  /* Pages that have PG_mlocked set */
+    unsigned long pinned_vm;  /* Refcount permanently increased */
+    unsigned long data_vm;    /* VM_WRITE & ~VM_SHARED & ~VM_STACK */
+    unsigned long exec_vm;    /* VM_EXEC & ~VM_WRITE & ~VM_STACK */
+    unsigned long stack_vm;    /* VM_STACK */
+
+    //......
+}
+```
+
+![mm_struct]()
+
+####    vm_area_struct
+内核使用结构体 [`vm_area_struct`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/mm_types.h#L284)来**描述用户虚拟内存空间的各个逻辑区域：代码段，数据段，堆，内存映射区，栈等，也称为VMA（virtual memory area）**
+
+每个 `vm_area_struct` 结构对应于虚拟内存空间中的唯一虚拟内存区域 VMA，其中`vm_start` 指向了这块虚拟内存区域的起始地址（最低地址），`vm_start` 本身包含在这块虚拟内存区域内，`vm_end` 指向了这块虚拟内存区域的结束地址（最高地址），而 `vm_end` 本身包含在这块虚拟内存区域之外，所以 `vm_area_struct` 结构描述的是 `[vm_start，vm_end)` 这样一段左闭右开的虚拟内存区域
+
+```CPP
+//内核通过 vm_area_struct 结构（虚拟内存区）来管理各个段
+struct vm_area_struct {
+    struct mm_struct *vm_mm; /* The address space we belong to. */
+	unsigned long vm_start;		/* Our start address within vm_mm. */
+	unsigned long vm_end;		/* The first byte after our end address
+					   within vm_mm. */
+
+    /* linked list of VM areas per task, sorted by address */
+	struct vm_area_struct *vm_next, *vm_prev;
+	/*
+	 * Access permissions of this VMA.
+	 */
+	pgprot_t vm_page_prot;
+	unsigned long vm_flags;	
+
+    //每个 VMA 区域都是红黑树中的一个节点，通过 struct vm_area_struct 结构中的 vm_rb 将自己连接到红黑树中
+    struct rb_node vm_rb;
+
+	struct anon_vma *anon_vma;	/* Serialized by page_table_lock */
+    struct file * vm_file;		/* File we map to (can be NULL). */
+	unsigned long vm_pgoff;		/* Offset (within vm_file) in PAGE_SIZE
+					   units */	
+	void * vm_private_data;		/* was vm_pte (shared mem) */
+	/* Function pointers to deal with this struct. */
+	const struct vm_operations_struct *vm_ops;
+}
+```
+
+-   `vm_mm`：指向进程的内存管理对象，每个进程都有一个类型为 `mm_struct` 的内存管理对象，用于管理进程的虚拟内存空间和内存映射等
+-   `vm_start`：虚拟内存区的起始虚拟内存地址
+-   `vm_end`：虚拟内存区的结束虚拟内存地址
+-   `vm_next`：Linux 会通过链表把进程的所有虚拟内存区连接起来，这个字段用于指向下一个虚拟内存区
+-   `vm_page_prot`：主要用于保存当前虚拟内存区所映射的物理内存页的读写权限
+-   `vm_flags`：标识当前虚拟内存区的功能特性
+-   `vm_rb`：某些场景中需要通过虚拟内存地址查找对应的虚拟内存区，为了加速查找过程，内核以虚拟内存地址作为key，把进程所有的虚拟内存区保存到一棵红黑树中，而这个字段就是红黑树的节点结构
+-   `vm_ops`：每个虚拟内存区都可以自定义一套操作接口，通过操作接口，能够让虚拟内存区实现一些特定的功能，比如：把虚拟内存区映射到文件。而 `vm_ops` 字段就是虚拟内存区的操作接口集，一般在创建虚拟内存区时指定
+
+####    mm_rb && mmap
+
+```CPP
+struct mm_struct {
+     struct rb_root mm_rb;              //红黑树的root
+
+     //vm_area_struct 链表首节点
+     struct vm_area_struct *mmap;		/* list of VMAs */
+}
+```
+
+几个要点：
+
+-   `mmap`：串联起了整个虚拟内存空间中的虚拟内存区域，即一个双向链表将虚拟内存空间中的这些虚拟内存区域 VMA 串联起来。`vm_area_struct` 结构中的 `vm_next`/`vm_prev` 指针分别指向 VMA 节点所在双向链表中的后继和前驱节点，内核中的这个 VMA 双向链表是有顺序的，所有 VMA 节点按照低地址到高地址的增长方向排序。此外，双向链表中的最后一个 VMA 节点的 `vm_next` 指向 `NULL`，双向链表的头指针存储在内存描述符 `struct mm_struct` 结构中的 `mmap`成员
+-   在每个虚拟内存区域 VMA 中又通过 `struct vm_area_struct` 中的 `vm_mm` 指针指向了所属的虚拟内存空间 `mm_struct`
+-   可通过 `cat /proc/pid/maps`/`pmap pid` 查看进程的虚拟内存空间布局以及其中包含的所有内存区域（其实现原理就是通过遍历内核中的这个 `vm_area_struct` 双向链表获取）
+-   `mm_rb`：红黑树的root节点，每个`vm_area_struct`都包含了`struct rb_node vm_rb`成员即为红黑树的节点
+-   在内核中，**同样的内存区域 `vm_area_struct` 会有两种组织形式，一种是双向链表用于高效的遍历，另一种就是红黑树用于高效的查找**
+
+使用rbtree组织VMA区域的场景如下：
+-   需要根据特定虚拟内存地址在虚拟内存空间中查找特定的VMA虚拟内存区域，尤其在进程虚拟内存空间中包含的内存区域 VMA 比较多的情况下，使用rbtree查找更为高效
+
+![final]()
+
+##  0x02    进程虚拟内存管理：ELF加载
+
 
 ##  0x0  参考
 -   [4.6 深入理解 Linux 虚拟内存管理](https://www.xiaolincoding.com/os/3_memory/linux_mem.html)
 -   [4.7 深入理解 Linux 物理内存管理](https://www.xiaolincoding.com/os/3_memory/linux_mem2.html#_6-1-%E5%8C%BF%E5%90%8D%E9%A1%B5%E7%9A%84%E5%8F%8D%E5%90%91%E6%98%A0%E5%B0%84)
 -   [mmap 源码分析](https://leviathan.vip/2019/01/13/mmap%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90/)
+-   [linux源码解读（十六）：红黑树在内核的应用——虚拟内存管理](https://www.cnblogs.com/theseventhson/p/15820092.html)
+-   [图解 Linux 虚拟内存空间管理](https://github.com/liexusong/linux-source-code-analyze/blob/master/process-virtual-memory-manage.md)
