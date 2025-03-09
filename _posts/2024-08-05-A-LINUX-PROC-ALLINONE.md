@@ -270,12 +270,25 @@ static const struct pid_entry tgid_base_stuff[] = {
 ##  0x03 proc_dir_entry 主要功能分析
 本小节主要基于内核代码，分析下`/proc`及子目录的初始化流程
 
+1、内核初始化创建`/proc`目录，[代码](https://elixir.bootlin.com/linux/v4.14.119/source/init/main.c#L513)
+
+```CPP
+asmlinkage void __init start_kernel(void)
+{
+	//...
+    proc_root_init();
+	//...
+}
+```
+
+//TODO
+
 ##  0x04 pid_entry主要功能分析
 
-##  0x05 proc 函数钩子实例分析
+##  0x05 proc 函数钩子实例分析（进程属性相关）
 
-####    proc_pid_limits
-`/proc/x/limits `
+####    proc_pid_limit的实现
+`/proc/x/limits`实时反映当前进程的资源限制
 
 ```BASH
 [root@VM-X-X-centos ]# cat /proc/4124608/limits 
@@ -330,9 +343,9 @@ static int proc_pid_limits(struct seq_file *m, struct pid_namespace *ns,
 }
 ```
 
-####    proc_pid_cmdline
+####    proc_pid_cmdline的实现
 
-`/proc/x/cmdline`
+`/proc/x/cmdline`记录了进程启动时的完整命令行参数
 
 ```BASH
 [root@VM-X-X-centos X]# cat /proc/4124608/cmdline 
@@ -384,10 +397,157 @@ out:
 }
 ```
 
-##  0x06  参考
+##	0x06	proc 函数钩子实例分析（进程内存相关）
+先梳理下进程的内存统计的背景知识，业务进程使用的内存主要有以下几种情况（其中前两者算作进程的`RSS`，后两者属于page cache）
+
+-	用户空间的匿名映射页（Anonymous pages in User Mode address spaces）：比如调用`malloc`分配的内存，以及使用`MAP_ANONYMOUS`的`mmap`等场景；当系统内存不够时，内核可以将这部分内存交换出去
+-	用户空间的文件映射页（Mapped pages in User Mode address spaces）：包含map file和map tmpfs；前者比如指定文件的`mmap`，后者比如IPC共享内存；当系统内存不够时，内核可以回收这些页，但回收之前可能需要与文件同步数据
+-	文件缓存（page in page cache of disk file）：发生在程序通过普通的`read`/`write`读写文件时，当系统内存不够时，内核可以回收这些页，但回收之前可能需要与文件同步数据
+-	buffer pages，属于page cache：比如读取块设备文件
+
+本小节汇总下与内存相关的几个proc文件
+
+-	`/proc/[pid]/stat`
+-	`/proc/[pid]/statm`
+
+####	VSS/RSS/PSS/USS
+-	`VSS`：（Virtual Set Size）虚拟耗用内存（包含共享库占用的内存），即是进程向系统申请的虚拟内存（包含共享库内存总数），即单个进程全部可访问的地址空间，其大小可能包括还尚未在内存中驻留的部分
+-	`RSS`：（Resident Set Size）常驻内存大小，表示进程实际使用物理内存；是进程在 RAM 中实际保存的总内存（包含共享库占用的共享内存总数）。这个值经常用于进程内存监控，不过有一点需要关注：`RSS`包含了共享库占用的共享内存总数，然而实际上一个共享库仅会被加载到内存中一次，无论被多少个进程使用	
+-	`PSS`：（Proportional Set Size） 实际使用的物理内存（比例分配共享库占用的内存），是单个进程运行时实际占用的物理内存（包含比例分配共享库占用的内存）。对比 `RSS` 来说，`PSS` 中的共享库内存是按照比例计算的（若一个共享库有 `N` 个进程使用，那么该库比例分配给 `PSS` 的大小为`1/N`），即`PSS` 明确的表示了单个进程在系统总内存中的实际使用量
+-	`USS`：（Unique Set Size） 进程独自占用的物理内存（不包含共享库占用的内存），是进程实际独自占用的物理内存（不包含共享库占用的内存）。`USS` 揭示了单个进程运行中真实的内存增量大小。如果单个进程终止，`USS` 就是实际返还给系统的内存大小
+
+一般来说内存占用大小有如下规律：`VSS >= RSS >= PSS >= USS`
+
+####	do_task_stat的实现：/proc/[pid]/stat
+`/proc/[pid]/stat`相关的输出字段：
+
+```TEXT
+(23) vsize  %lu
+        Virtual memory size in bytes.
+(24) rss  %ld
+        Resident Set Size: number of pages the process has
+        in real memory.  This is just the pages which count
+        toward text, data, or stack space.  This does not
+        include pages which have not been demand-loaded in,
+        or which are swapped out.
+```
+
+对应的内核函数为[`do_task_stat`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/array.c#L393)，rss列的计算函数为[`get_mm_rss`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/array.c#L514)，可见`RSS`的计算包含了`MM_FILEPAGES`/`MM_ANONPAGES`/`MM_SHMEMPAGES`（单位：页）
+
+```CPP
+static inline unsigned long get_mm_rss(struct mm_struct *mm)
+{
+	return get_mm_counter(mm, MM_FILEPAGES) +
+		get_mm_counter(mm, MM_ANONPAGES) +
+		get_mm_counter(mm, MM_SHMEMPAGES);
+}
+```
+
+注意到，`/proc/[pid]/stat`的`RSS`值与`/proc/[pid]/statm`输出的`RSS`是相等的
+
+```BASH
+[root@VM-x-x-centos memory]# cat /proc/3447782/stat | awk '{print "RSS(page):", $24}'
+RSS(page): 22811
+[root@VM-218-158-centos memory]# cat /proc/3447782/statm 
+330060 22811 3727 1320 0 33217 0
+```
+
+####	 proc_pid_statm的实现
+`/proc/${PID}/statm` 用于记录指定进程的内存使用情况，所有数值以 内存页（Page）为单位（`1` 页通常为 `4` KB），关联内核函数为[`proc_pid_statm`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/array.c#L586)，即当用户态读取 `/proc/${PID}/statm` 时，内核通过虚拟文件系统（VFS）触发该函数
+
+```TEXT
+Provides information about memory usage, measured in pages.
+The columns are:
+
+  size       (1) total program size
+             (same as VmSize in /proc/[pid]/status)
+  resident   (2) resident set size
+             (same as VmRSS in /proc/[pid]/status)
+  share      (3) shared pages (i.e., backed by a file)
+  text       (4) text (code)
+  lib        (5) library (unused in Linux 2.6)
+  data       (6) data + stack
+  dt         (7) dirty pages (unused in Linux 2.6)
+```
+
+```BASH
+[root@VM-X-X-centos ~]# cat /proc/3447782/statm 
+329932/size/ 21419/resident/ 2538/share/ 1320/text/ 0 32065/data/ 0
+
+#size：进程的虚拟内存总量（包括物理内存、交换区、未映射内存等）
+#resident：实际驻留物理内存的大小（RSS），即进程当前使用的物理内存
+#share：与其他进程共享的物理内存（如共享库、共享内存段）
+#text：代码段（可执行指令）占用的物理内存（所有进程共享同一程序的代码段时，此值可能重复计算）
+#data：数据段（全局变量、静态数据）和堆栈占用的物理内存（反映进程的堆内存和栈内存使用）
+```
+
+`proc_pid_statm`函数的实现如下，注意[`get_mm_counter`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/mm.h#L1448)函数的作用是读取`mm_struct`结构体的成员数组计数`mm->rss_stat.count[index]`
+
+```CPP
+static inline unsigned long get_mm_counter(struct mm_struct *mm, int member)
+{
+	long val = atomic_long_read(&mm->rss_stat.count[member]);
+
+#ifdef SPLIT_RSS_COUNTING
+	/*
+	 * counter is updated in asynchronous manner and may go to minus.
+	 * But it's never be expected number for users.
+	 */
+	if (val < 0)
+		val = 0;
+#endif
+	return (unsigned long)val;
+}
+
+unsigned long task_statm(struct mm_struct *mm,
+			 unsigned long *shared, unsigned long *text,
+			 unsigned long *data, unsigned long *resident)
+{
+	*shared = get_mm_counter(mm, MM_FILEPAGES) +
+			get_mm_counter(mm, MM_SHMEMPAGES);
+	*text = (PAGE_ALIGN(mm->end_code) - (mm->start_code & PAGE_MASK))
+								>> PAGE_SHIFT;
+	*data = mm->data_vm + mm->stack_vm;
+	*resident = *shared + get_mm_counter(mm, MM_ANONPAGES);
+	return mm->total_vm;
+}
+
+int proc_pid_statm(struct seq_file *m, struct pid_namespace *ns,
+			struct pid *pid, struct task_struct *task)
+{
+	unsigned long size = 0, resident = 0, shared = 0, text = 0, data = 0;
+	struct mm_struct *mm = get_task_mm(task);
+
+	if (mm) {
+		size = task_statm(mm, &shared, &text, &data, &resident);
+		mmput(mm);
+	}
+	/*
+	 * For quick read, open code by putting numbers directly
+	 * expected format is
+	 * seq_printf(m, "%lu %lu %lu %lu 0 %lu 0\n",
+	 *               size, resident, shared, text, data);
+	 */
+	seq_put_decimal_ull(m, "", size);
+	seq_put_decimal_ull(m, " ", resident);
+	seq_put_decimal_ull(m, " ", shared);
+	seq_put_decimal_ull(m, " ", text);
+	seq_put_decimal_ull(m, " ", 0);	//废弃
+	seq_put_decimal_ull(m, " ", data);
+	seq_put_decimal_ull(m, " ", 0);	//废弃
+	seq_putc(m, '\n');
+
+	return 0;
+}
+```
+
+##  0x07  参考
 -   [Linux进程网络流量统计方法及实现](https://zhuanlan.zhihu.com/p/49981590)
 -   [使用 golang gopacket 实现进程级流量监控](https://github.com/rfyiamcool/notes/blob/main/netflow.md)
 -   [从内核代码角度详解proc目录](https://blog.spoock.com/2019/10/26/proc-from-kernel/)
 -   [Linux下/proc目录简介](https://blog.spoock.com/2019/10/08/proc/)
 -   [Linux Procfs (一) /proc/* 文件实例解析](https://juejin.cn/post/7055321925463048228)
 -	[A journey into the Linux proc filesystem](https://fernandovillalba.substack.com/p/a-journey-into-the-linux-proc-filesystem)
+-	[聊聊 Linux 的内存统计](https://www.0xffffff.org/2019/07/17/42-linux-memory-monitor/)
+-	[Linux中进程内存与cgroup内存的统计](https://hustcat.github.io/memory-usage-in-process-and-cgroup/?spm=a2c6h.12873639.article-detail.4.4db57092lEvNeV)
+-	[proc_pid_statm(5) — Linux manual page](https://man7.org/linux/man-pages/man5/proc_pid_statm.5.html)
