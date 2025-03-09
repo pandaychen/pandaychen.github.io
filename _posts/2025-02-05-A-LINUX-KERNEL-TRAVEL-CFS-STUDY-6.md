@@ -243,11 +243,114 @@ struct cfs_rq {
 
 1、`calc_delta_fair`：用来计算进程的`vruntime`的函数
 
-2、`sched_slice`：
+2、`sched_slice`：此函数是用来计算一个调度周期内，一个调度实体可以分配多少运行时间
 
-3、`place_entity`：分为两种情况
+```CPP
+static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+	//__sched_period函数是计算调度周期的函数，此函数当进程个数小于8时，调度周期等于调度延迟等于6ms。否则调度周期等于进程的个数乘以0.75ms，表示一个进程最少可以运行0.75ms，防止进程过快发生上下文切换
+	u64 slice = __sched_period(cfs_rq->nr_running + !se->on_rq);
 
-4、`update_curr`：
+	//遍历当前的调度实体，如果调度实体没有调度组的关系，则只运行一次
+	//获取当前CFS运行队列cfs_rq，获取运行队列的权重cfs_rq->rq代表的是这个运行队列的权重。最后通过__calc_delta计算出此进程的实际运行时间
+	for_each_sched_entity(se) {
+		struct load_weight *load;
+		struct load_weight lw;
+
+		cfs_rq = cfs_rq_of(se);
+		load = &cfs_rq->load;
+
+		if (unlikely(!se->on_rq)) {
+			lw = cfs_rq->load;
+
+			update_load_add(&lw, se->load.weight);
+			load = &lw;
+		}
+
+		//__calc_delta函数：不仅仅可以计算一个进程的虚拟时间，它在这里是计算一个进程在总的调度周期中可以获取的运行时间，公式为：进程的运行时间 = （调度周期时间 * 进程的weight） / CFS运行队列的总weigth
+		slice = __calc_delta(slice, se->load.weight, load);
+	}
+	return slice;
+}
+```
+
+3、`place_entity`：此函数用来惩罚一个调度实体，本质是修改其`vruntime`的值。根据传入参数`initiat`分为两种情况
+
+-	`initial==0/*false*/`：如果`inital`为`false`，则代表的是唤醒的进程，对于唤醒的进程则需要照顾，最大的照顾是调度延时的一半，确保调度实体的`vruntime`不得倒退
+-	`initial==1/*true*/`：当参数`initial`为`true`时，代表是新创建的进程，新创建的进程则给它的`vruntime`增加值，代表惩罚它。因为新创建进程的`vruntime`过小，防止其一直占在CPU
+
+```CPP
+static void
+place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
+{
+	//获取当前CFS运行队列的min_vruntime的值
+	u64 vruntime = cfs_rq->min_vruntime;
+
+	/*
+	 * The 'current' period is already promised to the current tasks,
+	 * however the extra weight of the new task will slow them down a
+	 * little, place the new task so that it fits in the slot that
+	 * stays open at the end.
+	 */
+	if (initial && sched_feat(START_DEBIT))
+		vruntime += sched_vslice(cfs_rq, se);
+
+	/* sleeps up to a single latency don't count. */
+	if (!initial) {
+		unsigned long thresh = sysctl_sched_latency;
+
+		/*
+		 * Halve their sleep time's effect, to allow
+		 * for a gentler effect of sleepers:
+		 */
+		if (sched_feat(GENTLE_FAIR_SLEEPERS))
+			thresh >>= 1;
+
+		vruntime -= thresh;
+	}
+
+	/* ensure we never gain time by being placed backwards. */
+	//通过`max_vruntime`获取最大的`vruntime`
+	se->vruntime = max_vruntime(se->vruntime, vruntime);
+}
+```
+
+4、`update_curr`：update_curr函数用来更新当前进程的运行时间信息
+
+```CPP
+static void update_curr(struct cfs_rq *cfs_rq)
+{
+	struct sched_entity *curr = cfs_rq->curr;
+	u64 now = rq_clock_task(rq_of(cfs_rq));
+	u64 delta_exec;
+
+	if (unlikely(!curr))
+		return;
+
+	//计算出当前CFS运行队列的进程，距离上次更新虚拟时间的差值
+	delta_exec = now - curr->exec_start;
+	if (unlikely((s64)delta_exec <= 0))
+		return;
+
+	//更新exec_start的值
+	curr->exec_start = now;
+
+	schedstat_set(curr->statistics.exec_max,
+		      max(delta_exec, curr->statistics.exec_max));
+
+	//更新当前进程总共执行的时间
+	curr->sum_exec_runtime += delta_exec;
+	schedstat_add(cfs_rq->exec_clock, delta_exec);
+
+	//通过calc_delta_fair计算当前进程虚拟时间
+	curr->vruntime += calc_delta_fair(delta_exec, curr);
+	//通过update_min_vruntime函数来更新CFS运行队列中最小的vruntime的值
+	update_min_vruntime(cfs_rq);
+
+
+	account_cfs_rq_runtime(cfs_rq, delta_exec);
+}
+```
 
 ####	vruntime的汇总
 -	`vruntime` 本质上是一个累加值，但其累加规则并非简单的物理时间叠加，而是基于进程的 ​权重（优先级）​​动态调整
@@ -541,13 +644,18 @@ static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 ##	0x	总结
 
 ####	vruntime
-`vruntime`是一个累计值，作为每个调度实体（`struct sched_entity`）的 vruntime 字段记录该进程的加权累计运行时间
+`vruntime`本质是一个累计值，作为每个调度实体（`struct sched_entity`）的 vruntime 字段记录该进程的加权累计运行时间
 
 1、`vruntime`的累加性质
 
 2、`vruntime`的特殊调整
 
 3、`vruntime`的底层实现
+
+##	0x	一些细节
+
+####	如何检测时间耗尽？
+`sched_slice`可以计算计算一个调度周期内，一个调度实体可以分配多少运行时间，那么CPU如何知道这个调度实体已经运行到达它的运行时间上限了呢？换句话说CPU如何检查某个进程已经用完了它此刻的"时间片"？
 
 
 ##  0x0  参考
