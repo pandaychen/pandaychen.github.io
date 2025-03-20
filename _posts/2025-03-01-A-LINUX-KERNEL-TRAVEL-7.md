@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:  Linux 内核之旅（三）：虚拟内存管理（下）TODO
+title:  Linux 内核之旅（七）：虚拟内存管理（下）TODO
 subtitle:   内核视角的虚拟内存管理
 date:       2025-03-01
 author:     pandaychen
