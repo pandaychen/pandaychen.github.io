@@ -210,7 +210,6 @@ vriture_runtime = wall_time * ----------------
 ```
 
 
-
 进程A的虚拟时间`3.3 * 1024 / 1024 = 3.3ms`，可以看出`nice`值为`0`的进程的虚拟时间和实际时间是相等的。进程B的虚拟时间是`2.7 * 1024 / 820 = 3.3ms`。可以看出尽管A和B进程的权重值不一样，但是计算得到的虚拟时间是一样的。因此CFS主要保证每一个进程获得执行的虚拟时间一致即可。在选择下一个即将运行的进程的时候，只需要找到虚拟时间最小的进程即可。内核对公式做了如下转换：
 
 ```TEXT
@@ -353,6 +352,10 @@ struct sched_entity {
 
 这样CFS算法的最终调度效果就是：所有进程的 `vruntime` 趋近一致，但实际运行时间按权重比例分配
 
+7、vruntime的汇总
+
+-	`vruntime` 本质上是一个累加值，但其累加规则并非简单的物理时间叠加，而是基于进程的 ​权重（优先级）​​动态调整
+
 ####	min_vruntime：CFS就绪队列的最小虚拟运行时间（实时）
 CFS代码中出现的`min_vruntime`（注意到其是归属于`cfs_rq`结构），其作用是作为`vruntime` 的标尺，用来动态记录每个CPU CFS就绪队列上 `vruntime` 的最小值（`min_vruntime`是属于CFS运行就绪队列的唯一成员），这个值是计算就绪队列虚拟运行时间的基础，大部分情况下是CFS红黑树最小子节点（最左节点）的虚拟运行时间，但实际情况下可能有时候会比最小子节点的虚拟运行时间稍大一些
 
@@ -367,14 +370,21 @@ struct cfs_rq {
 
 `min_vruntime`主要应用于如下场景：
 
-1、新进程创建：一个进程在刚刚加入到CFS就绪队列的红黑树中时，需要有一个基准值，即这个新加入的进程，应该和什么虚拟运行时间进行对比，找到它在红黑树中的合适位置（不能设置为一个较小的值这样就破坏了公平性），该值即为`min_vruntime`。为什么`min_vruntime`不能直接取最左子节点对应进程的虚拟运行时间？因为系统在运行，对应的里面的每个进程其虚拟运行时间也是一直在增加，因此每个就绪队列的最小虚拟运行时间也一直是增加的才对。正因为这样，这个值不能取最左子节点进程的虚拟运行时间，而是根据系统的情况一直累加，不能发生回退。既然虚拟运行时间是一直累加的，那么在进程一直运行的情况下，就可能发生数据溢出现象，因此在对比两个虚拟运行时间大小的时候，不是直接比较而是判断的两者的差值（见后文分析）
+1、新进程创建，如何设置其vruntime？
 
-2、`min_vruntime`的更新逻辑（见后文）
+一个进程在刚刚加入到CFS就绪队列的红黑树中时，需要有一个基准值，即这个新加入的进程，应该和什么虚拟运行时间进行对比，找到它在红黑树中的合适位置（不能设置为一个较小的值会破坏CFS的公平性），该值即为`min_vruntime`。为什么`min_vruntime`不能直接取最左子节点对应进程的虚拟运行时间？因为系统在运行，对应的里面的每个进程其虚拟运行时间也是一直在增加，因此每个就绪队列的最小虚拟运行时间也一直是增加的才对。正因为这样，这个值不能取最左子节点进程的虚拟运行时间，而是根据系统的情况一直累加，不能发生回退。既然虚拟运行时间是一直累加的，那么在进程一直运行的情况下，就可能发生数据溢出现象，因此在对比两个虚拟运行时间大小的时候，不是直接比较而是判断的两者的差值（见后文分析）
 
-3、
+2、`min_vruntime`的更新逻辑（见后文分析）
 
+3、基于`min_vruntime`的校准更新逻辑，主要场景如下
 
-####	几个重要函数
+-	`task_fork_fair`：进程创建时，在以就绪队列的最小虚拟运行时间为基准设置其最初的虚拟运行时间时，还需要再减去队列的最小虚拟运行时间
+-	`enqueue_entity`：进程加入一个CFS就绪队列时，虚拟运行时间要加上该CPU就绪队列的最小虚拟运行时间
+-	`dequeue_entity`：进程离开一个CFS就绪队列时，虚拟运行时间要减去该CPU就绪队列的最小虚拟运行时间
+
+这个机制比较合理，因为可能在调度的过程中会发生CPU切换。如进程在刚创建的时候，其vruntime是根据当时所在的CPU就绪队列的`min_vruntime`为基础计算的，而进程真正开始被调度执行的时候，其所在的CPU可能不是最开始创建时所在的CPU了，中间发生了进程在不同CPU之间的迁移（不同的CPU之间，其虚拟运行时间也不尽相同，所以需要处理）
+
+##	0x03 	代码中的几个重要函数
 
 1、`calc_delta_fair`：用来计算进程的`vruntime`的函数
 
@@ -489,10 +499,9 @@ static void update_curr(struct cfs_rq *cfs_rq)
 }
 ```
 
-####	vruntime的汇总
--	`vruntime` 本质上是一个累加值，但其累加规则并非简单的物理时间叠加，而是基于进程的 ​权重（优先级）​​动态调整
-
-##	0x03	CFS的运行原理
+####	`update_min_vruntime`：计算与判断
+`update_min_vruntime`用于CFS就绪队列最小虚拟运行时间更新
+##	0x04	CFS的运行原理及核心代码走读
 
 ####    进程创建
 进程的创建是通过`do_fork()`完成，调用链如下：`do_fork()`----> `_do_fork()` ----> `copy_process()`----> `sched_fork()`；当fork 进程时，核心`copy_process`以复制父进程的方式来生成一个新的`task_struct`，然后调用`wake_up_new_task` 函数将新进程添加到CPU的就绪队列中，等待调度器调度执行
@@ -521,7 +530,6 @@ long _do_fork(unsigned long clone_flags,unsigned long stack_start,unsigned long 
     //...
 } 
 
-
 static struct task_struct *copy_process(...){
     // 复制进程task_struct结构体
     struct task_struct *p;
@@ -542,7 +550,7 @@ static struct task_struct *copy_process(...){
     }else{
         p->tgid = p->pid;
     }
-    ...
+    //...
 }
 ```
 
@@ -552,7 +560,6 @@ static struct task_struct *copy_process(...){
 static struct task_struct *copy_process(...){
     //...
     retval = sched_fork(clone_flags, p);
-
 	//...
 }
 
@@ -777,7 +784,9 @@ static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 
 TODO
 
-##	0x04	调度方式一：新进程的调度过程
+##	0x05	调度方式一：新进程的调度过程
+继续上一小节的内容
+
 1、新进程加入就绪队列，经过`do_fork()`的大部分初始化工作完成之后，接下来就是唤醒新进程准备运行，将新进程加入就绪队列准备调度
 
 ```CPP
@@ -860,7 +869,6 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 
 4、`enqueue_entity`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/fair.c#L3581)：将调度实体`se`插入`cfs_rq`的调度红黑树结构中
 
--	
 
 ```CPP
 static void enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
@@ -955,7 +963,7 @@ void rb_insert_color(struct rb_node *node, struct rb_root *root)
 ```
 
 ##	0x05	调度方式二：周期性调度
-周期性调度是指Linux定时周期性地检查当前任务是否耗尽当前进程的时间片，并检查是否应该抢占当前进程。一般会在定时器的中断函数中，通过一层层函数调用最终到`scheduler_tick()`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/core.c#L3091)
+周期性调度是指Linux定时周期性地检查当前任务是否耗尽当前进程的时间片（关于耗尽检测的说法见后文分析），并检查是否应该抢占当前进程。一般会在定时器的中断函数中，通过一层层函数调用最终到`scheduler_tick()`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/core.c#L3091)
 
 ```CPP
 void scheduler_tick(void)
@@ -984,7 +992,7 @@ void scheduler_tick(void)
 }
 ```
 
-1、
+1、`task_tick_fair`/`entity_tick`（又看到了熟悉的`update_curr`函数）
 
 ```CPP
 static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
@@ -1012,7 +1020,7 @@ static void entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int qu
 }
 ```
 
-2、`check_preempt_tick`
+2、`check_preempt_tick`：周期性调度的核心逻辑，统计当前进程`curr`已经运行的时间，以此判断是否能够被其他进程抢占，如果cfs判断需要立马抢占，只是调用`resched_curr`去设置抢占标志`TIF_NEED_RESCHED`，那么真正的切换时机呢？根据进程调度第一定律，一定要等待正在运行的进程自身调用 `__schedule` 函数实现
 
 ```CPP
 static void
@@ -1062,7 +1070,194 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	-	将当前被强占的进程重新加入就绪队列红黑树上（enqueue task）
 	-	从就绪队列红黑树上删除即将运行进程的节点（dequeue task）
 
-##	0x06	选择下一个合适进程运行
+
+##	0x06	如何挑选下一个合适进程？
+当进程被设置`TIF_NEED_RESCHED` flag后会在某一时刻触发系统发生调度或者进程调用`schedule()`函数主动放弃cpu使用权，触发系统调度
+
+1、`schedule`/`__schedule`，CFS 的调度过程是由 `schedule` 函数完成的，该函数的执行过程如下：
+
+-	关闭当前 CPU 的抢占功能
+-	如果当前 CPU 的运行队列中不存在任务，调用 `idle_balance` 从其他 CPU 的运行队列中取一部分执行
+-	调用 `pick_next_task` 选择红黑树中优先级最高的任务
+-	调用 `context_switch` 切换运行的上下文，包括寄存器的状态和堆栈
+-	重新开启当前 CPU 的抢占功能
+
+```CPP
+// schedule 方法入口
+asmlinkage __visible void __sched schedule(void){
+    struct task_struct *tsk = current;
+    sched_submit_work(tsk);
+    do {
+        preempt_disable();
+        __schedule(false);
+        sched_preempt_enable_no_resched();
+    } while (need_resched());
+}
+
+//主要逻辑是在 __schedule 函数中实现的
+static void __sched notrace __schedule(bool preempt)
+{
+	struct task_struct *prev, *next;
+	struct rq_flags rf;
+	struct rq *rq;
+	int cpu;
+ 	// 在当前cpu 上取出任务队列rq（其实是红黑树）
+	cpu = smp_processor_id();
+	rq = cpu_rq(cpu);
+
+	//prev即 即将要被切换走的"正在运行"的进程
+	prev = rq->curr;
+ 
+	if (!preempt && prev->state) {
+		if (unlikely(signal_pending_state(prev->state, prev))) {
+			prev->state = TASK_RUNNING;
+		} else {
+			//针对主动放弃cpu进入睡眠的进程，需要从对应的就绪队列上删除该进程
+			deactivate_task(rq, prev, DEQUEUE_SLEEP | DEQUEUE_NOCLOCK);    
+			prev->on_rq = 0;
+		}
+	}
+
+	// 获取下一个待执行任务，其实就是从当前rq 的红黑树节点中选择vruntime最小的节点
+	next = pick_next_task(rq, prev, &rf);   
+	//清除TIF_NEED_RESCHED flag
+	clear_tsk_need_resched(prev);           
+ 
+	if (likely(prev != next)) {
+		rq->curr = next;
+		// 当选出的继任者和前任不同，就要进行上下文切换，继任者进程正式进入运行
+		//上下文切换，从prev进程切换到next进程
+		rq = context_switch(rq, prev, next, &rf);    
+	}
+ 
+	balance_callback(rq);
+}
+```
+
+2、`pick_next_task`/`pick_next_task_fair`：CFS调度器选择下一个执行进程
+
+```CPP
+static struct task_struct *
+pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
+{
+	struct cfs_rq *cfs_rq = &rq->cfs;
+	struct sched_entity *se;
+	struct task_struct *p;
+	int new_tasks;
+ 
+again:
+	if (!cfs_rq->nr_running)
+		goto idle;
+	
+	//处理prev进程的后事，当进程让出cpu时就会调用该函数
+	put_prev_task(rq, prev);                        
+	do {
+		//选择最适合运行的调度实体
+		se = pick_next_entity(cfs_rq, NULL);
+		//选择出来的调度实体se还需要继续加工一下才能投入运行，加工方法set_next_entity，见下文分析     
+		set_next_entity(cfs_rq, se);              
+		cfs_rq = group_cfs_rq(se);
+		//针对没有使能组调度的情况下，循环一次即退出循环
+	} while (cfs_rq);                           
+ 
+	p = task_of(se);
+#ifdef CONFIG_SMP
+	list_move(&p->se.group_node, &rq->cfs_tasks);
+#endif
+ 
+	if (hrtick_enabled(rq))
+		hrtick_start_fair(rq, p);
+ 
+	return p;
+idle:
+	new_tasks = idle_balance(rq, rf);
+ 
+	if (new_tasks < 0)
+		return RETRY_TASK;
+ 
+	if (new_tasks > 0)
+		goto again;
+ 
+	return NULL;
+}
+```
+
+3、`put_prev_task()`/`put_prev_task_fair()`：是将即将失去执行权的当前进程，放回到其调度器的就绪队列中，核心工作由`put_prev_entity`函数实现，虽然参数叫`prev`，但是记住目前仍然是`rq->curr`
+
+```CPP
+static void put_prev_task_fair(struct rq *rq, struct task_struct *prev)
+{
+	struct sched_entity *se = &prev->se;
+	struct cfs_rq *cfs_rq;
+	for_each_sched_entity(se) {         
+		cfs_rq = cfs_rq_of(se);
+		put_prev_entity(cfs_rq, se);      
+	}
+}
+
+static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev)
+{
+	/*
+	 * If still on the runqueue then deactivate_task()
+	 * was not called and update_curr() has to be done:
+	 */
+	/*
+	如果prev进程依然在就绪队列上，极有可能是prev进程被强占的情况。在让出cpu之前需要更新进程虚拟时间等信息
+	如果prev进程不在就绪队列上，这里可以直接跳过更新。因为，prev进程在deactivate_task()中已经调用了update_curr()，所以这里就可以省略了
+	*/
+	if (prev->on_rq)                            
+		update_curr(cfs_rq);
+
+	/*
+	如果prev进程依然在就绪队列上，需要重新将prev进程插入红黑树等待调度
+	*/
+	if (prev->on_rq) {
+		/* Put 'current' back into the tree. */
+
+		/*
+			重新将prev进程插入红黑树等待调度
+		*/
+		__enqueue_entity(cfs_rq, prev);         
+		/* in !on_rq case, update occurred at dequeue */
+
+		/*
+		更新prev进程的负载信息，这些信息在负载均衡的时候会用到
+		*/
+		update_load_avg(cfs_rq, prev, 0);      
+	}
+	/*
+	后事已经处理完毕，就绪队列的curr指针也应该指向NULL，代表当前就绪队列上没有正在运行的进程
+	*/
+	cfs_rq->curr = NULL;                        
+}
+```
+
+4、`set_next_entity`，此函数用于将调度实体存放的进程做为下一个可执行进程的信息保存下来，注意这里参数`se`已经是选中被调度的实体了
+
+```CPP
+static void
+set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+	/* 'current' is not kept within the tree. */
+	if (se->on_rq) {
+		/*
+		__dequeue_entity()是将调度实体从红黑树中删除，针对即将运行的进程，都会从红黑树中删除当前进程。当进程被强占后，调用put_prev_entity()函数会重新插入红黑树。因此这个地方和put_prev_entity()函数中加入红黑树是个呼应
+		*/
+		__dequeue_entity(cfs_rq, se);            
+		//更新进程的负载信息。负载均衡会使用       
+		update_load_avg(cfs_rq, se, UPDATE_TG);  
+	}
+
+	//更新就绪队列curr成员，现在se是当前正在运行的进程
+	cfs_rq->curr = se;
+	//update_stats_curr_start更新调度实体exec_start成员，为update_curr()函数统计时间做准备                            
+    update_stats_curr_start(cfs_rq, se);
+	//check_preempt_tick()函数用到，统计当前进程已经运行的时间，以此判断是否能够被其他进程抢占
+	se->prev_sum_exec_runtime = se->sum_exec_runtime;   
+}
+```
+
+##	0x0	进程的睡眠
 
 
 ##	0x	总结
@@ -1079,7 +1274,10 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 ##	0x	一些细节
 
 ####	为什么说CFS是公平的？
-在 CFS中，尽管所有进程的 vruntime 最终会趋向于同步增长，但高优先级进程（权重更高的进程）实际获得的 CPU 时间更多。这是 CFS 实现公平的核心机制：通过调整虚拟运行时间的增长速度，让高优先级进程在虚拟运行时间维度上看似公平，而在物理时间维度上获得更多资源。所有进程的 vruntime 最终会趋向同步增长，看似公平。但在物理时间维度上，高优先级进程通过权重机制获得了更多资源，这是对优先级差异的合理体现。
+在 CFS中，尽管所有进程的 vruntime 最终会趋向于同步增长，但高优先级进程（权重更高的进程）实际获得的 CPU 时间更多。这是 CFS 实现公平的核心机制：通过调整虚拟运行时间的增长速度，让高优先级进程在虚拟运行时间维度上看似公平，而在物理时间维度上获得更多资源
+
+-	**所有进程的 vruntime 最终会趋向同步增长，看似公平**
+-	**但在物理时间维度上，高优先级进程通过权重机制获得了更多资源，这是对优先级差异的合理体现**
 
 vruntime 同步增长是 CFS 实现公平的表象，确保所有进程在虚拟时间维度上平等。实际 CPU 时间分配中高优先级进程通过更慢的 vruntime 增长，获得更多物理时间，这是权重的直接作用
 
