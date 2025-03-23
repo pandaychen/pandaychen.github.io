@@ -197,6 +197,8 @@ struct mm_struct {
 ![mm_struct]()
 
 ####    vm_area_struct
+Linux 内核按照功能上的差异，把虚拟内存空间划分为多个段。那么在内核中，是通过`vm_area_struct`结构来管理这些段
+
 内核使用结构体 [`vm_area_struct`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/mm_types.h#L284)来**描述用户虚拟内存空间的各个逻辑区域：代码段，数据段，堆，内存映射区，栈等，也称为VMA（virtual memory area）**
 
 每个 `vm_area_struct` 结构对应于虚拟内存空间中的唯一虚拟内存区域 VMA，其中`vm_start` 指向了这块虚拟内存区域的起始地址（最低地址），`vm_start` 本身包含在这块虚拟内存区域内，`vm_end` 指向了这块虚拟内存区域的结束地址（最高地址），而 `vm_end` 本身包含在这块虚拟内存区域之外，所以 `vm_area_struct` 结构描述的是 `[vm_start，vm_end)` 这样一段左闭右开的虚拟内存区域
@@ -239,6 +241,10 @@ struct vm_area_struct {
 -   `vm_rb`：某些场景中需要通过虚拟内存地址查找对应的虚拟内存区，为了加速查找过程，内核以虚拟内存地址作为key，把进程所有的虚拟内存区保存到一棵红黑树中，而这个字段就是红黑树的节点结构
 -   `vm_ops`：每个虚拟内存区都可以自定义一套操作接口，通过操作接口，能够让虚拟内存区实现一些特定的功能，比如：把虚拟内存区映射到文件。而 `vm_ops` 字段就是虚拟内存区的操作接口集，一般在创建虚拟内存区时指定
 
+内核通过一个链表和一棵红黑树来管理进程中所有的段。`mm_struct` 结构的 `mmap` 字段就是链表的头节点，而 `mm_rb` 字段就是红黑树的根节点，如下：
+
+![vm_area_struct](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/memory/vm-area-struct-layout.png)
+
 ####    mm_rb && mmap
 
 ```CPP
@@ -264,7 +270,196 @@ struct mm_struct {
 ![final]()
 
 ##  0x02    进程虚拟内存管理：ELF加载
+本小节主要讨论下进程的虚拟内存区是如何建立起来的，主要涉及到：
+-   ELF文件
 
+####    ELF：Executable and Linkable Format
+在 Linux 系统中使用ELF格式来存储一个可执行的应用程序，一个 ELF 文件由以下三部分组成：
+
+![elf]()
+
+-   ELF 头（ELF header）：描述应用程序的类型、CPU架构、入口地址、程序头表偏移和节头表偏移等
+-   程序头表（Program header table）：列举了所有有效的段（segments）和其属性，程序头表需要加载器将文件中的段加载到虚拟内存段中
+-   节头表（Section header table）：包含对节（sections）的描述
+
+当内核加载一个应用程序时，就是通过读取 ELF 文件的信息，然后把文件中所有的段加载到虚拟内存的段中。ELF 文件通过程序头表`elf64_phdr`来描述应用程序中所有的段，表中的每一个项都描述一个段的信息，程序加载器可以通过 ELF 头中获取到程序头表的偏移量，然后通过程序头表的偏移量读取到程序头表的数据，再通过程序头表来获取到所有段的信息
+
+```CPP
+typedef struct elf64_phdr {
+    Elf64_Word p_type;     // 段的类型
+    Elf64_Word p_flags;    // 可读写标志
+    Elf64_Off p_offset;    // 段在ELF文件中的偏移量
+    Elf64_Addr p_vaddr;    // 段的虚拟内存地址
+    Elf64_Addr p_paddr;    // 段的物理内存地址
+    Elf64_Xword p_filesz;  // 段占用文件的大小
+    Elf64_Xword p_memsz;   // 段占用内存的大小
+    Elf64_Xword p_align;   // 内存对齐
+} Elf64_Phdr;
+```
+
+####    ELF的加载过程
+要加载一个程序，需要调用 `execve` 系统调用来完成， `execve` 系统调用的调用栈如下，`execve` 系统调用最终会调用 `load_elf_binary` 函数来加载程序的 ELF 文件，接下来简单描述下`load_elf_binary`的过程
+
+```BASH
+sys_execve
+ ->do_execve
+    ->do_execveat_common
+       -> __do_execve_file
+           -> exec_binprm
+              -> search_binary_handler
+                 -> load_elf_binary
+```
+
+####    load_elf_binary的实现
+
+1、读取并检查ELF头
+
+```CPP
+//这段代码的逻辑主要是读取应用程序的 ELF 头，然后检查 ELF 头信息是否合法
+static int load_elf_binary(struct linux_binprm *bprm, struct pt_regs *regs)
+{
+    //...
+    struct {
+        struct elfhdr elf_ex;
+        struct elfhdr interp_elf_ex;
+    } *loc;
+
+    loc = kmalloc(sizeof(*loc), GFP_KERNEL);
+    if (!loc) {
+        retval = -ENOMEM;
+        goto out_ret;
+    }
+
+    // 1. 获取ELF头
+    loc->elf_ex = *((struct elfhdr *)bprm->buf);
+
+    retval = -ENOEXEC;
+    // 2. 检查ELF签名是否正确
+    if (memcmp(loc->elf_ex.e_ident, ELFMAG, SELFMAG) != 0)
+        goto out;
+
+    // 3. 是否是可执行文件或者动态库
+    if (loc->elf_ex.e_type != ET_EXEC && loc->elf_ex.e_type != ET_DYN)
+        goto out;
+
+    // 4. 检查系统架构是否正确
+    if (!elf_check_arch(&loc->elf_ex))
+        goto out;
+    //...
+}
+```
+
+2、读取程序头表，主要包含如下流程：
+
+-   从 ELF 头的信息中获取到程序头表的大小
+-   调用 `kmalloc` 函数申请一块内存来保存程序头表
+-   调用 `kernel_read` 函数从 ELF 文件中读取程序头表的数据，保存到 `elf_phdata` 变量中，程序头表的偏移量可以通过 ELF 头的 `e_phoff` 字段获取
+
+```CPP
+static int load_elf_binary(struct linux_binprm *bprm, struct pt_regs *regs)
+{
+    // ......
+    // ......
+    // 接上面的代码
+    size = loc->elf_ex.e_phnum * sizeof(struct elf_phdr); // 程序头表的大小
+    retval = -ENOMEM;
+
+    elf_phdata = kmalloc(size, GFP_KERNEL); // 申请一块内存来保存程序头表
+    if (!elf_phdata)
+        goto out;
+
+	// 从ELF文件中读取程序头表的数据, 并且保存到 elf_phdata 变量中
+    retval = kernel_read(bprm->file, loc->elf_ex.e_phoff, (char *)elf_phdata, size);
+    if (retval != size) {
+        if (retval >= 0)
+            retval = -EIO;
+        goto out_free_ph;
+    }
+    //...
+}
+```
+
+3、加载段到虚拟内存，把段加载到虚拟内存主要通过 `elf_map` 函数完成
+
+-   遍历程序头表所有的段
+-   判断段是否需要加载
+-   获取段的可读写权限和段的虚拟内存地址
+-   调用 `elf_map` 函数把段加载到虚拟内存
+
+```CPP
+    // 遍历程序头表所有的段
+    for (i = 0, elf_ppnt = elf_phdata; i < loc->elf_ex.e_phnum; i++, elf_ppnt++) {
+        int elf_prot = 0, elf_flags;
+        unsigned long k, vaddr;
+
+        if (elf_ppnt->p_type != PT_LOAD)  // 判断段是否需要加载
+            continue;
+        //...
+        // 段的可读写权限
+        if (elf_ppnt->p_flags & PF_R)
+            elf_prot |= PROT_READ;
+        if (elf_ppnt->p_flags & PF_W)
+            elf_prot |= PROT_WRITE;
+        if (elf_ppnt->p_flags & PF_X)
+            elf_prot |= PROT_EXEC;
+
+        elf_flags = MAP_PRIVATE | MAP_DENYWRITE | MAP_EXECUTABLE;
+
+        vaddr = elf_ppnt->p_vaddr;  // 获取段的虚拟内存地址
+        //...
+        // 把段加载到虚拟内存
+        error = elf_map(bprm->file, load_bias + vaddr, elf_ppnt, elf_prot, elf_flags, 0);
+        //...
+    }
+```
+
+4、 `elf_map` 函数的调用栈及核心流程，`elf_map` 函数最终会调用 `mmap_region` 来完成加载段到虚拟内存
+
+```BASH
+elf_map
+ |--> do_mmap
+   |--> do_mmap_pgoff
+      |--> mmap_region
+```
+
+`mmap_region`的主要流程如下：
+
+-   调用 `kmem_cache_zalloc` 函数申请一个 `vm_area_struct`（虚拟内存区）结构
+-   设置 `vm_area_struct` 结构各个字段的值
+-   调用 `vma_link` 函数把 `vm_area_struct` 结构连接到虚拟内存区链表和红黑树中，`vma_link`[实现](https://elixir.bootlin.com/linux/v4.11.6/source/mm/mmap.c#L589)
+-   通过上面的过程，内核就把应用程序的所有段加载到虚拟内存中
+
+```CPP
+unsigned long 
+mmap_region(struct file *file, unsigned long addr, unsigned long len, 
+            unsigned long flags, unsigned int vm_flags, unsigned long pgoff)
+{
+    struct mm_struct *mm = current->mm;
+    struct vm_area_struct *vma, *prev;
+    //...
+    // 申请一个 vm_area_struct 结构
+    vma = kmem_cache_zalloc(vm_area_cachep, GFP_KERNEL);
+    if (!vma) {
+        error = -ENOMEM;
+        goto unacct_error;
+    }
+
+    // 设置 vm_area_struct 结构各个字段的值
+    vma->vm_mm = mm;
+    vma->vm_start = addr;        // 段的开始虚拟内存地址
+    vma->vm_end = addr + len;    // 段的结束虚拟内存地址
+    vma->vm_flags = vm_flags;    // 段的功能特性
+    vma->vm_page_prot = vm_get_page_prot(vm_flags);
+    vma->vm_pgoff = pgoff;
+
+    //...
+    // 把 vm_area_struct 结构链接到虚拟内存区链表和红黑树中
+    vma_link(mm, vma, prev, rb_link, rb_parent);
+    //...
+    
+    return addr;
+}
+```
 
 ##  0x0  参考
 -   [4.6 深入理解 Linux 虚拟内存管理](https://www.xiaolincoding.com/os/3_memory/linux_mem.html)
