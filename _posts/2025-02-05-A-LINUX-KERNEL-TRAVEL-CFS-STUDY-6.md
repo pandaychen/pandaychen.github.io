@@ -352,7 +352,7 @@ struct sched_entity {
 
 这样CFS算法的最终调度效果就是：所有进程的 `vruntime` 趋近一致，但实际运行时间按权重比例分配
 
-7、vruntime的汇总
+7、vruntime小结
 
 -	`vruntime` 本质上是一个累加值，但其累加规则并非简单的物理时间叠加，而是基于进程的 ​权重（优先级）​​动态调整
 
@@ -384,11 +384,13 @@ struct cfs_rq {
 
 这个机制比较合理，因为可能在调度的过程中会发生CPU切换。如进程在刚创建的时候，其vruntime是根据当时所在的CPU就绪队列的`min_vruntime`为基础计算的，而进程真正开始被调度执行的时候，其所在的CPU可能不是最开始创建时所在的CPU了，中间发生了进程在不同CPU之间的迁移（不同的CPU之间，其虚拟运行时间也不尽相同，所以需要处理）
 
-##	0x03 	代码中的几个重要函数
+##	0x03 	代码中若干重要函数
 
-1、`calc_delta_fair`：用来计算进程的`vruntime`的函数
+####	`calc_delta_fair`
+`calc_delta_fair`，用来计算进程的`vruntime`的函数（见上文）
 
-2、`sched_slice`：此函数是用来计算一个调度周期内，一个调度实体可以分配多少运行时间
+####	`sched_slice`
+`sched_slice`函数是用来计算一个调度周期内，一个调度实体可以分配多少运行时间
 
 ```CPP
 static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
@@ -419,7 +421,8 @@ static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 }
 ```
 
-3、`place_entity`：此函数用来惩罚一个调度实体，本质是修改其`vruntime`的值。根据传入参数`initiat`分为两种情况
+####	`place_entity`
+`place_entity`函数用来惩罚一个调度实体，本质是修改其`vruntime`的值。根据传入参数`initial`分为两种情况
 
 -	`initial==0/*false*/`：如果`inital`为`false`，则代表的是唤醒的进程，对于唤醒的进程则需要照顾，最大的照顾是调度延时的一半，确保调度实体的`vruntime`不得倒退
 -	`initial==1/*true*/`：当参数`initial`为`true`时，代表是新创建的进程，新创建的进程则给它的`vruntime`增加值，代表惩罚它。因为新创建进程的`vruntime`过小，防止其一直占在CPU
@@ -460,7 +463,8 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 }
 ```
 
-4、`update_curr`：update_curr函数用来更新当前进程的运行时间信息（形象比喻为linux CFS的记账函数，其中时间账本为`struct sched_entity`）
+####	`update_curr`
+`update_curr`函数用来更新当前进程的运行时间信息（形象比喻为linux CFS的记账函数，其中时间账本为`struct sched_entity`）以及当前CPU cfs就绪队列的重要成员（如`update_min_vruntime`），注意到其参数为cfs就绪队列`cfs_rq`
 
 ![update_curr]()
 
@@ -500,7 +504,12 @@ static void update_curr(struct cfs_rq *cfs_rq)
 ```
 
 ####	`update_min_vruntime`：计算与判断
-`update_min_vruntime`用于CFS就绪队列最小虚拟运行时间更新
+`update_min_vruntime`用于CFS就绪队列最小虚拟运行时间更新（见下文代码分析）
+
+![update_min_vruntime]()
+
+判断函数todo
+
 ##	0x04	CFS的运行原理及核心代码走读
 
 ####    进程创建
@@ -592,8 +601,8 @@ void wake_up_new_task(struct task_struct *p){
 
 需要说明的是上面`wake_up_new_task`实现中，通过调用`select_task_rq()`函数重新选择CPU（逻辑核），通过调用调度类中`select_task_rq`方法选择调度类中最空闲的CPU。如此在缓存性能和空闲核两个点做权衡，同等条件会尽量优先考虑缓存命中率，选择同`L1`/`L2`的核，其次会选择同一个物理CPU上的（共享`L3`），最坏情况下去选择另一个（负载最小的）物理CPU上的核，称之为漂移。通常由于宿主机的CPU利用率过高的水平导致出现了漂移的情况，进程在不同的核上运行概率增加，导致缓存MISS，穿透到内存的访问次数增加，进程的运行性能就会下降
 
-####	CFS调度类及核心函数实现
-`fair_sched_class`是CFS调度类实现，调用调度类中的`task_fork`函数
+####	CFS调度类：task_fork_fair（进程创建）
+接着`sched_fork`函数继续分析，其中`fair_sched_class`是CFS调度类实现，调用调度类中的`task_fork`函数
 
 ```CPP
 const struct sched_class fair_sched_class = {
@@ -617,7 +626,7 @@ const struct sched_class fair_sched_class = {
 };
 ```
 
-`task_fork_fair`函数主要做fork相关的操作，参数`p`就是创建的`task_struct`
+`task_fork_fair`函数主要做`fork`新进程创建相关的操作，参数`p`就是创建的`task_struct`，核心实现如下：
 ```CPP
 static void task_fork_fair(struct task_struct *p)
 {
@@ -785,7 +794,12 @@ static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 TODO
 
 ##	0x05	调度方式一：新进程的调度过程
-继续上一小节的内容
+上一小节介绍了`do_dork`->`sched_fork`->`task_fork_fair`，对新进程创建到调度前的准备事项，本小节继续介绍唤醒新进程调度的流程，重要的几个方法：
+-	`wake_up_new_task`
+-	`enqueue_task_fair`
+-	`enqueue_entity`
+-	`account_entity_enqueue`
+-	`__enqueue_entity`
 
 1、新进程加入就绪队列，经过`do_fork()`的大部分初始化工作完成之后，接下来就是唤醒新进程准备运行，将新进程加入就绪队列准备调度
 
@@ -891,20 +905,27 @@ static void enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int f
 	update_curr(cfs_rq);                        
  
 	if (renorm && !curr)
-		se->vruntime += cfs_rq->min_vruntime;   /* 2 */
+		//还记得之前在task_fork_fair()函数最后减去的min_vruntime吗？入就绪队列时再加回来
+		se->vruntime += cfs_rq->min_vruntime;   
  
-	account_entity_enqueue(cfs_rq, se);         /* 3 */
+	//更新就绪队列相关信息，例如就绪队列的权重
+	account_entity_enqueue(cfs_rq, se);         
  
 	if (flags & ENQUEUE_WAKEUP)
-		place_entity(cfs_rq, se, 0);            /* 4 */
+		//针对唤醒的进程（flag有ENQUEUE_WAKEUP标识），是需要根据情况给予一定的补偿
+		//见place_entity()函数分析
+		//当然这里针对新进程第一次加入就绪队列是不需要调用的
+		place_entity(cfs_rq, se, 0);            
  
 	if (!curr)
-		__enqueue_entity(cfs_rq, se);           /* 5 */
-	se->on_rq = 1;                              /* 6 */
+		//__enqueue_entity()是将se加入就绪队列维护的红黑树中，所有的se以vruntime为key
+		__enqueue_entity(cfs_rq, se);           
+	//所有的操作完毕也意味着se已经加入cfs就绪队列，置位on_rq成员
+	se->on_rq = 1;                              
 }
 ```
 
-5、`__enqueue_entity`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/fair.c#L547)：将当前的调度实体加入当前`cfs_rq`的红黑树，并触发调整
+5、`__enqueue_entity`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/fair.c#L547)：将当前的调度实体加入当前`cfs_rq`的红黑树，并触发红黑树的自调整
 
 ```CPP
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
@@ -934,6 +955,7 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 		 * 以se->vruntime值为键值进行红黑树结点的比较
 		 */
 		if (entity_before(se, entry)) {
+			// 注意：vruntime可能会溢出，但不影响计算结果，见上文分析
 			link = &parent->rb_left;
 		} else {
 			link = &parent->rb_right;
@@ -962,8 +984,40 @@ void rb_insert_color(struct rb_node *node, struct rb_root *root)
 }
 ```
 
-##	0x05	调度方式二：周期性调度
-周期性调度是指Linux定时周期性地检查当前任务是否耗尽当前进程的时间片（关于耗尽检测的说法见后文分析），并检查是否应该抢占当前进程。一般会在定时器的中断函数中，通过一层层函数调用最终到`scheduler_tick()`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/core.c#L3091)
+6、`account_entity_enqueue`：更新就绪队列的相关信息，如权重等
+
+```cpp
+static void account_entity_enqueue(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+	//更新就绪队列权重，就是将se权重加在就绪队列权重上面
+	update_load_add(&cfs_rq->load, se->load.weight);  
+	if (!parent_entity(se))
+		//cpu就绪队列struct rq同样也需要更新权重信息
+		update_load_add(&rq_of(cfs_rq)->load, se->load.weight);   
+#ifdef CONFIG_SMP
+	if (entity_is_task(se)) {
+		struct rq *rq = rq_of(cfs_rq);
+ 
+		account_numa_enqueue(rq, task_of(se));
+		//将调度实体se加入链表
+		list_add(&se->group_node, &rq->cfs_tasks);                 
+	}
+#endif
+	//就绪队列中所有调度实体的个数+1
+	cfs_rq->nr_running++;                                          
+}
+```
+
+至此，对新建进程已经成功加入了CPU的CFS就绪队列，这里只需要等待CFS算法在合适的时机进行调度
+
+##	0x06	调度方式二：周期性调度
+除了对新建进程的调度方式外，还有另外一种核心调度模式即周期性调度。周期性调度是指Linux定时周期性地检查当前任务是否耗尽当前进程的时间片（关于耗尽检测的说法见后文分析），并检查是否应该抢占当前进程。一般会在定时器的中断函数中，通过一层层函数调用最终到`scheduler_tick()`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/core.c#L3091)，周期性调度的核心方法如下：
+
+-	`scheduler_tick`
+-	`entity_tick`
+-	`check_preempt_tick`
+-	`check_preempt_curr`
+
 
 ```CPP
 void scheduler_tick(void)
@@ -993,6 +1047,8 @@ void scheduler_tick(void)
 ```
 
 1、`task_tick_fair`/`entity_tick`（又看到了熟悉的`update_curr`函数）
+
+![entity_tick]()
 
 ```CPP
 static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
@@ -1062,7 +1118,7 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 }
 ```
 
-总结下，针对每一次周期调度流程
+小结下，针对每一次周期调度流程
 1.	更新当前正在运行进程的虚拟时间
 2.	检查当前进程是否满足被抢占的条件，即`check_preempt_tick`函数中的`if (delta_exec > ideal_runtime)....`，然后置位`IF_NEED_RESCHED`
 3.	检查`TIF_NEED_RESCHED` flag
@@ -1071,7 +1127,7 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	-	从就绪队列红黑树上删除即将运行进程的节点（dequeue task）
 
 
-##	0x06	如何挑选下一个合适进程？
+##	0x07	如何挑选下一个合适进程？
 当进程被设置`TIF_NEED_RESCHED` flag后会在某一时刻触发系统发生调度或者进程调用`schedule()`函数主动放弃cpu使用权，触发系统调度
 
 1、`schedule`/`__schedule`，CFS 的调度过程是由 `schedule` 函数完成的，该函数的执行过程如下：
@@ -1112,7 +1168,7 @@ static void __sched notrace __schedule(bool preempt)
 		if (unlikely(signal_pending_state(prev->state, prev))) {
 			prev->state = TASK_RUNNING;
 		} else {
-			//针对主动放弃cpu进入睡眠的进程，需要从对应的就绪队列上删除该进程
+			//针对主动放弃cpu进入睡眠的进程，需要从对应的就绪队列上删除该进程（见下文分析）
 			deactivate_task(rq, prev, DEQUEUE_SLEEP | DEQUEUE_NOCLOCK);    
 			prev->on_rq = 0;
 		}
@@ -1135,6 +1191,8 @@ static void __sched notrace __schedule(bool preempt)
 ```
 
 2、`pick_next_task`/`pick_next_task_fair`：CFS调度器选择下一个执行进程
+
+![pick_next_task_fair]()
 
 ```CPP
 static struct task_struct *
@@ -1257,10 +1315,149 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 }
 ```
 
-##	0x0	进程的睡眠
+##	0x08	进程的睡眠
 
+1、在`__schedule`方法中，注意到如果当前占用CPU的`prev`进程主动睡眠，那么会调用`deactivate_task()`函数，最终会调用调度类`dequeue_task`/`dequeue_task_fair`方法，该函数与`enqueue_task_fair()`的作用刚好相反，即将调度实体`se`从对应的就绪队列`cfs_rq`上删除
 
-##	0x	总结
+```cpp
+static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
+{
+	struct cfs_rq *cfs_rq;
+	struct sched_entity *se = &p->se;
+	int task_sleep = flags & DEQUEUE_SLEEP;
+	for_each_sched_entity(se) {                 
+		cfs_rq = cfs_rq_of(se);
+		//将调度实体se从对应的就绪队列cfs_rq上删除
+		dequeue_entity(cfs_rq, se, flags);      
+	}
+	if (!se)
+		sub_nr_running(rq, 1);
+}
+
+static void dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
+{
+	//出就绪队列之前更新下cfs_rq已经curr当前正在运行进程的虚拟时间等信息
+	update_curr(cfs_rq);                          
+	if (se != cfs_rq->curr)
+		//如果se不是当前正在运行的进程，其对应的调度实体还在cfs就绪队列红黑树上，调用__dequeue_entity()函数从红黑树上删除节点
+		__dequeue_entity(cfs_rq, se);          
+	//调度实体已经从就绪队列的红黑树上删除，因此更新on_rq成员
+	se->on_rq = 0;                                
+
+	//更新就绪队列相关信息，例如权重信息
+	account_entity_dequeue(cfs_rq, se);           
+	if (!(flags & DEQUEUE_SLEEP))
+		//如果进程不是睡眠（例如从一个CPU迁移到另一个CPU），进程最小虚拟时间需要减去当前就绪队列对应的最小虚拟时间
+		//迁移之后会在enqueue的时候加上对应CPU（可能是同个也可能是另外一个）的CFS就绪队列最小拟时间
+		se->vruntime -= cfs_rq->min_vruntime;     
+} 
+```
+
+2、`account_entity_dequeue`
+
+```cpp
+static void account_entity_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+	//从就绪队列权重总和中减去当前dequeue调度实体的权重
+	update_load_sub(&cfs_rq->load, se->load.weight); 
+	if (!parent_entity(se))
+		update_load_sub(&rq_of(cfs_rq)->load, se->load.weight);
+#ifdef CONFIG_SMP
+	if (entity_is_task(se)) {
+		account_numa_dequeue(rq_of(cfs_rq), task_of(se));
+		// 从链表中删除调度实体se
+		list_del_init(&se->group_node);                   
+	}
+#endif
+	//就绪队列中可运行调度实体计数减1
+	cfs_rq->nr_running--;                                 
+}
+```
+
+##	0x09	唤醒抢占
+
+####	抢占当前进程条件
+当进程被唤醒时（`wake_up_new_task`、`try_to_wake_up`等），也是检查进程是否可以抢占当前进程执行权的时机，因为唤醒的进程有可能具有更高的优先级或者更小的虚拟时间。此时会调用`check_preempt_curr`执行抢占检查的工作：
+
+1、`wake_up_new_task`函数
+
+```cpp
+void wake_up_new_task(struct task_struct *p)
+{
+	struct rq_flags rf;
+	struct rq *rq;
+ 
+	p->state = TASK_RUNNING;
+
+	rq = __task_rq_lock(p, &rf);
+	activate_task(rq, p, ENQUEUE_NOCLOCK);                                   
+	p->on_rq = TASK_ON_RQ_QUEUED;
+	// 既然唤醒了新进程，那么就检查是否能够抢占执行
+	check_preempt_curr(rq, p, WF_FORK);                                      
+}
+
+void check_preempt_curr(struct rq *rq, struct task_struct *p, int flags)
+{
+	const struct sched_class *class;
+ 
+	if (p->sched_class == rq->curr->sched_class) {
+		//唤醒的进程和当前的进程同属于一个调度类，直接调用调度类的check_preempt_curr函数检查抢占条件
+		rq->curr->sched_class->check_preempt_curr(rq, p, flags);   
+	} else {
+		//否则如果唤醒的进程和当前进程不属于一个调度类，就需要按照调度器类的优先级来选择
+		//例如，当期进程是CFS调度类，唤醒的进程是RT调度类，自然实时进程是需要抢占当前进程的，因为优先级更高
+		for_each_class(class) {                                    
+			if (class == rq->curr->sched_class)
+				break;
+			if (class == p->sched_class) {
+				resched_curr(rq);
+				break;
+			}
+		}
+	}
+}
+```
+
+2、`check_preempt_wakeup`函数，假设唤醒的进程和当前的进程同属于一个CFS调度类
+
+```cpp
+static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_flags)
+{
+	struct sched_entity *se = &curr->se, *pse = &p->se;
+	struct cfs_rq *cfs_rq = task_cfs_rq(curr);
+ 
+	//重要：检查唤醒的进程是否满足抢占当前进程的条件
+	if (wakeup_preempt_entity(se, pse) == 1)   
+		goto preempt;
+ 
+	return;
+preempt:
+	//如果可以抢占当前进程，设置TIF_NEED_RESCHED flag
+	resched_curr(rq);                           
+}
+```
+
+3、`wakeup_preempt_entity`函数：传入两个调度实体，返回对比结果（是否可以抢占）
+
+![wakeup_preempt_entity]()
+
+```cpp
+static int wakeup_preempt_entity(struct sched_entity *curr, struct sched_entity *se)
+{
+	s64 gran, vdiff = curr->vruntime - se->vruntime;
+ 
+	if (vdiff <= 0)                    /* 1 */
+		return -1;
+ 
+	gran = wakeup_gran(se);
+	if (vdiff > gran)                  /* 2 */
+		return 1;
+ 
+	return 0;
+}
+```
+
+##	0x0A	总结
 
 ####	vruntime
 `vruntime`本质是一个累计值，作为每个调度实体（`struct sched_entity`）的 vruntime 字段记录该进程的加权累计运行时间
