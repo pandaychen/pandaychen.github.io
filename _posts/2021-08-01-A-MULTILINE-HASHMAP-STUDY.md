@@ -484,7 +484,7 @@ int MemHash::Append(uint64_t key, const char* data, int len)
 ####  细节
 上面的代码思路基本上很清晰了，不过有两个地方需要特别做下解释：
 
-1、问题 1：插入新元素时，如何查找可用 `mem_block`？回想在 `mem_head` 中 `free_block_pos` 成员，该成员标记了 `mem_block` 区域空闲块的首地址。如此这样将空闲 block 组织成链表结构（链表的指针是索引位置），在每个空闲 block 中记录下一个空闲的 block 地址，将空闲 block 逻辑上串联，在 header 中记录空闲链表头部地址；需要空闲 block 时，从空闲链表头部开始获取即可，然后对于每个占用的 `mem_block`，对其 `flag` 进行置位标识该 block 已被使用，同时更 ` 新 mem_node` 索引的 `pos` 字段
+1、问题 1：插入新元素时，如何查找可用 `mem_block`？回想在 `mem_head` 中 `free_block_pos` 成员，该成员标记了 `mem_block` 区域空闲块的首地址。如此这样将空闲 block 组织成链表结构（链表的指针是索引位置），在每个空闲 block 中记录下一个空闲的 block 地址，将空闲 block 逻辑上串联，在 header 中记录空闲链表头部地址；需要空闲 block 时，从空闲链表头部开始获取即可，然后对于每个占用的 `mem_block`，对其 `flag` 进行置位标识该 block 已被使用，同时更新`mem_node` 索引的 `pos` 字段
 
 2、问题 2：删除元素后如何回收 block？查找待删除的最后一个 block，将其 `next` 设置为 `header` 中空闲链表头部地址，同时将 `header` 中空闲链表头部地址更新为删除的第一个 `mem_block` 地址
 
