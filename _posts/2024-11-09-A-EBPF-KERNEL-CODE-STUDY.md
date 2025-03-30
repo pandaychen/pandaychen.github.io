@@ -258,12 +258,14 @@ static void __schedule notrace __schedule(bool preempt){
 
 ####    调度相关
 
-
 ##  0x02    runqlat 实现
+以bcc的[实现](https://github.com/iovisor/bcc/blob/master/libbpf-tools/runqlat.bpf.c)为例
 
 ##	0x03	runqlen 实现
+[实现](https://github.com/iovisor/bcc/blob/master/libbpf-tools/runqlen.bpf.c)
 
 ##	0x04	runslower 实现
+[实现](https://github.com/iovisor/bcc/blob/master/libbpf-tools/runqslower.bpf.c)
 
 ##  0x05  参考
 -   [透过Tracepoint理解内核 - 调度器框架和性能](https://zhuanlan.zhihu.com/p/143320517)
