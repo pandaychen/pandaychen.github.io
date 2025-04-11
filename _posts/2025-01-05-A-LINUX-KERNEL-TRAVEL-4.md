@@ -112,6 +112,8 @@ struct rq {
 }
 ```
 
+注意：每个CPU逻辑核都有自己的 `struct rq` 结构，用于描述在此 CPU 上所运行的所有进程，其包括一个实时进程队列`rt_rq` 和一个 CFS 运行队列 `cfs_rq`。在调度时，调度器首先会先去实时进程队列找是否有实时进程需要运行，如果没有才会去 CFS 运行队列（叫队列，实际上是红黑树）找是否有进行需要运行。这样保证了实时任务的优先级永远大于普通任务
+
 3、 [`sched_entity`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/sched.h#L359)：代表被CFS算法调度的实体
 
 ```CPP
@@ -307,7 +309,7 @@ static inline struct task_struct *pick_next_task(struct rq *rq,
 
 ```CPP
 struct rq {
-         struct cfs_rq cfs;
+    struct cfs_rq cfs;
 	struct rt_rq rt;
 	struct dl_rq dl;
 };
