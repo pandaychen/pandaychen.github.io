@@ -324,6 +324,71 @@ tags:
 -   `tracepoint:syscalls:sys_enter_memfd_create`
 -   `tracepoint:syscalls:sys_exit_memfd_create`
 
+####    可观测（tracing）
+
+-   `tracepoint/syscalls/sys_enter_connect`
+-   `tracepoint/syscalls/sys_exit_connect`
+-   `tracepoint/syscalls/sys_enter_accept`
+-   `tracepoint/syscalls/sys_exit_accept`
+-   `tracepoint/syscalls/sys_enter_accept4`
+-   `tracepoint/syscalls/sys_exit_accept4`
+-   `tracepoint/syscalls/sys_enter_close`
+-   `tracepoint/syscalls/sys_exit_close`
+-   `tracepoint/syscalls/sys_enter_write`
+-   `tracepoint/syscalls/sys_exit_write`
+-   `tracepoint/syscalls/sys_enter_read`
+-   `tracepoint/syscalls/sys_exit_read` 
+-   `tracepoint/syscalls/sys_enter_sendmsg`
+-   `tracepoint/syscalls/sys_exit_sendmsg`
+-   `tracepoint/syscalls/sys_enter_recvmsg`
+-   `tracepoint/syscalls/sys_exit_recvmsg`
+
+####    数据包（协议栈流向）可观测
+
+-   `kprobe/__skb_datagram_iter`
+-   `kprobe/skb_copy_datagram_iovec`
+-   `tracepoint/skb/skb_copy_datagram_iovec`
+-   `tracepoint/net/netif_receive_skb`
+-   `kprobe/tcp_queue_rcv`
+-   `kprobe/tcp_rcv_established`
+-   `kprobe/tcp_v4_do_rcv`
+-   `kprobe/tcp_v6_do_rcv`
+-   `kprobe/tcp_v4_rcv`
+-   `kprobe/ip_rcv_core`
+-   `kprobe/dev_hard_start_xmit`
+-   `kprobe/dev_queue_xmit`
+-   `kprobe/__ip_queue_xmit`
+-   `kprobe/__ip_queue_xmit`
+-   `kprobe/nf_nat_packet`
+-   `kprobe/nf_nat_manip_pkt`
+-   `kprobe/security_socket_sendmsg`
+-   `kprobe/security_socket_recvmsg`
+-   `tracepoint/syscalls/sys_enter_recvfrom`
+-   `tracepoint/syscalls/sys_exit_recvfrom`
+-   `tracepoint/syscalls/sys_enter_read`
+-   `tracepoint/syscalls/sys_exit_read`
+-   `tracepoint/syscalls/sys_enter_recvmsg`
+-   `tracepoint/syscalls/sys_exit_recvmsg`
+-   `tracepoint/syscalls/sys_enter_readv`
+-   `tracepoint/syscalls/sys_exit_readv`
+-   `tracepoint/syscalls/sys_enter_sendfile64`
+-   `tracepoint/syscalls/sys_exit_sendfile64`
+-   `tracepoint/syscalls/sys_enter_sendto`
+-   `tracepoint/syscalls/sys_exit_sendto`
+-   `tracepoint/syscalls/sys_enter_write`
+-   `tracepoint/syscalls/sys_exit_write`
+-   `tracepoint/syscalls/sys_enter_sendmsg`
+-   `tracepoint/syscalls/sys_exit_sendmsg`
+-   `tracepoint/syscalls/sys_enter_writev`
+-   `tracepoint/syscalls/sys_exit_writev`
+-   `tracepoint/syscalls/sys_enter_close`
+-   `kprobe/sys_close`
+-   `tracepoint/syscalls/sys_exit_close`
+-   `tracepoint/syscalls/sys_enter_connect`
+-   `tracepoint/syscalls/sys_exit_connect`
+-   `tracepoint/syscalls/sys_enter_accept4`
+-   `tracepoint/syscalls/sys_exit_accept4`
+
 ##  0x03    参考
 -   [Linux System Call Table](https://chromium.googlesource.com/chromiumos/docs/+/master/constants/syscalls.md)
 -   [linux系统编程之进程（四）：进程退出exit，_exit区别即atexit函数](https://www.cnblogs.com/mickole/p/3186606.html)

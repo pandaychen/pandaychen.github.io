@@ -770,14 +770,16 @@ static u64 sched_vslice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 
 static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
-	u64 slice = __sched_period(cfs_rq->nr_running + !se->on_rq);    /* 1 */
+	//__sched_period()：根据就绪队列调度实体个数计算调度周期
+	u64 slice = __sched_period(cfs_rq->nr_running + !se->on_rq);   
  
-	for_each_sched_entity(se) {                                     /* 2 */
+	for_each_sched_entity(se) {                                    
 		struct load_weight *load;
 		struct load_weight lw;
  
 		cfs_rq = cfs_rq_of(se);
-		load = &cfs_rq->load;                                       /* 3 */
+		// 获取就绪队列的权重，也就是就绪队列上所有调度实体权重之和
+		load = &cfs_rq->load;                                   
  
 		if (unlikely(!se->on_rq)) {
 			lw = cfs_rq->load;
@@ -785,13 +787,16 @@ static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 			update_load_add(&lw, se->load.weight);
 			load = &lw;
 		}
-		slice = __calc_delta(slice, se->load.weight, load);         /* 4 */
+		//__calc_delta()函数包含如下两个功能：
+		//1：计算进程运行时间转换成虚拟时间
+		//2：计算调度实体se的权重占整个就绪队列权重的比例，然后乘以调度周期时间即可得到当前调度实体应该运行的时间（参数weught传递调度实体se权重，参数lw传递就绪队列权重cfs_rq->load）。例如，就绪队列权重是3072，当前调度实体se权重是1024，调度周期是6ms，那么调度实体应该得到的时间是6*1024/3072=2ms
+		slice = __calc_delta(slice, se->load.weight, load);      
 	}
 	return slice;
 }
 ```
 
-TODO
+至此，一个fork新创建的进程在调度前的准备工作基本就完成了
 
 ##	0x05	调度方式一：新进程的调度过程
 上一小节介绍了`do_dork`->`sched_fork`->`task_fork_fair`，对新进程创建到调度前的准备事项，本小节继续介绍唤醒新进程调度的流程，重要的几个方法：
@@ -882,7 +887,6 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 ```
 
 4、`enqueue_entity`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/fair.c#L3581)：将调度实体`se`插入`cfs_rq`的调度红黑树结构中
-
 
 ```CPP
 static void enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
@@ -1572,6 +1576,9 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 -	进程权重与优先级：高优先级进程的 `sched_slice` 更长，但通过 vruntime 的缓慢增长间接实现，而非硬性时间限制
 -	运行队列负载：若运行队列中有大量进程，调度周期（`sysctl_sched_latency`）可能扩展为 `调度周期 = max(6ms, nr_running × 0.75ms)`，避免时间片过小
 -	最小调度粒度（`sysctl_sched_min_granularity`）：进程至少运行 `sysctl_sched_min_granularity` 默认为`0.75ms`才会被抢占，防止频繁切换
+
+####	
+
 
 
 ##  0x0  参考

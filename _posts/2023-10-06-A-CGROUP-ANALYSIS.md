@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      Linux Namespace && Cgroup
+title:      Linux Namespace && Cgroup（V1）
 subtitle:   Linux 系统资源隔离与管理机制介绍
 date:       2023-10-06
 author:     pandaychen
@@ -92,6 +92,8 @@ Linux PID 命名空间用于隔离进程 ID，在一个 PID 命名空间中，�
 -   `memory.memsw.limit_in_bytes`：用于设置 cgroup 中进程的内存+交换空间（swap）的限制。可以设置一个整数值，表示 cgroup 中所有进程可使用的内存+swap 的上限
 -   `memory.memsw.usage_in_bytes`：记录了 cgroup 中所有进程当前的内存+swap 使用量
 
+####	cpuset subsystem
+
 ##  0x03    CGROUP 限制配置 && 实现
 正如前文描述，在共享的机器上，进程相互隔离，互不影响，对其它进程是种保护。对于可能存在内存泄漏的进程，可以设置内存限制，通过系统 OOM 触发的 Kill 信号量来实现重启。本小节给出一个基于`/sys/fs/cgroup/memory`控制内存使用的case
 
@@ -178,10 +180,17 @@ Cgroup 提供了设置进程在满负载情况下的优先级接口（`cpu.share
 2、查看对应 cgroup 的 CPU 限制
 
 ```BASH
+#cpu（注意挂载位置）
 [root@VM-130-44-centos ~]# cat /sys/fs/cgroup/cpu/XXX-bkmonitorbeat-f75df986656263e86157c4df672b81c4/cpu.cfs_period_us
 100000
+
+#cpu
 [root@VM-130-44-centos ~]# cat /sys/fs/cgroup/cpu/XXX-bkmonitorbeat-f75df986656263e86157c4df672b81c4/cpu.cfs_quota_us
 1000000
+
+#cpuset
+[root@VM-130-44-centos ~]# cat /sys/fs/cgroup/cpuset/XXX-bkmonitorbeat-f75df986656263e86157c4df672b81c4/cpuset.cpus
+0-15
 ```
 
 3、查看对应 cgroup 的 memory 限制
@@ -222,9 +231,24 @@ Kernel为了实现资源隔离和虚拟化，引入了Namespace机制，即可�
 
 ![PIDNAMESPACE](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/linux/pid_namespace_1.png)
 
-##  0x06    参考
+##	0x06	一些细节问题
+
+1、问题一：基于cgroup的CPU限制，是指定到某个CPU Core生效还是全局Core生效，如何配置
+
+CPU 限制策略的具体效果取决于使用的控制器类型（cpu/cpuset控制器），结论如下：
+
+-	如果仅用 `cpu` 控制器：不区分核心，按总时间限制
+-	如果用 `cpuset` 控制器：限制核心范围，但不限制时间
+-	通过两者组合使用可实现资源隔离+使用率限制，可实现需要精确控制 CPU 的场景
+
+对于cpu 控制器（基于CFS 调度策略）而言，不会区分 CPU 核心，即通过 `cpu.cfs_quota_us` 和 `cpu.cfs_period_us` 设置的 CPU 时间配额（如限制进程使用 `50%` 的 CPU）是全局性的，不绑定到特定的CPU core；其次是跨核心共享配额，进程可以在任何可用的 CPU core上运行，但所有core的使用时间会累加并受配额限制。例如，如果限制为 `1` 个 CPU core的 `100%`，则进程可以跨多个核心运行，但总时间不超过 `1` core的 `100%`（如 `2` CPU core上各用 `50%`）
+
+对于cpuset 控制器而言，其作用是​绑定到特定核心，即通过 `cpuset.cpus` 指定进程允许运行的 CPU core（如 `0-3`）。此时，进程只能在这些核心上运行，但不会自动限制 CPU 使用率（仍需配合 cpu 控制器限制时间）；其作用隔离性更强，适合需要核心绑定的场景（如减少缓存抖动或满足实时性要求）。对二者的组合使用可实现同时限制核心和时间，例如用 cpuset 绑定进程到核心 `0-1`，再用 cpu 控制器限制这些核心上的总使用时间，此时配额会在绑定的核心范围内生效
+
+##  0x07    参考
 -   [Linux Namespace 和 Cgroup](https://segmentfault.com/a/1190000009732550)
 -   [如何在 Go 中使用 CGroup 实现进程内存控制](https://cloud.tencent.com/developer/article/2005471)
 -   [探索 Linux 命名空间和控制组：实现资源隔离与管理的双重利器](https://cloud.tencent.com/developer/article/2367949)
 -   [Linux PID 一网打尽](https://cloud.tencent.com/developer/article/1682890)
 -   [关于 Linux Cgroup 的一些个人理解](https://smartkeyerror.com/Linux-Cgroup)
+-	[Linux Cgroup V2 初体验](https://www.lixueduan.com/posts/linux/08-cgroup-v2/)
