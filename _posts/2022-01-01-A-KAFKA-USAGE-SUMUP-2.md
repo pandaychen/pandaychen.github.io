@@ -14,7 +14,7 @@ tags:
 
 ## 0x00 前言
 
-本篇文章，总结下在项目中使用 sarama-kafka 库的一些经验及对 Kafka 集群高可用的一些认识。核心围绕着：我们如何主动感知到 push 到 kafka 的消息哪些未被消费（生产到消费的各个环节）以及如何避免这种情况的
+本篇文章，总结下在项目中使用 sarama-kafka 库的一些经验及对 Kafka 集群高可用的一些认识。核心围绕着：如何主动感知到 push 到 kafka 的消息哪些未被消费（生产到消费的各个环节）以及如何避免这种情况的
 
 ## 0x01 Kafka 的基本概念
 
@@ -351,7 +351,7 @@ func (h exampleConsumerGroupHandler) ConsumeClaim(sess ConsumerGroupSession, cla
 ```golang
 func (h msgConsumerGroup) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
    for msg := range claim.Messages() {
-      // 处理我们的业务逻辑，如写 mysql 等等
+      // 处理业务逻辑，如写 mysql 等等
       doOurBusinessLogic(msg)
 
       // 正确：插入 mysql 成功后程序崩溃，下一次顶多重复消费一次，而不是因为 Offset 超前，导致应用层消息丢失了
@@ -380,7 +380,7 @@ func (h msgConsumerGroup) ConsumeClaim(sess sarama.ConsumerGroupSession, claim s
    for msg := range claim.Messages() {
       fmt.Printf("%s Message topic:%q partition:%d offset:%d  value:%s\n", h.name, msg.Topic, msg.Partition, msg.Offset, string(msg.Value))
 
-      // 处理我们的业务逻辑，如写 mysql 等等
+      // 处理业务逻辑，如写 mysql 等等
       doOurBusinessLogic(msg)
 
       // 手动提交模式下，也需要先进行标记

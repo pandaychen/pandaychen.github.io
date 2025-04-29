@@ -102,7 +102,16 @@ WAN 池是全局唯一的，所有数据中心的 Server 都应该加入到 WAN 
 
 ####  构建gossip集群的基本步骤
 ```GO
-1、new个配置文件 c := memberlist.DefaultLocalConfig() 2、创建gossip网络 m, err := memberlist.Create(c) 3、将节点加入到集群 m.Join(parts) 4、实现delegate接口 5、将我们需要同步的数据加到广播队列 broadcasts.QueueBroadcast(userdate)
+// 1、new配置文件 
+c := memberlist.DefaultLocalConfig()
+// 2、创建gossip网络
+m, err := memberlist.Create(c) 
+// 3、将节点加入到集群
+m.Join(parts)
+// 4、实现delegate接口
+
+// 5、将需要同步的数据加到广播队列
+broadcasts.QueueBroadcast(userdate)
 ```
 
 ####    memberlist的协议

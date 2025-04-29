@@ -25,7 +25,7 @@ encrypted=`echo $plaintext | openssl enc -salt -aes-256-cbc -e -a -k $password`
 echo $encrypted | openssl enc -salt -aes-256-cbc -d -a -k $password
 ```
 
-一看是常见的 `aes-256-cbc` 加密模式，其中某一次的加密结果是 `U2FsdGVkX1+m6PD2vAhrOI8F5HhC0NlctfX0DvuHOYI=`，这与平时我们使用的 `aes-256-cbc` 有些出入：
+一看是常见的 `aes-256-cbc` 加密模式，其中某一次的加密结果是 `U2FsdGVkX1+m6PD2vAhrOI8F5HhC0NlctfX0DvuHOYI=`，这与平时使用的 `aes-256-cbc` 模式有些出入：
 
 - 加密串长度不符合预期结果（和普通方式相比）
 - 加密的结果每次都不相同
