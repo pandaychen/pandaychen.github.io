@@ -70,8 +70,6 @@ tags:
 
 ####    分区表
 
-
-
 > 分区是把一张表的数据分成 N 多个区块，这些区块可以在同一个磁盘上，也可以在不同的磁盘上。就访问数据库应用而言，逻辑上就只有一个表或者一个索引，但实际上这个表可能有 N 个物理分区对象组成，每个分区都是一个独立的对象，可以独立处理，可以作为表的一部分进行处理。分区对应用来说是完全透明的，不影响应用的业务逻辑。
 
 常用的几种分区方式：
@@ -105,7 +103,7 @@ PARTITION BY RANGE (TO_DAYS(hiredate) ) (
 );
 ```
 
-注意：使用 `RANGE` 分区方式，后续需要手动创建分区（如果分区用完的话，比如时间在 `20211211` 之后的数据），现网中通常是单独启动一个创建分区的进程，预先创建需要的分区。也可以使用上面的默认分区 `p11`（`p11` 是一个可选分区，如果在定义表的没有指定的这个分区，当我们插入大于 `20211211` 的数据的时候，会出错）
+注意：使用 `RANGE` 分区方式，后续需要手动创建分区（如果分区用完的话，比如时间在 `20211211` 之后的数据），现网中通常是单独启动一个创建分区的进程，预先创建需要的分区。也可以使用上面的默认分区 `p11`（`p11` 是一个可选分区，如果在定义表的没有指定的这个分区，当插入大于 `20211211` 的数据的时候，会出错）
 
 又如：用 id 来作为分区的列字段，将 `1-1000` 分为第一个区，`1001-2000` 分为第二个区，等等：
 ```sql
@@ -282,13 +280,38 @@ func batchInsert(){}
 }
 ```
 
+API接口如下：
+
+```GO
+//创建 BulkInserter，通过 sqlx.NewBulkInserter 创建 BulkInserter，他需要一个 sqlx.SqlConn 和一个插入 sql 语句。
+func NewBulkInserter(sqlConn SqlConn, stmt string) (*BulkInserter, error)
+
+//插入数据
+//注意其中 args，为 insert 中的每个参数，需要和 `?`一一对应，同时因为 Insert 其实是一个异步操作，这个地方不会有插入 error 返回
+func (bi *BulkInserter) Insert(args ...any) error
+
+//flush：因为的插入其实是一个异步过程，如果有业务需要立即入库或者程序即将退出，需要手动 flush 一下。框架已经在 PeriodicalExecutor 添加了 proc.AddShutdownListener。所以无需关心退出时的操作，只需要在业务需要的时候自己调用flush
+blk.Flush()
+
+//设置结果回调：如果有业务需要关注每次批量插入的结果，因为插入是异步行为，所以需要手动设置结果回调
+blk.SetResultHandler(func(result sql.Result, err error) {
+    if err != nil {
+        logx.Error(err)
+        return
+    }
+    fmt.Println(result.RowsAffected())
+})
+```
+
+`BulkInserter` 当前[逻辑实现](https://github.com/zeromicro/go-zero/blob/go1.16/core/stores/mon/bulkinserter.go)默认将会在收集到 `1000` 个记录（`maxBulkRows`）或者每间隔`1`秒（`flushInterval`）进行一次落库操作。`BulkInserter` 是基于 `executors.PeriodicalExecutor` 实现的，核心逻辑会在收集到足够数据的记录的时候或者满足一定时长的时候写入数据，同时写入是异步操作，错误的结果只能够通过回调进行处理
+
 ####    实现原理分析
-[bulkexecutor](https://github.com/zeromicro/go-zero/blob/master/core/executors/bulkexecutor.go)
+[bulkexecutor](https://github.com/zeromicro/go-zero/blob/master/core/executors/bulkexecutor.go)，参考文章[GoZero 组件分析：executors（批处理组件）](https://pandaychen.github.io/2024/01/15/A-GOZERO-EXECUTORS-ANALYSIS/#bulkexecutor-%E5%AE%9E%E7%8E%B0)
 
 ##  0x05    Mysql 的应用经验
 
 ####    MySQL 缓存管理
-TODO
+
 
 ## 0x06 参考
 -   [哪些场景我不建议用分区表？](https://learn.lianglianglee.com/%E4%B8%93%E6%A0%8F/MySQL%E5%AE%9E%E6%88%98%E5%AE%9D%E5%85%B8/14%20%20%E5%88%86%E5%8C%BA%E8%A1%A8%EF%BC%9A%E5%93%AA%E4%BA%9B%E5%9C%BA%E6%99%AF%E6%88%91%E4%B8%8D%E5%BB%BA%E8%AE%AE%E7%94%A8%E5%88%86%E5%8C%BA%E8%A1%A8%EF%BC%9F.md)
