@@ -16,7 +16,7 @@ tags:
 ##  0x01    原理 && 应用
 bitmap 比较简单，用一个 bit 来标记某个元素对应的 value，而 Key 即是该元素。由于采用 bit 来存储一个数据，相对节省空间（不考虑稀疏存储的场景下）。假设要对 `0-31` 内的 `3` 个元素 `(10,17,28)` 排序，那么就可以采用 Bitmap 方法（假设这些元素没有重复）。bitmap 算法常用于对大量整形数据做去重和查询
 
-要表示 `32` 个数，我们就只需要 `32` 个 bit（`4`Bytes），首先初始化 `4`Byte 的空间，将这些空间的所有 bit 位都置为 `0`
+要表示 `32` 个数，只需要 `32` 个 bit（`4`Bytes），首先初始化 `4`Byte 的空间，将这些空间的所有 bit 位都置为 `0`
 
 ![B1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/datastructure/bitmap/bitmap-1.jpg)
 
@@ -171,7 +171,7 @@ func (dst Bitmap) Max() (uint32, bool) {
 ![bit1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/xdp/bytedance/bitmap-1.png)
 
 ####    匹配规则
-报文匹配时，根据五元组（源、目的地址，源、目的端口、协议）依次作为 key，分别查找对应的 eBPF Map，得到 `5` 个 value。我们将这 `5` 个 value 进行按位与操作，得到一个 bitmap。这个 bitmap 的每个 bit，就表示了对应的一条规则；被置位为 `1` 的 bit，表示对应的规则匹配成功，一般有两种情况
+报文匹配时，根据五元组（源、目的地址，源、目的端口、协议）依次作为 key，分别查找对应的 eBPF Map，得到 `5` 个 value。然后将这 `5` 个 value 进行按位与操作，得到一个 bitmap。这个 bitmap 的每个 bit，就表示了对应的一条规则；被置位为 `1` 的 bit，表示对应的规则匹配成功，一般有两种情况
 
 1.	最终的 bitmap 只有 `1` 位被置位
 2.	最终的 bitmap 超过 `1` 位被置位，此时需要获取优先级最高的那条（数字最小）
