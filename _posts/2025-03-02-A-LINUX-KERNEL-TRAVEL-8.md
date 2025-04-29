@@ -131,7 +131,7 @@ tags:
 17、待内存中的所有数据包被处理完成后（即`poll`函数执行完成），**会再次启用网卡的硬中断，这样下次网卡再收到数据的时候就会通知CPU**
 
 
-3、阶段3：协议栈网络层（IP）
+三、阶段3：协议栈网络层（IP）
 
 接着看下数据包来到协议栈的处理过程，重要的内核函数如下：
 
@@ -225,7 +225,6 @@ tags:
 -   通过`epoll`/`select`监听相应的socket，当收到通知后，再调用`recvfrom`函数去读取接收队列的数据
 
 至此，一个UDP包就经由网卡成功送到了应用层程序
-
 
 ####    网卡收包的若干细节
 
@@ -389,9 +388,9 @@ struct sk_buff_head {
 };
 ```
 
-![layout1]()
+![layout1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/sk_buff/sk_buff_layout1.png)
 
-2、`sk_buff`的线性空间管理
+2、`sk_buff`的线性空间管理 && 创建
 
 ```CPP
 /* These elements must be at the end, see alloc_skb() for details.  */
@@ -402,9 +401,11 @@ struct sk_buff_head {
 
 从下图中可以发现，`head`与`end`指向的位置始终不变，数据的变化、协议头的添加都是依靠`tail`与`data`的移动来实现的；此外，初始化时，`head`、`data`、`tail`都指向开始位置
 
-![layout2]()
+![layout2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/sk_buff/sk_buff_layout2.png)
 
-2、重要成员
+`sk_buff`线性数据区的创建过程如下，`sk_buff`结构数据区初始化成功后，此时 `head` 指针、`data` 指针、`tail` 指针都是指向同一个地方（**`head` 指针和 `end` 指针指向的位置一直都不变，而对于数据的变化和协议信息的添加都是通过 `data` 指针和 `tail` 指针的改变来表现的**）
+
+3、重要成员
 
 -   `struct sock *sk`：指向拥有该`sk_buff`的套接字（即skb 关联的socket），当这个包是socket 发出或接收时，这里指向对应的socket，而如果是转发包，这里是`NULL`；在可观测场景下，当socket已经建立时，可以用来解析获取传输层的关键信息
 -   `unsigned int truesize`：表示skb使用的大小，包括skb结构体以及它所指向的数据
@@ -413,7 +414,7 @@ struct sk_buff_head {
 -   `__u16			mac_len`：链路层帧头长度
 -   `__u16 hdr_len`：被copy的skb中可写的头部长度
 
-3、General成员，即skb的通用成员，与协议类型或内核特性无关，这里也列举几个
+4、General成员，即skb的通用成员，与协议类型或内核特性无关，这里也列举几个
 
 `struct net_device	*dev`成员，用来表示从哪个设备收到报文，或将把报文发到哪个设备
 
@@ -500,9 +501,11 @@ struct tcp_skb_cb {
 	__u16			mac_header;
 ```
 
-3、管理函数（Management functions）
+5、管理函数（Management functions）
 
-3.1、分配和释放内存，通过`alloc_skb`获取一个`struct sk_buff`加长度为`size`（经过对齐）的数据缓冲区
+5.1、分配和释放内存，通过`alloc_skb`获取一个`struct sk_buff`加长度为`size`（经过对齐）的数据缓冲区，其中`skb->end`指向的是一个`skb_shared_info`结构体，`head`、`data`、`tail`以及`end`初始化指向如图所示，`end`留出了padding（tailroom）保证使读取为主的`skb_shared_info`结构与前面的数据不在一个缓存行
+
+![alloc_skb](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/sk_buff/alloc_skb.png)
 
 ```CPP
 //net/core/skbuff.c
@@ -527,22 +530,63 @@ static inline struct sk_buff *alloc_skb(unsigned int size, gfp_t priority){
 }
 ```
 
-3.2、`sk_buff`数据缓冲区指针操作
+5.2、`sk_buff`数据缓冲区指针操作
 
-![]()
+![sk_buff_oper](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/sk_buff/sk_buff_oper_function.png)
 
-3.3、接收数据包的处理过程
+-   `skb_put`
+-   `skb_push`
+-   `skb_pull`：常用于协议栈接收报文时，从外到内剥离协议头（以太网头-IP 头-TCP 头）的操作
+-   `skb_reserve`
 
-3.4、发送数据包的处理过程
+5.3、接收数据包的处理过程，伪代码描述如下：
 
-由下图描述了发送数据包时skb缓冲区被填满的过程
+```CPP
+// 驱动构造 skb（DMA 数据已写入）
+struct sk_buff *skb = build_skb(dma_buffer, buffer_size);
+skb_put(skb, packet_len);  // 设置数据长度
 
-![sk_buff]()
+// 协议栈处理（以太网层）
+__be16 proto = eth_type_trans(skb, dev);
+skb_pull(skb, ETH_HLEN);    // 剥离以太网头
 
+// 协议栈处理（IP 层）
+struct iphdr *iph = ip_hdr(skb);
+skb_pull(skb, iph->ihl * 4); // 剥离 IP 头
 
-线性数据区的创建过程
+// 协议栈处理（TCP 层）
+struct tcphdr *th = tcp_hdr(skb);
+skb_pull(skb, th->doff * 4); // 剥离 TCP 头
 
-`sk_buff`结构数据区初始化成功后，此时 `head` 指针、`data` 指针、`tail` 指针都是指向同一个地方（**`head` 指针和 `end` 指针指向的位置一直都不变，而对于数据的变化和协议信息的添加都是通过 `data` 指针和 `tail` 指针的改变来表现的**）
+// 应用层获取负载数据
+char *payload = skb->data;
+int payload_len = skb->len;
+```
+
+5.4、发送数据包的处理过程，下图展示了发送数据包时skb缓冲区被填满的过程，伪代码描述如下：
+
+```CPP
+unsigned int total_header_len = ETH_HLEN + IP4_HLEN + TCP_HLEN;
+unsigned int payload_len = 1000;
+// 分配skb，总空间为 headers + payload，初始 data 和 tail 指向缓冲区起始位置
+struct sk_buff *skb = alloc_skb(total_header_len + payload_len, GFP_KERNEL);
+// 预留所有协议头的空间，预留头部空间，data 和 tail 后移
+skb_reserve(skb, total_header_len);
+// 添加负载数据，填充负载数据，tail 后移，扩展数据区
+skb_put(skb, payload_len);
+memcpy(skb->data, payload, payload_len);
+// 添加TCP头，添加协议头（从内到外），data 前移，覆盖预留空间
+tcp_header = skb_push(skb, TCP_HLEN);
+// 添加IP头
+ip_header = skb_push(skb, IP4_HLEN);
+// 添加以太网头
+eth_header = skb_push(skb, ETH_HLEN);
+// 发送
+dev_queue_xmit(skb);
+```
+
+![sk_buff_send_packet](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/sk_buff/sk_buff_eg2_from_tcplayer_to_linklayer.png)
+
 
 
 ####    struct socket结构
@@ -629,7 +673,6 @@ struct sock {
 ```
 
 ####    struct sock_common结构
-
 `struct sock_common`是套接口在网络层的最小表示，即最基本的网络层套接字信息
 ```CPP
 struct sock_common {
@@ -689,8 +732,74 @@ struct sock_common {
 ####    小结
 网络通信中通过网卡获取到的数据包至少包括了物理层，链路层和网络层的内容，因此套接字结构体仅仅从网络层开始，即通常只定义了传输层的套接字`socket`和网络层的套接字`sock`。`socket` 是用于负责对上给用户提供接口，并且和文件系统关联。而 `sock`负责向下对接内核网络协议栈
 
-从传输层到链路层，它是存放数据的通用结构，为了保持高效率，数据在传递过程中尽量不发生额外的拷贝。因此，从高层到低层的时候，会不断地在数据前加头，因此每一层的协议都会调用skb_reserve，为自己的报头预留空间。至于从低层到高层，去掉低层报头的方式就是移动一下指针，指向高层头，非常简单。
+从传输层到链路层，它是存放数据的通用结构，为了保持高效率，数据在传递过程中尽量不发生额外的拷贝。因此，从高层到低层的时候，会不断地在数据前加头，因此每一层的协议都会调用`skb_reserve`，为自己的报头预留空间。至于从低层到高层，去掉低层报头的方式就是移动一下指针，指向高层头，非常简单
 
+##	0x03	可观测：内核路径上的主要函数
+
+####	准备工作
+
+Linux驱动，内核协议栈等等模块在具备接收网卡数据包之前，需要完整如下的初始化工作，这部分内容可以参考[图解Linux网络包接收过程](https://mp.weixin.qq.com/s/GoYDsfy9m0wRoXi_NCfCmg)：
+
+1.	Linux系统启动，创建ksoftirqd内核线程
+2.	网络子系统初始化
+3.	协议栈注册
+4.	网卡驱动初始化
+5.	启动网卡
+
+其中协议栈注册主要完成了各层协议处理函数的注册，如内核实现网络层的ip协议，传输层的tcp/udp协议等，这些协议对应的实现函数分别是`ip_rcv()`/`tcp_v4_rcv()`/`udp_rcv()`
+
+![]()
+
+```CPP
+//file: net/ipv4/af_inet.c
+
+static struct packet_type ip_packet_type __read_mostly = {
+
+    .type = cpu_to_be16(ETH_P_IP),
+    .func = ip_rcv,};static const struct net_protocol udp_protocol = {
+    .handler =  udp_rcv,
+    .err_handler =  udp_err,
+    .no_policy =    1,
+    .netns_ok = 1,};static const struct net_protocol tcp_protocol = {
+    .early_demux    =   tcp_v4_early_demux,
+    .handler    =   tcp_v4_rcv,
+    .err_handler    =   tcp_v4_err,
+    .no_policy  =   1,
+    .netns_ok   =   1,
+
+};
+
+static int __init inet_init(void){
+    ......
+    if (inet_add_protocol(&icmp_protocol, IPPROTO_ICMP) < 0)
+        pr_crit("%s: Cannot add ICMP protocol\n", __func__);
+    if (inet_add_protocol(&udp_protocol, IPPROTO_UDP) < 0)
+        pr_crit("%s: Cannot add UDP protocol\n", __func__);
+    if (inet_add_protocol(&tcp_protocol, IPPROTO_TCP) < 0)
+        pr_crit("%s: Cannot add TCP protocol\n", __func__);
+    ......
+    dev_add_pack(&ip_packet_type);
+}
+
+int inet_add_protocol(const struct net_protocol *prot, unsigned char protocol){
+    if (!prot->netns_ok) {
+        pr_err("Protocol %u is not namespace aware, cannot register.\n",
+            protocol);
+        return -EINVAL;
+    }
+
+    return !cmpxchg((const struct net_protocol **)&inet_protos[protocol],
+            NULL, prot) ? 0 : -1;
+}
+```
+
+上面的代码可知，udp_protocol结构体中的handler是`udp_rcv`，tcp_protocol结构体中的handler是`tcp_v4_rcv`，通过`inet_add_protocol`被注册到了协议栈的处理钩子上
+
+####	接收数据的主要流程
+
+
+####	一图以蔽之
+![recv](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/latelee_excellent_send_and_recv_arch_kernel3.17.1_note.png)
 
 ##  0x0  参考
 -   [Monitoring and Tuning the Linux Networking Stack: Sending Data](https://blog.packagecloud.io/monitoring-tuning-linux-networking-stack-sending-data/)
@@ -699,7 +808,7 @@ struct sock_common {
 -   [Linux 内核数据流概览初探](http://klworldy.com/posts/kerneldataflow/)
 -   [Linux是怎么从网络上接收数据包的](https://mp.weixin.qq.com/s/gVYdRWCoQwpFtsKXMyIHRg)
 -   [linux网络子系统研究：数据收发简略流程图](https://www.latelee.cn/net-study/linux-network-data-recv-send.html)
--   [eBPF Docs Program context '__sk_buff'](https://docs.ebpf.io/linux/program-context/__sk_buff/)
+-   [eBPF Docs Program context __sk_buff](https://docs.ebpf.io/linux/program-context/__sk_buff/)
 -   [25 张图，一万字，拆解 Linux 网络包发送过程](https://mp.weixin.qq.com/s?__biz=Mzg3ODUxNzM0MA==&mid=2247484532&idx=2&sn=2a934f8d6ae87b53b62671972987388d&scene=21#wechat_redirect)
 -   [Linux网络 - 数据包的接收过程](https://segmentfault.com/a/1190000008836467)
 -   [Linux 网卡数据收发过程分析](https://mp.weixin.qq.com/s?__biz=MzA3NzYzODg1OA==&mid=2648464515&idx=1&sn=117fa172f80cda8f446a1eb5e191464f&scene=21#wechat_redirect)
