@@ -29,6 +29,15 @@ CONFIG_PROC_EVENTS=y
 
 相关代码：[`Connector`](https://github.com/torvalds/linux/tree/master/drivers/connector)，其中 `connectors.c` 和 `cnqueue.c` 是 Netlink Connector 的实现，而 `cnproc.c` 是一个应用实例，名为进程事件连接器，可以通过该连接器来实现对进程创建的监控
 
+####	通信机制的比较
+用户空间和内核空间的通信方式通常有三种：`/proc`、ioctl以及netlink，前两种都是单向的，而netlink可以实现双工通信。netlink机制的优点如下：
+
+1.	netlink是一种异步通信机制，在内核与用户态应用之间传递的消息保存在socket缓存队列中，发送消息只是把消息保存在接收者的socket的接 收队列，而不需要等待接收者收到消息，但系统调用与 ioctl 则是同步通信机制，如果传递的数据太长，将影响调度粒度
+2.	netlink 支持多播，内核模块或应用可以把消息多播给一个netlink组，属于该neilink 组的任何内核模块或应用都能接收到该消息，内核事件向用户态的通知机制就使用了这一特性，任何对内核事件感兴趣的应用都能收到该子系统发送的内核事件
+3.	内核可以使用 netlink 首先发起会话，但系统调用和 ioctl 只能由用户应用发起调用
+4.	netlink 使用标准的 socket API
+5.	netlink协议基于BSD socket和AF_NETLINK地址簇，使用`32`位的端口号寻址，每个Netlink协议通常与一个或一组内核服务/组件相关联
+
 ####    关键组件（内核态 + 用户态）
 
 1、连接器模块（Connector Module），内核模块，负责管理事件的注册和广播，处理来自用户空间的订阅请求，并在相应的事件发生时向订阅者广播通知
@@ -63,7 +72,7 @@ type NetlinkSocket struct {
 }
 ```
 
-通过 [`SubscribeAt`](https://github.com/vishvananda/netlink/blob/main/nl/nl_linux.go#L821) 方法生成一个 `NetlinkSocket`：
+通过 [`SubscribeAt`](https://github.com/vishvananda/netlink/blob/main/nl/nl_linux.go#L821) 方法生成一个 `NetlinkSocket`，`SubscribeAt`最终会调用`Subscribe`[方法](https://github.com/vishvananda/netlink/blob/main/nl/nl_linux.go#L791C6-L791C15)：
 
 ```GO
 // SubscribeAt works like Subscribe plus let's the caller choose the network
@@ -77,6 +86,72 @@ func SubscribeAt(newNs, curNs netns.NsHandle, protocol int, groups ...uint) (*Ne
 	defer c()
 	return Subscribe(protocol, groups...)
 }
+```
+
+####	vishvananda/netlink的两种典型用法
+1、 通过 netlink 查询接口信息（socket info），这种工作模式是用户态进程通过 netlink socket 主动发送一个请求消息给内核，内核处理该请求后返回一个响应消息。整个过程是同步的，用户态进程会阻塞等待响应。通常应用于需要一次性获取数据或执行某个操作，例如查询网络接口信息、路由表、修改某个配置项等，代码片段如下：
+
+```GO
+//通过 Linux Netlink 的 INET_DIAG 子系统​实现了查询网络套接字状态信息的功能，尤其是TCP/UDP套接字的详细诊断信息。其作用类似于命令行工具 ss 或 netstat，但直接通过内核接口获取数据
+// subscribe the netlink
+
+	//订阅 INET_DIAG 协议，NETLINK_INET_DIAG​是 Netlink 协议族，专用于查询IPv4/IPv6 套接字诊断信息​（如 TCP/UDP 状态、统计信息）
+	if s, err = nl.Subscribe(unix.NETLINK_INET_DIAG); err != nil {
+		return
+	}
+	defer s.Close()
+	// send the netlink request
+	//构造 Netlink 请求
+	//SOCK_DIAG_BY_FAMILY表示按协议族（如 AF_INET 或 AF_INET6）查询套接字
+	//NLM_F_DUMP 为标志位，表示请求内核返回所有匹配的套接字信息（类似 GET ALL）
+	req = nl.NewNetlinkRequest(nl.SOCK_DIAG_BY_FAMILY, unix.NLM_F_DUMP)
+	
+	//添加过滤条件
+	req.AddData(&socketRequest{
+		Family:   family,	// 协议族：AF_INET（IPv4）或 AF_INET6（IPv6）
+		Protocol: protocol,	// 协议类型：IPPROTO_TCP 或 IPPROTO_UDP
+		Ext:      (1 << (INET_DIAG_VEGASINFO - 1)) | (1 << (INET_DIAG_INFO - 1)),	// 请求扩展信息
+		States:   uint32(1 << state),	// 状态过滤：如 TCP_ESTABLISHED
+	})
+	if err = s.Send(req); err != nil {
+		return
+	}
+```
+
+2、类似于订阅模式（异步多播组），工作机制是用户态进程订阅一个或多个多播组，如此内核在特定事件发生时（如网络接口状态变化），主动向这些多播组推送通知消息，用户态进程无需主动轮询，异步接收事件通知即可。适用场景为需要实时监控内核事件，例如网络接口 UP/DOWN、路由表更新、进程审计事件等。代码片段如下：
+
+
+```GO
+//通过 Netlink 的 Connector 子系统订阅进程事件多播通知（例如进程创建、退出等）
+//核心功能：订阅进程事件
+//代码通过 NETLINK_CONNECTOR 协议订阅进程事件多播组（CN_IDX_PROC），实现实时监控进程生命周期，当系统中发生进程创建（fork）、退出（exit）等事件时，内核主动推送通知
+
+	//构造 Netlink 消息
+	nlmsg := nlmsg nl.NetlinkRequest{}	
+	nlmsg.Pid = uint32(os.Getpid())	 // 设置发送者 PID（当前进程）
+	nlmsg.Type = unix.NLMSG_DONE		 // 消息类型
+	nlmsg.Len = uint32(unix.SizeofNlMsghdr)	// 消息头长度（需校验是否包含数据部分）
+	nlmsg.AddData(
+		// 添加 Connector 控制消息，其中CN_IDX_PROC 和 CN_VAL_PROC 标识 Connector 子系统中的进程事件通道
+		// PROC_CN_MCAST_LISTEN表示订阅多播组的控制命令
+		nl.NewCnMsg(CN_IDX_PROC,	// Connector 子系统索引（进程事件）
+		 			CN_VAL_PROC,	 // Connector 子系统值（进程事件）
+		  			PROC_CN_MCAST_LISTEN),	 // 控制命令：订阅多播组
+	)
+
+	//创建并订阅 netlink socket
+	if n.sock, err = nl.SubscribeAt(
+		netns.None(),		// PID 命名空间（None 表示当前命名空间）
+		netns.None(),		 // 网络命名空间（None 表示当前命名空间）
+		unix.NETLINK_CONNECTOR,	// 使用 Connector 协议
+		CN_IDX_PROC); err != nil { 	// 订阅的多播组（进程事件）
+		return err
+	}
+
+	//发送订阅请求
+	if err = n.sock.Send(&nlmsg); err != nil {
+		return err
+	}
 ```
 
 ####    支持的 events 事件
@@ -123,6 +198,7 @@ const (
 
 
 ##  0x03 参考
+-	[深入理解Linux Netlink机制：进程间通信的关键](https://zhuanlan.zhihu.com/p/693908092)
 -   [连接器（Netlink_Connector）及其应用](https://imagine4077.github.io/Hogwarts/c/2016/05/02/%E8%BF%9E%E6%8E%A5%E5%99%A8-Netlink_Connector-%E5%8F%8A%E5%85%B6%E5%BA%94%E7%94%A8.html)
 -   [netlink socket 编程 --why & how](https://e-mailky.github.io/2017-02-14-netlink)
 -	[保障IDC安全：分布式HIDS集群架构设计](https://tech.meituan.com/2019/01/17/distributed-hids-cluster-architecture-design.html)
