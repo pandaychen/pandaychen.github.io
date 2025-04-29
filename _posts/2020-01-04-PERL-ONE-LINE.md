@@ -23,7 +23,7 @@ tags:
 ![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/perl/perl-one-line.png)
 
 ## 0x01	Perl 单行选项
-> `-e` 开关允许我们在命令行中运行脚本
+> `-e` 开关允许在命令行中运行脚本
 
 ```perl
 #简单的打印

@@ -20,7 +20,7 @@ channel 是 golang 提供的非常有趣且实用的功能，基于 channel 和 
 
 通道（channel），像是通道（管道），可以通过它们发送类型化的数据在协程之间通信，可以避开所有内存共享导致的坑；通道的通信方式保证了同步性。数据通过通道：同一时间只有一个协程可以访问数据：所以不会出现数据竞争，设计如此。数据的归属（可以读写数据的能力）被传递。
 
-通道实际上是类型化消息的队列：使数据得以传输。它是先进先出（FIFO）结构的所以可以保证发送给他们的元素的顺序（有些人知道，通道可以比作 Unix shells 中的双向管道（tw-way pipe））。通道也是引用类型，所以我们使用 make() 函数来给它分配内存。
+通道实际上是类型化消息的队列：使数据得以传输。它是先进先出（FIFO）结构的所以可以保证发送给他们的元素的顺序（有些人知道，通道可以比作 Unix shells 中的双向管道（tw-way pipe））。通道也是引用类型，所以使用 `make()` 函数来给它分配内存。
 
 ## 0x01 Channel 基础语法
 基础语法：
@@ -177,7 +177,7 @@ func main() {
 ```
 
 ####      有缓冲 channel 的默认行为
-默认 unbuffered channel 与 buffered channel 的行为是不同的，它们体现了一种交付保证（unbuffered channel）和不保证的思路（buffered channel），见文章 [聊一聊 Go 中 channel 的行为](https://www.infoq.cn/article/wZ1kKQLlsY1N7gigvpHo)，例如：看出带缓冲的 channel 略有不同。尽管已经 close 了，但我们依旧可以从中读出关闭前写入的 3 个值。第四次读取时，则会返回该 channel 类型的零值。向这类 channel 写入操作也会触发 panic。
+默认 unbuffered channel 与 buffered channel 的行为是不同的，它们体现了一种交付保证（unbuffered channel）和不保证的思路（buffered channel），见文章 [聊一聊 Go 中 channel 的行为](https://www.infoq.cn/article/wZ1kKQLlsY1N7gigvpHo)，例如：看出带缓冲的 channel 略有不同。尽管已经 close 了，但依旧可以从中读出关闭前写入的 3 个值。第四次读取时，则会返回该 channel 类型的零值。向这类 channel 写入操作也会触发 panic
 
 ```go
 package main
@@ -197,12 +197,12 @@ func main() {
 }
 ```
 
-我们再看看其他一些 channel 在应用中的范式（套路）。
+再看看其他一些 channel 在应用中的范式（套路）
 
 ##      0x02 channel 的应用范式（Interesting）
 
 ####     for-select 经典用法
-在使用 select 时很少只是对其进行一次 evaluation，我们常常将其与 `for {}` 结合在一起使用，并选择适当时机从 `for {}` 中退出。
+在使用 select 时很少只是对其进行一次 evaluation，常常将其与 `for {}` 结合在一起使用，并选择适当时机从 `for {}` 中退出。
 ```go
 for {
         select {
@@ -481,7 +481,7 @@ exit status 2
 ```
 
 ##      0x04    工作经验：并发请求下的 channel 典型用法
-在开发中，遇到需要并发调用请求（各请求间无关联）的场景，如客户端并发请求服务接口等，通常我们可以使用下面这种基于 channel 的简单并发请求框架：
+在开发中，遇到需要并发调用请求（各请求间无关联）的场景，如客户端并发请求服务接口等，通常可以使用下面这种基于 channel 的简单并发请求框架：
 -       不关心调用顺序
 -       不关系结果顺序
 -       各个 goroutine 必须要实现超时机制，避免调用方阻塞
