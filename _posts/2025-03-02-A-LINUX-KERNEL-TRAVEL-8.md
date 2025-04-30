@@ -897,7 +897,7 @@ EXPORT_SYMBOL(inet_recvmsg);
 ```
 
 ####	sys_recvfrom的调用链
-[sys_recvfrom](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/sys_recvfrom.png)
+![sys_recvfrom](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/sys_recvfrom.png)
 
 ####	udp_recvmsg的核心逻辑
 `udp_recvmsg`函数包含下面的主要工作：

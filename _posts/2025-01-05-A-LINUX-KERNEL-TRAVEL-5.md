@@ -1,7 +1,7 @@
 ---
 layout:     post
-title:  Linux 内核之旅（五）：ftrace/bpftrace
-subtitle:   内核追踪的工具入门
+title:  Linux 内核之旅（五）：内核的可观测
+subtitle:   内核追踪的工具入门：ftrace/bpftrace/perf
 date:       2025-01-05
 author:     pandaychen
 header-img:
@@ -44,9 +44,13 @@ bdi   dma_buf      extfrag        hid   mce      sched_features  tracing        
 ##  0x02    bpftrace
 
 
-##  0x0  参考
+##  0x03    perf
+
+##  0x04  参考
 -   [七张图看懂 Linux profiling 机制](https://tinylab.org/linux-profiling-methods-overview)
 -   [从Ftrace开始内核探索之旅](https://github.com/mz1999/blog/blob/master/docs/ftrace.md)
 -   [问题排查利器：Linux 原生跟踪工具 Ftrace 必知必会](https://www.ebpf.top/post/ftrace_tools/)
 -   [【一文秒懂】Ftrace系统调试工具使用终极指南](https://www.cnblogs.com/-Donge/p/17981595)
 -   [ftrace基本用法](https://tinylab.org/ftrace-usage/)
+-   [Linux可观测性](https://qiankunli.github.io/2019/11/25/linux_observability.html#tracepoint-%E5%92%8C-kprobe)
+-   [一文学会ftrace的基础用法](https://www.daodaodao123.com/?p=959)
