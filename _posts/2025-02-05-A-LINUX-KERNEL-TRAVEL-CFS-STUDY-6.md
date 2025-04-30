@@ -421,7 +421,7 @@ static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 }
 ```
 
-####	`place_entity`
+####	`place_entity`：惩罚/补偿一个调度实体
 `place_entity`函数用来惩罚一个调度实体，本质是修改其`vruntime`的值。根据传入参数`initial`分为两种情况
 
 -	`initial==0/*false*/`：如果`inital`为`false`，则代表的是唤醒的进程，对于唤醒的进程则需要照顾，最大的照顾是调度延时的一半，确保调度实体的`vruntime`不得倒退
@@ -441,6 +441,7 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 	 * stays open at the end.
 	 */
 	if (initial && sched_feat(START_DEBIT))
+		// 新创建的进程惩罚的时间如何计算？参考sched_vslice的实现，参考下文
 		vruntime += sched_vslice(cfs_rq, se);
 
 	/* sleeps up to a single latency don't count. */
@@ -504,11 +505,16 @@ static void update_curr(struct cfs_rq *cfs_rq)
 ```
 
 ####	`update_min_vruntime`：计算与判断
-`update_min_vruntime`用于CFS就绪队列最小虚拟运行时间更新（见下文代码分析）
+`update_min_vruntime`用于CFS就绪队列最小虚拟运行时间更新（见下文代码分析），汇总下哪些地方会涉及到**最小的虚拟运行时间**的计算？
 
-![update_min_vruntime]()
+-	就绪队列本身的`cfs_rq->min_vruntime`成员
+-	当前正在运行的进程的最小虚拟时间，因为CFS调度器选择最适合运行的进程是选择维护的红黑树中虚拟时间最小的进程
+-	如果在当前进程运行的过程中，有进程加入就绪队列，那么红黑树最左边的进程的虚拟时间同样也有可能是最小的虚拟时间
 
-判断函数todo
+所以，计算`min_vruntime`就是上述几种情况的大小比较，但需要满足一个原则**需要保证就绪队列的最小虚拟时间min_vruntime单调递增的特性，更新最小虚拟时间**，这里的单调递增指的是要始终增大，不能减小
+
+![update_min_vruntime](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/scheduler/cfs/update_min_runtime.png)
+
 
 ##	0x04	CFS的运行原理及核心代码走读
 
@@ -755,7 +761,7 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 	}
  
 	/* ensure we never gain time by being placed backwards. */
-	//保证调度实体的虚拟时间不能倒退。为何呢？可以想一下，如果一个进程刚睡眠1ms，然后醒来后你却要奖励3ms（虚拟时间减去3ms），然后他竟然赚了2ms。作为调度器，我们不做亏本生意。你睡眠100ms，奖励你3ms，那就是没问题的
+	//保证调度实体的虚拟时间不能倒退。为何呢？可以想一下，如果一个进程刚睡眠1ms，然后醒来后却要奖励3ms（虚拟时间减去3ms），然后竟然赚了2ms。作为调度器，睡眠100ms，奖励你3ms，那就是没问题的
 	se->vruntime = max_vruntime(se->vruntime, vruntime);    
 }
 ```
@@ -799,7 +805,9 @@ static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 至此，一个fork新创建的进程在调度前的准备工作基本就完成了
 
 ##	0x05	调度方式一：新进程的调度过程
-上一小节介绍了`do_dork`->`sched_fork`->`task_fork_fair`，对新进程创建到调度前的准备事项，本小节继续介绍唤醒新进程调度的流程，重要的几个方法：
+
+####	CFS的核心调度器
+CFS的核心调度器包含了两种实现，即主调度器和周期性调度器，接下来就分析下这两类方式的主要实现。上一小节介绍了`do_dork`->`sched_fork`->`task_fork_fair`，对新进程创建到调度前的准备事项，本小节继续介绍唤醒新进程调度的流程，重要的几个方法：
 -	`wake_up_new_task`
 -	`enqueue_task_fair`
 -	`enqueue_entity`
@@ -816,7 +824,7 @@ do_fork()-->_do_fork()-->wake_up_new_task()-->activate_task()-->enqueue_task()--
 
 新进程的调度流程如下图：
 
-![do_fork]()
+![do_fork](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/scheduler/task_fork_flow.jpeg)
 
 2、`wake_up_new_task`：负责唤醒新创建的进程，当准备就绪后会调用`check_preempt_curr`函数尝试抢占当前CPU，[代码](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/core.c#L2536)片段如下：
 
@@ -1022,7 +1030,6 @@ static void account_entity_enqueue(struct cfs_rq *cfs_rq, struct sched_entity *s
 -	`check_preempt_tick`
 -	`check_preempt_curr`
 
-
 ```CPP
 void scheduler_tick(void)
 {
@@ -1211,7 +1218,7 @@ again:
 	if (!cfs_rq->nr_running)
 		goto idle;
 	
-	//处理prev进程的后事，当进程让出cpu时就会调用该函数
+	//处理prev进程的后续工作，当进程让出cpu时就会调用该函数
 	put_prev_task(rq, prev);                        
 	do {
 		//选择最适合运行的调度实体
@@ -1306,7 +1313,7 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 		__dequeue_entity()是将调度实体从红黑树中删除，针对即将运行的进程，都会从红黑树中删除当前进程。当进程被强占后，调用put_prev_entity()函数会重新插入红黑树。因此这个地方和put_prev_entity()函数中加入红黑树是个呼应
 		*/
 		__dequeue_entity(cfs_rq, se);            
-		//更新进程的负载信息。负载均衡会使用       
+		//更新进程的负载信息，负载均衡会使用       
 		update_load_avg(cfs_rq, se, UPDATE_TG);  
 	}
 
@@ -1352,7 +1359,7 @@ static void dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int f
 	account_entity_dequeue(cfs_rq, se);           
 	if (!(flags & DEQUEUE_SLEEP))
 		//如果进程不是睡眠（例如从一个CPU迁移到另一个CPU），进程最小虚拟时间需要减去当前就绪队列对应的最小虚拟时间
-		//迁移之后会在enqueue的时候加上对应CPU（可能是同个也可能是另外一个）的CFS就绪队列最小拟时间
+		//迁移之后会在enqueue的时候加上对应CPU（可能是同个也可能是另外一个）的CFS就绪队列最小虚拟时间
 		se->vruntime -= cfs_rq->min_vruntime;     
 } 
 ```
@@ -1379,6 +1386,13 @@ static void account_entity_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *s
 ```
 
 ##	0x09	唤醒抢占
+唤醒抢占的逻辑是下图中的第二条路线，即`wake_up_new_task`-->`check_preempt_curr`-->`check_preempt_wakeup`
+
+```text
+do_fork()--->_do_fork()--->wake_up_new_task()--->activate_task()--->enqueue_task()--->enqueue_task_fair()
+                                   |
+                                   +------------>check_preempt_curr()--->check_preempt_wakeup() 
+```
 
 ####	抢占当前进程条件
 当进程被唤醒时（`wake_up_new_task`、`try_to_wake_up`等），也是检查进程是否可以抢占当前进程执行权的时机，因为唤醒的进程有可能具有更高的优先级或者更小的虚拟时间。此时会调用`check_preempt_curr`执行抢占检查的工作：
@@ -1422,7 +1436,7 @@ void check_preempt_curr(struct rq *rq, struct task_struct *p, int flags)
 }
 ```
 
-2、`check_preempt_wakeup`函数，假设唤醒的进程和当前的进程同属于一个CFS调度类
+2、`check_preempt_wakeup`函数，假设唤醒的进程`p->se`和当前正在运行的进程`curr->se`同属于一个CFS调度类
 
 ```cpp
 static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_flags)
@@ -1450,18 +1464,63 @@ static int wakeup_preempt_entity(struct sched_entity *curr, struct sched_entity 
 {
 	s64 gran, vdiff = curr->vruntime - se->vruntime;
  
-	if (vdiff <= 0)                    /* 1 */
+	if (vdiff <= 0)                    
 		return -1;
  
+	//默认情况下，wakeup_gran()函数返回的值是1ms根据调度实体se的权重计算的虚拟时间
 	gran = wakeup_gran(se);
-	if (vdiff > gran)                  /* 2 */
+	if (vdiff > gran)                  
 		return 1;
  
 	return 0;
 }
+
+static unsigned long
+wakeup_gran(struct sched_entity *curr, struct sched_entity *se)
+{
+	unsigned long gran = sysctl_sched_wakeup_granularity;
+
+	/*
+	 * Since its curr running now, convert the gran from real-time
+	 * to virtual-time in his units.
+	 *
+	 * By using 'se' instead of 'curr' we penalize light tasks, so
+	 * they get preempted easier. That is, if 'se' < 'curr' then
+	 * the resulting gran will be larger, therefore penalizing the
+	 * lighter, if otoh 'se' > 'curr' then the resulting gran will
+	 * be smaller, again penalizing the lighter task.
+	 *
+	 * This is especially important for buddies when the leftmost
+	 * task is higher priority than the buddy.
+	 */
+	return calc_delta_fair(gran, se);
+}
+```
+
+举例来说，有`se3`、`se2`和`se1`三个调度实体以及其相应的虚拟运行时间：
+
+-	对于`se1`：curr虚拟时间比se小，返回`-1`
+-	对于`se2`：如果curr虚拟时间比se大，并且两者差值小于gran，返回`0`
+-	对于`se3`：如果curr虚拟时间比se大，并且两者差值大于gran，返回`1`
+
+默认情况下，`wakeup_gran()`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/fair.c#L6092)返回的值是`1ms`根据调度实体se的权重计算的虚拟时间。因此，满足抢占的条件就是，唤醒的进程的虚拟时间首先要比正在运行进程的虚拟时间小，并且差值还要大于唤醒抢占粒度（即代码中的`sysctl_sched_wakeup_granularity`）才行。这样做的目的是避免抢占过于频繁，导致大量上下文切换影响系统性能
+
+```TEXT
+se3             se2    curr         se1
+------|---------------|------|-----------|--------> vruntime
+          |<------gran------>|
+                         
+ 
+     wakeup_preempt_entity(curr, se1) = -1
+     wakeup_preempt_entity(curr, se2) =  0
+     wakeup_preempt_entity(curr, se3) =  1
 ```
 
 ##	0x0A	总结
+
+####	进程调度
+
+![scheduler](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/scheduler/process_schedule.png)
 
 ####	vruntime
 `vruntime`本质是一个累计值，作为每个调度实体（`struct sched_entity`）的 vruntime 字段记录该进程的加权累计运行时间
@@ -1471,6 +1530,43 @@ static int wakeup_preempt_entity(struct sched_entity *curr, struct sched_entity 
 2、`vruntime`的特殊调整
 
 3、`vruntime`的底层实现
+
+4、`vruntime`的累加值溢出
+
+参考`__enqueue_entity`方法中，调用`entity_before`函数有符号差值比较的实现：函数将无符号的`vruntime`差值转换为有符号的64位整数（`s64`类型），这种转换在差值未超出`s64`范围时完全正确，且当`a`或`b`任意一方在`u64`累加溢出时，比较仍然是有效的（假设`a->vruntime = 2^64 - 100`即将溢出，`b->vruntime = 200`溢出后重新递增，无符号减法即`a - b = (2^64 - 100) - 200 = 2^64 - 300`，但在`u64`中结果为 `0xFFFFFFFFFFFFFEDC`，即`-300`的补码。转换为`s64`为`-300`，因此`entity_before(a, b)`返回`true`，仍然有效）
+
+-	当`a->vruntime < b->vruntime`时，差值为负数，转换后符号位为`1`，表达式`(s64)(a->vruntime - b->vruntime) < 0`正确返回`true`
+-	当`a->vruntime > b->vruntime`时，差值为正数，表达式返回`false`
+
+```cpp
+static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+	//...
+		//利用entity_before()函数比较两个调度实体se的vruntime值大小
+		if (entity_before(se, entry)) {
+			link = &parent->rb_left;
+		}
+	//...
+}
+
+static inline int entity_before(struct sched_entity *a, struct sched_entity *b)
+{
+	return (s64)(a->vruntime - b->vruntime) < 0;
+}
+```
+
+同样技巧还应用`max_vruntime`函数中，`max_vruntime`和`vruntime`是`u64`类型，也存在溢出的风险
+
+```CPP
+static inline u64 max_vruntime(u64 max_vruntime, u64 vruntime)
+{
+	s64 delta = (s64)(vruntime - max_vruntime);
+	if (delta > 0)
+		max_vruntime = vruntime;
+ 
+	return max_vruntime;
+}
+```
 
 ##	0x	一些细节
 
