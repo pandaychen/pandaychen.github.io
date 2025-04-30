@@ -14,6 +14,8 @@ tags:
 ##  0x00    前言
 笔者最近在研究基于ebpf的网络协议栈可观测及tracing，本文对协议栈的数据处理基础做了若干总结
 
+本文代码基于 [v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include) 版本
+
 ##  0x01   网卡的报文接收过程
 一些背景知识：
 
@@ -108,9 +110,9 @@ tags:
 ```
 
 
-7、内核中的`ksoftirqd`进程专门负责软中断的处理，当它收到软中断后，就会调用相应软中断所对应的处理函数，对于上面第`6`步中是网卡驱动模块抛出的软中断，`ksoftirqd`会调用网络模块的`net_rx_action`函数
+7、内核中的`ksoftirqd`进程专门负责软中断的处理，当它收到软中断后，就会调用相应软中断所对应的处理函数，对于上面第`6`步中是网卡驱动模块抛出的软中断，`ksoftirqd`会调用网络模块的`net_rx_action`函数（`ksoftirqd`线程开始调用驱动的`poll`函数收包）
 
-8、`net_rx_action`会调用网卡驱动里的`poll`函数（对于igb网卡驱动来说，此[函数]()就是`igb_poll`）来一个个的处理数据包
+8、`net_rx_action`会调用网卡驱动里的`poll`函数（对于igb网卡驱动来说，此[函数](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L6600)就是`igb_poll`）来一个个的处理数据包（`poll`函数将收到的包送到协议栈注册的`ip_rcv`函数中）
 
 9、在`poll`函数中，驱动会一个接一个的读取网卡写到内存中的数据包，内存中数据包的格式只有驱动知道
 
@@ -588,7 +590,6 @@ dev_queue_xmit(skb);
 ![sk_buff_send_packet](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/sk_buff/sk_buff_eg2_from_tcplayer_to_linklayer.png)
 
 
-
 ####    struct socket结构
 每个`struct socket`结构都有一个`struct sock`结构成员，`sock`是对`socket`的扩充，`socket->sk`指向对应的`sock`结构，`sock->socket` 指向对应的`socket`结构
 
@@ -726,33 +727,34 @@ struct sock_common {
 	refcount_t		skc_refcnt;   // 套接字引用计数
 ......
 };
-
 ```
 
 ####    小结
 网络通信中通过网卡获取到的数据包至少包括了物理层，链路层和网络层的内容，因此套接字结构体仅仅从网络层开始，即通常只定义了传输层的套接字`socket`和网络层的套接字`sock`。`socket` 是用于负责对上给用户提供接口，并且和文件系统关联。而 `sock`负责向下对接内核网络协议栈
 
-从传输层到链路层，它是存放数据的通用结构，为了保持高效率，数据在传递过程中尽量不发生额外的拷贝。因此，从高层到低层的时候，会不断地在数据前加头，因此每一层的协议都会调用`skb_reserve`，为自己的报头预留空间。至于从低层到高层，去掉低层报头的方式就是移动一下指针，指向高层头，非常简单
+从传输层到链路层，它是存放数据的通用结构，为了保持高效率，数据在传递过程中尽量不发生额外的拷贝。因此，从高层到低层的时候，会不断地在数据前加头，因此每一层的协议都会调用`skb_reserve`，为自己的报头预留空间。至于从低层到高层，去掉低层报头的方式就是移动一下指针，指向高层头，非常简洁
 
-##	0x03	可观测：内核路径上的主要函数
+##	0x03	可观测：内核收包的主要过程
 
 ####	准备工作
 
 Linux驱动，内核协议栈等等模块在具备接收网卡数据包之前，需要完整如下的初始化工作，这部分内容可以参考[图解Linux网络包接收过程](https://mp.weixin.qq.com/s/GoYDsfy9m0wRoXi_NCfCmg)：
 
-1.	Linux系统启动，创建ksoftirqd内核线程
+1.	Linux系统启动，创建ksoftirqd内核线程，用来处理软中断
 2.	网络子系统初始化
-3.	协议栈注册
-4.	网卡驱动初始化
-5.	启动网卡
+3.	协议栈注册，针对协议栈支持的各类协议如arp/icmp/ip/udp/tcp等，每一个协议都会将自己的处理函数注册
+4.	网卡驱动初始化，初始化DMA以及向内核注册收包函数地址（NAPI的`poll`函数）
+5.	启动网卡，分配RX/TX队列，注册中断对应的处理函数
+6.	当上面工作都完成之后，就可以打开硬中断，等待数据包的到来
 
-其中协议栈注册主要完成了各层协议处理函数的注册，如内核实现网络层的ip协议，传输层的tcp/udp协议等，这些协议对应的实现函数分别是`ip_rcv()`/`tcp_v4_rcv()`/`udp_rcv()`
+其中协议栈注册主要完成了各层协议处理函数的注册，如内核实现网络层的ip协议，传输层的tcp/udp协议等，这些协议对应的实现函数分别是`ip_rcv()`/`tcp_v4_rcv()`/`udp_rcv()`，内核调用`inet_init`后开始网络协议栈注册。通过`inet_init`将上述函数注册到了`inet_protos`和`ptype_base`数据结构中
 
-![]()
+![inet_init]()
 
 ```CPP
 //file: net/ipv4/af_inet.c
-
+//udp_protocol结构体中的handler是udp_rcv，tcp_protocol结构体中的handler是tcp_v4_rcv
+//通过inet_add_protocol被初始化到数据结构中
 static struct packet_type ip_packet_type __read_mostly = {
 
     .type = cpu_to_be16(ETH_P_IP),
@@ -771,6 +773,8 @@ static struct packet_type ip_packet_type __read_mostly = {
 
 static int __init inet_init(void){
     ......
+
+	//inet_add_protocol：注册icmp/tcp/udp等协议钩子
     if (inet_add_protocol(&icmp_protocol, IPPROTO_ICMP) < 0)
         pr_crit("%s: Cannot add ICMP protocol\n", __func__);
     if (inet_add_protocol(&udp_protocol, IPPROTO_UDP) < 0)
@@ -778,9 +782,17 @@ static int __init inet_init(void){
     if (inet_add_protocol(&tcp_protocol, IPPROTO_TCP) < 0)
         pr_crit("%s: Cannot add TCP protocol\n", __func__);
     ......
+
+	//注册ip_packet_type
+	//dev_add_pack(&ip_packet_type)
+	//ip_packet_type结构体中的type是协议名，func是ip_rcv函数
+	//在dev_add_pack中会被注册到ptype_base哈希表中
     dev_add_pack(&ip_packet_type);
 }
 
+/*
+inet_add_protocol函数将tcp和udp对应的处理函数都注册到了inet_protos数组
+*/
 int inet_add_protocol(const struct net_protocol *prot, unsigned char protocol){
     if (!prot->netns_ok) {
         pr_err("Protocol %u is not namespace aware, cannot register.\n",
@@ -791,17 +803,153 @@ int inet_add_protocol(const struct net_protocol *prot, unsigned char protocol){
     return !cmpxchg((const struct net_protocol **)&inet_protos[protocol],
             NULL, prot) ? 0 : -1;
 }
+
+//file: net/core/dev.c
+void dev_add_pack(struct packet_type *pt){
+    struct list_head *head = ptype_head(pt);
+    ......
+}
+
+static inline struct list_head *ptype_head(const struct packet_type *pt){
+    if (pt->type == htons(ETH_P_ALL))
+        return &ptype_all;
+    else
+        return &ptype_base[ntohs(pt->type) & PTYPE_HASH_MASK];
+}
 ```
 
-上面的代码可知，udp_protocol结构体中的handler是`udp_rcv`，tcp_protocol结构体中的handler是`tcp_v4_rcv`，通过`inet_add_protocol`被注册到了协议栈的处理钩子上
+小结下，上述逻辑中`inet_protos`记录了udp，tcp处理函数的地址，`ptype_base`存储了`ip_rcv()`函数的处理地址，软中断中会通过`ptype_base`找到`ip_rcv`函数地址，进而将ip包正确地送到`ip_rcv()`函数中执行，进而在`ip_rcv`中将会通过`inet_protos`结构定位到tcp或者udp的处理函数，再而把包转发给`udp_rcv()`或`tcp_v4_rcv()`函数。另外，在`ip_rcv`、`tcp_v4_rcv`、`udp_rcv`等函数中可以了解更详细的处理细节，比如`ip_rcv`中会处理netfilter和iptables过滤规则， netfilter 或 iptables 规则，这些规则都是在软中断的上下文中执行的，会加大网络延迟（规则复杂且数目较多）
 
-####	接收数据的主要流程
+####	接收数据的主要流程（核心）
+1、硬中断处理
 
+2、 `ksoftirqd`内核线程处理软中断
+
+3、网络协议栈处理
+
+4、IP协议层处理
+
+5、UDP协议层处理
+
+##	0x04	应用层处理
+上一章节描述了整个Linux内核对数据包的接收和处理过程，最后把数据包放到socket的接收队列中，那么应用层如何接受数据呢？以UDP应用常用的`recvfrom`函数（glibc库函数）为例进行分析
+
+####	系统调用：recvfrom
+对于系统库函数`recvfrom`，该函数在执行后会将用户进行陷入到内核态，进入到Linux实现的系统调用`sys_recvfrom`，回想下前文介绍的socket相关结构
+
+![recvfrom_socket](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/recvfrom_socket.png)
+
+如上图，`struct socket`结构中的`const struct proto_ops`成员对应的是协议的方法集合（每个协议都会实现不同的方法集）
+
+```CPP
+//file: net/ipv4/af_inet.c
+//IPv4 Internet协议族来说,每种协议都有对应的处理方法
+const struct proto_ops inet_stream_ops = {
+    ......
+    .recvmsg       = inet_recvmsg,	//
+    .mmap          = sock_no_mmap,    
+}
+
+//udp是通过inet_dgram_ops来定义的，其中注册了inet_recvmsg方法
+const struct proto_ops inet_dgram_ops = {
+    ......
+    .sendmsg       = inet_sendmsg,
+    .recvmsg       = inet_recvmsg,  //UDP的处理方法
+}
+```
+
+`struct sock *sk`结构的`sk_prot`成员定义了二级处理函数。对于UDP协议来说，会被设置成UDP协议实现的方法集`udp_prot`
+
+```CPP
+//file: net/ipv4/udp.c
+struct proto udp_prot = {
+    .name          = "UDP",
+    .owner         = THIS_MODULE,
+    .close         = udp_lib_close,
+    .connect       = ip4_datagram_connect,
+    ......
+    .sendmsg       = udp_sendmsg,
+    .recvmsg       = udp_recvmsg,
+    .sendpage      = udp_sendpage,    
+}
+```
+
+[inet_recvmsg](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/af_inet.c#L784)的实现最后会调用`sk->sk_prot->recvmsg`进行后续处理，对于UDP协议的socket来说（`sk_prot`就是`struct proto udp_prot`），该实现就是`udp_recvmsg`
+
+```CPP
+//file: net/ipv4/af_inet.c
+int inet_recvmsg(struct socket *sock, struct msghdr *msg, size_t size,
+		 int flags)
+{
+	struct sock *sk = sock->sk;
+	int addr_len = 0;
+	int err;
+
+	sock_rps_record_flow(sk);
+
+	err = sk->sk_prot->recvmsg(sk, msg, size, flags & MSG_DONTWAIT,
+				   flags & ~MSG_DONTWAIT, &addr_len);
+	if (err >= 0)
+		msg->msg_namelen = addr_len;
+	return err;
+}
+EXPORT_SYMBOL(inet_recvmsg);
+```
+
+####	sys_recvfrom的调用链
+[sys_recvfrom](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/sys_recvfrom.png)
+
+####	udp_recvmsg的核心逻辑
+`udp_recvmsg`函数包含下面的主要工作：
+1. 取数据包：`__skb_recv_datagram()`函数，从`sk_receive_queue`上取一个`skb`
+2. 拷贝数据（内核空间copy到用户空间）：`skb_copy_datagram_iovec()`或`skb_copy_and_csum_datagram_iovec()`
+3. 必要时计算校验和：`skb_copy_and_csum_datagram_iovec()`
+
+从内核[udp_recvmsg](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/udp.c#L1408)实现，寻找收包的调用链，最终会调用`__skb_recv_datagram`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/core/datagram.c#L270)
+
+```TEXT
+udp_recvmsg
+	--->__skb_recv_udp
+		---> __skb_recv_datagram
+			--->__skb_try_recv_datagram
+```
+
+`__skb_recv_datagram`的实现如下，从`__skb_try_recv_datagram`函数代码可知[收包过程](https://elixir.bootlin.com/linux/v4.11.6/source/net/core/datagram.c#L206)就是访问`sk->sk_receive_queue`；如果没有数据，且用户允许等待，则将调用`__skb_wait_for_more_packets()`执行等待操作（会让用户进程进入睡眠状态）
+
+```CPP
+struct sk_buff *__skb_recv_datagram(struct sock *sk, unsigned int flags,
+				    void (*destructor)(struct sock *sk,
+						       struct sk_buff *skb),
+				    int *peeked, int *off, int *err)
+{
+	struct sk_buff *skb, *last;
+	long timeo;
+
+	timeo = sock_rcvtimeo(sk, flags & MSG_DONTWAIT);
+
+	do {
+		//
+		skb = __skb_try_recv_datagram(sk, flags, destructor, peeked,
+					      off, err, &last);
+		if (skb)
+			return skb;
+
+		if (*err != -EAGAIN)
+			break;
+	} while (timeo &&
+		!__skb_wait_for_more_packets(sk, err, &timeo, last));
+
+	return NULL;
+}
+EXPORT_SYMBOL(__skb_recv_datagram);
+```
 
 ####	一图以蔽之
 ![recv](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/latelee_excellent_send_and_recv_arch_kernel3.17.1_note.png)
+##	0x05	主要hook点
 
-##  0x0  参考
+
+##  0x06  参考
 -   [Monitoring and Tuning the Linux Networking Stack: Sending Data](https://blog.packagecloud.io/monitoring-tuning-linux-networking-stack-sending-data/)
 -   [Monitoring and Tuning the Linux Networking Stack: Receiving Data](https://blog.packagecloud.io/monitoring-tuning-linux-networking-stack-receiving-data/)
 -   [Linux网络 - 数据包的发送过程](https://segmentfault.com/a/1190000008926093)
