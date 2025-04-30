@@ -86,6 +86,23 @@ go tool pprof http://localhost:6060/debug/pprof/mutex
 -   `traces`：显示所有goroutine的调用栈
 -   `list`：列出代码详细的信息
 
+
+####    memory快照
+现网中排查内存泄漏的问题，可以使用如下脚本来采集`heap`视图，并利用`go tool pprof`对内存差异较大的时间点（**需要结合监控图标了解到内存有明显泄漏前后的时间点**）进行分析比较：
+
+```BASH
+#!/bin/bash
+DURATION=1200  # 运行时间： 1200秒
+INTERVAL=10    # 采样间隔 
+END_TIME=$((SECONDS + DURATION))
+
+while [ $SECONDS -lt $END_TIME ]; do
+  TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+  curl -s "http://localhost:6666/debug/pprof/heap" > "heap_${TIMESTAMP}.pprof"
+  sleep $INTERVAL
+done
+```
+
 ####    traces命令
 现网中，基于`traces`命令可以协助排查并定位goroutine泄漏问题
 
