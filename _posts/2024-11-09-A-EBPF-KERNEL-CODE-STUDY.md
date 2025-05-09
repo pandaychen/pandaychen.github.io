@@ -240,31 +240,103 @@ static int exec_binprm(struct linux_binprm *bprm)
 
 ####    schedule相关的静态hook点
 
-1、静态跟踪点tracepoint
+1、静态跟踪点tracepoint的嵌入
 
 根据上一小节可知，静态跟踪点的入口是在每个要跟踪的位置埋下`trace_xxx`函数，比如`tracepoint:sched:sched_switch`这个tracepoint静态跟踪点对应的hook[位置](https://github.com/torvalds/linux/blob/v6.13/kernel/sched/core.c#L6753)就在CFS的周期性调度核心函数`__schedule`中：
 
 ```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/core.c#L3436
 static void __schedule notrace __schedule(bool preempt){
+	struct task_struct *prev, *next;
+    unsigned long *switch_count;
+    struct rq_flags rf;
+    struct rq *rq;
+    int cpu;
+	// 在当前cpu 上取出任务队列rq（其实是红黑树）
+    cpu = smp_processor_id();
+    rq = cpu_rq(cpu);   
+    prev = rq->curr;
     //...
-    trace_sched_switch(preempt, prev, next);
+
+	//获取下一个待执行任务，其实就是从当前rq 的红黑树节点中选择vruntime最小的节点
+	next = pick_next_task(rq, prev, &rf);
+	clear_tsk_need_resched(prev);
+	clear_preempt_need_resched();
+	
+	//当选出的继任者和前任不同
+	// 当前正在运行的进程（前任）：prev
+	// 选出的继任者：next
+    if (likely(prev != next)) {
+		rq->nr_switches++;
+		rq->curr = next;
+		++*switch_count;
+
+		// 即将切换前，触发trace钩子 sched_switch（trace_sched_switch本质是个宏定义）
+		trace_sched_switch(preempt, prev, next);
+
+		/* Also unlocks the rq: */
+		// 核心：当选出的继任者和前任不同，就要进行上下文切换，继任者进程正式进入运行
+		rq = context_switch(rq, prev, next, &rf);
+	} else {
+		rq->clock_update_flags &= ~(RQCF_ACT_SKIP|RQCF_REQ_SKIP);
+		rq_unpin_lock(rq, &rf);
+		raw_spin_unlock_irq(&rq->lock);
+	}
+
+	//...
 }
 ```
 
-此外，内核源码中`register_trace_sched_switch`在该静态跟踪点上注册了一些钩子函数，每当内核执行到`__schedule`中的`trace_sched_switch`时，就会调用所注册的`xx_probe_xx` 等函数来完成整个静态跟踪过程
+CFS 的调度过程主要由 `__schedule` 函数完成的，主要步骤如下：
+1.	关闭当前 CPU 的抢占功能
+2.	如果当前 CPU 的运行队列中不存在任务，调用 `idle_balance` 从其他 CPU 的运行队列中取一部分执行
+3.	调用 `pick_next_task` 选择红黑树中优先级最高的任务
+4.	调用 `context_switch` 切换运行的上下文，包括寄存器的状态和堆栈
+5.	重新开启当前 CPU 的抢占功能
 
-2、`trace_sched_switch`的实现
 
+此外，内核源码中`register_trace_sched_switch`在该静态跟踪点上注册了一些钩子函数，每当内核执行到`__schedule`中的[`trace_sched_switch`](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/core.c#L3436)时，就会调用所注册的`xx_probe_xx` 等函数来完成整个静态跟踪过程
 
-####    调度相关
+2、`trace_sched_switch`，会调用开发者实现的`tracepoint:sched:sched_switch`钩子，相关的内核代码[参考](https://github.com/torvalds/linux/blob/master/kernel/trace/trace_sched_switch.c)
 
-##  0x02    runqlat 实现
+####    调度基础
+这里只讨论CFS调度算法，相关文章可以参考下面列表，这里回顾下进程的基本状态及切换的基础知识
+
+![state](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/ebpf/code-study/1/task_struct_state_switch.png)
+
+-	`TASK_RUNNING`：可运行状态，处于这种状态的进程，要么正在运行、要么正准备运行。正在运行的进程就是当前进程（由current所指向的进程），而准备运行的进程只要得到CPU就可以立即投入运行，CPU是这些进程唯一等待的系统资源
+-	`TASK_INTERRUPTIBLE`：可中断的等待（睡眠）状态
+-	`TASK_UNINTERRUPTIBLE`：不可中断的等待状态。对于等待状态（`TASK_INTERRUPTIBLE`与`TASK_UNINTERRUPTIBLE`）的进程而言，处于该状态的进程正在等待某个事件（event）或某个资源，它肯定位于系统中的某个等待队列（wait_queue）中
+-	`TASK_ZOMBIE`：僵死状态，进程虽然已经终止，但由于某种原因，父进程还没有执行`wait()`系统调用，终止进程的信息也还没有回收。顾名思义，处于该状态的进程就是死进程，这种进程实际上是系统中的垃圾，必须进行相应处理以释放其占用的资源
+-	`TASK_STOPPED`：暂停状态，此时的进程暂时停止运行来接受某种特殊处理。通常当进程接收到`SIGSTOP`、`SIGTSTP`、`SIGTTIN`或 `SIGTTOU`信号后就处于这种状态
+
+结合前一章节末的图来看，Sleep对应于等待状态，而Wait与Run对应于`TASK_RUNNING`可运行状态，状态可能的切换路径如下：
+
+-	Run->Sleep：任务因等待 event 进入休眠态，发生了Voluntary Switch（自愿切换，都没法进一步执行了就别占用CPU资源了），关联hook点为`sched_switch`
+-	Run->Wait：任务因 Involuntary Switch（非自愿切换） 让出 CPU，关联hook点为`sched_switch`
+-	Wait->Run：任务被调度切换获取到CPU，准备运行，关联hook点为`sched_wakeup`
+-	Sleep->Wait：任务等待到相应的资源就绪，可以开始调度流程，关联hook为`sched_switch`
+
+![switch_and_wakeup]()
+
+上面提到了Voluntary Switch与Involuntary Switch，在 CFS 调度策略中，当一个任务因访问的 I/O 资源暂时不可获得而让出 CPU，属于 Voluntary Switch。而一个任务因 vruntime 处于劣势（基于vruntime调度策略下）而被抢占，自然是 Involuntary Switch。但是这二者的最终都是当前正在占用CPU的进程（`task_struct`）通过主动调用`__schedule`函数来实现让出CPU的过程
+
+汇总下结论：
+1.	所有进程调度最终是通过正在运行的进程调用`__schedule` 函数实现，在`__schedule`的实现中可以触发trace`trace_sched_switch`，对应hook为`tracepoint:sched:sched_switch`
+2.	当一个进程从睡眠状态被唤醒时，通常会触发`sched_wakeup` 事件，对应hook为`tracepoint:sched:sched_wakeup`
+3.	当一个新创建的进程被唤醒时触发，通常会触发`sched_wakeup_new`事件，对应hook为`tracepoint:sched:sched_wakeup_new`
+4.	当调度器选择一个新的进程运行时触发，会触发`sched_switch` 事件
+
+##  0x02    runqlat 实现分析
 以bcc的[实现](https://github.com/iovisor/bcc/blob/master/libbpf-tools/runqlat.bpf.c)为例
+####	MAP定义
 
-##	0x03	runqlen 实现
+####	核心逻辑
+
+##	0x03	runqlen 实现分析
 [实现](https://github.com/iovisor/bcc/blob/master/libbpf-tools/runqlen.bpf.c)
 
-##	0x04	runslower 实现
+##	0x04	runslower 实现分析
 [实现](https://github.com/iovisor/bcc/blob/master/libbpf-tools/runqslower.bpf.c)
 
 ##  0x05  参考
@@ -273,3 +345,4 @@ static void __schedule notrace __schedule(bool preempt){
 -   [runqslower实现：bcc](https://github.com/iovisor/bcc/blob/master/libbpf-tools/runqslower.bpf.c)
 -   [Helper function bpf_task_storage_get](https://docs.ebpf.io/linux/helper-function/bpf_task_storage_get/)
 -   [高性能：7-可用于CPU分析的BPF工具【bpf performance tools读书笔记】](https://cloud.tencent.com/developer/article/1595327)
+-	[Linux 调度 - 切换类型的划分](https://zhuanlan.zhihu.com/p/402423877)
