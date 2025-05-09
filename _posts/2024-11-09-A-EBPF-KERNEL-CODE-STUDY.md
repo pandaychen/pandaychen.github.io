@@ -328,7 +328,16 @@ CFS 的调度过程主要由 `__schedule` 函数完成的，主要步骤如下�
 4.	当调度器选择一个新的进程运行时触发，会触发`sched_switch` 事件
 
 ##  0x02    runqlat 实现分析
-以bcc的[实现](https://github.com/iovisor/bcc/blob/master/libbpf-tools/runqlat.bpf.c)为例
+先回到bpftrace的[实现](https://github.com/bpftrace/bpftrace/blob/master/tools/runqlat.bt)，看下其大致原理：
+
+```TEXT
+ttwu_do_wakeup() --> trace_sched_wakeup --> tracepoint:sched:sched_wakeup
+wake_up_new_task() --> trace_sched_wakeup_new --> tracepoint:sched:sched_wakeup_new
+__schedule() --> trace_sched_switch --> tracepoint:sched:sched_switch
+```
+
+
+下面以bcc的[实现](https://github.com/iovisor/bcc/blob/master/libbpf-tools/runqlat.bpf.c)源码进行分析
 ####	MAP定义
 
 ####	核心逻辑
