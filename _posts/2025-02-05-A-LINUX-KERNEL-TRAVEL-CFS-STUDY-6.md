@@ -1673,8 +1673,13 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 -	运行队列负载：若运行队列中有大量进程，调度周期（`sysctl_sched_latency`）可能扩展为 `调度周期 = max(6ms, nr_running × 0.75ms)`，避免时间片过小
 -	最小调度粒度（`sysctl_sched_min_granularity`）：进程至少运行 `sysctl_sched_min_granularity` 默认为`0.75ms`才会被抢占，防止频繁切换
 
-####	
+####	CFS调度策略中的可观测
+前文[EBPF 内核态代码学习（一）：进程调度延时计算](https://pandaychen.github.io/2024/11/09/A-EBPF-KERNEL-CODE-STUDY/)介绍了CPU延时及负载相关的几种测量工具，这里再稍微梳理下`tracepoint:sched:sched_wakeup`、`tracepoint:sched:sched_wakeup_new`与`tracepoint:sched:sched_switch`这三个hook点与不同调度类型场景触发的关系，即Voluntary Switch与Involuntary Switch
 
+| 调度类型 | 说明 |触发场景 | 与ebpf hook的关系 |
+| :-----:| :----: | :----: | :----: |
+| Voluntary Switch（主动切换） | 当任务主动让出 CPU 时发生，常见于以下场景：<br>等待资源：如 I/O 操作、锁释放、信号量等待等，调用 schedule() 主动进入阻塞状态<br>主动休眠：通过 sleep() 或 yield() 等函数显式让出 CPU<br>​协作式调度：在用户态任务中主动触发调度（如实时任务协作）|  | |
+| Involuntary Switch（被动切换） |  |  | |
 
 
 ##  0x0  参考

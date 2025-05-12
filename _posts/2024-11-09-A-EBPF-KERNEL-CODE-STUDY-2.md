@@ -18,7 +18,7 @@ tags:
 
 实现上述两种场景，核心就是两点：
 -   hook 系统调用： `getdents64` 系统调用可以读取目录下的文件信息，可以通过挂接这个系统调用，修改它返回的结果，从而达到隐藏文件的目的
--   借助于 eBPF `bpf_probe_write_user` 功能，该函数可以 ** 修改用户空间的内存 **，因此能用来修改 `getdents64` 系统调用返回的结果（注意：内核空间是无法修改的）
+-   借助于 eBPF `bpf_probe_write_user` 功能，该函数可以 **修改用户空间的内存**，因此能用来修改 `getdents64` 系统调用返回的结果（注意：内核空间是无法修改的）
 
 ####    bpf_probe_write_user 方法
 [`bpf_probe_write_user`](https://docs.ebpf.io/linux/helper-function/bpf_probe_write_user/)，该函数允许 eBPF 程序写入当前正在运行的进程的用户空间内存，因此基于 ebpf 实现的恶意软件可以使用此功能在 hook 系统调用运行期间修改进程的内存，例如一个典型的恶意场景是修改 `sudoer` 文件，参考 [使用 eBPF 添加 sudo 用户](https://eunomia.dev/zh/tutorials/26-sudo/)
