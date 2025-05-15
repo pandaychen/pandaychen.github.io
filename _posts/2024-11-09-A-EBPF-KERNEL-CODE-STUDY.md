@@ -402,6 +402,7 @@ __schedule() --> trace_sched_switch --> tracepoint:sched:sched_switch
 ####	MAP定义
 
 ```CPP
+//通过 cgroup_map 实现 cgroup 级别的监控隔
 struct {
 	__uint(type, BPF_MAP_TYPE_CGROUP_ARRAY);
 	__type(key, u32);
@@ -413,20 +414,24 @@ struct {
 支持对指定cgroup，其中利用到了`BPF_MAP_TYPE_CGROUP_ARRAY`类型的map（即`cgroup_map`），通过cgroup对进程进行事件过滤，仅统计特定cgroup内进程的调度延迟
 
 ```cpp
-struct {
+struct {	
         __uint(type, BPF_MAP_TYPE_HASH);
-        __uint(max_entries, MAX_ENTRIES);
-        __type(key, u32);
-        __type(value, u64);
+        __uint(max_entries, MAX_ENTRIES);	// 最大条目数（足够记录高并发场景）
+        __type(key, u32);		// 键为 PID
+        __type(value, u64);	 // 值为时间戳（纳秒）
 } start SEC(".maps");
 
 struct {
-        __uint(type, BPF_MAP_TYPE_HASH);
+        __uint(type, BPF_MAP_TYPE_HASH);	
         __uint(max_entries, MAX_ENTRIES);
-        __type(key, u32);
+        __type(key, u32);		//统计维度（PID/TGID/命名空间
         __type(value, struct hist);
 } hists SEC(".maps");
 ```
+
+-	`cgroup_map`：用于 cgroup 过滤，即用于过滤任务是否属于特定 cgroup（需用户态设置）
+-	`start`：记录任务进入运行队列（runqueue）的时间戳，即任务被唤醒时的时间戳，key为 pid，value为 `bpf_ktime_get_ns()`
+-	`hists`：存储延迟直方图数据，key根据统计模式（进程/线程/命名空间）动态生成
 
 ####	核心逻辑：用户态
 runqlat支持若干[选项](https://github.com/iovisor/bcc/blob/master/libbpf-tools/runqlat.c#L48)，支持过滤指定条件，用户态通过`bpf_map_update_elem`写入内核态的map，以`cgroupsPath`过滤为例：
@@ -454,10 +459,181 @@ if (env.cg) {
 ```
 
 ####	核心逻辑：内核态
+1、新进程创建并加入调度队列
 
+```CPP
+//关联raw_tracepoint
+SEC("raw_tp/sched_wakeup_new")
+int BPF_PROG(handle_sched_wakeup_new, struct task_struct *p)
+{
+	if (filter_cg && !bpf_current_task_under_cgroup(&cgroup_map, 0))
+		return 0;
 
-####	一个细节
-如果将`start`这个MAP实现换为`BPF_MAP_TYPE_PERCPU_HASH`，其他代码不修改，那么还可以得到正确的结果吗？
+	return trace_enqueue(BPF_CORE_READ(p, tgid), BPF_CORE_READ(p, pid));
+}
+
+SEC("tp_btf/sched_wakeup_new")
+int BPF_PROG(sched_wakeup_new, struct task_struct *p)
+{
+	if (filter_cg && !bpf_current_task_under_cgroup(&cgroup_map, 0))
+		return 0;
+
+	return trace_enqueue(p->tgid, p->pid);
+}
+```
+
+2、已存在进程被唤醒加入调度队列
+
+```CPP
+SEC("raw_tp/sched_wakeup")
+int BPF_PROG(handle_sched_wakeup, struct task_struct *p)
+{
+	if (filter_cg && !bpf_current_task_under_cgroup(&cgroup_map, 0))
+		return 0;
+
+	return trace_enqueue(BPF_CORE_READ(p, tgid), BPF_CORE_READ(p, pid));
+}
+
+SEC("tp_btf/sched_wakeup")
+int BPF_PROG(sched_wakeup, struct task_struct *p)
+{
+	if (filter_cg && !bpf_current_task_under_cgroup(&cgroup_map, 0))
+		return 0;
+
+	return trace_enqueue(p->tgid, p->pid);
+}
+```
+
+3、进程切换流程，一个正在占用CPU的进程主动/被动释放CPU给下一个进程使用
+
+```CPP
+SEC("raw_tp/sched_wakeup")
+int BPF_PROG(handle_sched_wakeup, struct task_struct *p)
+{
+	if (filter_cg && !bpf_current_task_under_cgroup(&cgroup_map, 0))
+		return 0;
+
+	return trace_enqueue(BPF_CORE_READ(p, tgid), BPF_CORE_READ(p, pid));
+}
+
+SEC("tp_btf/sched_switch")
+int BPF_PROG(sched_switch, bool preempt, struct task_struct *prev, struct task_struct *next)
+{
+	return handle_switch(preempt, prev, next);
+}
+```
+
+4、核心函数：`trace_enqueue`，用于记录`task_struct`唤醒（入调度队列）的开始时间
+
+```CPP
+static int trace_enqueue(u32 tgid, u32 pid)
+{
+	u64 ts;
+
+	if (!pid)
+		return 0;
+	if (targ_tgid && targ_tgid != tgid)	//开启过滤条件并检测
+		return 0;
+
+	ts = bpf_ktime_get_ns();
+	bpf_map_update_elem(&start, &pid, &ts, BPF_ANY);	//更新入队时间
+	return 0;
+}
+```
+
+5、核心函数`handle_switch`，处理上下文切换
+
+```CPP
+static int handle_switch(bool preempt, struct task_struct *prev, struct task_struct *next)
+{
+	struct hist *histp;
+	u64 *tsp, slot;
+	u32 pid, hkey;
+	s64 delta;
+
+	//1. 检查 cgroup 过滤条件（开启时）
+	if (filter_cg && !bpf_current_task_under_cgroup(&cgroup_map, 0))
+		return 0;
+
+	// 2. 若 prev 仍可运行（还在runqueue） 即TASK_RUNNING状态，说明其被抢占，重新记录其入队时间（Involuntary Switch）
+	// 隐含了若 prev 处于非 TASK_RUNNING状态，则无需重新记录，等待下次wakeup时再触发记录就好
+	if (get_task_state(prev) == TASK_RUNNING)
+		trace_enqueue(BPF_CORE_READ(prev, tgid), BPF_CORE_READ(prev, pid));
+
+	pid = BPF_CORE_READ(next, pid);
+
+	// 3. 计算 next 的调度延迟（next即将获取CPU）
+	tsp = bpf_map_lookup_elem(&start, &pid);
+	if (!tsp)
+		return 0;
+	delta = bpf_ktime_get_ns() - *tsp;
+	if (delta < 0)
+		goto cleanup;
+
+	 // 4. 根据统计模式生成直方图键值
+	if (targ_per_process)
+		hkey = BPF_CORE_READ(next, tgid);	// 按tgid统计（64位）
+	else if (targ_per_thread)
+		hkey = pid;					   // 按pid统计（32位）
+	else if (targ_per_pidns)
+		hkey = pid_namespace(next);	// 按 PID 命名空间统计
+	else
+		hkey = -1;					// 全局统计
+
+	// 5. 更新直方图数据
+	histp = bpf_map_lookup_or_try_init(&hists, &hkey, &zero);
+	if (!histp)
+		goto cleanup;
+	if (!histp->comm[0])
+		bpf_probe_read_kernel_str(&histp->comm, sizeof(histp->comm),
+					next->comm);
+	if (targ_ms)
+		delta /= 1000000U;
+	else
+		delta /= 1000U;
+	slot = log2l(delta);		// 时间分桶，这里是按对数分桶（如 1-2μs, 2-4μs, ...）
+	//这里的好处是指数分桶适应延迟的长尾分布，避免固定区间导致的数据稀疏问题
+	if (slot >= MAX_SLOTS)
+		slot = MAX_SLOTS - 1;
+	__sync_fetch_and_add(&histp->slots[slot], 1);	// 原子计数
+
+cleanup:
+	bpf_map_delete_elem(&start, &pid);	// 清理时间戳记录
+	return 0;
+}
+```
+
+####	一些细节
+1、如果将`start`这个MAP实现换为`BPF_MAP_TYPE_PERCPU_HASH`，其他代码不修改，那么还可以得到正确的结果吗？
+
+2、获取pid_namespace的方法，基础概念可参考[Linux 内核之旅（一）：进程](https://pandaychen.github.io/2024/10/02/A-LINUX-KERNEL-TRAVEL-1/#pid_namespace进程命名空间)
+
+```CPP
+//通过遍历 PID 结构体，获取任务所属的 PID 命名空间 ID，支持容器环境监控
+static unsigned int pid_namespace(struct task_struct *task)
+{
+	struct pid *pid;
+	unsigned int level;
+	struct upid upid;
+	unsigned int inum;
+
+	/*  get the pid namespace by following task_active_pid_ns(),
+	 *  pid->numbers[pid->level].ns
+	 */
+	pid = BPF_CORE_READ(task, thread_pid);
+	level = BPF_CORE_READ(pid, level);
+	// 获取upid
+	bpf_core_read(&upid, sizeof(upid), &pid->numbers[level]);
+	//ns.inum
+	//ns为struct pid_namespace的ns_common成员，变量名，参考https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/pid_namespace.h#L54
+	//inum为struct ns_common的成员，参考https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/ns_common.h#L9
+	inum = BPF_CORE_READ(upid.ns, ns.inum); // 命名空间 ID
+
+	return inum;
+}
+```
+
+3、对直方图的操作，用户态程序通过 `bpf_map_lookup_elem` 读取 `hists`数据结构，生成直方图
 
 ####	其他
 只支持在cgroup V2的系统上运行（cgroup V1上运行会报错：Failed adding target cgroup to map）
