@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:  Linux 内核之旅（二）：VFS
+title:  Linux 内核之旅（二）：VFS（基础篇）
 subtitle:
 date:       2024-11-20
 author:     pandaychen
@@ -505,7 +505,7 @@ static inline struct hlist_bl_head *d_hash(const struct dentry *parent,
 -	`struct qstr` 中字段hash的意义：如果一个目录book，但是每一次都要计算该`basename`的hash值，就会每次查找不得不计算一次book的hash，这样会降低效率，因此采用空间换时间，计算一次后保存，提高查询效率
 -	某个目录对应的dentry不在cache中？一开始可能某个目录对应的dentry根本就不在内存中，因此内核提供了`d_lookup`函数，以父dentry和`struct qstr`[类型](https://docs.huihoo.com/doxygen/linux/kernel/3.7/structqstr.html)的`name`为依据，来查找内存中是否已经有了对应的dentry，当然如果没有，就需要分配一个dentry（`d_alloc`函数负责分配dentry结构体，初始化相应的变量，建立与父dentry的关系）
 
-##	0x0	Mnt Namespace 详解
+##	0x01	Mnt Namespace 详解
 本小节引用自 [Mnt Namespace 详解](https://tinylab.org/mnt-namespace/#down) 一文
 
 Linux 文件系统，是由多种设备、多种文件系统组成的一个混合的树形结构。本小节尝试从简单到复杂介绍树形结构构造：
@@ -600,7 +600,7 @@ mount 的过程就是把设备的文件系统加入到 vfs 框架中，以 `moun
 ##	0x0	files_struct
 ![files_struct](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/fs.vfs.png)
 
-##	0x0	部分核心源码摘要
+##	0x02	部分核心源码摘要
 
 ####	mount
 `mount()` 系统调用是理解文件系统层次化的核心，它主要包含 `3` 个关键步骤：
@@ -608,33 +608,306 @@ mount 的过程就是把设备的文件系统加入到 vfs 框架中，以 `moun
 1、解析 `mount` 系统调用中的参数挂载点路径 `pathname` ，返回对应的 `struct path` 结构
 
 ```BASH
-SYSCALL_DEFINE5(mount) → do_mount() → user_path() → user_path_at_empty() → filename_lookup() → path_lookupat() → link_path_walk() → walk_component() → follow_managed()
+SYSCALL_DEFINE5(mount) -> do_mount() -> user_path() -> user_path_at_empty() -> filename_lookup() -> path_lookupat() -> link_path_walk() -> walk_component() -> follow_managed()
 ```
 
 2、解析 `mount` 系统调用中的参数文件系统类型 `-t type` 和设备路径 `devname` ，建立起子设备的树形结构（如果之前已经创建过引用即可），建立起新的 `struct mount` 结构对其引用
 
 ```BASH
-SYSCALL_DEFINE5(mount) → do_mount() → do_new_mount() → vfs_kern_mount() → mount_fs() → type->mount()
+SYSCALL_DEFINE5(mount) -> do_mount() -> do_new_mount() -> vfs_kern_mount() -> mount_fs() -> type->mount()
 ```
 
 3、将新建立的 `struct mount` 结构挂载到查找到的 `struct path` 结构上
 
 ```BASH
-SYSCALL_DEFINE5(mount) → do_mount() → do_new_mount() → do_add_mount() → graft_tree() → attach_recursive_mnt() → commit_tree()
+SYSCALL_DEFINE5(mount) -> do_mount() -> do_new_mount() -> do_add_mount() -> graft_tree() -> attach_recursive_mnt() -> commit_tree()
 ```
 
-##	0x0	用户态视角
+##	0x03	用户态视角
 
-####	open then write
+####	VFS实例化
+假设有一个文件`/myfile.txt`位于 `EXT4` 作为文件系统的磁盘上，那么读取这个文件（确保它没有被缓存）的流程如下：
 
-以文件写入为例，先 `open` 再 `write`：
+![ext4]()
+
+```bash
+# 系统调用链
+PID     TID     COMM            FUNC
+28653   28653   cat             blk_start_request
+        blk_start_request+0x1 
+        scsi_request_fn+0xf5 
+        __blk_run_queue+0x43 
+        queue_unplugged+0x2a 
+        blk_flush_plug_list+0x20a 
+        blk_finish_plug+0x2c 
+        __do_page_cache_readahead+0x1da 
+        ondemand_readahead+0x11a 
+        page_cache_sync_readahead+0x2e 
+        generic_file_read_iter+0x7fb 
+        ext4_file_read_iter+0x56 
+        new_sync_read+0xe4 
+        __vfs_read+0x29 
+        vfs_read+0x8e 
+        sys_read+0x55 
+        do_syscall_64+0x73 
+        entry_SYSCALL_64_after_hwframe+0x3d 
+```
+
+####	Open Then Write
+以文件写入为例，系统调用先 `open` 再 `write`：
 
 ![vfsops](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/vfsops.png)
 
 -	`open`：工作流程大致为，系统调用将创建一个 `file` 对象（首先通过查找 dentry cache 来确定 `file` 存在的位置），并且在 open files tables 中（即 `task_struct` 的 fd table）分配一个索引
--	`write`：由于 block I/O 非常耗时，所有 linux 会使用 page cache 来缓存每次 read file 的内容， 当 write system call 时，系统将这个 page 标记为 dirty，并且将这个 page 移动到 dirty list 上， 系统会定时将这些 page flush 到磁盘上
+-	`write`：由于 block I/O 非常耗时，所以 Linux 内核会使用 page cache 来缓存每次 read file 的内容， 当 write system call 时，系统将这个 page 标记为 dirty，并且将这个 page 移动到 dirty list 上， 系统会定时将这些 page flush 到磁盘上
 
-##  0x0  参考
+##	0x04	VFS的应用（工作）
+
+####	SOCK_FS文件系统
+socket在Linux中对应的文件系统叫sockfs，每创建一个socket，就在sockfs中创建了一个特殊的文件，同时创建了sockfs文件系统中的inode，该inode唯一标识当前socket的通信，那么sockfs是如何注册到VFS中的？本节就简单讨论这个问题
+
+1、核心结构体（参考上文）
+
+-	`struct file_system_type`：每一种文件系统必须要有自己的`file_system_type`结构
+-	`struct sock_fs_type`：在Linux内核中`sock_fs_type`结构定义代表了sockfs的网络文件系统
+-	`struct vfsmount`与`struct mount`：
+
+```CPP
+static struct file_system_type sock_fs_type = {
+	.name = "sockfs",
+	.mount = sockfs_mount,	//for mount
+	.kill_sb = kill_anon_super,
+};
+```
+
+2、sockfs文件系统的注册过程
+
+内核初始化时，执行`sock_init()`函数注册sockfs，相关实现如下：
+
+```CPP
+static int __init sock_init(void)
+{
+	//......
+	err = register_filesystem(&sock_fs_type);//注册SOCK_FS
+	//......
+	sock_mnt = kern_mount(&sock_fs_type);//安装SOCK_FS
+	//......
+}
+
+//register_filesystem：注册函数
+int register_filesystem(struct file_system_type * fs)
+{
+	int res = 0;
+	struct file_system_type ** p;
+
+	BUG_ON(strchr(fs->name, '.'));
+	if (fs->next)
+		return -EBUSY;
+	write_lock(&file_systems_lock);
+	p = find_filesystem(fs->name, strlen(fs->name)); //查找是否存在
+	if (*p)
+		res = -EBUSY;
+	else
+		*p = fs; //将filesystem静态变量指向fs
+	write_unlock(&file_systems_lock);
+	return res;
+}
+
+// find_filesystem：for循环一开始的file_systems变量就是上面说的注册文件系统使用到的全局变量指针，
+// strncmp去比较file_system_type的第一项name（文件系统名）是否和将要注册的文件系统名字相同
+// 如果相同返回的P就是指向同名file_system_type结构的指针
+// 如果没找到则指向NULL
+static struct file_system_type **find_filesystem(const char *name, unsigned len)
+{
+	struct file_system_type **p;
+	for (p = &file_systems; *p; p = &(*p)->next)
+		if (strncmp((*p)->name, name, len) == 0 && 	!(*p)->name[len])
+			break;
+	return p;
+}
+```
+
+在返回`register_filesystem`函数后，若检查OK，就把当前要注册的文件系统挂到尾端`file_system_type`的`next`指针上，串联进链表，至此SOCK_FS文件系统模块就注册完成
+
+3、sockfs文件系统的安装
+
+在上面的`sock_init()`函数中的`sock_mnt = kern_mount(&sock_fs_type)`实现了对sockfs的安装过程。`kern_mount`函数主要用于那些没有实体介质的文件系统，该函数主要是获取文件系统的`super_block`对象与根目录的`inode`与`dentry`对象，并将这些对象加入到系统链表
+
+`kern_mount`宏及相关函数实现如下：
+
+```CPP
+#define kern_mount(type) kern_mount_data(type, NULL)
+
+struct vfsmount *kern_mount_data(struct file_system_type *type, void *data)
+{
+	struct vfsmount *mnt;
+	//调用vfs_kern_mount
+	mnt = vfs_kern_mount(type, SB_KERNMOUNT, type->name, data);
+	if (!IS_ERR(mnt)) {
+		/*
+		* it is a longterm mount, don't release mnt until
+		* we unmount before file sys is unregistered
+		*/
+		real_mount(mnt)->mnt_ns = MNT_NS_INTERNAL;
+	}
+	return mnt;
+}
+```
+
+`vfs_kern_mount`函数调用`mount_fs`获取该文件系统的根目录的`dentry`，同时也获取`super_block`，具体实现如下：
+
+```CPP
+struct vfsmount *
+vfs_kern_mount(struct file_system_type *type, int flags, const char *name, void *data)
+{
+	struct mount *mnt;
+	struct dentry *root;
+
+	if (!type)
+		return ERR_PTR(-ENODEV);
+
+	mnt = alloc_vfsmnt(name);
+	//分配一个mount对象，并对其进行部分初始化
+	if (!mnt)
+		return ERR_PTR(-ENOMEM);
+
+	if (flags & SB_KERNMOUNT)
+		mnt->mnt.mnt_flags = MNT_INTERNAL;
+
+	root = mount_fs(type, flags, name, data);
+	//获取该文件系统的根目录的dentry，同时也获取super_block
+	if (IS_ERR(root)) {
+		mnt_free_id(mnt);
+		free_vfsmnt(mnt);
+		return ERR_CAST(root);
+	}
+	//对mnt对象与root进行绑定
+	mnt->mnt.mnt_root = root;
+	mnt->mnt.mnt_sb = root->d_sb;
+	mnt->mnt_mountpoint = mnt->mnt.mnt_root;
+	mnt->mnt_parent = mnt;
+	lock_mount_hash();
+	list_add_tail(&mnt->mnt_instance, &root->d_sb->s_mounts);
+	//将mnt添加到root->d_sb->s_mounts链表中 
+	unlock_mount_hash();
+	return &mnt->mnt;
+}
+```
+
+接着看下`mount_fs`的实现，其中很重要的一段逻辑`type->mount`，在sockfs中是回调函数`sockfs_mount`
+
+```CPP
+struct dentry *
+mount_fs(struct file_system_type *type, int flags, const char *name, void *data)
+{
+	struct dentry *root;
+	struct super_block *sb;
+	char *secdata = NULL;
+	int error = -ENOMEM;
+
+	if (data && !(type->fs_flags & FS_BINARY_MOUNTDATA)) {//在kern_mount调用中data为NULL，所以该if判断为假
+		secdata = alloc_secdata();
+		if (!secdata)
+			goto out;
+
+		error = security_sb_copy_data(data, secdata);
+		if (error)
+			goto out_free_secdata;
+	}
+
+	root = type->mount(type, flags, name, data);//调用file_system_type中的 mount方法
+	if (IS_ERR(root)) {
+		error = PTR_ERR(root);
+		goto out_free_secdata;
+	}
+	sb = root->d_sb;
+	BUG_ON(!sb);
+	WARN_ON(!sb->s_bdi);
+	sb->s_flags |= SB_BORN;
+
+	error = security_sb_kern_mount(sb, flags, secdata);
+	//......
+}
+```
+
+4、`sockfs_mount`的实现，可以看到`mount_pseudo_xattr`的入参`"socket:"`、`SOCKFS_MAGIC`和`sockfs_ops`，这里关注下`SOCKFS_MAGIC`这个常量，定义在[`magic.h`](https://elixir.bootlin.com/linux/v4.11.6/source/include/uapi/linux/magic.h#L75)
+
+
+`sockfs_mount`函数进行超级块sb、根root、根dentry相关的创建及初始化操作，其中这段`s->s_d_op=dops`就说指向了`sockfs_ops`结构体，也就是该sockfs文件系统的`struct super_block`的函数操作集指向了`sockfs_ops`（`sockfs_dentry_operations`）
+
+```CPP
+static const struct super_operations sockfs_ops = {
+.alloc_inode = sock_alloc_inode,
+.destroy_inode = sock_destroy_inode,
+.statfs = simple_statfs,
+};
+```
+
+`sockfs_ops`函数表**对sockfs文件系统的节点和目录提供了具体的操作函数，后面涉及到的sockfs文件系统的重要操作均会到该函数表中查找到对应的操作函数**，例如Linux内核在创建socket节点时会查找`sockfs_ops`的`alloc_inode`函数， 从而调用`sock_alloc_indode`函数完成socket以及inode节点的创建
+
+```CPP
+static struct dentry *sockfs_mount(struct file_system_type *fs_type,
+int flags, const char *dev_name, void *data)
+{
+	return mount_pseudo_xattr(fs_type, "socket:", &sockfs_ops,
+	sockfs_xattr_handlers,
+	&sockfs_dentry_operations, SOCKFS_MAGIC);
+}
+
+struct dentry *mount_pseudo_xattr(struct file_system_type *fs_type, char *name,
+const struct super_operations *ops, const struct xattr_handler **xattr,
+const struct dentry_operations *dops, unsigned long magic)
+{
+	struct super_block *s;
+	struct dentry *dentry;
+	struct inode *root;
+	struct qstr d_name = QSTR_INIT(name, strlen(name));
+
+	s = sget_userns(fs_type, NULL, set_anon_super, SB_KERNMOUNT|SB_NOUSER,
+	&init_user_ns, NULL);
+	if (IS_ERR(s))
+		return ERR_CAST(s);
+
+	s->s_maxbytes = MAX_LFS_FILESIZE;
+	s->s_blocksize = PAGE_SIZE;
+	s->s_blocksize_bits = PAGE_SHIFT;
+	s->s_magic = magic;	//设置super_block的magic
+	s->s_op = ops ? ops : &simple_super_operations;
+	s->s_xattr = xattr;
+	s->s_time_gran = 1;
+	root = new_inode(s);
+	if (!root)
+		goto Enomem;
+	/*
+	* since this is the first inode, make it number 1. New inodes created
+	* after this must take care not to collide with it (by passing
+	* max_reserved of 1 to iunique).
+	*/
+	root->i_ino = 1;
+	root->i_mode = S_IFDIR | S_IRUSR | S_IWUSR;
+	root->i_atime = root->i_mtime = root->i_ctime = current_time(root);
+	dentry = __d_alloc(s, &d_name);
+	if (!dentry) {
+		iput(root);
+		goto Enomem;
+	}
+	d_instantiate(dentry, root);
+	s->s_root = dentry;	//设置根root dentry
+	s->s_d_op = dops;	//重要
+	s->s_flags |= SB_ACTIVE;
+	return dget(s->s_root);
+
+	Enomem:
+	deactivate_locked_super(s);
+	return ERR_PTR(-ENOMEM);
+}
+```
+
+5、`sock_alloc_indode`函数
+
+TODO
+
+##  0x05  参考
 -   [VFS](https://akaedu.github.io/book/ch29s03.html)
 -   [vfs](https://hushi55.github.io/2015/10/19/linux-kernel-vfs)
 -	[File Descriptor Table](https://chenshuo.com/notes/kernel/data-structures/)
@@ -650,3 +923,4 @@ SYSCALL_DEFINE5(mount) → do_mount() → do_new_mount() → do_add_mount() → 
 -	[Virtual File System](https://myaut.github.io/dtrace-stap-book/kernel/fs.html)
 -	[What is a Superblock, Inode, Dentry and a File?](https://unix.stackexchange.com/questions/4402/what-is-a-superblock-inode-dentry-and-a-file)
 -	[Linux虚拟文件系统(VFS)](https://arkingc.github.io/2017/08/18/2017-08-18-linux-code-vfs/)
+-   [LINUX SOCKFS文件系统分析：sockfs文件系统类型的定义及注册](https://blog.csdn.net/lickylin/article/details/102540200)
