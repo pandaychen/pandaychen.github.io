@@ -50,7 +50,7 @@ tags:
 XDP（eXpress Data Path）机制运行于 Linux 内核网络栈的最底层，只存在于 RX 路径（Ingress）上，允许在网络设备驱动内部网络堆栈中数据来源最早的地方进行数据包处理，在特定模式下可以在操作系统分配内存（skb）之前就已经完成处理。XDP 暴露了一个可以加载 BPF 程序的 hook，hook 程序能够对传入的数据包进行任意修改和快速决策，避免了内核内部处理带来的额外开销
 
 ####  内核对XDP的支持
-[kernel support](https://github.com/iovisor/bcc/blob/master/docs/kernel-versions.md#xdp)
+参考[kernel support](https://github.com/iovisor/bcc/blob/master/docs/kernel-versions.md#xdp)
 
 ####  XDP 输入参数
 XDP hook 的输入参数类型为 `struct xdp_md`（在内核头文件 `bpf.h` 中定义），是`xdp_buff`的BPF结构，对比`sk_buff`结构而言，`sk_buff`包含数据包的元数据，而`xdp_buff`创建更早，不依赖与其他内核层（因此XDP机制下可以更快的获取和处理数据包）
@@ -224,8 +224,9 @@ int xdp_firewall(struct xdp_md *ctx)
 ```
 
 ####  DROP-TCP
-示例 2，通过 xdp 拦截所有系统的 packet，如果是 TCP 报文则全部丢弃
-```C
+通过 xdp 拦截所有系统的 packet，如果是 TCP 报文则全部丢弃
+
+```CPP
 /*
   check whether the packet is of TCP protocol
 */
@@ -520,9 +521,23 @@ process_tcp_ack(struct Packet* packet) {
 }
 ```
 
-不过，这段代码的流程上是存在问题的（从原代码的`TODO`也可以看出），一个完整的syn-cookies流程图如下：
+不过，这段代码的流程上是不够完善的（从原代码的`TODO`也可以看出），一个完整的syn-cookies流程图如下：
 
 ![syn-cookie](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/xdp/syn-cookies-2.png)
+
+改进版本的syncookie[代码](https://github.com/PlushBeaver/xdp-syn-cookie/blob/usermode-proto/xdp_filter.c)隐藏了一处细节，在[`cookie_check`](https://github.com/PlushBeaver/xdp-syn-cookie/blob/usermode-proto/xdp_filter.c#L354)方法中校验ACK包通过后，其XDP的action为`XDP_PASS`，即把此ACK包转发给协议栈处理，由于没有前置的SYN packet，协议栈收到这个ACK之后会直接向原客户端发送RST packet，根据RFC的[解释](https://datatracker.ietf.org/doc/html/rfc793#section-3.4)，这样会触发原客户端的TCP 重连，下一次重连时，由于客户端的源IP已在XDP的MAPS中[放行](https://github.com/PlushBeaver/xdp-syn-cookie/blob/usermode-proto/xdp_filter.c#L262)，所以客户端可以成功通过syncookie算法，验证流程可参考下面方式
+
+```BASH
+#模拟ACK发送的命令
+
+#服务端查询RST packet
+tcpdump -i eth1 'tcp[tcpflags] & (tcp-rst) != 0'
+
+#客户端发送ACK packet
+hping3 -A -p 8000 X.X.X.X
+```
+
+![rst](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/xdp/tcp-send-ack-then-rst.png)
 
 ##  0x03 TC 基础
 
