@@ -961,6 +961,8 @@ struct fdtable {
 
 ![vfs](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/vfs.png)
 
+这里埋一个有趣的问题，假设某个`struct task_struct`的父进程打开了socket连接（如bash反连场景），那么如何通过当前的`task_struct`获取到该socket（本质上也是fd）关联的四元组详情？
+
 ##	0x06	namespaces
 `task_struct`中成员`struct nsproxy *nsproxy;`指向命名空间namespaces的指针（通过 namespace 可以让一些进程只能看到与自己相关的一部分资源，而另外一些进程也只能看到与它们自己相关的资源，这两类进程无法感知对方的存在）。实现方式是把一个或多个进程的相关资源指定在同一个 namespace 中，而进程究竟是属于哪个 namespace 由 `*nsproxy` 指针表明了归属关系
 
