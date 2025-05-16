@@ -20,6 +20,7 @@ tags:
 一些背景知识：
 
 -   网卡驱动是加载到内核中的模块，负责衔接网卡和内核的网络模块，驱动在加载的时候将自己注册进网络模块，当相应的网卡收到数据包时，网络模块会调用相应的驱动程序处理数据
+-   常见的intel网卡：igb（网卡，其中的 i 是 intel，gb 表示每秒 1Gb）、ixgbe（xgb 表示 10Gb，e 表示以太网）、i40e（intel 40Gbps 以太网）
 
 ![recv-arch](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/kernel_packet.jpg)
 
@@ -64,7 +65,7 @@ tags:
 
 4、CPU根据中断表，调用已经注册的中断函数，这个中断函数会调到驱动程序（NIC Driver）中相应的函数（调用对应的网卡驱动硬中断处理程序）
 
-5、网卡驱动被调用后，**网卡驱动先禁用网卡的中断**，表示驱动程序已经知道内存中有数据了，告诉网卡下次再收到数据包直接写内存就可以了，不要再通知CPU了，这样可以提高效率，避免CPU不停的被中断；然后启动对应的软中断函数
+5、网卡驱动被调用后，**网卡驱动先禁用网卡的中断，表示驱动程序已经知道内存中有数据了，告诉网卡下次再收到数据包直接写内存就可以了，不要再通知CPU了，这样可以提高效率，避免CPU不停的被中断**；然后启动对应的软中断函数
 
 6、启动软中断，这步结束后，硬件中断处理函数就结束返回了。由于硬中断处理程序执行的过程中不能被中断，所以如果它执行时间过长，会导致CPU没法响应其它硬件的中断，于是内核引入软中断，这样可以将硬中断处理函数中耗时的部分移到软中断处理函数里面来慢慢处理
 
@@ -740,12 +741,62 @@ struct sock_common {
 
 Linux驱动，内核协议栈等等模块在具备接收网卡数据包之前，需要完整如下的初始化工作，这部分内容可以参考[图解Linux网络包接收过程](https://mp.weixin.qq.com/s/GoYDsfy9m0wRoXi_NCfCmg)：
 
-1.	Linux系统启动，创建ksoftirqd内核线程，用来处理软中断
-2.	网络子系统初始化
-3.	协议栈注册，针对协议栈支持的各类协议如arp/icmp/ip/udp/tcp等，每一个协议都会将自己的处理函数注册
-4.	网卡驱动初始化，初始化DMA以及向内核注册收包函数地址（NAPI的`poll`函数）
-5.	启动网卡，分配RX/TX队列，注册中断对应的处理函数
-6.	当上面工作都完成之后，就可以打开硬中断，等待数据包的到来
+1、Linux系统启动，创建ksoftirqd内核线程，用来处理软中断
+
+创建ksoftirqd内核线程关联结构[`softirq_threads`](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/softirq.c#L748)，当ksoftirqd被创建出来以后，它就会进入自己的线程循环函数`ksoftirqd_should_run`和`run_ksoftirqd`，不停地判断有没有软中断需要被处理
+
+```CPP
+//file: kernel/softirq.c
+static struct smp_hotplug_thread softirq_threads = {
+    .store          = &ksoftirqd,
+    .thread_should_run  = ksoftirqd_should_run,
+    .thread_fn      = run_ksoftirqd,
+    .thread_comm        = "ksoftirqd/%u",
+};
+
+static __init int spawn_ksoftirqd(void)
+{
+    register_cpu_notifier(&cpu_nfb);
+
+    BUG_ON(smpboot_register_percpu_thread(&softirq_threads));
+
+    return 0;
+}
+early_initcall(spawn_ksoftirqd);
+```
+
+2、网络子系统初始化
+
+3、协议栈注册，针对协议栈支持的各类协议如arp/icmp/ip/udp/tcp等，每一个协议都会将自己的处理函数注册
+
+4、网卡驱动初始化，初始化DMA以及向内核注册收包函数地址（NAPI的`poll`函数）
+
+5、启动网卡，分配RX/TX队列，注册中断对应的处理函数
+
+```CPP
+//file: drivers/net/ethernet/intel/igb/igb_main.c
+static int __igb_open(struct net_device *netdev, bool resuming)
+{
+    /* allocate transmit descriptors */
+    err = igb_setup_all_tx_resources(adapter);
+
+    /* allocate receive descriptors */
+    err = igb_setup_all_rx_resources(adapter);
+
+    /* 注册中断处理函数 */
+    err = igb_request_irq(adapter);
+    if (err)
+        goto err_req_irq;
+
+    /* 启用NAPI */
+    for (i = 0; i < adapter->num_q_vectors; i++)
+        napi_enable(&(adapter->q_vector[i]->napi));
+
+    //......
+}
+```
+
+6、当上面工作都完成之后，就可以打开硬中断，等待数据包的到来
 
 其中协议栈注册主要完成了各层协议处理函数的注册，如内核实现网络层的ip协议，传输层的tcp/udp协议等，这些协议对应的实现函数分别是`ip_rcv()`/`tcp_v4_rcv()`/`udp_rcv()`，内核调用`inet_init`后开始网络协议栈注册。通过`inet_init`将上述函数注册到了`inet_protos`和`ptype_base`数据结构中
 
@@ -823,13 +874,141 @@ static inline struct list_head *ptype_head(const struct packet_type *pt){
 ####	接收数据的主要流程（核心）
 1、硬中断处理
 
+首先数据帧从网线到达网卡的接收队列上，网卡在分配给自己的RingBuffer中寻找可用的内存位置，找到后DMA引擎会把数据DMA到这块Ringbuffer中（该过程对CPU无感）。当DMA操作完成以后，网卡会向CPU发起一个硬中断，通知CPU有数据帧到达。igb网卡的硬中断注册的处理函数是[`igb_msix_ring`](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L5782)，上文也提到过，硬中断里只完成简单必要的工作，剩下的大部分逻辑都是转交给软中断处理。`igb_msix_ring`的逻辑仅仅记录了一个寄存器，修改了一下下CPU的`poll_list`，然后发出软中断即完成
+
+![hardirq]()
+
+-   `igb_write_itr`：记录一下硬件中断频率
+-   `napi_schedule->__napi_schedule->____napi_schedule->__raise_softirq_irqoff`：触发软中断
+
+```CPP
+//file: drivers/net/ethernet/intel/igb/igb_main.c
+static irqreturn_t igb_msix_ring(int irq, void *data)
+{
+    struct igb_q_vector *q_vector = data;
+
+    /* Write the ITR value calculated from the previous interrupt. */
+    igb_write_itr(q_vector);
+
+    napi_schedule(&q_vector->napi);
+
+    return IRQ_HANDLED;
+}
+
+/* Called with irq disabled */
+static inline void ____napi_schedule(struct softnet_data *sd,
+                     struct napi_struct *napi)
+{
+    //list_add_tail修改了CPU变量softnet_data里的poll_list，将驱动napi_struct传过来的poll_list添加了进来
+    //其中softnet_data中的poll_list是一个双向列表，其中的设备都带有输入帧等着被处理
+    list_add_tail(&napi->poll_list, &sd->poll_list);
+
+    //触发了一个软中断NET_RX_SOFTIRQ
+    //触发过程只是对一个变量进行了一次或运算而已
+    __raise_softirq_irqoff(NET_RX_SOFTIRQ);
+}
+
+void __raise_softirq_irqoff(unsigned int nr)
+{
+    trace_softirq_raise(nr);
+    or_softirq_pending(1UL << nr);
+}
+//file: include/linux/irq_cpustat.h
+
+//local_softirq_pending() 修改
+#define or_softirq_pending(x)  (local_softirq_pending() |= (x))
+```
+
 2、 `ksoftirqd`内核线程处理软中断
 
-3、网络协议栈处理
+ksoftirqd中两个线程函数`ksoftirqd_should_run`和`run_ksoftirqd`的主要逻辑如下：
 
-4、IP协议层处理
+![]()
 
-5、UDP协议层处理
+-   `ksoftirqd_should_run`：读取`local_softirq_pending`函数的结果（硬中断也调用此函数，硬中断位置会修改写入标记），如果硬中断中设置了`NET_RX_SOFTIRQ`，接下来会真正进入线程函数中`run_ksoftirqd`处理
+-   `run_ksoftirqd`：
+
+```CPP
+static int ksoftirqd_should_run(unsigned int cpu)
+{
+    return local_softirq_pending();
+}
+
+#define local_softirq_pending() \
+    __IRQ_STAT(smp_processor_id(), __softirq_pending)
+
+static void run_ksoftirqd(unsigned int cpu)
+{
+    //屏蔽当前CPU上的所有中断
+    local_irq_disable();
+    if (local_softirq_pending()) {
+        __do_softirq();
+        rcu_note_context_switch(cpu);
+        local_irq_enable();
+        cond_resched();
+        return;
+    }
+
+    //用于将CPSR寄存器中的中断使能位设为1，从而使得CPU能够响应中断
+    local_irq_enable();
+}
+```
+
+这里对`run_ksoftirqd`的逻辑进行下说明：
+
+-   `__do_softirq`：判断根据当前CPU的软中断类型，调用其注册的`action`方法（前文描述过为`NET_RX_SOFTIRQ`注册的处理函数[`net_rx_action`](https://elixir.bootlin.com/linux/v4.11.6/source/net/core/dev.c#L5313)）
+
+```CPP
+asmlinkage void __do_softirq(void)
+{
+    do {
+        if (pending & 1) {
+            unsigned int vec_nr = h - softirq_vec;
+            int prev_count = preempt_count();
+
+            //...
+            trace_softirq_entry(vec_nr);
+            //CALL net_rx_action
+            h->action(h);
+            trace_softirq_exit(vec_nr);
+            //...
+        }
+        h++;
+        pending >>= 1;
+    } while (pending);
+}
+```
+
+`h->action(h)`即调用`net_rx_action`函数，它的工作过程如下：
+
+1.  函数开头的`time_limit`和`budget`是用来控制`net_rx_action`函数主动退出的，目的是保证网络包的接收不霸占CPU不放，等下次网卡再有硬中断过来的时候再处理剩下的接收数据包
+2.  最核心逻辑是获取到当前CPU变量`softnet_data`，对其`poll_list`进行遍历, 然后执行到网卡驱动注册到的`poll`函数（对于igb网卡来说即igb驱动的`igb_poll`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L6600)）
+
+```cpp
+static void net_rx_action(struct softirq_action *h)
+{
+    struct softnet_data *sd = &__get_cpu_var(softnet_data);
+    unsigned long time_limit = jiffies + 2;
+    int budget = netdev_budget;
+    void *have;
+    //WHY?
+    local_irq_disable();
+
+    while (!list_empty(&sd->poll_list)) {
+        ......
+        n = list_first_entry(&sd->poll_list, struct napi_struct, poll_list);
+
+        work = 0;
+        if (test_bit(NAPI_STATE_SCHED, &n->state)) {
+            //igb_poll for igb driver
+            work = n->poll(n, weight);
+            trace_napi_poll(n);
+        }
+
+        budget -= work;
+    }
+}
+```
 
 ##	0x04	应用层处理
 上一章节描述了整个Linux内核对数据包的接收和处理过程，最后把数据包放到socket的接收队列中，那么应用层如何接受数据呢？以UDP应用常用的`recvfrom`函数（glibc库函数）为例进行分析
@@ -946,8 +1125,21 @@ EXPORT_SYMBOL(__skb_recv_datagram);
 
 ####	一图以蔽之
 ![recv](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/latelee_excellent_send_and_recv_arch_kernel3.17.1_note.png)
-##	0x05	主要hook点
 
+##	0x05	主要hook点
+从上图中标注的关键节点，列举下内核接收包主要的hooks，如下：
+
+1、[`tracepoint:net:netif_receive_skb`](https://elixir.bootlin.com/linux/v4.11.6/source/net/core/dev.c#L4296)
+
+```CPP
+int netif_receive_skb(struct sk_buff *skb)
+{
+	trace_netif_receive_skb_entry(skb);
+
+	return netif_receive_skb_internal(skb);
+}
+EXPORT_SYMBOL(netif_receive_skb);
+```
 
 ##  0x06  参考
 -   [Monitoring and Tuning the Linux Networking Stack: Sending Data](https://blog.packagecloud.io/monitoring-tuning-linux-networking-stack-sending-data/)
@@ -966,3 +1158,5 @@ EXPORT_SYMBOL(__skb_recv_datagram);
 -   <<深入理解Linux网络技术内幕>>
 -   [sk_buff 简介](https://www.llcblog.cn/2020/10/26/how-sk-buff-work/)
 -   [【Linux】网络专题（二）——核心数据结构sk_buff](https://void-star.icu/archives/939)
+-	[Linux 网络栈接收数据（RX）：配置调优（2022）](https://arthurchiao.art/blog/linux-net-stack-tuning-rx-zh/)
+-   [Linux 网络栈接收数据（RX）：原理及内核实现（2022）](https://arthurchiao.art/blog/linux-net-stack-implementation-rx-zh/)
