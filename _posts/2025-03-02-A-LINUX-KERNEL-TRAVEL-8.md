@@ -982,7 +982,8 @@ asmlinkage void __do_softirq(void)
 `h->action(h)`即调用`net_rx_action`函数，它的工作过程如下：
 
 1.  函数开头的`time_limit`和`budget`是用来控制`net_rx_action`函数主动退出的，目的是保证网络包的接收不霸占CPU不放，等下次网卡再有硬中断过来的时候再处理剩下的接收数据包
-2.  最核心逻辑是获取到当前CPU变量`softnet_data`，对其`poll_list`进行遍历, 然后执行到网卡驱动注册到的`poll`函数（对于igb网卡来说即igb驱动的`igb_poll`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L6600)）
+2.  `net_rx_action`最核心逻辑是获取到当前CPU变量`softnet_data`，对其`poll_list`进行遍历, 然后执行到网卡驱动注册到的`poll`函数（对于igb网卡来说即igb驱动的`igb_poll`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L6600)）
+3.	`igb_poll`的初始化流程在[`igb_alloc_q_vector`](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L1225)函数中：`netif_napi_add(adapter->netdev, &q_vector->napi,igb_poll, 64)`
 
 ```cpp
 static void net_rx_action(struct softirq_action *h)
@@ -994,13 +995,16 @@ static void net_rx_action(struct softirq_action *h)
     //WHY?
     local_irq_disable();
 
+	//https://elixir.bootlin.com/linux/v4.11.6/source/net/core/dev.c#L5269
+	//循环收包，直到poll_list为空 or 主动退出
     while (!list_empty(&sd->poll_list)) {
-        ......
+        //......
         n = list_first_entry(&sd->poll_list, struct napi_struct, poll_list);
 
         work = 0;
         if (test_bit(NAPI_STATE_SCHED, &n->state)) {
             //igb_poll for igb driver
+			// mlx5 for mlx5 driver
             work = n->poll(n, weight);
             trace_napi_poll(n);
         }
@@ -1009,6 +1013,380 @@ static void net_rx_action(struct softirq_action *h)
     }
 }
 ```
+
+继续走读下收包核心函数`igb_poll`，其重点工作是对[`igb_clean_rx_irq`](https://elixir.bootlin.com/linux/v4.11.8/source/drivers/net/ethernet/intel/igb/igb_main.c#L7157)的调用，`igb_clean_rx_irq`的主要工作：
+
+-	`igb_fetch_rx_buffer->napi_alloc_skb->__napi_alloc_skb`：
+-	`igb_is_non_eop`：`igb_fetch_rx_buffer`和`igb_is_non_eop`的作用就是把数据帧从RingBuffer上取下来，特别注意这里是通过**循环获取的**，因为有可能帧要占多个RingBuffer（当网卡通过 DMA 将数据包写入内存时，可能因硬件特性或数据包长度超过缓冲区容量，将一个完整数据帧分散到多个接收描述符对应的缓冲区中），所以是在一个循环中获取的，直到帧尾部。`igb_is_non_eop`函数的主要功能是用于判断当前接收的数据缓冲区（Rx buffer）是否属于一个完整数据帧的结尾部分。**获取下来的一个数据帧用一个`sk_buff`来表示**，这个结构会贯穿协议栈处理直到应用层
+-	`napi_alloc_skb`：调用[`__napi_alloc_skb`](https://elixir.bootlin.com/linux/v4.11.8/source/net/core/skbuff.c#L471)，该方法最终最调用`__build_skb`进行创建`sk_buff`的操作；这里有个细节稍微提一下，generic XDP的处理逻辑就是在`__build_skb`之前，不过此内核igb驱动不支持，可以参考mlx5驱动的实现[`skb_from_cqe`](https://elixir.bootlin.com/linux/v4.11.8/source/drivers/net/ethernet/mellanox/mlx5/core/en_rx.c#L927)
+-	`igb_process_skb_fields`：收取完数据以后，对其进行一些校验，然后开始设置`skb`变量的timestamp, VLAN id, protocol等字段
+-	`napi_gro_receive`：`napi_skb_finish->netif_receive_skb`
+
+```cpp
+/**
+ *  igb_poll - NAPI Rx polling callback
+ *  @napi: napi polling structure
+ *  @budget: count of how many packets we should handle
+ **/
+static int igb_poll(struct napi_struct *napi, int budget)
+{
+    //...
+
+	//igb_poll的核心逻辑是对igb_clean_rx_irq的调用
+    if (q_vector->tx.ring)
+        clean_complete = igb_clean_tx_irq(q_vector);
+
+    if (q_vector->rx.ring)
+        clean_complete &= igb_clean_rx_irq(q_vector, budget);
+    //...
+}
+
+static bool igb_clean_rx_irq(struct igb_q_vector *q_vector, const int budget)
+{
+    //...
+    do {
+        /* retrieve a buffer from the ring */
+        skb = igb_fetch_rx_buffer(rx_ring, rx_desc, skb);
+
+        /* fetch next buffer in frame if non-eop */
+        if (igb_is_non_eop(rx_ring, rx_desc))
+            continue;
+        }
+
+        /* verify the packet layout is correct */
+        if (igb_cleanup_headers(rx_ring, rx_desc, skb)) {
+            skb = NULL;
+            continue;
+        }
+
+        /* populate checksum, timestamp, VLAN, and protocol */
+        igb_process_skb_fields(rx_ring, rx_desc, skb);
+
+        napi_gro_receive(&q_vector->napi, skb);
+}
+
+static struct sk_buff *igb_fetch_rx_buffer(struct igb_ring *rx_ring,
+					   union e1000_adv_rx_desc *rx_desc,
+					   struct sk_buff *skb)
+{
+	unsigned int size = le16_to_cpu(rx_desc->wb.upper.length);
+	struct igb_rx_buffer *rx_buffer;
+	struct page *page;
+
+	//...
+
+	if (likely(!skb)) {
+
+		/* allocate a skb to store the frags */
+		skb = napi_alloc_skb(&rx_ring->q_vector->napi, IGB_RX_HDR_LEN);
+		if (unlikely(!skb)) {
+			rx_ring->rx_stats.alloc_failed++;
+			return NULL;
+		}
+
+		/* we will be copying header into skb->data in
+		 * pskb_may_pull so it is in our interest to prefetch
+		 * it now to avoid a possible cache miss
+		 */
+		prefetchw(skb->data);
+	}
+	//...
+}
+```
+
+这里额外贴下`mlx5`驱动的`skb_from_cqe`[实现](https://elixir.bootlin.com/linux/v4.11.8/source/drivers/net/ethernet/mellanox/mlx5/core/en_rx.c#L762)，可以看到XDP在内核的实现位置：
+
+```cpp
+static inline
+struct sk_buff *skb_from_cqe(struct mlx5e_rq *rq, struct mlx5_cqe64 *cqe,
+			     u16 wqe_counter, u32 cqe_bcnt)
+{
+	//...
+	rcu_read_lock();
+
+	// 优先进行xdp的处理
+	consumed = mlx5e_xdp_handle(rq, di, va, &rx_headroom, &cqe_bcnt);
+	rcu_read_unlock();
+	// 如果xdp以及处理了，就不走后面的流程
+	if (consumed)
+		return NULL; /* page/packet was consumed by XDP */
+
+	// 走正常协议栈流程
+	skb = build_skb(va, RQ_PAGE_SIZE(rq));
+	if (unlikely(!skb)) {
+		rq->stats.buff_alloc_err++;
+		mlx5e_page_release(rq, di, true);
+		return NULL;
+	}
+
+	/* queue up for recycling ..*/
+	page_ref_inc(di->page);
+	mlx5e_page_release(rq, di, true);
+
+	skb_reserve(skb, rx_headroom);
+	skb_put(skb, cqe_bcnt);
+
+	return skb;
+}
+```
+
+`igb_clean_rx_irq`函数的最后流程是调用`napi_gro_receive->napi_skb_finish`函数，继续跟踪就看到了熟悉的`netif_receive_skb`函数，在`netif_receive_skb`中，数据包将被送到协议栈中继续处理
+
+```cpp
+//file: net/core/dev.c
+gro_result_t napi_gro_receive(struct napi_struct *napi, struct sk_buff *skb)
+{
+    skb_gro_reset_offset(skb);
+	/*
+	dev_gro_receive这个函数代表的是网卡GRO特性
+	可以简单理解成把相关的小包合并成一个大包就行，目的是减少传送给网络栈的包数，这有助于减少 CPU 的使用量
+	*/
+    return napi_skb_finish(dev_gro_receive(napi, skb), skb);
+}
+
+//file: net/core/dev.c
+static gro_result_t napi_skb_finish(gro_result_t ret, struct sk_buff *skb)
+{
+    switch (ret) {
+    case GRO_NORMAL:
+		// 熟悉的函数
+        if (netif_receive_skb(skb))
+            ret = GRO_DROP;
+        break;
+    //......
+}
+```
+
+3、网络协议栈处理
+
+`netif_receive_skb->__netif_receive_skb_core`函数会根据packet的协议调用注册的协议处理函数处理，在`__netif_receive_skb_core`函数，`__netif_receive_skb_core`取出protocol，它会从数据包中取出协议信息，然后遍历注册在这个协议上的回调函数列表
+
+-	tcpdump的抓包点逻辑
+-	`list_for_each_entry_rcu`用于遍历由RCU保护的链表，目的是将网络数据包（sk_buff）分发给注册的协议处理程序（如抓包工具tcpdump或协议栈）,在`__netif_receive_skb_core`中，list_for_each_entry_rcu被用于两个场景（代码片段如下）
+	-	遍历`ptype_all`链表，将数据包发送给所有注册的全局协议处理程序，由于可能有多个处理程序注册到`ptype_all`（例如多个抓包实例），所以需循环逐个检查设备是否匹配（`ptype->dev == skb->dev`）并分发数据包
+	-	遍历`ptype_base`哈希链表：根据数据包的类型（如IPv4、ARP）分发到对应的协议栈处理程序，由于同一协议类型可能有多个处理程序（如内核协议栈和用户态工具），需遍历所有可能的匹配项
+
+![]()
+
+```cpp
+static int __netif_receive_skb_core(struct sk_buff *skb, bool pfmemalloc)
+{
+    //......
+
+    //pcap逻辑，这里会将数据送入抓包点。tcpdump就是从这个入口获取包的
+    list_for_each_entry_rcu(ptype, &ptype_all, list) {
+        if (!ptype->dev || ptype->dev == skb->dev) {
+			 // 数据包传递给匹配的协议处理程序
+            if (pt_prev)
+                ret = deliver_skb(skb, pt_prev, orig_dev);
+            pt_prev = ptype;
+        }
+    }
+
+    //......
+
+	//ptype_base 是一个 hashtable
+	//ip_rcv 函数地址就存储在这个 hashtable
+    list_for_each_entry_rcu(ptype,
+            &ptype_base[ntohs(type) & PTYPE_HASH_MASK], list) {
+        if (ptype->type == type &&
+            (ptype->dev == null_or_dev || ptype->dev == skb->dev ||
+             ptype->dev == orig_dev)) {
+			// 数据包传递给特定协议类型的处理程序
+            if (pt_prev)
+                ret = deliver_skb(skb, pt_prev, orig_dev);	//for ip_rcv
+            pt_prev = ptype;
+        }
+    }
+}
+
+//file: net/core/dev.c
+static inline int deliver_skb(struct sk_buff *skb,
+                  struct packet_type *pt_prev,
+                  struct net_device *orig_dev)
+{
+    //......
+
+	//这里调用到了协议层注册的处理函数
+	//对于ip包，就会进入到ip_rcv
+	//对于arp包，会进入到arp_rcv
+    return pt_prev->func(skb, skb->dev, pt_prev, orig_dev);
+}
+```
+
+4、IP协议层处理流程
+
+```cpp
+//file: net/ipv4/ip_input.c
+int ip_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt, struct net_device *orig_dev)
+{
+    //......
+
+	//NF_HOOK是一个钩子函数，当执行完注册的钩子后就会执行到最后一个参数指向的函数ip_rcv_finish
+    return NF_HOOK(NFPROTO_IPV4, NF_INET_PRE_ROUTING, skb, dev, NULL,
+               ip_rcv_finish);
+}
+
+static int ip_rcv_finish(struct sk_buff *skb)
+{
+    //......
+
+    if (!skb_dst(skb)) {
+		//ip_route_input_noref中调用了ip_route_input_mc
+        int err = ip_route_input_noref(skb, iph->daddr, iph->saddr,
+                           iph->tos, skb->dev);
+        //...
+    }
+
+	//......
+    return dst_input(skb);
+}
+
+//file: net/ipv4/route.c
+static int ip_route_input_mc(struct sk_buff *skb, __be32 daddr, __be32 saddr,
+                u8 tos, struct net_device *dev, int our)
+{
+    if (our) {
+        rth->dst.input= ip_local_deliver;	//函数`ip_local_deliver`被赋值给了dst.input
+        rth->rt_flags |= RTCF_LOCAL;
+    }
+}
+```
+
+上面`ip_rcv_finish`中的`return dst_input(skb)`就是调用了`ip_local_deliver`，如下：
+
+```cpp
+/* Input packet from network to transport.  */
+static inline int dst_input(struct sk_buff *skb)
+{
+	//skb_dst(skb)->input调用的input方法就是路由子系统赋的ip_local_deliver
+    return skb_dst(skb)->input(skb);
+}
+```
+
+在`ip_local_deliver`函数最后的逻辑`ip_local_deliver_finish`中，会看到根据协议`ip_hdr(skb)->protocol`类型来选择对应的handler进行调用`ipprot->handler(skb)`，skb buffer将会进一步被派送到更上层的协议中，比如udp/tcp
+
+```cpp
+//file: net/ipv4/ip_input.c
+int ip_local_deliver(struct sk_buff *skb)
+{
+    /*
+     *  Reassemble IP fragments.
+     */	
+	//如果ip分片需要重组
+    if (ip_is_fragment(ip_hdr(skb))) {
+        if (ip_defrag(skb, IP_DEFRAG_LOCAL_DELIVER))
+            return 0;
+    }
+
+    return NF_HOOK(NFPROTO_IPV4, NF_INET_LOCAL_IN, skb, skb->dev, NULL,
+               ip_local_deliver_finish);
+}
+
+static int ip_local_deliver_finish(struct sk_buff *skb)
+{
+    //......
+
+    int protocol = ip_hdr(skb)->protocol;
+    const struct net_protocol *ipprot;
+
+	//inet_protos中保存着tcp_rcv()和udp_rcv()的函数地址
+    ipprot = rcu_dereference(inet_protos[protocol]);
+    if (ipprot != NULL) {
+        ret = ipprot->handler(skb);
+    }
+}
+```
+
+5、UDP协议层处理过程
+
+UDP协议的处理[函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/udp.c#L1873)是`udp_rcv->__udp4_lib_rcv`，关键流程如下：
+
+-	`__udp4_lib_lookup_skb`：根据`skb`来寻找对应的socket结构，即`struct sock *sk`
+-	`udp_queue_rcv_skb`：将`skb`成功挂到`sk`对应的接收队列`sk_receive_queue`的尾部，等待上层接收
+
+```cpp
+//file: net/ipv4/udp.c
+int udp_rcv(struct sk_buff *skb)
+{
+    return __udp4_lib_rcv(skb, &udp_table, IPPROTO_UDP);
+}
+
+/*
+ *	All we need to do is get the socket, and then do a checksum.
+ */
+int __udp4_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,
+           int proto)
+{
+	// ......
+	//__udp4_lib_lookup_skb是根据skb来寻找对应的socket，当找到以后将数据包放到socket的缓存队列里
+	//如果没有找到，则发送一个目标不可达的icmp包
+    sk = __udp4_lib_lookup_skb(skb, uh->source, uh->dest, udptable);
+
+    if (sk != NULL) {
+        int ret = udp_queue_rcv_skb(sk, skb);
+		//......
+    }
+
+    icmp_send(skb, ICMP_DEST_UNREACH, ICMP_PORT_UNREACH, 0);
+}
+```
+
+`udp_queue_rcv_skb`函数的主要功能是
+
+```cpp
+//file: net/ipv4/udp.c
+int udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
+{   
+    //......
+
+	//sk_rcvqueues_full：接收队列如果满了的话，将直接把包丢弃
+	//接收队列大小受内核参数net.core.rmem_max和net.core.rmem_default影响
+    if (sk_rcvqueues_full(sk, skb, sk->sk_rcvbuf))
+        goto drop;
+
+        rc = 0;
+
+    ipv4_pktinfo_prepare(skb);
+    bh_lock_sock(sk);
+	/*
+	sock_owned_by_user：这里判断用户是不是正在这个socket上进行系统调用（socket被占用），如果没有，那就可以直接放到socket的接收队列中
+	如果有，那就通过sk_add_backlog把数据包添加到backlog队列
+	当用户释放的socket的时候，内核会检查backlog队列，如果有数据再移动到接收队列中
+	*/
+    if (!sock_owned_by_user(sk))
+        rc = __udp_queue_rcv_skb(sk, skb);	//核心处理
+    else if (sk_add_backlog(sk, skb, sk->sk_rcvbuf)) {
+        bh_unlock_sock(sk);
+        goto drop;
+    }
+    bh_unlock_sock(sk);
+
+    return rc;
+}
+```
+
+`sock_owned_by_user`函数的场景是TODO
+
+继续看下`__udp_queue_rcv_skb->__udp_enqueue_schedule_skb`的实现：
+
+```cpp
+int __udp_enqueue_schedule_skb(struct sock *sk, struct sk_buff *skb)
+{
+	struct sk_buff_head *list = &sk->sk_receive_queue;
+	int rmem, delta, amt, err = -ENOMEM;
+	spinlock_t *busy = NULL;
+	int size;
+	//......
+
+	//把skb挂到list的尾部
+	__skb_queue_tail(list, skb);
+
+	//......	
+}
+EXPORT_SYMBOL_GPL(__udp_enqueue_schedule_skb);
+```
+
 
 ##	0x04	应用层处理
 上一章节描述了整个Linux内核对数据包的接收和处理过程，最后把数据包放到socket的接收队列中，那么应用层如何接受数据呢？以UDP应用常用的`recvfrom`函数（glibc库函数）为例进行分析
