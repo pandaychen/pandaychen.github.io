@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      数据结构与算法回顾（九）：bitmap
-subtitle:
+subtitle:	bitmap在XDP ACL项目中的应用
 date:       2024-08-09
 author:     pandaychen
 header-img:
@@ -9,6 +9,7 @@ catalog: true
 tags:
     - Golang
     - 数据结构
+    - eBPF
 ---
 
 ##  0x00    前言
@@ -136,14 +137,13 @@ func (dst Bitmap) Max() (uint32, bool) {
 
 问题就来了，如何设计巧妙的数据结构来解决 iptables 链式匹配的低效问题（在 xdp 程序中）
 
-
 ####    算法描述
 
-借助于 bitmap 来实现，为了提升匹配效率，将所有的 ACL 规则做预处理，将链式的规则拆分存储。规则匹配时，参考内核的 `O(1)` 调度算法，在多个匹配的规则中，快速选取高优先级的规则
+借助于 bitmap 来实现，为了提升匹配效率，将所有的 ACL 规则做预处理，将链式的规则拆分存储。规则匹配时，参考内核的 `O(1)` 调度算法，在多个匹配的规则中，快速选取**高优先级**（序号越前优先级越高）的规则
 
 1、规则预处理
 
-按照如下六个维度将 iptables 链式规则拆分，核心思路将规则生成 `6` 张表 bitmap，其中 key 为关联各个表的属性，value 为 bitmap
+按照如下六个维度将 iptables 链式规则拆分，核心思路将规则生成 `6` 张表 bitmap，**其中 key 为关联各个表的属性，value 为 bitmap**
 
 -   规则编号：key 为规则编号，value 存储 action 结果
 -   源地址：key 为源地址，value bitmap 存储规则编号
@@ -162,7 +162,7 @@ func (dst Bitmap) Max() (uint32, bool) {
 4.  规则 `256` 有目的端口、协议两个匹配项，将目的端口 `53` 作为 key，规则编号 `0x100` 作为 value，存储到 sport Map 中；将 udp 协议号 `17` 作为 key，规则编号 `0x100` 作为 value，存储到 proto Map 中
 5. 依次将规则 `1`、`16`、`256` 的规则编号作为 key，动作作为 value，存储到 action Map 中
 
-此外，还需要补充下特殊规则：
+此外，还需要补充下**特殊规则**：
 6.  相同 key 合并：规则编号 `16`、`256` 均有目的端口为 `53` 的匹配项，应该将 `16`、`256` 的规则编号进行按位或操作，然后再存储，即 `0x10 | 0x100 = 0x110`（注意这里是 16 进制）
 7.  通配规则的处理（规则 `1`）：规则 `1` 的目的端口、协议均为通配项，应该将规则 `1` 的编号按位或追加到现有的匹配项中（下图中下划线的 value 值：`0x111`、`0x11` 等）。同理，将规则 `16`、`256` 的规则编号按位或追加到现有的源地址匹配项中（下划线的 value 值：`0x111`、`0x110`）
 
@@ -170,12 +170,41 @@ func (dst Bitmap) Max() (uint32, bool) {
 
 ![bit1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/xdp/bytedance/bitmap-1.png)
 
+srcMap：
+-	`192.168.3.0/24->0x111`：CIDR为`192.168.3.0/24`会命中规则`1`、`16`以及`256`
+-	`!192.168.3.0/24->0x110`：`192.168.3.0/24`之外的网段会命中规则`16`、`256`（这里的实现比较灵活）
+
+dport Map：
+-	`53->0x111[0b000100010001]`：说明目的端口为`53`会匹配到规则`1`、`16`以及`256`
+-	`80->0x11`：说明目的端口为`80`会匹配到规则`1`、`16`
+
+2、和iptables规则的兼容性？实际上`iptables`支持的场景更为复杂，比如若干规则的源、目的IP都包含了CIDR，而且这些CIDR之间存在包含或不包含的关系，如何转换为bitmap存储？（`iptables`是链式匹配不存在类似转换问题）
+
+```bash
+# 比如这样的iptables规则
+iptables -A INPUT -s 192.168.0.0/16 -p tcp --dport 53 -j ACCEPT	#序号1
+iptables -A INPUT -s 192.168.00.0/16 -p tcp --dport 80 -j DROP	#序号2
+iptables -A INPUT -s 172.16.0.0/16 -p tcp --dport 8080 -j DROP	#序号3
+iptables -A INPUT -s 172.16.1.0/24  -j DROP						#序号4
+```
+
+3、链式规则的匹配转换为查表操作，为简化理解，对于一条规则只考虑下面的属性：
+
+-	IP 地址：由多条 CIDR 组成的远端地址
+-	端口（端口范围）：分为源端口 OR 目的端口
+-	协议：TCP/UDP/ICMP 等
+-	动作：ACCEPT、DROP
+-	规则的优先级：priority
+-	可能需要一条默认规则（优先级最低）
+-	规则的创建时间
+
 ####    匹配规则
 报文匹配时，根据五元组（源、目的地址，源、目的端口、协议）依次作为 key，分别查找对应的 eBPF Map，得到 `5` 个 value。然后将这 `5` 个 value 进行按位与操作，得到一个 bitmap。这个 bitmap 的每个 bit，就表示了对应的一条规则；被置位为 `1` 的 bit，表示对应的规则匹配成功，一般有两种情况
 
 1.	最终的 bitmap 只有 `1` 位被置位
-2.	最终的 bitmap 超过 `1` 位被置位，此时需要获取优先级最高的那条（数字最小）
+2.	最终的 bitmap 超过 `1` 位被置位，此时需要获取优先级最高的那条（数字最小，即最右边的 `1`）
 
+获取到优先级最高的bitmap的唯一位，再用此值去查询action对应的eBPF Map，获取最终的ACTION结果，一次查询完成
 
 ![bit2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/xdp/bytedance/bitmap-2.png)
 
@@ -189,12 +218,32 @@ func (dst Bitmap) Max() (uint32, bool) {
 
 将非 NULL 的 value 进行按位与操作（`0x110 & 0x111 & 0x101`），得到 bitmap = `0x100`。由于 bitmap 只有一位被置位 `1`（只有一条规则匹配成功，即规则 `256`），利用该 bitmap 作为 key，查找 action Map，得到 value 为 `ACCEPT`；同样，报文（`192.168.4.1:1000 -> 192.168.4.100:53` tcp）的五元组作为 key，查找 eBPF Map 后，最终匹配到规则 `16`
 
-第二种情况，当报文（`192.168.3.1:1000 -> 192.168.4.100:53` udp）的五元组作为 key，计算结果为 `0x101`（多个 bit 被置位），由于 bitmap 有两位被置位（规则 `1`、`256`），按规则应该取优先级最高的规则编号作为 key，查找 action Map。在字节的描述中，借鉴了内核 `O(1)` 调度算法的思想，使用指令 `bitmap &= -bitmap` 即可取到优先级最高的 bit（如 `0x101 &= -(0x101)` 最终等于 `0x1`），最后使用 `0x1` 作为 key，查找 action Map，得到 value 为 `DROP`
+第二种情况，当报文（`192.168.3.1:1000 -> 192.168.4.100:53` udp）的五元组作为 key，计算结果为 `0x101`（多个 bit 被置位），由于 bitmap 有两位被置位（规则 `1`、`256`），按规则应该取优先级最高的规则编号作为 key，查找 action Map。在原文实现借鉴了内核 `O(1)` 调度算法的思想，使用指令 `bitmap &= -bitmap` 即可取到优先级最高（最低有效位）的 bit（如 `0x101 &= -(0x101)` 最终等于 `0x1`），最后使用 `0x1` 作为 key，查找 action Map，得到 value 为 `DROP`
 
+##	0x03	代码实现
+上面算法的描述过于抽象，实现中还需要考虑如下细节：
+
+-	对CIDR规则的处理，单条规则的CIDR数组是否存在冲突？整体规则条目中CIDR是否存在冲突？
+-	对端口范围的处理、未设置端口范围按照全端口匹配
+
+本小节以项目[xdp_acl](https://github.com/hi-glenn/xdp_acl)进行简单说明
+
+####	内核态实现
+
+####	用户态实现
+
+####	对端口范围规则的处理
+需要处理如下case
+
+1、未设置端口匹配的规则（全端口匹配）
+
+2、设置指定端口的规则
+
+####	对CIDR规则的处理
 
 ####    热更新（CRUD）
 
-##  0x03    参考
+##  0x04    参考
 -   [Golang 优化之路——bitset](https://blog.cyeam.com/golang/2017/01/18/go-optimize-bitset)
 -   [Go 每日一库之 roaring](https://darjun.github.io/2022/07/17/godailylib/roaring/)
 -   [eBPF 技术实践：高性能 ACL](https://blog.csdn.net/ByteDanceTech/article/details/106632252)
