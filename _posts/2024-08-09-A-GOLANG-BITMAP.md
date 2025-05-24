@@ -229,6 +229,51 @@ iptables -A INPUT -s 172.16.1.0/24  -j DROP						#序号4
 本小节以项目[xdp_acl](https://github.com/hi-glenn/xdp_acl)进行简单说明
 
 ####	内核态实现
+1、ebpf maps，包含`src_v4`、`sport_v4`、`dst_v4`、`dport_v4`、`proto_v4`和`rule_action_v4`，特点是内核态只读，用户态读写
+
+以`src_v4`为例，注意其类型为`BPF_MAP_TYPE_LPM_TRIE`，比较适合CIDR匹配这种场景
+
+```CPP
+#define BITMAP_ARRAY_SIZE 160
+
+__u64 bitmap[BITMAP_ARRAY_SIZE];
+
+struct bpf_map_def SEC("maps") src_v4 = {
+	.type = BPF_MAP_TYPE_LPM_TRIE,
+	.key_size = sizeof(struct lpm_key_ipv4), // 8 byte: mask len; 8 byte: host byte oreder
+	.value_size = sizeof(bitmap),
+	.max_entries = IP_MAX_ENTRIES_V4,
+	.map_flags = BPF_F_NO_PREALLOC,
+};
+```
+
+![core-struct](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/xdp/xdp_acl/core_struct_1.png)
+
+2、匹配规则实现`get_hit_rules_optimize`
+
+```CPP
+static __always_inline void get_hit_rules_optimize(__u64 *rule_array[], __u32 *rule_array_len_ptr, __u64 *rule_array_index_ptr, __u64 *hit_rules_ptr)
+{
+	if (5 == *rule_array_len_ptr)
+	{
+		// 五个规则的第0号位置进行& 与运算，因为优先级0号位置最高，从左向右依次降低
+		//rule_array[0]	规则1
+		//rule_array[1]	规则2
+		//rule_array[2]	规则3
+		//rule_array[3]	规则4
+		//rule_array[4]	规则5
+		//rule_array_index_ptr 遍历后会加1，这里会重复8次，外层重复20次，那就对上了
+		*hit_rules_ptr = (rule_array[0][*rule_array_index_ptr]) & (rule_array[1][*rule_array_index_ptr]) & (rule_array[2][*rule_array_index_ptr]) & (rule_array[3][*rule_array_index_ptr]) & (rule_array[4][*rule_array_index_ptr]);
+		if (*hit_rules_ptr > 0)
+		{
+			return;
+		}
+
+		// 省略8次重复的逻辑
+	}
+	return;
+}
+```
 
 ####	用户态实现
 
