@@ -228,12 +228,11 @@ WebShell 是一种可执行 Shell 命令的脚本文件（常见的有 PHP等）
 - `tracepoint/syscalls/sys_exit_connect`
 
 ##  0x06    基于ebpf的恶意利用
+工具参考[bad-bpf](https://github.com/pathtofile/bad-bpf)
 
 1、使用 eBPF 添加 `sudo` 用户
 
 它通过拦截 `sudo` 读取 `/etc/sudoers` 文件，并将第一行覆盖为 `<username> ALL=(ALL:ALL) NOPASSWD:ALL #` 的方式工作。通过这种方式欺骗了 `sudo`，使其认为用户被允许成为 `root`。其他程序如 `cat` 或 `sudoedit` 不受影响，所以对于这些程序来说，文件未改变，用户并没有这些权限。行尾的 `#` 确保行的其余部分被当作注释处理，因此不会破坏文件的逻辑
-
-[bad-bpf](https://github.com/pathtofile/bad-bpf)
 
 2、eBPF内存木马：通过ebpf hook入/出口流量，筛选出特定的恶意命令。再通过hook `execve/execveat`等函数，将其他进程正常执行的命令替换为恶意命令，达到WebShell的效果，利用门槛较高。
 
@@ -273,7 +272,6 @@ Linux Rootkit特指以Linux内核模块（LKM）形式加载到操作系统中�
 
 ####  进程隐藏
 1、利用`prctl`系统调用进行
-
 
 2、利用挂载覆盖`/proc/pid` 目录，利用 `mount`指令的`bind`方式将另外一个目录挂载覆盖至`/proc/`目录下指定进程 ID 的目录（由于`ps`、`top` 等工具会读取`/proc` 目录下获取进程信息，如果将进程 ID 的目录信息覆盖，则原来的进程信息将从 ps 的输出结果中隐藏）
 
