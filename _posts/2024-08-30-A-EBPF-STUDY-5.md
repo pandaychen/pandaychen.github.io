@@ -554,6 +554,7 @@ hping3 -A -p 8000 X.X.X.X
 ##  0x05  XDP项目参考
 - [Utilities and example programs for use with XDP](https://github.com/xdp-project/xdp-tools)
 - [A high performance ACL basied on XDP](https://github.com/hi-glenn/xdp_acl)
+- [A firewall that utilizes the Linux kernel's XDP hook](https://github.com/gamemann/XDP-Firewall)
 
 ##  0x06    参考
 - [每秒 1 百万的包传输，几乎不耗 CPU 的那种](https://colobu.com/2023/04/02/support-1m-pps-with-zero-cpu-usage/)
@@ -569,3 +570,4 @@ hping3 -A -p 8000 X.X.X.X
 - [eBPF Talk: XDP 解析所有 TCP options](https://asphaltt.github.io/post/ebpf-talk-127-xdp-tcp-options/)
 - [eBPF Talk: XDP 系列文章](https://www.v2ex.com/t/906620)
 - [eBPF Firewall](https://github.com/danger-dream/ebpf-firewall)
+- [eBPF 开发者教程： 简单的 XDP 负载均衡器](https://eunomia.dev/zh/tutorials/42-xdp-loadbalancer/)

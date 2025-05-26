@@ -82,8 +82,8 @@ eBPF 辅助函数（Helper Functions）是一组内核提供的 API，用于帮�
 
 eBPF提供的辅助函数的使用可以参考：
 
--   [Helper functions](https://ebpf-docs.dylanreimerink.nl/linux/helper-function/)
--   [Helper functions](https://man7.org/linux/man-pages/man2/bpf.2.html)
+-   [ebpf-docs：Helper functions](https://ebpf-docs.dylanreimerink.nl/linux/helper-function/)
+-   [man7.org：Helper functions](https://man7.org/linux/man-pages/man2/bpf.2.html)
 
 内核不允许eBPF程序直接调用内核中的任意函数，只能访问有限的bpf-helpers。bpf-helpers可以对BPF Maps进行增删改查，部分指令由bpf系统调用完成。bpf-helpers还包含了内核提供的工具函数，例如读取内核中的内存空间，获取当前时间、打印调试信息等等。常用函数如下：
 
@@ -134,8 +134,7 @@ eBPF 的工作逻辑详细描述如下：
 -   `raw_tracepoint`：原始跟踪点，在指定的内核原始跟踪点处执行
 -   `raw_tracepoint_return`：原始跟踪点返回，在指定的内核原始跟踪
 -   `xdp`：网络数据处理，拦截和处理网络数据包
--   `perf_event`：性能事件，用于处理内核性能事件
-
+-   `perf_event`：性能事件，用于处理内核性能事件，[示例](https://github.com/iovisor/bcc/blob/master/libbpf-tools/runqlen.bpf.c#L15)
 
 ####    ebpf vs linux kernel module
 
@@ -159,7 +158,7 @@ eBPF 的工作逻辑详细描述如下：
 - 运行于内核态的 BPF 程序的源代码文件 (`bpf_program.bpf.c`)：仅支持 C 开发（且语法受限），并且可以完善地将 C 源码编译成 BPF 目标文件的只有 clang 编译器
 - 用于向内核加载 BPF 程序、从内核卸载 BPF 程序、与内核态进行数据交互、展现用户态程序逻辑的用户态程序的源代码文件 (`bpf_loader.c`)，用于加载和卸载 BPF 程序的用户态程序则可以由多种语言开发，既可以用 C ，也支持 Python、Go、Rust 等
 
-目前运行于内核态的 BPF 程序只能用 C 语言开发 (对应于第一类源代码文件，如下图 `bpf_program.bpf.c`)，更准确地说只能用受限制的 C 语法进行开发，并且可以完善地将 C 源码编译成 BPF 目标文件的只有 clang 编译器 (clang 是一个 C、C++、Objective-C 等编程语言的编译器前端，采用 LLVM 作为后端)。
+目前运行于内核态的 BPF 程序只能用 C 语言开发（对应于第一类源代码文件，如下图 `bpf_program.bpf.c`），更准确地说只能用受限制的 C 语法进行开发，并且可以完善地将 C 源码编译成 BPF 目标文件的只有 clang 编译器（clang 是一个 C、C++、Objective-C 等编程语言的编译器前端，采用 LLVM 作为后端）
 
 重要：BPF 程序的编译与加载到内核过程的示意图如下：
 
@@ -400,7 +399,7 @@ BPF 字节码是运行于 OS 内核态的代码，它与用户态是有严格界
 5、确定应用程序所需的最低内核版本
 
 ##  0x02    基于 golang 的用户态实现
-本小节介绍下 [cilium/ebpf](https://github.com/cilium/ebpf) 的开发入门，该项目借鉴了 libbpf-boostrap 的思路，通过代码生成与 bpf 程序内嵌的方式构建 eBPF 程序用户态部分，提供了 `bpf2go` 工具，可以将 bpf 的 C 源码转换为相应的 go 源码。ebpf 将 bpf 程序抽象为 `bpfObjects`，通过生成的 `loadBpfObjects` 完成 bpf 程序加载到内核的过程，然后利用 ebpf 库提供的诸如 `link` 之类的包实现 ebpf 与内核事件的关联。example 如下：
+本小节介绍下 [cilium/ebpf](https://github.com/cilium/ebpf) 的开发入门，该项目借鉴了 libbpf-boostrap 的思路，通过代码生成与 bpf 程序内嵌的方式构建 eBPF 程序用户态部分，提供了 `bpf2go` 工具，可以将 bpf 的 C 源码转换为相应的 go 源码（`bpf2go`工具的[本质](https://github.com/cilium/ebpf/blob/main/cmd/bpf2go/gen/compile.go)）。ebpf 将 bpf 程序抽象为 `bpfObjects`，通过生成的 `loadBpfObjects` 完成 bpf 程序加载到内核的过程，然后利用 ebpf 库提供的诸如 `link` 之类的包实现 ebpf 与内核事件的关联。example 如下：
 
 ```BASH
 tracepoint_in_c     #*.go ebpf 程序用户态部分
@@ -1239,8 +1238,8 @@ whoami           68338  68337    0 /usr/bin/whoami
 ####  内核态开发
 内核态代码入门可以阅读[eBPF 开发实践教程](https://eunomia.dev/zh/tutorials/)，需要注意：
 
-1.  支持CORE（BTF）技术的开发模式及编译工具
-2.  不支持CORE技术的开发及编译工具（走内核头文件方式编译）
+1.  支持CORE（内核开启BTF）技术的开发模式及编译工具
+2.  不支持CORE技术的开发及编译工具（使用内核头文件方式编译），也可以选择[btfhub](https://github.com/aquasecurity/btfhub)技术
 
 
 ####  用户态开发

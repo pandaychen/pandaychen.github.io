@@ -270,7 +270,7 @@ struct bpf_map_def SEC("maps") sport_v4 = {
 ####	匹配规则实现
 匹配规则实现`get_hit_rules_optimize`
 
-![match]()
+![match](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/xdp/xdp_acl/core_struct_2.png)
 
 ```CPP
 static __always_inline void get_hit_rules_optimize(__u64 *rule_array[], __u32 *rule_array_len_ptr, __u64 *rule_array_index_ptr, __u64 *hit_rules_ptr)
@@ -308,8 +308,7 @@ static __always_inline void get_hit_rules_optimize(__u64 *rule_array[], __u32 *r
 `genPortConstraintsRuleArrAndLoadIntoMap`方法用于在第一次运行时，初始化配置文件中的端口规则，数据源来自全局配置规则列表[`ruleList`](https://github.com/hi-glenn/xdp_acl/blob/main/rules_about.go#L83)，把`ruleList`中所有规则的端口规则，按规则处理完成之后，通过`bpfMapForPort`写入到内核态的map中
 
 ```CPP
-// specifiedPortRule：key 端口号
-//	value：priority 序号数组
+// specifiedPortRule：key 端口号，value：priority 序号数组
 
 // 参数specifiedPortRule 是全局变量	specifiedDstPortRule = make(map[uint16][]uint32, 1024) 的引用
 // 参数 commonPortRulePtr 是全局变量	commonSrcPortRule RuleBitmapArrV4 的 引用
@@ -395,11 +394,79 @@ func genPortConstraintsRuleArrAndLoadIntoMap(originalRulesWgPtr *sync.WaitGroup,
 }
 ```
 
-2、对源/目的IP（CIDR规则）规则的处理
+2、对源/目的IP（CIDR规则）规则的处理，同端口处理一样，把`ruleList`中所有规则的CIDR规则，按规则处理完成之后，通过`bpfMapForIP`写入到内核态的map中。不过这里需要注意的是，由于CIDR之间可能会存在子集包含与包含关系，所以要边处理边检查CIDR集合关系。比如`192.168.1.0/24`对应规则priority为`100`，而`192.168.1.0/25`（子集）对应priority为`100`，那么最终`specialCidrMapRuleArr`中`192.168.1.0/25`对应的priority数组至少应该是`[100,200]`
+
+```CPP
+// specialCidr： key 为cidr结构体，value为priority 数组
+func genIpConstraintsRuleArrAndLoadIntoMap(originalRulesWgPtr *sync.WaitGroup, bpfMapForIP *ebpf.Map, specialCidrMapRuleArr map[SpecialCidr][]uint32, name string) {
+	/*
+		{
+			"specialCidr struct": [4, 5, 6],
+			"specialCidr struct": [4, 5, 6, 7, 8]
+		}
+	*/
+	b := time.Now()
+
+	var addrArr []Addr
+	var addr Addr
+	var aSpecialCidr, bSpecialCidr SpecialCidr
+	var ruleArr, newCidrRuleNoArr []uint32
+
+	var compareRet CIDR_COMPARE_RET
+
+	for ruleInx := 0; ruleInx < len(ruleList); ruleInx++ {
+
+		if MAP_TYPE_IP_SRC == name {
+			addrArr = ruleList[ruleInx].AddrSrcArr
+		} else {
+			addrArr = ruleList[ruleInx].AddrDstArr
+		}
+
+		for _, addr = range addrArr {
+			aSpecialCidr = addr.CidrSpecial
+			newCidrRuleNoArr = []uint32{ruleList[ruleInx].Priority}
+			for bSpecialCidr, ruleArr = range specialCidrMapRuleArr {
+				compareRet = compareCIDR(&aSpecialCidr, &bSpecialCidr)
+				if CIDR_EQUAL == compareRet || CIDR_CONTAIN == compareRet {
+					// 新项 cidr 与 遍历项 cidr 相同 || 新项 cidr 比 遍历项 cidr 大
+					specialCidrMapRuleArr[bSpecialCidr] = append(ruleArr, ruleList[ruleInx].Priority)
+				} else if CIDR_INCLUDED == compareRet {
+					// 新项 cidr 比 遍历项 cidr 小
+					newCidrRuleNoArr = append(newCidrRuleNoArr, ruleArr...)
+					removeDupRuleNo(&newCidrRuleNoArr)
+				}
+				// CIDR_NO_CROSS: 新项 cidr 与 遍历项 cidr 无交叉; 啥也不做
+			}
+
+			if _, ok := specialCidrMapRuleArr[aSpecialCidr]; !ok {
+				specialCidrMapRuleArr[aSpecialCidr] = newCidrRuleNoArr
+			}
+
+			ruleArr = ruleArr[:0]
+			newCidrRuleNoArr = newCidrRuleNoArr[:0]
+		}
+
+		addrArr = addrArr[:0]
+	}
+
+
+	for specialCidr, rulesNoArr := range specialCidrMapRuleArr {
+		keyNew := getLpmKey(&specialCidr)
+		var value RuleBitmapArrV4
+		for i := 0; i < len(rulesNoArr); i++ {
+			setBitmapBit(&value, rulesNoArr[i])
+		}
+		if err := bpfMapForIP.Put(keyNew, &value); err != nil {
+			zlog.Error(err.Error(), "; bpfMapForIP Put error")
+		}
+	}
+
+	//...
+}
+```
 
 ####    热更新（CRUD）实现
 xdp_acl支持[异步方式](https://github.com/hi-glenn/xdp_acl/blob/main/web.go#L176)修改规则，以新增规则为例：
-
 
 
 ##  0x06    参考
