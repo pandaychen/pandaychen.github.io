@@ -260,6 +260,10 @@ Linux Rootkit特指以Linux内核模块（LKM）形式加载到操作系统中�
 - [vlany](https://github.com/mempodippy/vlany)：修改动态链接器rootkit 
 - [cub3](https://github.com/mempodippy/cub3)：用于预加载的恶意动态链接库
 
+####    利用io_uring异步IO执行机制绕过
+参考文章[深度解构io_uring新型Rootkit的攻击防护](https://mp.weixin.qq.com/s?__biz=MzU3ODAyMjg4OQ==&mid=2247496377&idx=1&sn=27cbb8a50866b909bd9a1cb441df1a6f&subscene=0)。基于io_uring技术实现的工具curing，通过不同的`opcode`[组合](https://github.com/axboe/liburing/blob/master/src/include/liburing/io_uring.h#L207)，完成了不同的功能，典型的如文件打开`IORING_OP_OPENAT`/网络连接`IORING_OP_CONNECT`等，curing工具通过传入`IORING_OP_OPENAT`完成打开文件操作，在内核中通过`IORING_OP_OPENAT`对应的函数回调`io_openat`完成内核操作，从而可以绕过依赖监控syscall行为发现风险的安全产品
+
+![curing](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/hids/rootkit/curing_rootkit.png)
 
 ##  0x08  其他
 
@@ -270,9 +274,8 @@ Linux Rootkit特指以Linux内核模块（LKM）形式加载到操作系统中�
 ####  进程隐藏
 1、利用`prctl`系统调用进行
 
-2、
 
-3、利用挂载覆盖`/proc/pid` 目录，利用 `mount`指令的`bind`方式将另外一个目录挂载覆盖至`/proc/`目录下指定进程 ID 的目录（由于`ps`、`top` 等工具会读取`/proc` 目录下获取进程信息，如果将进程 ID 的目录信息覆盖，则原来的进程信息将从 ps 的输出结果中隐藏）
+2、利用挂载覆盖`/proc/pid` 目录，利用 `mount`指令的`bind`方式将另外一个目录挂载覆盖至`/proc/`目录下指定进程 ID 的目录（由于`ps`、`top` 等工具会读取`/proc` 目录下获取进程信息，如果将进程 ID 的目录信息覆盖，则原来的进程信息将从 ps 的输出结果中隐藏）
 
 ```bash
 #隐藏进程 id 为 42 的进程信息
@@ -419,3 +422,4 @@ int main(void)
 -   [ptrace实现代码注入](https://m0nkee.github.io/2015/08/20/play-ptrace/)
 -   [Linux ELF无文件内存执行学习小记](https://xeldax.top/article/linux_no_file_elf_mem_execute)
 -   [How BPF-Enabled Malware Works](https://www.trendmicro.com/vinfo/us/security/news/threat-landscape/how-bpf-enabled-malware-works-bracing-for-emerging-threats)
+-   [零系统调用的暗度陈仓：深度解构io_uring新型Rootkit的攻击防护](https://mp.weixin.qq.com/s?__biz=MzU3ODAyMjg4OQ==&mid=2247496377&idx=1&sn=27cbb8a50866b909bd9a1cb441df1a6f&subscene=0)
