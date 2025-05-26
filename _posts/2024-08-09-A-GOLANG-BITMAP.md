@@ -226,10 +226,14 @@ iptables -A INPUT -s 172.16.1.0/24  -j DROP						#序号4
 -	对CIDR规则的处理，单条规则的CIDR数组是否存在冲突？整体规则条目中CIDR是否存在冲突？
 -	对端口范围的处理、未设置端口范围按照全端口匹配
 
-本小节以项目[xdp_acl](https://github.com/hi-glenn/xdp_acl)进行简单说明
+本小节以项目[xdp_acl](https://github.com/hi-glenn/xdp_acl)进行简单说明，项目的整体运行流程如下：
 
-####	内核态实现
-1、ebpf maps，包含`src_v4`、`sport_v4`、`dst_v4`、`dport_v4`、`proto_v4`和`rule_action_v4`，特点是内核态只读，用户态读写
+![xdp_acl]()
+
+##	0x04	内核态实现
+
+####	数据结构
+ebpf maps，包含`src_v4`、`sport_v4`、`dst_v4`、`dport_v4`、`proto_v4`和`rule_action_v4`，特点是内核态只读，用户态读写
 
 以`src_v4`为例，注意其类型为`BPF_MAP_TYPE_LPM_TRIE`，比较适合CIDR匹配这种场景
 
@@ -249,7 +253,24 @@ struct bpf_map_def SEC("maps") src_v4 = {
 
 ![core-struct](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/xdp/xdp_acl/core_struct_1.png)
 
-2、匹配规则实现`get_hit_rules_optimize`
+又如`sport_v4`存储端口匹配规则的内核态map，注意这里需要存储`0-65535`每个端口对应的bitmap，即key为端口号，value为`bitmap`结构
+
+```CPP
+// 支持的最多端口个数 1~65535; 65536 == 2^16
+#define PORT_MAX_ENTRIES_V4 65536
+
+struct bpf_map_def SEC("maps") sport_v4 = {
+	.type = BPF_MAP_TYPE_HASH,
+	.key_size = sizeof(__u16), // 2 byte; net byte oreder
+	.value_size = sizeof(bitmap),
+	.max_entries = PORT_MAX_ENTRIES_V4,
+};
+```
+
+####	匹配规则实现
+匹配规则实现`get_hit_rules_optimize`
+
+![match]()
 
 ```CPP
 static __always_inline void get_hit_rules_optimize(__u64 *rule_array[], __u32 *rule_array_len_ptr, __u64 *rule_array_index_ptr, __u64 *hit_rules_ptr)
@@ -275,20 +296,113 @@ static __always_inline void get_hit_rules_optimize(__u64 *rule_array[], __u32 *r
 }
 ```
 
-####	用户态实现
+##	0x05	用户态实现
 
-####	对端口范围规则的处理
-需要处理如下case
+####	规则==> bpf Map的转换
 
-1、未设置端口匹配的规则（全端口匹配）
+1、对端口范围规则的处理，需要处理如下case
 
-2、设置指定端口的规则
+-	未设置端口匹配的规则（全端口匹配），需要转换为`0-65535`，即每个端口key对应的value bitmap中，这条规则（`priority`）都需要被置位
+-	设置指定端口的规则
 
-####	对CIDR规则的处理
+`genPortConstraintsRuleArrAndLoadIntoMap`方法用于在第一次运行时，初始化配置文件中的端口规则，数据源来自全局配置规则列表[`ruleList`](https://github.com/hi-glenn/xdp_acl/blob/main/rules_about.go#L83)，把`ruleList`中所有规则的端口规则，按规则处理完成之后，通过`bpfMapForPort`写入到内核态的map中
 
-####    热更新（CRUD）
+```CPP
+// specifiedPortRule：key 端口号
+//	value：priority 序号数组
 
-##  0x04    参考
+// 参数specifiedPortRule 是全局变量	specifiedDstPortRule = make(map[uint16][]uint32, 1024) 的引用
+// 参数 commonPortRulePtr 是全局变量	commonSrcPortRule RuleBitmapArrV4 的 引用
+func genPortConstraintsRuleArrAndLoadIntoMap(originalRulesWgPtr *sync.WaitGroup,
+						bpfMapForPort *ebpf.Map, 	//映射到内核态map
+						commonPortRulePtr *RuleBitmapArrV4, 
+						specifiedPortRule map[uint16][]uint32, 
+						name string) {
+	b := time.Now()
+
+	var portSli []uint16
+
+	// 读取本地的rules规则
+	for ruleInx := 0; ruleInx < len(ruleList); ruleInx++ {
+		if onlyContainICMP(ruleList[ruleInx].Protos) {
+			//icmp无端口
+			continue
+		} else {
+			if name == MAP_TYPE_PORT_SRC {
+				portSli = ruleList[ruleInx].PortSrcArr
+			} else {
+				portSli = ruleList[ruleInx].PortDstArr
+			}
+		}
+
+		// 没有设置端口，那就是全端口匹配
+		fmt.Println("len(portSli)", len(portSli), portSli)
+		if len(portSli) == 0 {
+			// 设置bitmap
+			//commonPortRulePtr：暂存全端口的bitmap的置位情况
+			setBitmapBit(commonPortRulePtr, ruleList[ruleInx].Priority /*priority即iptables的序号*/)
+		} else {
+			// 设置了端口
+			for portInx := 0; portInx < len(portSli); portInx++ {
+				// specifiedPortRule是一个map
+				// 这里先聚合，然后遍历完所有的端口规则后，再设置bitmap
+				specifiedPortRule[portSli[portInx] /*端口的值*/] = append(specifiedPortRule[portSli[portInx]], ruleList[ruleInx].Priority)
+			}
+		}
+
+		// portArr = nil
+		//GC
+		portSli = portSli[:0]
+	}
+
+	/*
+		经过初始化后，两类规则：
+		-	全端口（未设置端口的）规则：保存在commonPortRulePtr bitmap中
+		-	端口规则：specifiedPortRule 保存指定所有端口的规则，value为 序号的数组
+	*/
+
+	// 下发配置
+	var portMapKey uint16
+	var portMapValue RuleBitmapArrV4
+
+	// 遍历1-65535
+	for port := PORT_MIN; port <= PORT_MAX; port++ {
+		portMapKey = htons(uint16(port))
+
+		if specifiedPortRuleArr, ok := specifiedPortRule[uint16(port)]; !ok {
+			// 未设置基于端口的规则（那就是全端口命中了）
+			if err := bpfMapForPort.Put(portMapKey, commonPortRulePtr /*注意，这个数据结构只有一份*/); err != nil {
+				zlog.Error(err.Error(), "; bpfMapForPort Put error")
+			}
+		} else {
+			// 设置了指定端口的规则
+			// commonPortRulePtr是端口的bitmap
+			// 注意：这里是深拷贝，portMapValue获取的是commonPortRulePtr的独立副本
+			portMapValue = *commonPortRulePtr
+			// specifiedPortRuleArr[ruleInx] 就是 .Priority的数组
+			for ruleInx := 0; ruleInx < len(specifiedPortRuleArr); ruleInx++ {
+				// 在原有的全端口bitmap规则基础上，加入指定端口的priority到bitmap中，这样完成之后再整体放入内核的map
+				setBitmapBit(&portMapValue, specifiedPortRuleArr[ruleInx])
+			}
+			//写入到内核的map中去
+			if err := bpfMapForPort.Put(portMapKey, &portMapValue); err != nil {
+				zlog.Error(err.Error(), "; bpfMapForPort Put error")
+			}
+		}
+	}
+
+	//...
+}
+```
+
+2、对源/目的IP（CIDR规则）规则的处理
+
+####    热更新（CRUD）实现
+xdp_acl支持[异步方式](https://github.com/hi-glenn/xdp_acl/blob/main/web.go#L176)修改规则，以新增规则为例：
+
+
+
+##  0x06    参考
 -   [Golang 优化之路——bitset](https://blog.cyeam.com/golang/2017/01/18/go-optimize-bitset)
 -   [Go 每日一库之 roaring](https://darjun.github.io/2022/07/17/godailylib/roaring/)
 -   [eBPF 技术实践：高性能 ACL](https://blog.csdn.net/ByteDanceTech/article/details/106632252)
