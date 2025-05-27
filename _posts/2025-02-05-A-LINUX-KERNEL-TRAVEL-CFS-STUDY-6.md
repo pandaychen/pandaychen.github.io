@@ -1678,11 +1678,14 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 
 | 调度类型 | 说明 |触发场景 | 与ebpf hook的关系 |
 | :-----:| :----: | :----: | :----: |
-| Voluntary Switch（主动切换） | 当任务主动让出 CPU 时发生，常见于以下场景：<br>等待资源：如 I/O 操作、锁释放、信号量等待等，调用 schedule() 主动进入阻塞状态<br>主动休眠：通过 sleep() 或 yield() 等函数显式让出 CPU<br>​协作式调度：在用户态任务中主动触发调度（如实时任务协作）|  | |
-| Involuntary Switch（被动切换） |  |  | |
+| Voluntary Switch<br>（主动切换）|延迟通常与资源等待相关| 当任务主动让出 CPU 时发生，常见于：<br>1、等待资源：如 I/O 操作、锁释放、信号量等待等，调用 `schedule()` 主动进入阻塞状态<br>主动休眠：通过 `sleep()` 或 `yield()` 等函数显式让出 CPU<br>协作式调度：在用户态任务中主动触发调度（如实时任务协作）| 1、`sched_switch`：记录切换事件，其中 `prev` 任务的状态会被标记为阻塞（如 `TASK_INTERRUPTIBLE`），`next` 任务被调度<br> 2、`sched_wakeup`：当任务重新被唤醒时触发，例如 I/O 完成或锁释放后，任务从阻塞状态变为可运行状态 |
+| Involuntary Switch（被动切换） | 延迟常由调度器策略（如抢占）引起 | 当任务被强制剥夺 CPU 时发生，常见于：<br> 1、时间片耗尽：任务用完调度器分配的时间片（CFS 调度器的 `time_slice` 归零）<br> 2、抢占式调度：高优先级任务（如实时进程）抢占当前任务 <br> 3、中断或异常：硬件中断、软中断或页面错误后，调度器重新选择任务 | 1、`sched_switch`：记录切换事件，并且调度器触发切换时`prev` 任务的状态仍为 `TASK_RUNNING`（表示任务仍可运行但被抢占），还在等待队列中 <br> 2、`sched_wakeup`：若被抢占的任务后续需要重新调度（如时间片轮转），可能触发 `sched_wakeup` |
 
+通过上面表格可知：
+-	`sched_wakeup`/`sched_wakeup_new`：用于标记任务进入运行队列的时间戳，与 `sched_switch` 结合可计算任务等待调度延迟（从唤醒到实际运行、等待CPU的时间），对 Voluntary/Involuntary Switch 而言，无论主动还是被动切换，任务唤醒时均会触发这两个钩子
+-	`sched_switch`：无论是主动还是被动切换，均通过此钩子记录上下文切换信息（如 `prev` 和 `next` 任务的 PID、优先级、状态等），并且可以通过`prev->state`字段判断切换类型，对于Voluntary Switch，`prev->state` 的状态值非 `TASK_RUNNING`（如阻塞）;而对Involuntary Switch：`prev->state` 为 `TASK_RUNNING`（仍可运行但被抢占），[参考](https://github.com/iovisor/bcc/blob/master/libbpf-tools/runqslower.bpf.c#L53)
 
-##  0x0  参考
+##  0x0B  参考
 -   [【原创】（五）Linux进程调度-CFS调度器](https://www.cnblogs.com/LoyenWang/p/12495319.html)
 -   [CFS调度器（1）-基本原理](http://www.wowotech.net/process_management/447.html)
 -   [调度系统设计精要](https://mp.weixin.qq.com/s/R3BZpYJrBPBI0DwbJYB0YA)
