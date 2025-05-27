@@ -94,7 +94,7 @@ Sampling run queue length at 99 Hertz... Hit Ctrl-C to end.
 ####    runqslower
 linux内核代码提供了`runqslower`的工具，该工具用于展示在CPU runqueue队列中停留的时间大于某一值的任务（哪些进程的调度延迟超过了特定的阈值），有两个版本：
 
--   [bcc基于libbpf的版本](https://github.com/iovisor/bcc/blob/master/libbpf-tools/runqslower.c)
+-   [bcc基于libbpf的版本](https://github.com/iovisor/bcc/blob/master/libbpf-tools/runqslower.c)：实现了`tp_btf`/`raw_tp`两种版本的tracepoint钩子的兼容
 -   [内核实现的版本](https://github.com/torvalds/linux/blob/master/tools/bpf/runqslower/runqslower.bpf.c)：有若干新特性，比如`v5.11`版本的提供的helper方法：[`bpf_task_storage_get`](https://docs.ebpf.io/linux/helper-function/bpf_task_storage_get/)
 
 主要涉及到如下hook点：
@@ -301,12 +301,12 @@ CFS 的调度过程主要由 `__schedule` 函数完成的，主要步骤如下�
 -	`trace_sched_switch`：记录切换事件，包含 `preempt`（是否抢占）、`prev`（当前任务）、`next`（下一个任务）参数
 -	`context_switch`：执行寄存器保存、堆栈切换（x86 的 `switch_to_asm` 汇编代码）等底层操作
 
-这里的`trace_sched_switch`是宏定义，关联`TRACE_EVENT`，对应的实现如下：
+这里的`trace_sched_switch`是宏定义，关联`TRACE_EVENT`，对应的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/include/trace/events/sched.h#L107)如下：
 
 ```CPP
 TRACE_EVENT(sched_switch,
-    TP_PROTO(bool preempt, struct task_struct *prev, struct task_struct *next),
-    TP_ARGS(preempt, prev, next),
+    TP_PROTO(bool preempt, struct task_struct *prev, struct task_struct *next),	//重要
+    TP_ARGS(preempt, prev, next),		//重要
     TP_STRUCT__entry(
         __array(char, prev_comm, TASK_COMM_LEN) // 上一个任务的名称
         __field(pid_t, prev_pid)                // 上一个任务的 PID
@@ -316,12 +316,73 @@ TRACE_EVENT(sched_switch,
         __field(pid_t, next_pid)                // 下一个任务的 PID
         __field(int, next_prio)                 // 下一个任务的优先级
     ),
-    TP_printk("prev_comm=%s prev_pid=%d prev_prio=%d prev_state=%s -> next_comm=%s next_pid=%d next_prio=%d",
-        __entry->prev_comm, __entry->prev_pid, __entry->prev_prio,
-        __print_flags(__entry->prev_state, "|", { TASK_RUNNING, "R" }, ...),
-        __entry->next_comm, __entry->next_pid, __entry->next_prio
-    )
+
+    TP_fast_assign(
+		memcpy(__entry->next_comm, next->comm, TASK_COMM_LEN);
+		__entry->prev_pid	= prev->pid;
+		__entry->prev_prio	= prev->prio;
+		__entry->prev_state	= __trace_sched_switch_state(preempt, prev);	//特别处理这个字段
+		memcpy(__entry->prev_comm, prev->comm, TASK_COMM_LEN);
+		__entry->next_pid	= next->pid;
+		__entry->next_prio	= next->prio;
+	),
+
+	TP_printk("prev_comm=%s prev_pid=%d prev_prio=%d prev_state=%s%s ==> next_comm=%s next_pid=%d next_prio=%d",
+		__entry->prev_comm, __entry->prev_pid, __entry->prev_prio,
+		__entry->prev_state & (TASK_STATE_MAX-1) ?
+		  __print_flags(__entry->prev_state & (TASK_STATE_MAX-1), "|",
+				{ 1, "S"} , { 2, "D" }, { 4, "T" }, { 8, "t" },
+				{ 16, "Z" }, { 32, "X" }, { 64, "x" },
+				{ 128, "K" }, { 256, "W" }, { 512, "P" },
+				{ 1024, "N" }) : "R",
+		__entry->prev_state & TASK_STATE_MAX ? "+" : "",
+		__entry->next_comm, __entry->next_pid, __entry->next_prio)
 );
+```
+
+从上面的代码可以看出，**`TP_STRUCT__entry.prev_state`不直接等于`task_struct->state`，而是来自`__trace_sched_switch_state`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/include/trace/events/sched.h#L107)**，从这里可以看出
+
+-	`preempt==false`时：返回`p->state`，通常关联Voluntary Switch场景，即进程等待事件主动释放CPU（也有例外）
+-	`preempt==true`时：返回`TASK_RUNNING | TASK_STATE_MAX`，该场景通常为Involuntary Switch，即被切换的进程仍然还在runqueue队列中
+
+```CPP
+static inline long __trace_sched_switch_state(bool preempt, struct task_struct *p)
+{
+#ifdef CONFIG_SCHED_DEBUG
+	BUG_ON(p != current);
+#endif /* CONFIG_SCHED_DEBUG */
+
+	/*
+	 * Preemption ignores task state, therefore preempted tasks are always
+	 * RUNNING (we will not have dequeued if state != RUNNING).
+	 */
+	return preempt ? TASK_RUNNING | TASK_STATE_MAX : p->state;
+}
+#endif /* CREATE_TRACE_POINTS */
+```
+
+基于上述描述，如果采用tracepoint hook即`tracepoint:sched:sched_switch`实现相关功能的话，那么这里使用`prev_state`字段就要严格按照切换场景进行比较了（必然不能直接与`task->struct`的[原子状态字段](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/sched.h#L68)比较）
+
+```BASH
+#tracepoint:sched:sched_switch的参数
+[root@VM-X-X-tencentos ~]# cat /sys/kernel/debug/tracing/events/sched/sched_switch/format 
+name: sched_switch
+ID: 301
+format:
+        field:unsigned short common_type;       offset:0;       size:2; signed:0;
+        field:unsigned char common_flags;       offset:2;       size:1; signed:0;
+        field:unsigned char common_preempt_count;       offset:3;       size:1; signed:0;
+        field:int common_pid;   offset:4;       size:4; signed:1;
+
+        field:char prev_comm[16];       offset:8;       size:16;        signed:0;
+        field:pid_t prev_pid;   offset:24;      size:4; signed:1;
+        field:int prev_prio;    offset:28;      size:4; signed:1;
+        field:long prev_state;  offset:32;      size:8; signed:1;
+        field:char next_comm[16];       offset:40;      size:16;        signed:0;
+        field:pid_t next_pid;   offset:56;      size:4; signed:1;
+        field:int next_prio;    offset:60;      size:4; signed:1;
+
+print fmt: "prev_comm=%s prev_pid=%d prev_prio=%d prev_state=%s%s ==> next_comm=%s next_pid=%d next_prio=%d", REC->prev_comm, REC->prev_pid, REC->prev_prio, (REC->prev_state & ((((0x00000000 | 0x00000001 | 0x00000002 | 0x00000004 | 0x00000008 | 0x00000010 | 0x00000020 | 0x00000040) + 1) << 1) - 1)) ? __print_flags(REC->prev_state & ((((0x00000000 | 0x00000001 | 0x00000002 | 0x00000004 | 0x00000008 | 0x00000010 | 0x00000020 | 0x00000040) + 1) << 1) - 1), "|", { 0x00000001, "S" }, { 0x00000002, "D" }, { 0x00000004, "T" }, { 0x00000008, "t" }, { 0x00000010, "X" }, { 0x00000020, "Z" }, { 0x00000040, "P" }, { 0x00000080, "I" }) : "R", REC->prev_state & (((0x00000000 | 0x00000001 | 0x00000002 | 0x00000004 | 0x00000008 | 0x00000010 | 0x00000020 | 0x00000040) + 1) << 1) ? "+" : "", REC->next_comm, REC->next_pid, REC->next_prio
 ```
 
 ####    调度基础
@@ -462,7 +523,7 @@ if (env.cg) {
 1、新进程创建并加入调度队列
 
 ```CPP
-//关联raw_tracepoint
+//关联raw_tracepoint事件类型
 SEC("raw_tp/sched_wakeup_new")
 int BPF_PROG(handle_sched_wakeup_new, struct task_struct *p)
 {
@@ -472,6 +533,7 @@ int BPF_PROG(handle_sched_wakeup_new, struct task_struct *p)
 	return trace_enqueue(BPF_CORE_READ(p, tgid), BPF_CORE_READ(p, pid));
 }
 
+//关联 tp_btf 事件类型
 SEC("tp_btf/sched_wakeup_new")
 int BPF_PROG(sched_wakeup_new, struct task_struct *p)
 {
@@ -507,13 +569,10 @@ int BPF_PROG(sched_wakeup, struct task_struct *p)
 3、进程切换流程，一个正在占用CPU的进程主动/被动释放CPU给下一个进程使用
 
 ```CPP
-SEC("raw_tp/sched_wakeup")
-int BPF_PROG(handle_sched_wakeup, struct task_struct *p)
+SEC("raw_tp/sched_switch")
+int BPF_PROG(handle_sched_switch, bool preempt, struct task_struct *prev, struct task_struct *next)
 {
-	if (filter_cg && !bpf_current_task_under_cgroup(&cgroup_map, 0))
-		return 0;
-
-	return trace_enqueue(BPF_CORE_READ(p, tgid), BPF_CORE_READ(p, pid));
+	return handle_switch(preempt, prev, next);
 }
 
 SEC("tp_btf/sched_switch")
@@ -633,7 +692,20 @@ static unsigned int pid_namespace(struct task_struct *task)
 }
 ```
 
-3、对直方图的操作，用户态程序通过 `bpf_map_lookup_elem` 读取 `hists`数据结构，生成直方图
+3、`get_task_state`的[实现](https://github.com/iovisor/bcc/blob/master/libbpf-tools/core_fixes.bpf.h#L24)，获取`task_struct`结构中的`state`字段
+
+```CPP
+static __always_inline __s64 get_task_state(void *task)
+{
+	struct task_struct___x *t = task;
+
+	if (bpf_core_field_exists(t->__state))
+		return BPF_CORE_READ(t, __state);
+	return BPF_CORE_READ((struct task_struct___o *)task, state);
+}
+```
+
+4、对直方图的操作，用户态程序通过 `bpf_map_lookup_elem` 读取 `hists`数据结构，生成直方图
 
 ####	其他
 只支持在cgroup V2的系统上运行（cgroup V1上运行会报错：Failed adding target cgroup to map）
@@ -647,8 +719,82 @@ static unsigned int pid_namespace(struct task_struct *task)
 ##	0x03	runqlen 实现分析
 [实现](https://github.com/iovisor/bcc/blob/master/libbpf-tools/runqlen.bpf.c)
 
+runqlen主要采用了`SEC("perf_event")`采样机制来获取CPU的运行队列长度
+
+```CPP
+//关联perf_event事件类型
+SEC("perf_event")
+int do_sample(struct bpf_perf_event_data *ctx)
+{
+	struct task_struct *task;
+	struct hist *hist;
+	u64 slot, cpu = 0;
+
+	task = (void*)bpf_get_current_task();
+	if (targ_host)
+		slot = BPF_CORE_READ(task, se.cfs_rq, rq, nr_running);
+	else
+		slot = cfs_rq_get_nr_running_or_nr_queued(BPF_CORE_READ(task, se.cfs_rq));
+	/*
+	 * Calculate run queue length by subtracting the currently running task,
+	 * if present. len 0 == idle, len 1 == one running task.
+	 */
+	if (slot > 0)
+		slot--;
+	if (targ_per_cpu) {
+		cpu = bpf_get_smp_processor_id();
+		/*
+		 * When the program is started, the user space will immediately
+		 * exit when it detects this situation, here just to pass the
+		 * verifier's check.
+		 */
+		if (cpu >= MAX_CPU_NR)
+			return 0;
+	}
+	hist = &hists[cpu];
+	if (slot >= MAX_SLOTS)
+		slot = MAX_SLOTS - 1;
+	if (targ_per_cpu)
+		hist->slots[slot]++;
+	else
+		__sync_fetch_and_add(&hist->slots[slot], 1);
+	return 0;
+}
+```
+
 ##	0x04	runslower 实现分析
-[实现](https://github.com/iovisor/bcc/blob/master/libbpf-tools/runqslower.bpf.c)
+[实现](https://github.com/iovisor/bcc/blob/master/libbpf-tools/runqslower.bpf.c)，和runqlat实现思路一样，不同点在于在`handle_switch`方法中，计算出调度延迟超限会通过`BPF_MAP_TYPE_PERF_EVENT_ARRAY`输出事件到用户态
+
+```CPP
+static int handle_switch(void *ctx, struct task_struct *prev, struct task_struct *next)
+{
+	//....
+
+	pid = BPF_CORE_READ(next, pid);
+
+	/* fetch timestamp and calculate delta */
+	tsp = bpf_map_lookup_elem(&start, &pid);
+	if (!tsp)
+		return 0;   /* missed enqueue */
+
+	delta_us = (bpf_ktime_get_ns() - *tsp) / 1000;
+	if (min_us && delta_us <= min_us)
+		return 0;
+
+	event.pid = pid;
+	event.prev_pid = BPF_CORE_READ(prev, pid);
+	event.delta_us = delta_us;
+	bpf_probe_read_kernel_str(&event.task, sizeof(event.task), next->comm);
+	bpf_probe_read_kernel_str(&event.prev_task, sizeof(event.prev_task), prev->comm);
+
+	/* output */
+	bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU,
+			      &event, sizeof(event));
+
+	bpf_map_delete_elem(&start, &pid);
+	return 0;
+}
+```
 
 ##  0x05  参考
 -   [透过Tracepoint理解内核 - 调度器框架和性能](https://zhuanlan.zhihu.com/p/143320517)
