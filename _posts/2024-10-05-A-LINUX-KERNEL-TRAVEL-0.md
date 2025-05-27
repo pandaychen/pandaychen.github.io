@@ -149,7 +149,7 @@ static inline void __hlist_del(struct hlist_node *n)
 内核中用 `hlist` 来实现 hash table，如下：
 
 ```BASH
-[root@VM-119-175-tencentos kernel]# dmesg | grep "hash table entries"
+[root@VM-X-X-tencentos kernel]# dmesg | grep "hash table entries"
 [0.039306] PV qspinlock hash table entries: 256 (order: 0, 4096 bytes, linear)
 [0.041316] Dentry cache hash table entries: 2097152 (order: 12, 16777216 bytes, linear)
 [0.042294] Inode-cache hash table entries: 1048576 (order: 11, 8388608 bytes, linear)
