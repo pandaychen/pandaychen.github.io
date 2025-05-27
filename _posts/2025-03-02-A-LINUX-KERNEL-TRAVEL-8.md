@@ -16,6 +16,8 @@ tags:
 
 本文代码基于 [v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include) 版本
 
+-	[Linux 网络栈接收数据（RX）：原理及内核实现（2022）](https://arthurchiao.art/blog/linux-net-stack-implementation-rx-zh/)
+
 ##  0x01   网卡的报文接收过程
 一些背景知识：
 
@@ -24,6 +26,19 @@ tags:
 
 ![recv-arch](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/kernel_packet.jpg)
 
+####	NAPI技术
+-	Busy-polling（持续轮询）：给网卡预留专门的 CPU 和线程，100% 用于收发包，典型的方式是 DPDK
+-	硬件中断（IRQ）：在绝大部分场景下，预留专门的 CPU 用于收发包属于资源浪费。简单来说， 只需要在网卡有包达到时，通知 CPU 来收即可；如果没有包，CPU 做别的事情去就可以了。当网卡有包到达时，通过硬件中断（IRQ）机制通知CPU，这是最高优先级的通知机制，告诉 CPU 需要马上处理
+
+而中断方式针对高吞吐场景的改进是 NAPI ，其结合了轮询和中断两种方式，工作流程如下：
+
+![napi]()
+
+-	每次执行到 NAPI 的 poll() 方法时，也就是会执行到网卡注册的 poll() 方法时，会批量从 RingBuffer 收包；在此 poll 工作时，会尽量把所有待收的包都收完（通过内核 budget 配置和调优）；在此期间内新到达网卡的包，也不会再触发硬件中断 IRQ
+-	当 NAPI poll() 未正在运行或不在这个调度周期内，收到的包会触发 IRQ，然后内核来启动 poll() 再收包（下面要讨论的`igb_msix_ring`硬件中断处理函数的流程）
+-	**NAPI 存在的意义是无需硬件中断通知就可以接收网络数据**。NAPI 的轮询循环（poll loop）是受硬件中断（IRQ）触发而运行起来的。NAPI 功能启用，但默认是没有工作的，直到第一个包到达的时候，网卡触发的一个硬件将它唤醒。当然内核又有其他的情况导致NAPI 功能也会被关闭，直到下一个硬中断再次将它唤起
+
+####	网卡收包：一个例子
 本小节使用以太网的物理网卡结合一个UDP packet的接收过程为例子描述下内核收包过程，如下：
 
 一、阶段1：数据包从网卡到内存
@@ -767,6 +782,8 @@ early_initcall(spawn_ksoftirqd);
 
 2、网络子系统初始化
 
+-	SoftIRQ handler 初始化：`net_dev_init` 分别为接收和发送数据注册了一个软中断处理函数（后文会描述网卡驱动的中断处理函数是如何触发 `net_rx_action()` 执行的）；这里内核的软中断系统是一种在硬中断处理上下文（驱动中）之外执行代码的机制，可以把软中断系统想象成一系列内核线程（每个 CPU 一个）， 这些线程执行针对不同事件注册的处理函数（SoftIRQ handler）
+
 3、协议栈注册，针对协议栈支持的各类协议如arp/icmp/ip/udp/tcp等，每一个协议都会将自己的处理函数注册
 
 4、网卡驱动初始化，初始化DMA以及向内核注册收包函数地址（NAPI的`poll`函数）
@@ -874,14 +891,17 @@ static inline struct list_head *ptype_head(const struct packet_type *pt){
 ####	接收数据的主要流程（核心）
 1、硬中断处理
 
-首先数据帧从网线到达网卡的接收队列上，网卡在分配给自己的RingBuffer中寻找可用的内存位置，找到后DMA引擎会把数据DMA到这块Ringbuffer中（该过程对CPU无感）。当DMA操作完成以后，网卡会向CPU发起一个硬中断，通知CPU有数据帧到达。igb网卡的硬中断注册的处理函数是[`igb_msix_ring`](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L5782)，上文也提到过，硬中断里只完成简单必要的工作，剩下的大部分逻辑都是转交给软中断处理。`igb_msix_ring`的逻辑仅仅记录了一个寄存器，修改了一下下CPU的`poll_list`，然后发出软中断即完成
+首先数据帧从网线到达网卡的接收队列上，网卡在分配给自己的RingBuffer中寻找可用的内存位置，找到后DMA引擎会把数据DMA到这块Ringbuffer中（该过程对CPU无感）。当DMA操作完成以后，网卡会向CPU发起一个硬中断，通知CPU有数据帧到达。igb网卡的硬中断注册的处理函数是[`igb_msix_ring`](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L5782)，这里硬中断里只完成简单必要的工作，剩下的大部分逻辑都是转交给软中断处理。`igb_msix_ring`的逻辑仅仅记录了一个寄存器，修改了一下CPU的`poll_list`，然后发出软中断即完成
+
+硬中断期间是不能再进行另外的硬中断的，不能嵌套。所以硬中断处理函数（handler）执行时，会屏蔽部分或全部（新的）硬中断。这就要求硬中断要尽快处理，然后关闭这次硬中断，这样下次硬中断才能再进来；另一方面，中断被屏蔽的时间越长，丢失事件的可能性也就越大；如果一次硬中断时间过长，RingBuffer 会被塞满导致丢包。因此所有耗时的操作都应该从硬中断处理逻辑中剥离出来，硬中断因此能尽可能快地执行，然后再重新打开。所以软中断就是针对这一目的设计的
 
 ![hardirq]()
 
 -   `igb_write_itr`：记录一下硬件中断频率
--   `napi_schedule->__napi_schedule->____napi_schedule->__raise_softirq_irqoff`：触发软中断
+-   硬中断触发，调用`napi_schedule->__napi_schedule->____napi_schedule->__raise_softirq_irqoff`：触发软中断
 
 ```CPP
+// igb网卡的硬中断处理函数
 //file: drivers/net/ethernet/intel/igb/igb_main.c
 static irqreturn_t igb_msix_ring(int irq, void *data)
 {
@@ -919,14 +939,18 @@ void __raise_softirq_irqoff(unsigned int nr)
 #define or_softirq_pending(x)  (local_softirq_pending() |= (x))
 ```
 
+注意是先注册 NAPI poll，再打开硬件中断；硬中断先执行到网卡注册的 IRQ handler，在 handler 里面再触发 `NET_RX_SOFTIRQ` 的软中断softirq。在网卡驱动的硬中断处理函数做的事情很少，但软中断将会在和硬中断相同的 CPU 上执行。这就是给每个 CPU 一个特定的硬中断的意义：此 CPU 不仅处理这个硬中断，而且通过 NAPI 处理接下来的软中断来收包
+
 2、 `ksoftirqd`内核线程处理软中断
 
 ksoftirqd中两个线程函数`ksoftirqd_should_run`和`run_ksoftirqd`的主要逻辑如下：
 
-![]()
+![kfngxl]()
 
 -   `ksoftirqd_should_run`：读取`local_softirq_pending`函数的结果（硬中断也调用此函数，硬中断位置会修改写入标记），如果硬中断中设置了`NET_RX_SOFTIRQ`，接下来会真正进入线程函数中`run_ksoftirqd`处理
--   `run_ksoftirqd`：
+-   `run_ksoftirqd`函数：在软中断线程初始化时，就会注册`run_ksoftirqd()`函数。首先调用`local_irq_disable()`关闭所在 CPU 的所有硬中断，接下来，判断如果有 pending softirq，则执行`__do_softirq()` 处理软中断，软中断流程完成后，然后重新打开所在 CPU 的硬中断，然后返回；否则直接打开所在 CPU 的硬中断，然后返回
+
+![run_ksoftirqd]()
 
 ```CPP
 static int ksoftirqd_should_run(unsigned int cpu)
@@ -940,23 +964,30 @@ static int ksoftirqd_should_run(unsigned int cpu)
 static void run_ksoftirqd(unsigned int cpu)
 {
     //屏蔽当前CPU上的所有中断
+	// 关闭所在 CPU 的所有硬中断
     local_irq_disable();
     if (local_softirq_pending()) {
+		//__do_softirq的核心方法：
+		// 软中断处理函数 net_rx_action 会调用 NAPI 的 poll 函数来收包
         __do_softirq();
         rcu_note_context_switch(cpu);
+		// 重新打开所在 CPU 的所有硬中断
         local_irq_enable();
+		// 将 CPU 交还给调度器
         cond_resched();
         return;
     }
 
     //用于将CPSR寄存器中的中断使能位设为1，从而使得CPU能够响应中断
+ 	// 重新打开所在 CPU 的所有硬中断
     local_irq_enable();
 }
 ```
 
 这里对`run_ksoftirqd`的逻辑进行下说明：
 
--   `__do_softirq`：判断根据当前CPU的软中断类型，调用其注册的`action`方法（前文描述过为`NET_RX_SOFTIRQ`注册的处理函数[`net_rx_action`](https://elixir.bootlin.com/linux/v4.11.6/source/net/core/dev.c#L5313)）
+-   [`__do_softirq`](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/softirq.c#L241)：判断根据当前CPU的软中断类型，调用其注册的`action`方法（前文描述过为`NET_RX_SOFTIRQ`注册的处理函数[`net_rx_action`](https://elixir.bootlin.com/linux/v4.11.6/source/net/core/dev.c#L5313)）
+-   网络软中断下半部处理由 `net_rx_action` 函数完成，其主要功能就是从待处理队列中获取一个数据包，然后根据数据包的网络层协议类型来找到相应的处理接口来处理
 
 ```CPP
 asmlinkage void __do_softirq(void)
@@ -969,6 +1000,8 @@ asmlinkage void __do_softirq(void)
             //...
             trace_softirq_entry(vec_nr);
             //CALL net_rx_action
+			// 指向 net_rx_action()
+			//一旦软中断代码判断出有 softirq 处于 pending 状态，就会开始处理， 执行 net_rx_action，从 RingBuffer 收包
             h->action(h);
             trace_softirq_exit(vec_nr);
             //...
@@ -984,39 +1017,146 @@ asmlinkage void __do_softirq(void)
 1.  函数开头的`time_limit`和`budget`是用来控制`net_rx_action`函数主动退出的，目的是保证网络包的接收不霸占CPU不放，等下次网卡再有硬中断过来的时候再处理剩下的接收数据包
 2.  `net_rx_action`最核心逻辑是获取到当前CPU变量`softnet_data`，对其`poll_list`进行遍历, 然后执行到网卡驱动注册到的`poll`函数（对于igb网卡来说即igb驱动的`igb_poll`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L6600)）
 3.	`igb_poll`的初始化流程在[`igb_alloc_q_vector`](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L1225)函数中：`netif_napi_add(adapter->netdev, &q_vector->napi,igb_poll, 64)`
+4.	`napi_poll`函数的核心`h->action` 调用的实际是`net_rx_action`，该函数的功能是检查当前CPU的`softnet_data`的`poll_list`，取出第一个设备的napi列表，调用`napi_poll`获取对应网卡上的数据包，每个设备执行poll会受到两个参数的约束（确保不会占用过多的CPU资源），一旦超过给定的时间限制或者处理的包达到配额上限, 则直接返回
 
-```cpp
-static void net_rx_action(struct softirq_action *h)
+-	`netdev_budget_usecs`：每个设备能够处理的最大时间长度（最长可以占用的 CPU 时间）
+-	`netdev_budget`：单个设备一次能处理的最大包的配额
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/core/dev.c#L5269
+static __latent_entropy void net_rx_action(struct softirq_action *h)
 {
-    struct softnet_data *sd = &__get_cpu_var(softnet_data);
-    unsigned long time_limit = jiffies + 2;
-    int budget = netdev_budget;
-    void *have;
-    //WHY?
-    local_irq_disable();
+	// 该 CPU 的 softnet_data 统计
+	struct softnet_data *sd = this_cpu_ptr(&softnet_data);	
+	unsigned long time_limit = jiffies + 2;
+	// 该 CPU 的所有 NAPI 变量的总预算
+	int budget = netdev_budget;
+	LIST_HEAD(list);
+	LIST_HEAD(repoll);
 
-	//https://elixir.bootlin.com/linux/v4.11.6/source/net/core/dev.c#L5269
-	//循环收包，直到poll_list为空 or 主动退出
-    while (!list_empty(&sd->poll_list)) {
-        //......
-        n = list_first_entry(&sd->poll_list, struct napi_struct, poll_list);
+	local_irq_disable();
+	list_splice_init(&sd->poll_list, &list);
+	local_irq_enable();
 
-        work = 0;
-        if (test_bit(NAPI_STATE_SCHED, &n->state)) {
-            //igb_poll for igb driver
-			// mlx5 for mlx5 driver
-            work = n->poll(n, weight);
-            trace_napi_poll(n);
-        }
+	//特别注意，在napi_poll有三种情况会退出循环
+	for (;;) {
+		struct napi_struct *n;
 
-        budget -= work;
-    }
+		if (list_empty(&list)) {
+			if (!sd_has_rps_ipi_waiting(sd) && list_empty(&repoll))
+				goto out;
+			break;
+		}
+
+		n = list_first_entry(&list, struct napi_struct, poll_list);
+		// napi的poll收包
+		// 注意：执行网卡驱动注册的 poll() 方法，返回的是处理的数据帧数量，
+    	// 函数返回时，那些数据帧都已经发送到上层栈进行处理了
+		budget -= napi_poll(n, &repoll);
+
+		/* If softirq window is exhausted then punt.
+		 * Allow this to run for 2 jiffies since which will allow
+		 * an average latency of 1.5/HZ.
+		 */
+		// budget 或 time limit 用完了
+		if (unlikely(budget <= 0 ||
+			     time_after_eq(jiffies, time_limit))) {
+			// 更新 softnet_data.time_squeeze 计数
+			sd->time_squeeze++;
+			break;
+		}
+	}
+
+	local_irq_disable();
+
+	list_splice_tail_init(&sd->poll_list, &list);
+	list_splice_tail(&repoll, &list);
+	list_splice(&list, &sd->poll_list);
+
+
+	// 在给定的 time/budget 内，没有能够处理完全部 napi
+	// 关闭 NET_RX_SOFTIRQ 类型软中断，将 CPU 让给其他任务用
+    // 主动让出 CPU，不要让这种 softirq 独占 CPU 太久
+	if (!list_empty(&sd->poll_list))
+		__raise_softirq_irqoff(NET_RX_SOFTIRQ);
+
+	// Receive Packet Steering：唤醒其他 CPU 从 ring buffer 收包
+	net_rps_action_and_irq_enable(sd);
+out:
+	__kfree_skb_flush();
+}
+
+// napi_poll ...
+static int napi_poll(struct napi_struct *n, struct list_head *repoll)
+{
+	void *have;
+	int work, weight;
+
+	list_del_init(&n->poll_list);
+
+	have = netpoll_poll_lock(n);
+
+	weight = n->weight;
+
+	/* This NAPI_STATE_SCHED test is for avoiding a race
+	 * with netpoll's poll_napi().  Only the entity which
+	 * obtains the lock and sees NAPI_STATE_SCHED set will
+	 * actually make the ->poll() call.  Therefore we avoid
+	 * accidentally calling ->poll() when NAPI is not scheduled.
+	 */
+	work = 0;
+	if (test_bit(NAPI_STATE_SCHED, &n->state)) {
+		// igb_poll for igb driver
+		// mlx5 for mlx5 driver
+		work = n->poll(n, weight);
+		trace_napi_poll(n, work, weight);
+	}
+
+	WARN_ON_ONCE(work > weight);
+
+	if (likely(work < weight))
+		goto out_unlock;
+
+	/* Drivers must not modify the NAPI state if they
+	 * consume the entire weight.  In such cases this code
+	 * still "owns" the NAPI instance and therefore can
+	 * move the instance around on the list at-will.
+	 */
+	if (unlikely(napi_disable_pending(n))) {
+		napi_complete(n);
+		goto out_unlock;
+	}
+
+	if (n->gro_list) {
+		/* flush too old packets
+		 * If HZ < 1000, flush all packets.
+		 */
+		napi_gro_flush(n, HZ >= 1000);
+	}
+
+	/* Some drivers may have called napi_schedule
+	 * prior to exhausting their budget.
+	 */
+	if (unlikely(!list_empty(&n->poll_list))) {
+		pr_warn_once("%s: Budget exhausted after napi rescheduled\n",
+			     n->dev ? n->dev->name : "backlog");
+		goto out_unlock;
+	}
+
+	list_add_tail(&n->poll_list, repoll);
+
+out_unlock:
+	netpoll_poll_unlock(have);
+
+	return work;
 }
 ```
 
+![net_rx_action]()
+
 继续走读下收包核心函数`igb_poll`，其重点工作是对[`igb_clean_rx_irq`](https://elixir.bootlin.com/linux/v4.11.8/source/drivers/net/ethernet/intel/igb/igb_main.c#L7157)的调用，`igb_clean_rx_irq`的主要工作：
 
--	`igb_fetch_rx_buffer->napi_alloc_skb->__napi_alloc_skb`：
+-	`igb_fetch_rx_buffer->napi_alloc_skb->__napi_alloc_skb`：从 RingBuffer DMA 区域复制数据，然后初始化一个 `struct sk_buff *skb` 结构体变量
 -	`igb_is_non_eop`：`igb_fetch_rx_buffer`和`igb_is_non_eop`的作用就是把数据帧从RingBuffer上取下来，特别注意这里是通过**循环获取的**，因为有可能帧要占多个RingBuffer（当网卡通过 DMA 将数据包写入内存时，可能因硬件特性或数据包长度超过缓冲区容量，将一个完整数据帧分散到多个接收描述符对应的缓冲区中），所以是在一个循环中获取的，直到帧尾部。`igb_is_non_eop`函数的主要功能是用于判断当前接收的数据缓冲区（Rx buffer）是否属于一个完整数据帧的结尾部分。**获取下来的一个数据帧用一个`sk_buff`来表示**，这个结构会贯穿协议栈处理直到应用层
 -	`napi_alloc_skb`：调用[`__napi_alloc_skb`](https://elixir.bootlin.com/linux/v4.11.8/source/net/core/skbuff.c#L471)，该方法最终最调用`__build_skb`进行创建`sk_buff`的操作；这里有个细节稍微提一下，generic XDP的处理逻辑就是在`__build_skb`之前，不过此内核igb驱动不支持，可以参考mlx5驱动的实现[`skb_from_cqe`](https://elixir.bootlin.com/linux/v4.11.8/source/drivers/net/ethernet/mellanox/mlx5/core/en_rx.c#L927)
 -	`igb_process_skb_fields`：收取完数据以后，对其进行一些校验，然后开始设置`skb`变量的timestamp, VLAN id, protocol等字段
@@ -1216,6 +1356,19 @@ static inline int deliver_skb(struct sk_buff *skb,
 
 4、IP协议层处理流程
 
+网络包接收在 IP 层的入口函数是 `ip_rcv`，在此即可看到netfilter的核心逻辑了。packet在这里会遇到netfilter第一个 HOOK `PREROUTING`。当该钩子上的规则都处理完后，会进行路由选择。如果发现是本设备的网络包，进入`ip_local_deliver` 函数之后又会遇到 `INPUT` HOOK，如下图逻辑
+
+![recv-with-netfilter](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/recv_with_netfilter.png)
+
+`ip_rcv` 核心逻辑如下：
+-   数据合法性验证，统计计数器更新
+-   最后以 netfilter 的方式调用 `ip_rcv_finish`函数，这个意义在于任何 iptables 规则都能在 packet 刚进入 IP 层协议的时候被应用
+-   `NF_HOOK` 这个函数会执行到 iptables 中 `pre_routing` 里的各种表注册的各种规则。当处理完后，进入 `ip_rcv_finish`，此函数中将进行路由选择（`PREROUTING`命名由此得来，因为是在路由前执行）
+-   继续处理，如果发现是本地设备上的接收，会进入 `ip_local_deliver` 函数，接着是又会执行到 `LOCAL_IN` HOOK（即`INPUT` 链）
+-   netfilter在内核接收场景上的大体流程是：`PREROUTING`链 -> 路由判断（是本机）-> `INPUT`链 -> 后续处理
+
+还有一点需要注意的是，这里都是在软中断中处理的，即netfilter或iptables 规则都是在软中断上下文中执行的，数量规则很复杂时会导致网络延迟
+
 ```cpp
 //file: net/ipv4/ip_input.c
 int ip_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt, struct net_device *orig_dev)
@@ -1380,13 +1533,19 @@ int __udp_enqueue_schedule_skb(struct sock *sk, struct sk_buff *skb)
 	//......
 
 	//把skb挂到list的尾部
+	// 将这个 skb 插入 socket 的接收队列 sk->sk_receive_queue
 	__skb_queue_tail(list, skb);
+	//所有在这个 socket 上等待数据的进程都收到一个通过 sk_data_ready 通知处理函数
+	if (!sock_flag(sk, SOCK_DEAD))
+        sk->sk_data_ready(sk);
 
+	
 	//......	
 }
 EXPORT_SYMBOL_GPL(__udp_enqueue_schedule_skb);
 ```
 
+至此，软中断的一轮接收报文及处理过程结束，`run_ksoftirqd`逻辑中`__do_softirq`处理完成，继续下面的流程
 
 ##	0x04	应用层处理
 上一章节描述了整个Linux内核对数据包的接收和处理过程，最后把数据包放到socket的接收队列中，那么应用层如何接受数据呢？以UDP应用常用的`recvfrom`函数（glibc库函数）为例进行分析
@@ -1458,7 +1617,7 @@ EXPORT_SYMBOL(inet_recvmsg);
 
 ####	udp_recvmsg的核心逻辑
 `udp_recvmsg`函数包含下面的主要工作：
-1. 取数据包：`__skb_recv_datagram()`函数，从`sk_receive_queue`上取一个`skb`
+1. 取数据包：`__skb_recv_datagram()`函数，从`sk_receive_queue`上取一个`skb`，对应上面`udp_rcv`流程中最后的`__udp_enqueue_schedule_skb`的入队操作
 2. 拷贝数据（内核空间copy到用户空间）：`skb_copy_datagram_iovec()`或`skb_copy_and_csum_datagram_iovec()`
 3. 必要时计算校验和：`skb_copy_and_csum_datagram_iovec()`
 
@@ -1538,3 +1697,4 @@ EXPORT_SYMBOL(netif_receive_skb);
 -   [【Linux】网络专题（二）——核心数据结构sk_buff](https://void-star.icu/archives/939)
 -	[Linux 网络栈接收数据（RX）：配置调优（2022）](https://arthurchiao.art/blog/linux-net-stack-tuning-rx-zh/)
 -   [Linux 网络栈接收数据（RX）：原理及内核实现（2022）](https://arthurchiao.art/blog/linux-net-stack-implementation-rx-zh/)
+-   [带你理解 iptables 原理](https://blog.csdn.net/zhangyanfei01/article/details/121782458)
