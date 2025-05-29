@@ -36,7 +36,7 @@ Tracee 是一个用于 Linux 的运行时安全和取证工具，基于 Linux eB
 | EVENT | 事件识别符 | 
 | ARGS | 提供给函数的参数列表 | 
 
-```bash
+```text
 root@VM-16-15-ubuntu:~/tracee/dist# ./tracee-ebpf  --output option:parse-arguments
 TIME             UID    COMM             PID     TID     RET              EVENT                     ARGS
 14:20:53:862128  0      barad_agent      1209425 1593323 0                fchown                    fd: 14, owner: 0, group: 0
