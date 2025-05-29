@@ -15,12 +15,16 @@ Tracee 是一个用于 Linux 的运行时安全和取证工具，基于 Linux eB
 
 ![ARCH](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/tracee/architecture-1.png)
 
--   基于eBPF的事件采集器：在内核中捕获事件
--   事件处理管道：处理和丰富化事件
+-   基于eBPF的事件采集器（Capture）：在内核中捕获事件
+-   事件处理管道（Pipeline机制）：处理和丰富化事件
 -   签名引擎：检测安全威胁
 -   策略管理：控制事件过滤和选择
 
 本文关联版本为[v0.23.1](https://github.com/aquasecurity/tracee/releases/tag/v0.23.1)、二进制版本[v0.23.1](https://github.com/aquasecurity/tracee/releases/download/v0.23.1/tracee-x86_64.v0.23.1.tar.gz)，运行内核版本`6.6.30-5.tl4.x86_64`
+
+Tracee 包括两大基础组件：
+-   `Trace-eBPF`：使用 eBPF 进行 Linux 追踪和取证，BPF 底层代码实现参见 tracee.bpf.c
+-   `Trace-Rules`：运行时安全检测引擎，可通过管道的方式从 `Trace-eBPF` 中接受数据并进行处理
 
 ####    基础使用（采集）
 1、`./tracee-ebpf  --output option:parse-arguments`，每一行代表Tracee所采集到的（一条）单一事件，其中包含下列信息：
@@ -78,11 +82,39 @@ TIME             UID    COMM             PID     TID     RET              EVENT 
 -   Syscalls：https://aquasecurity.github.io/tracee/dev/docs/events/builtin/syscalls/
 
 ##  0x01    工作原理
+
+####    采集器
+
 Tracee 中的 `tracee-ebpf` 模块的核心能力包括： 事件跟踪（trace）、抓取（capture）和输出（output），`tracee-ebpf` 的核心能力在于底层 eBPF 机制抓取事件的能力，`tracee-ebpf` 默认实现了诸多的事件抓取功能，可以通过 `trace-ebpf -l` 参看到底层支持的函数全集（本版本约`1800+`）
 
-```BASH
+```text
 root@VM-16-15-ubuntu:~/tracee/dist# ./tracee-ebpf -l|wc -l
 1838
+
+Syscall Events
+
++------------------------------+--------------------------------+------------------------------------------+
+| RULE                         | SETS                           | ARGUMENTS                                |
++------------------------------+--------------------------------+------------------------------------------+
+| read                         | syscalls, fs, fs_read_write    | int fd, void* buf, size_t                |
+|                              |                                | count                                    |
++------------------------------+--------------------------------+------------------------------------------+
+| write                        | syscalls, fs, fs_read_write    | int fd, void* buf, size_t                |
+|                              |                                | count                                    |
++------------------------------+--------------------------------+------------------------------------------+
+| open                         | syscalls, fs, fs_file_ops      | const char* pathname, int                |
+|                              |                                | flags, mode_t mode                       |
++------------------------------+--------------------------------+------------------------------------------+
+| close                        | syscalls, fs, fs_file_ops      | int fd                                   |
++------------------------------+--------------------------------+------------------------------------------+
+| stat                         | syscalls, fs, fs_file_attr     | const char* pathname, struct             |
+|                              |                                | stat* statbuf                            |
++------------------------------+--------------------------------+------------------------------------------+
+| fstat                        | syscalls, fs, fs_file_attr     | int fd, struct stat* statbuf             |
++------------------------------+--------------------------------+------------------------------------------+
+| lstat                        | syscalls, fs, fs_file_attr     | const char* pathname, struct             |
+|                              |                                | stat* statbuf                            |
++------------------------------+--------------------------------+------------------------------------------+
 ```
 
 -   `RULE`：系统调用函数
@@ -98,7 +130,24 @@ root@VM-16-15-ubuntu:~/tracee/dist# ./tracee-ebpf -l|wc -l
 
 以上跟踪事件的过滤条件会**通过接口设置进内核中对应的 map 结构中，在完成过滤和事件跟踪以后，通过 perf_event 的方式上报到用户空间程序中，可以保存到文件后续进行处理，或者直接通过管道发送至 `tracee-rule` 进行解析和进行更高级别的上报**
 
-##  0x0    参考
+####  Tracee Pipeline Concept
+![pipeline](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/tracee/tracee-pipeline-overview.png)
+
+Pipeline的作用
+
+
+####    签名引擎
+
+##  0x02  内核态开发
+笔者感兴趣的内核态hook实现集中在此[`tracee.bpf.c`](https://github.com/aquasecurity/tracee/blob/main/pkg/ebpf/c/tracee.bpf.c)，除此之外：
+
+-   MAPS[定义](https://github.com/aquasecurity/tracee/blob/main/pkg/ebpf/c/maps.h)
+-   kernel [封装函数](https://github.com/aquasecurity/tracee/blob/main/pkg/ebpf/c/tracee.h)
+-   [通用封装函数](https://github.com/aquasecurity/tracee/tree/main/pkg/ebpf/c/common)
+-   [通用结构定义](https://github.com/aquasecurity/tracee/blob/main/pkg/ebpf/c/types.h)
+
+
+##  0x03    参考
 -   [eBPF 安全项目 Tracee 初探](https://www.do1618.com/archives/1702/ebpf-an-quan-xiang-mu-tracee-chu-tan/)
 -   [Tracee Architecture Overview](https://aquasecurity.github.io/tracee/v0.8.0/architecture/)
 -   [Tracee 性能](https://aquasecurity.github.io/tracee/v0.8.0/deep-dive/performance/)
