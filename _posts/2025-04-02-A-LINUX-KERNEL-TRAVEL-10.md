@@ -17,6 +17,13 @@ tags:
 本小节使用以太网的物理网卡，以一个UDP包的发送过程作为示例，了解下具体的发包过程
 
 ####    socket层
+1、`socket()`：创建一个UDP socket结构体，并初始化相应的UDP操作函数
+
+2、`sendto(sock, ...)`：应用层的程序（Application）调用该函数开始发送数据包，该函数会进而调用`inet_sendmsg`
+
+3、`inet_sendmsg`：该函数主要是检查当前socket有无绑定源端口，如果没有的话，调用`inet_autobind`分配一个，然后调用UDP层的函数
+
+4、`inet_autobind`：该函数会调用socket上绑定的`get_port`函数获取一个可用端口，由于该socket是UDP的socket，所以`get_port`函数会调到UDP内核实现里面的相应函数
 
 ```TEXT
                +-------------+
@@ -54,7 +61,6 @@ tags:
                +-----------+
 
 ```
-
 
 ####    UDP层
 
