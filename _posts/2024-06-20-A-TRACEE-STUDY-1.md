@@ -79,9 +79,29 @@ TIME             UID    COMM             PID     TID     RET              EVENT 
 -   Security Events
 -   Network Events
 -   Extra Events
--   Syscalls：https://aquasecurity.github.io/tracee/dev/docs/events/builtin/syscalls/
+-   [Syscalls](https://aquasecurity.github.io/tracee/dev/docs/events/builtin/syscalls/)
 
 ##  0x01    工作原理
+
+####    tracee架构
+![arch](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/tracee/architecture.png)
+
+如上图（图来自于版本v0.8.3），一共拆分为五个阶段：
+
+1、阶段一，内核态eBPF采集器产生到用户态（Userland）的Tracee事件，包含Tracepoints、Probes以及Trafic Control Hooks
+
+2、阶段二，用户态对内核态的事件进行丰富（ENRICHED）及补全，包含如下
+
+-   内核事件（Syscalls，TracePoints，kprobes）
+-   操作系统事件（Running Containers以及其他）
+-   派生（来自其他）事件
+-   网络事件
+
+3、阶段三，基于已有的规则签名（Signatures）进行检测，签名[支持](https://aquasecurity.github.io/tracee/v0.8.3/detecting/#selecting-signatures)
+
+4、阶段四，检测事件的消费及后续处理
+
+-   捕获事件或者二进制
 
 ####    采集器
 
@@ -133,10 +153,75 @@ Syscall Events
 ####  Tracee Pipeline Concept
 ![pipeline](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/tracee/tracee-pipeline-overview.png)
 
-Pipeline的作用
+Pipeline的作用过程如下：
 
+1.  每个CPU不断从内核运行的eBPF程序生成事件
+2.  每当触发其附加的内核hooks时，都会执行EBPF程序
+3.  eBPF程序基于given filters决定是否应该将事件提交给 tracee-ebpf
+4.  这些事件被发送到 libbpfgo 通过perfbuffer（共享内存环缓冲区）传递到用户态
+5.  libbpfgo 将内核eBPF采集器收集的事件发送给Tracee golang channels
+6.  tracee-ebpf 收到事件后，解析及转换参数类型的事件、丰富事件，如果需要捕获相关事件则进一步处理
+7.  tracee-ebpf 通过printer机制将事件发送给 Tracee-rules 模块
+8.  tracee-rules 接受这些事件并使用签名进行风险评估（推荐基于golang的规则）
+9.  Tracee-rules 给出风险评估结果
+
+####    风险检测
+
+| 风险 | 说明 | 应用范围 |
+| :-----| :---- | :----|
+| Standard Input/Output Over Socket | 	将进程的标准输入/输出重定向到套接字 | CVM/容器 |
+| Anti-Debugging | 进程使用反调试技术来阻止调试器 | CVM/容器 |
+| Code injection | 将代码注入另一个进程 | CVM/容器 |
+| Dynamic Code Loading | 写入可执行分配的内存区域 | CVM/容器 |
+| Fileless Execution | 直接从内存中运行进程（不使用磁盘文件） | CVM/容器 |
+| kernel module loading | 尝试加载内核模块检测 | CVM/容器 |
+| LD_PRELOAD | 使用 LD_PRELOAD 来允许进程hook | CVM/容器 |
+| Container Host Mount | 将主机文件系统挂载到容器中 | 容器 |
+| Dropped Executable | 在运行时从容器中创建或删除可执行文件 | CVM/容器 |
+| Illegitimate Shell | 生成 Shell 程序 | CVM/容器 |
+| K8S API Connection | 连接到 Kubernetes 集群 API 服务器 | 容器 |
+| K8S Service Account Use | 	读取容器中的 Kubernetes 服务帐户令牌文件 | 容器 |
+| K8S TLS Certificate Theft | 访问用于 Kubernetes 组件之间安全通信的 TLS 证书	 | CVM/容器 |
+
+
+举例来说，选用Fileless Execution（直接从内存执行进程，磁盘中无文件）行为，典型工具为`elfexec`进行验证：
+
+```BASH
+wget https://github.com/abbat/elfexec/releases/download/v0.3/elfexec.x64.glibc.xz
+xz -d elfexec.x64.glibc.xz
+chmod u+x elfexec.x64.glibc && mv ./elfexec.x64.glibc ./elfexec
+
+echo '
+#include <unistd.h>
+
+int main(int argc, char* argv[])
+{
+    write(STDOUT_FILENO, "Hello!\n", 7);
+    return 0;
+}
+' | cc -xc - -o /dev/stdout | elfexec
+```
+
+tracee-rules捕捉到结果如下，触发的检测签名为`TRC-5`
+
+```TEXT
+Loaded 14 signature(s): [TRC-1 TRC-13  TRC-2 TRC-3 TRC-11 TRC-9 TRC-4 TRC-5 TRC-12 TRC-8 TRC-6 TRC-10 TRC-7]
+
+*** Detection ***
+Time: xxxxxx
+Signature ID: TRC-5
+Signature: Fileless Execution
+Data: map[]
+Command: elfexec
+Hostname: localhost
+```
 
 ####    签名引擎
+
+2、自定义规则，`tracee-rules`提供了两种方式自定义规则，一是使用`.rego`语言的规则文本，而是使用go Signature接口的规则
+
+-   [rego规则](https://github.com/aquasecurity/tracee/tree/v0.8.3/signatures/rego)：基于文本的规则参考，适用`v0.8.3`版本
+-   [基于golang的规则](https://github.com/aquasecurity/tracee/tree/v0.8.3/signatures/golang)
 
 ##  0x02  内核态开发
 笔者感兴趣的内核态hook实现集中在此[`tracee.bpf.c`](https://github.com/aquasecurity/tracee/blob/main/pkg/ebpf/c/tracee.bpf.c)，除此之外：
@@ -154,3 +239,4 @@ Pipeline的作用
 -   [tracee 源码初探 (一)](https://www.cnblogs.com/janeysj/p/16254048.html)
 -   [libsinsp, libscap, the kernel module driver, and the eBPF driver sources](https://github.com/falcosecurity/libs)
 -   [execveat：doc](https://aquasecurity.github.io/tracee/v0.22/docs/events/builtin/syscalls/execveat/)
+-   [使用tracee编写规则追踪系统安全事件](https://www.freebuf.com/articles/system/304038.html)

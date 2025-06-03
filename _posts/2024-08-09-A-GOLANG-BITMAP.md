@@ -228,7 +228,7 @@ iptables -A INPUT -s 172.16.1.0/24  -j DROP						#序号4
 
 本小节以项目[xdp_acl](https://github.com/hi-glenn/xdp_acl)进行简单说明，项目的整体运行流程如下：
 
-![xdp_acl]()
+![xdp_acl](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/xdp/xdp_acl/flow_arch.png)
 
 ##	0x04	内核态实现
 
