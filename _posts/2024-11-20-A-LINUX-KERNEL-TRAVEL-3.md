@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:  Linux 内核之旅（二）：VFS（基础篇）
-subtitle:
+subtitle:	VFS的基本数据结构及关系
 date:       2024-11-20
 author:     pandaychen
 header-img:
@@ -49,11 +49,11 @@ vdb    ext4   1.0         5ab378b4-f1c3-48ce-9cf1-dff36890668e   46.1G     1% /f
                                                                               /data/test
                                                                               /data
 
-[root@VM-119-175-tencentos pandaychen]# ls /formount/
+[root@VM-X-X-tencentos pandaychen]# ls /formount/
 build  docker  home  lost+found  test  subdir
-[root@VM-119-175-tencentos pandaychen]# ls /data/
+[root@VM-X-X-tencentos pandaychen]# ls /data/
 build  docker  home  lost+found  test  subdir
-[root@VM-119-175-tencentos pandaychen]# ls /data/test/
+[root@VM-X-X-tencentos pandaychen]# ls /data/test/
 build  docker  home  lost+found  test  subdir
 ```
 
@@ -215,7 +215,7 @@ struct dentry {
 
 需要关注 `struct file` 的这几个重要成员：
 
--	`f_inode`：
+-	`f_inode`：直接指向文件对应的inode（注意到此成员与`file.f_path.dentry->d_inode`的指向是相同的）
 -	`f_list`：所有的打开的文件形成的链表！注意一个文件系统所有的打开的文件都通过这个链接到 super_block 中的 s_files 链表中！
 -	`f_path.dentry`：类型为`struct dentry *`，与该文件相关的 `dentry`
 -	`f_path.mnt`：类型为`struct vfsmount *`，该文件在这个文件系统中的挂载点（参考下面的mnt图）
@@ -554,7 +554,7 @@ Linux 使用父子树的形式来构造，父设备树中的一个文件夹 `str
 
 1、上图的挂载点
 
-如上图，可以看到通过一个 `struct mount` 结构负责引用一颗 ** 子设备树 **，把这颗子设备树挂载到父设备树的其中一个 `dentry` 节点上；如果 `dentry` 成为了挂载点 `mountpoint`，会给其标识成 `DCACHE_MOUNTED`。** 在查找路径的时候同样会判断 `dentry` 的 `DCACHE_MOUNTED` 标志，一旦置位就变成了 `mountpoint`，挂载点目录下原有的内容就不能访问了，转而访问子设备树根节点下的内容 **
+如上图，可以看到通过一个 `struct mount` 结构负责引用一颗 **子设备树**，把这颗子设备树挂载到父设备树的其中一个 `dentry` 节点上；如果 `dentry` 成为了挂载点 `mountpoint`，会给其标识成 `DCACHE_MOUNTED`。**在查找路径的时候同样会判断 `dentry` 的 `DCACHE_MOUNTED` 标志，一旦置位就变成了 `mountpoint`，挂载点目录下原有的内容就不能访问了，转而访问子设备树根节点下的内容**
 
 3、`path`：因为 Linux 提供的灵活的挂载规则，所以如果要标识一个路径 `struct path` 的话需要两个元素：`vfsmount` 和 `dentry`
 
@@ -581,7 +581,7 @@ struct task_struct {
 ####	mount 理解（两个规则）
 mount 的过程就是把设备的文件系统加入到 vfs 框架中，以 `mount -t fstpye devname pathname` 命令来进行挂载子设备的操作为例：
 
-1、规则一，一个设备可以被挂载多次（本文开头的例子），如下图可以看到同一个子设备树，同时被两个 `struct mount` 结构所引用，被挂载到父设备树的两处不同的 `dentry` 处。特别说明 ** 虽然子设备树被挂载两次并且通过两处路径都能访问，但子设备的 `dentry` 和 `inode` 只保持一份 **
+1、规则一，一个设备可以被挂载多次（本文开头的例子），如下图可以看到同一个子设备树，同时被两个 `struct mount` 结构所引用，被挂载到父设备树的两处不同的 `dentry` 处。特别说明 **虽然子设备树被挂载两次并且通过两处路径都能访问，但子设备的 `dentry` 和 `inode` 只保持一份**
 
 ![RULE1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/mnt-ns/mnt_tree_mmp.png)
 
@@ -595,14 +595,9 @@ mount 的过程就是把设备的文件系统加入到 vfs 框架中，以 `moun
 
 ![mnt-namespace](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/mnt-ns/mnt_tree_ns.png)
 
-##  0x0	 VFS 关联 task_struct
-
-##	0x0	files_struct
-![files_struct](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/fs.vfs.png)
-
 ##	0x02	部分核心源码摘要
 
-####	mount
+####	mount 调用路径
 `mount()` 系统调用是理解文件系统层次化的核心，它主要包含 `3` 个关键步骤：
 
 1、解析 `mount` 系统调用中的参数挂载点路径 `pathname` ，返回对应的 `struct path` 结构
@@ -661,7 +656,18 @@ PID     TID     COMM            FUNC
 -	`open`：工作流程大致为，系统调用将创建一个 `file` 对象（首先通过查找 dentry cache 来确定 `file` 存在的位置），并且在 open files tables 中（即 `task_struct` 的 fd table）分配一个索引
 -	`write`：由于 block I/O 非常耗时，所以 Linux 内核会使用 page cache 来缓存每次 read file 的内容， 当 write system call 时，系统将这个 page 标记为 dirty，并且将这个 page 移动到 dirty list 上， 系统会定时将这些 page flush 到磁盘上
 
-##	0x04	VFS的应用（工作）
+##	0x04	VFS的应用（项目相关）
+
+####	VFS 关联 task_struct
+项目中通常需要基于`task_struct`来获取与VFS相关的事件属性，这里就需要了解`task_struct`与VFS基础数据结构之间的关联关系，如下图所示
+
+-	进程（`task_struct`）所在的当前目录、根目录
+-	进程打开的fd是否为socket（SOCKFS），可能需要向上追溯到父进程
+-	进程在VFS中的绝对路径
+
+![files_struct](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/fs.vfs.png)
+
+其他相关知识点可以参考[Linux 内核之旅（一）：进程](https://pandaychen.github.io/2024/10/02/A-LINUX-KERNEL-TRAVEL-1/#0x05-关联文件系统)
 
 ####	SOCK_FS文件系统
 socket在Linux中对应的文件系统叫sockfs，每创建一个socket，就在sockfs中创建了一个特殊的文件，同时创建了sockfs文件系统中的inode，该inode唯一标识当前socket的通信，那么sockfs是如何注册到VFS中的？本节就简单讨论这个问题
@@ -843,7 +849,7 @@ static const struct super_operations sockfs_ops = {
 };
 ```
 
-`sockfs_ops`函数表**对sockfs文件系统的节点和目录提供了具体的操作函数，后面涉及到的sockfs文件系统的重要操作均会到该函数表中查找到对应的操作函数**，例如Linux内核在创建socket节点时会查找`sockfs_ops`的`alloc_inode`函数， 从而调用`sock_alloc_indode`函数完成socket以及inode节点的创建
+`sockfs_ops`函数表**对sockfs文件系统的节点和目录提供了具体的操作函数，后面涉及到的sockfs文件系统的重要操作均会到该函数表中查找到对应的操作函数**，例如Linux内核在创建socket节点时会查找`sockfs_ops`的`alloc_inode`函数， 从而调用`sock_alloc_inode`函数完成socket以及inode节点的创建
 
 ```CPP
 static struct dentry *sockfs_mount(struct file_system_type *fs_type,
@@ -903,7 +909,7 @@ const struct dentry_operations *dops, unsigned long magic)
 }
 ```
 
-5、`sock_alloc_indode`函数
+5、`sock_alloc_inode`函数
 
 TODO
 
