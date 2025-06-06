@@ -442,6 +442,10 @@ struct files_struct {
 	-	`inode_operaions`：inode 操作
 	-	`address_space_operations`：数据和 page cache 操作
 
+![vfs-relation]()
+
+从上图可以看出
+
 ####	设计dentry的意义
 dentry是目录项缓存，是一个存放在内存里的缩略版的磁盘文件系统目录树结构，思考几个问题：
 
@@ -538,7 +542,7 @@ Linux 使用父子树的形式来构造，父设备树中的一个文件夹 `str
 
 ![2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/mnt-ns/mount_struct.png)
 
-2、mount tree：内核引入树形结构来关联 mount 关系（思考下前文，一个合法的子目录可以成为任意一个块设备的挂载点），`struct mount` 结构之间也构成了树形结构（问题：mount tree 构造的原则是什么？）
+2、mount tree：内核引入树形结构来关联 mount 关系（思考下前文，**一个合法的子目录可以成为任意一个块设备的挂载点**），`struct mount` 结构之间也构成了树形结构（问题：mount tree 构造的原则是什么？）
 
 ![3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/mnt-ns/mnt_tree.png)
 
@@ -562,7 +566,7 @@ Linux 使用父子树的形式来构造，父设备树中的一个文件夹 `str
 
 特别要注意 `struct path`->`struct vfsmount *mnt`->`struct dentry *mnt_mountpoint`，计算绝对路径要用到，指向了挂载点的 `dentry`
 
-从上图，可以看到两个路径 `struct path` 最后引用到了同一 `inode`，但是路径 `path` 是不一样的，因为 `path` 指向的 `vfsmount` 是不一样的（很少的说明的本文开头列举的例子）
+从上图，可以看到两个路径 `struct path` 最后引用到了同一 `inode`，但是路径 `path` 是不一样的，因为 `path` 指向的 `vfsmount` 是不一样的（很好的说明的本文开头列举的例子）
 
 4、`chroot`：Linux 支持每个进程拥有不同的根目录，使用 `chroot()` 系统调用可以把当前进程的根目录设置为整棵文件系统树中的任何 path
 
