@@ -115,24 +115,40 @@ int openat(int dirfd, const char *pathname, int flags, mode_t mode);
 ```
 
 ####   nameidata/path/vfsmount结构
-[`nameidata`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L506)
+[`nameidata`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L506)，`nameidata`用来存储遍历路径的中间结果（临时性存放），在路径搜索时常用到
 
 ```CPP
 struct nameidata {
-	struct path	path;
-	struct qstr	last;
-	struct path	root;
+	struct path	path;   //path 保存当前搜索到的路径
+	struct qstr	last;   //last 保存当前子路径名及其散列值
+	struct path	root;   //root 用来保存根目录的信息
 	struct inode	*inode; /* path.dentry.d_inode */
-	unsigned int	flags;
+    // inode 指向当前找到的目录项的 inode 结构
 
+	unsigned int	flags;  //flags 是一些和查找（lookup）相关的标志位
+    unsigned	seq, m_seq;
+	int		last_type;  //last_type 表示当前节点类型
+	unsigned	depth;  // depth 用来记录在解析符号链接过程中的递归深度
+	int		total_link_count;
     //...
 
 	struct filename	*name;
-	struct nameidata *saved;
+	struct nameidata *saved;    //保存上一个nameidata的指针
 	struct inode	*link_inode;
 	unsigned	root_seq;
 	int		dfd;
 };
+
+//set_nameidata
+static void set_nameidata(struct nameidata *p, int dfd, struct filename *name)
+{
+	struct nameidata *old = current->nameidata;
+	p->stack = p->internal;
+	p->dfd = dfd;
+	p->name = name;
+	p->total_link_count = old ? old->total_link_count : 0;
+	p->saved = old;
+}
 ```
 
 ![nameidata-path-vfsmount]()
@@ -187,6 +203,7 @@ void fd_install(unsigned int fd, struct file *file)
 2、[`do_filp_open`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L3515)
 
 ```CPP
+//pathname是open file的完整路径名
 struct file *do_filp_open(int dfd, struct filename *pathname,
 		const struct open_flags *op)
 {
@@ -194,7 +211,9 @@ struct file *do_filp_open(int dfd, struct filename *pathname,
 	int flags = op->lookup_flags;
 	struct file *filp;
 
+    //将pathname保存到nameidata里
 	set_nameidata(&nd, dfd, pathname);
+    //调用path_openat，此时是flags是带了LOOKUP_RCU flag
 	filp = path_openat(&nd, op, flags | LOOKUP_RCU);
 	if (unlikely(filp == ERR_PTR(-ECHILD)))
 		filp = path_openat(&nd, op, flags);
@@ -205,7 +224,7 @@ struct file *do_filp_open(int dfd, struct filename *pathname,
 }
 ```
 
-3、[`path_openat`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L3457)，在`path_openat`中，先调用`get_empty_filp`方法分配一个空的`struct file`实例，再调用`path_init`、`link_path_walk`、`do_last`等方法执行后续的open操作，如果都成功了，则返回`struct file`给上层。核心方法是`link_path_walk`、`do_last`
+3、[`path_openat`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L3457)，在`path_openat`中，先调用`get_empty_filp`方法分配一个空的`struct file`实例，再调用`path_init`、`link_path_walk`、`do_last`等方法执行后续的open操作，如果都成功了，则返回`struct file`给上层。核心方法是`path_init`、`link_path_walk`、`do_last`，其中`path_init`和`link_path_walk`通常合在一起调用，作用是**可以根据给定的文件路径名称在内存中找到或者建立代表着目标文件或者目录的dentry结构和inode结构**
 
 ```CPP
 static struct file *path_openat(struct nameidata *nd,
@@ -234,15 +253,24 @@ static struct file *path_openat(struct nameidata *nd,
 		goto out2;
 	}
 
+    // 路径初始化，确定查找的起始目录，初始化结构体 nameidata 的成员 path
+    //调用path_init()设置nameidata的path结构体
+    //对于常规文件来说，如/data/test/testfile，设置path结构体指向根目录/，即设置path.mnt/path.dentry指向根目录/，为后续的目录解析做准备
+    // path_init()的返回值即指向open file的完整路径名字串开头
 	s = path_init(nd, flags);
 	if (IS_ERR(s)) {
 		put_filp(file);
 		return ERR_CAST(s);
 	}
     // 核心方法
+    // 调用函数 link_path_walk 解析文件路径的每个分量，最后一个分量除外
+  	// 调用函数 do_last，解析文件路径的最后一个分量，并且打开文件
 	while (!(error = link_path_walk(s, nd)) &&
 		(error = do_last(nd, file, op, &opened)) > 0) {
 		nd->flags &= ~(LOOKUP_OPEN|LOOKUP_CREATE|LOOKUP_EXCL);
+        // 如果最后一个分量是符号链接，调用 trailing_symlink 函数进行处理
+    	// 读取符号链接文件的数据，新的文件路径是符号链接链接文件的数据，然后继续 while
+    	// 循环，解析新的文件路径
 		s = trailing_symlink(nd);
 		if (IS_ERR(s)) {
 			error = PTR_ERR(s);
@@ -268,11 +296,108 @@ out2:
 }
 ```
 
-4、`path_init`方法，`path_init`方法主要是用来初始化`struct nameidata`实例中的`path`、`root`、`inode`等字段
+4、`path_init`方法，`path_init`方法主要是用来初始化`struct nameidata`实例中的`path`、`root`、`inode`等字段。当`path_init`函数执行成功后，就会在`nameidata`结构体的成员`nd->path.dentry`中指向搜索路径的起点，接下来就使用`link_path_walk`函数顺着路径进行搜索
 
-TODO
+```CPP
+static const char *path_init(struct nameidata *nd, unsigned flags)
+{
+	int retval = 0;
+	const char *s = nd->name->name;
 
-5、`link_path_walk`
+	if (!*s)
+		flags &= ~LOOKUP_RCU;
+
+	nd->last_type = LAST_ROOT; /* if there are only slashes... */
+	nd->flags = flags | LOOKUP_JUMPED | LOOKUP_PARENT;
+	nd->depth = 0;
+	if (flags & LOOKUP_ROOT) {
+		struct dentry *root = nd->root.dentry;
+		struct inode *inode = root->d_inode;
+		if (*s) {
+			if (!d_can_lookup(root))
+				return ERR_PTR(-ENOTDIR);
+			retval = inode_permission(inode, MAY_EXEC);
+			if (retval)
+				return ERR_PTR(retval);
+		}
+		nd->path = nd->root;
+		nd->inode = inode;
+		if (flags & LOOKUP_RCU) {
+			rcu_read_lock();
+			nd->seq = __read_seqcount_begin(&nd->path.dentry->d_seq);
+			nd->root_seq = nd->seq;
+			nd->m_seq = read_seqbegin(&mount_lock);
+		} else {
+			path_get(&nd->path);
+		}
+		return s;
+	}
+
+	nd->root.mnt = NULL;
+	nd->path.mnt = NULL;
+	nd->path.dentry = NULL;
+
+	nd->m_seq = read_seqbegin(&mount_lock);
+	if (*s == '/') {
+		if (flags & LOOKUP_RCU)
+			rcu_read_lock();
+		set_root(nd);
+		if (likely(!nd_jump_root(nd)))
+			return s;
+		nd->root.mnt = NULL;
+		rcu_read_unlock();
+		return ERR_PTR(-ECHILD);
+	} else if (nd->dfd == AT_FDCWD) {
+		if (flags & LOOKUP_RCU) {
+			struct fs_struct *fs = current->fs;
+			unsigned seq;
+
+			rcu_read_lock();
+
+			do {
+				seq = read_seqcount_begin(&fs->seq);
+				nd->path = fs->pwd;
+				nd->inode = nd->path.dentry->d_inode;
+				nd->seq = __read_seqcount_begin(&nd->path.dentry->d_seq);
+			} while (read_seqcount_retry(&fs->seq, seq));
+		} else {
+			get_fs_pwd(current->fs, &nd->path);
+			nd->inode = nd->path.dentry->d_inode;
+		}
+		return s;
+	} else {
+		/* Caller must check execute permissions on the starting path component */
+		struct fd f = fdget_raw(nd->dfd);
+		struct dentry *dentry;
+
+		if (!f.file)
+			return ERR_PTR(-EBADF);
+
+		dentry = f.file->f_path.dentry;
+
+		if (*s) {
+			if (!d_can_lookup(dentry)) {
+				fdput(f);
+				return ERR_PTR(-ENOTDIR);
+			}
+		}
+
+		nd->path = f.file->f_path;
+		if (flags & LOOKUP_RCU) {
+			rcu_read_lock();
+			nd->inode = nd->path.dentry->d_inode;
+			nd->seq = read_seqcount_begin(&nd->path.dentry->d_seq);
+		} else {
+			path_get(&nd->path);
+			nd->inode = nd->path.dentry->d_inode;
+		}
+		fdput(f);
+		return s;
+	}
+}
+```
+
+5、[`link_path_walk`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L2042)
 
 ```CPP
 /*
@@ -287,9 +412,11 @@ static int link_path_walk(const char *name, struct nameidata *nd)
 {
 	int err;
 
-    //跳过开始的/字符
+    //跳过开始的/字符（根目录）
 	while (*name=='/')
 		name++;
+
+    //如果路径只包含/，搜索完成，返回
 	if (!*name)
 		return 0;
 
@@ -298,28 +425,42 @@ static int link_path_walk(const char *name, struct nameidata *nd)
 		u64 hash_len;
 		int type;
 
+        //https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1667
+        //may_lookup 检查是否拥有中间目录的权限，需要有执行权限MAY_EXEC
 		err = may_lookup(nd);
 		if (err)
 			return err;
-
+        
+        //static inline u64 hash_name(const vo id *salt, const char *name)
+        //用父dentry的地址+当前denty的name计算hash值
+        //逐个字符的计算出，当前节点名称的哈希值，遇到/或者\0退出
+        //计算当前目录的hash_len，这个变量高4 byte是当前目录name字串长度，低4byte是当前目录（路径）的hash值，hash值的计算是基于当前目录的父目录dentry（nd->path.dentry）来计算的，所以它跟其目录（路径）dentry是关联的 
 		hash_len = hash_name(nd->path.dentry, name);
 
 		type = LAST_NORM;
+
+        //如果目录的第一个字符是.，当前节点长度只能为1或者2
 		if (name[0] == '.') switch (hashlen_len(hash_len)) {
 			case 2:
 				if (name[1] == '.') {
+                    //如果是2，第二个字符也是.
 					type = LAST_DOTDOT;
+                    //..需要查找当前目录的父目录
 					nd->flags |= LOOKUP_JUMPED;
 				}
 				break;
 			case 1:
+                //回到for循环开始，继续下一个节点
 				type = LAST_DOT;
 		}
 		if (likely(type == LAST_NORM)) {
+            // LAST_NORM：普通目录
 			struct dentry *parent = nd->path.dentry;
 			nd->flags &= ~LOOKUP_JUMPED;
 			if (unlikely(parent->d_flags & DCACHE_OP_HASH)) {
+                //当前目录项需要重新计算一下hash值
 				struct qstr this = { { .hash_len = hash_len }, .name = name };
+                // 调用parent这个dentry的parent->d_op->d_hash方法计算hash值
 				err = parent->d_op->d_hash(parent, &this);
 				if (err < 0)
 					return err;
@@ -328,10 +469,11 @@ static int link_path_walk(const char *name, struct nameidata *nd)
 			}
 		}
 
+        //更新nameidata last结构体，last.hash_len，name
 		nd->last.hash_len = hash_len;
 		nd->last.name = name;
 		nd->last_type = type;
-
+        //这里使name指向下一级目录
 		name += hashlen_len(hash_len);
 		if (!*name)
 			goto OK;
@@ -343,18 +485,24 @@ static int link_path_walk(const char *name, struct nameidata *nd)
 			name++;
 		} while (unlikely(*name == '/'));
 		if (unlikely(!*name)) {
+            //假设open file文件名路径上没有任何symlink，则如果这个条件满足，说明整个路径都解析完了，还剩最后的filename留给do_last()解析，此函数将从下面的!nd->depth条件处返回
 OK:
 			/* pathname body, done */
 			if (!nd->depth)
+                //此时已经到达了最终目标，路径行走任务完成
+                 //如果open file完整路径上没有任何symlink，nd->depth等于0
 				return 0;
 			name = nd->stack[nd->depth - 1].name;
 			/* trailing symlink, done */
 			if (!name)
+                //此时已经到达了最终目标，路径行走任务完成
 				return 0;
 			/* last component of nested symlink */
+            //symlink case
 			err = walk_component(nd, WALK_FOLLOW);
 		} else {
 			/* not the last component */
+            //常规目录case，非symlink的case
 			err = walk_component(nd, WALK_FOLLOW | WALK_MORE);
 		}
 		if (err < 0)
@@ -479,6 +627,257 @@ static int ext4_file_open(struct inode * inode, struct file * filp)
 ```
 
 ####    补充：`walk_component`的细节
+[`walk_component`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1763)方法对`nd`（中间结果）中的目录进行遍历
+
+-   优先使用`lookup_fast`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1537)：如果当前的目录是一个普通目录，路径行走有两个策略：先在效率高的rcu-walk模式[`__d_lookup_rcu`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1554)下遍历，如果失败了就在效率较低的ref-walk模式[`__d_lookup`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1600)下遍历
+-   如果`lookup_fast`查找失败，则调用`lookup_slow`函数。在 ref-walk 模式下会**首先在内存缓冲区查找相应的目标（lookup_fast），如果找不到就启动具体文件系统（如`ext4`）自己的 `lookup` 进行查找（lookup_slow）**
+-   在dcache里找到了当前目录对应的dentry或者是通过`lookup_slow`寻找到当前目录对应的dentry，这两种场景都会去设置`path`结构体里的`dentry`、`mnt`成员，并且将当前路径更新到`path`结构体
+-   当`path`结构体更新后，最后调用`step_info->path_to_nameidata`将`path`结构体更新到`nd.path`，[参考](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1803)，这样`nd`里的`path`就指向了当前目录了，至此完成一级目录的解析查找，返回`link_path_walk()`将基于`nd.path`作为父目录解析下一级目录，继续`link_path_walk`的循环查找直至退出
+
+```CPP
+static int walk_component(struct nameidata *nd, int flags)
+{
+	struct path path;
+	struct inode *inode;
+	unsigned seq;
+	int err;
+	/*
+	 * "." and ".." are special - ".." especially so because it has
+	 * to be able to know about the current root directory and
+	 * parent relationships.
+	 */
+	if (unlikely(nd->last_type != LAST_NORM)) {
+		err = handle_dots(nd, nd->last_type);
+		if (!(flags & WALK_MORE) && nd->depth)
+			put_link(nd);
+		return err;
+	}
+	err = lookup_fast(nd, &path, &inode, &seq);
+	if (unlikely(err <= 0)) {
+		if (err < 0)
+			return err;
+		path.dentry = lookup_slow(&nd->last, nd->path.dentry,
+					  nd->flags);
+		if (IS_ERR(path.dentry))
+			return PTR_ERR(path.dentry);
+
+		path.mnt = nd->path.mnt;
+		err = follow_managed(&path, nd);
+		if (unlikely(err < 0))
+			return err;
+
+		if (unlikely(d_is_negative(path.dentry))) {
+			path_to_nameidata(&path, nd);
+			return -ENOENT;
+		}
+
+		seq = 0;	/* we are already out of RCU mode */
+		inode = d_backing_inode(path.dentry);
+	}
+
+	return step_into(nd, &path, flags, inode, seq);
+}
+```
+
+[`__lookup_slow`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1625)实现如下，首先调用`d_alloc_parallel`给当前路径分配一个新的dentry，然后调用`inode->i_op->lookup()`，注意这里的inode是当前路径的父路径dentry的`d_inode`成员。此外，`inode->i_op`是具体的文件系统inode operations函数集。以ext4 文件系统为例，就是ext4 fs的inode operations函数集`ext4_dir_inode_operations`，其lookup函数是`ext4_lookup()`
+
+```CPP
+/* Fast lookup failed, do it the slow way */
+static struct dentry *lookup_slow(const struct qstr *name,
+				  struct dentry *dir,
+				  unsigned int flags)
+{
+	struct dentry *dentry = ERR_PTR(-ENOENT), *old;
+	struct inode *inode = dir->d_inode; //指向当前路径的父路径
+	DECLARE_WAIT_QUEUE_HEAD_ONSTACK(wq);
+
+	inode_lock_shared(inode);
+	/* Don't go there if it's already dead */
+	if (unlikely(IS_DEADDIR(inode)))
+		goto out;
+again:
+    // 新建dentry节点，并初始化相关关联
+	dentry = d_alloc_parallel(dir, name, &wq);
+	if (IS_ERR(dentry))
+		goto out;
+	if (unlikely(!d_in_lookup(dentry))) {
+		if (!(flags & LOOKUP_NO_REVAL)) {
+			int error = d_revalidate(dentry, flags);
+			if (unlikely(error <= 0)) {
+				if (!error) {
+					d_invalidate(dentry);
+					dput(dentry);
+					goto again;
+				}
+				dput(dentry);
+				dentry = ERR_PTR(error);
+			}
+		}
+	} else {
+        // 在ext4 fs中，会调用ext4_lookup寻找，此函数涉及到IO操作，性能较dcache会低
+		old = inode->i_op->lookup(inode, dentry, flags);
+		d_lookup_done(dentry);
+		if (unlikely(old)) {
+            //如果dentry是一个目录的dentry，则有可能old是有效的；否则如果dentry是文件的dentry则old是null
+			dput(dentry);
+			dentry = old;
+		}
+	}
+out:
+	inode_unlock_shared(inode);
+	return dentry;
+}
+```
+
+这里简单介绍下`ext4_lookup()`的实现，其原型为`static struct dentry *ext4_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)`，参数`dir`为当前目录dentry的父目录，参数`dentry`为需要查找的当前目录。`ext4_lookup()`首先调用了`ext4_lookup_entry()`，此函数根据当前路径的dentry的`d_name`成员在当前目录的父目录文件（用inode表示）里查找，这个会open父目录文件会涉及到IO读操作（具体可以分析`ext4_bread`函数的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/inode.c#L994)）。查找到后，得到当前目录的`ext4_dir_entry_2`，此结构体里有当前目录的inode number，然后根据此inode number调用`ext4_iget()`函数获得这个inode number对应的inode struct，得到这个inode后调用`d_splice_alias()`将dentry和inode绑定，即将inode赋值给dentry的`d_inode`成员
+
+当ext4文件系统的lookup完成后，此时的dentry已经有绑定的inode了，即已经设置了其`d_inode`成员了，然后调用`d_lookup_done()`将此dentry从lookup hash链表上移除（它是在`d_alloc_parallel`里被插入lookup hash的），这个lookup hash链表的作用是避免其它线程也同时来查找当前目录造成重复alloc dentry的问题
+
+####    对dcache的操作
+通过上面可以知道对路径的查找过程，也是对dcache树的不断的追加、修改过程（即对于不存在于dcache的dentry节点，需要先通过filename找到其文件系统磁盘的inode，然后建立内存inode及dentry结构，然后建立内存dentry到inode的关系），对于`lookup_slow`逻辑会涉及到如下操作dcache的逻辑：
+
+-   分配 dentry，从 slab 分配器分配内存，初始化 dentry 对象
+-   绑定 inode，关联 dentry 与 inode，并加入 dcache 树
+-   处理别名，解决硬链接冲突
+-   链接到父目录，将 dentry 加入父目录的 `d_subdirs` 链表
+
+1、`d_alloc_parallel->d_alloc->__d_alloc`(https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L2405)
+
+```CPP
+struct dentry *d_alloc(struct dentry * parent, const struct qstr *name)
+{
+	struct dentry *dentry = __d_alloc(parent->d_sb, name);
+	if (!dentry)
+		return NULL;
+	dentry->d_flags |= DCACHE_RCUACCESS;
+	spin_lock(&parent->d_lock);
+	/*
+	 * don't need child lock because it is not subject
+	 * to concurrency here
+	 */
+	__dget_dlock(parent);
+	dentry->d_parent = parent;  //将新建节点的dentry->d_parent设置为parent
+	list_add(&dentry->d_child, &parent->d_subdirs); //将 dentry 加入父目录的 d_subdirs 链表
+	spin_unlock(&parent->d_lock);
+
+	return dentry;
+}
+
+struct dentry *__d_alloc(struct super_block *sb, const struct qstr *name)
+{
+	struct dentry *dentry;
+	char *dname;
+	int err;
+
+	dentry = kmem_cache_alloc(dentry_cache, GFP_KERNEL);
+	if (!dentry)
+		return NULL;
+
+	dentry->d_iname[DNAME_INLINE_LEN-1] = 0;
+	if (unlikely(!name)) {
+		static const struct qstr anon = QSTR_INIT("/", 1);
+		name = &anon;
+		dname = dentry->d_iname;
+	} else if (name->len > DNAME_INLINE_LEN-1) {
+		size_t size = offsetof(struct external_name, name[1]);
+		struct external_name *p = kmalloc(size + name->len,
+						  GFP_KERNEL_ACCOUNT);
+		if (!p) {
+			kmem_cache_free(dentry_cache, dentry); 
+			return NULL;
+		}
+		atomic_set(&p->u.count, 1);
+		dname = p->name;
+		if (IS_ENABLED(CONFIG_DCACHE_WORD_ACCESS))
+			kasan_unpoison_shadow(dname,
+				round_up(name->len + 1,	sizeof(unsigned long)));
+	} else  {
+		dname = dentry->d_iname;
+	}	
+
+	dentry->d_name.len = name->len;
+	dentry->d_name.hash = name->hash;
+	memcpy(dname, name->name, name->len);
+	dname[name->len] = 0;
+
+	/* Make sure we always see the terminating NUL character */
+	smp_wmb();
+	dentry->d_name.name = dname;
+
+	dentry->d_lockref.count = 1;
+	dentry->d_flags = 0;
+	spin_lock_init(&dentry->d_lock);
+	seqcount_init(&dentry->d_seq);
+	dentry->d_inode = NULL;
+	dentry->d_parent = dentry;
+	dentry->d_sb = sb;
+	dentry->d_op = NULL;
+	dentry->d_fsdata = NULL;
+	INIT_HLIST_BL_NODE(&dentry->d_hash);
+	INIT_LIST_HEAD(&dentry->d_lru);
+	INIT_LIST_HEAD(&dentry->d_subdirs);
+	INIT_HLIST_NODE(&dentry->d_u.d_alias);
+	INIT_LIST_HEAD(&dentry->d_child);
+	d_set_d_op(dentry, dentry->d_sb->s_d_op);
+
+	if (dentry->d_op && dentry->d_op->d_init) {
+		err = dentry->d_op->d_init(dentry);
+		if (err) {
+			if (dname_external(dentry))
+				kfree(external_name(dentry));
+			kmem_cache_free(dentry_cache, dentry);
+			return NULL;
+		}
+	}
+
+	this_cpu_inc(nr_dentry);
+
+	return dentry;
+}
+```
+
+2、`d_splice_alias->__d_instantiate->__d_set_inode_and_type`：将dentry和inode绑定，即将inode赋值给dentry的`d_inode`成员
+
+```CPP
+void d_instantiate(struct dentry *entry, struct inode * inode)
+{
+	BUG_ON(!hlist_unhashed(&entry->d_u.d_alias));
+	if (inode) {
+		security_d_instantiate(entry, inode);
+		spin_lock(&inode->i_lock);
+		__d_instantiate(entry, inode);
+		spin_unlock(&inode->i_lock);
+	}
+}
+
+static void __d_instantiate(struct dentry *dentry, struct inode *inode)
+{
+	unsigned add_flags = d_flags_for_inode(inode);
+	WARN_ON(d_in_lookup(dentry));
+
+	spin_lock(&dentry->d_lock);
+	hlist_add_head(&dentry->d_u.d_alias, &inode->i_dentry);
+	raw_write_seqcount_begin(&dentry->d_seq);
+	__d_set_inode_and_type(dentry, inode, add_flags);
+	raw_write_seqcount_end(&dentry->d_seq);
+	fsnotify_update_flags(dentry);
+	spin_unlock(&dentry->d_lock);
+}
+
+static inline void __d_set_inode_and_type(struct dentry *dentry,
+					  struct inode *inode,
+					  unsigned type_flags)
+{
+	unsigned flags;
+
+    //设置dentry与inode的绑定关系
+	dentry->d_inode = inode;
+	flags = READ_ONCE(dentry->d_flags);
+	flags &= ~(DCACHE_ENTRY_TYPE | DCACHE_FALLTHRU);
+	flags |= type_flags;
+	WRITE_ONCE(dentry->d_flags, flags);
+}
+```
 
 ##  0x04  write流程
 [`vfs_write`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/read_write.c#L542)实现：
