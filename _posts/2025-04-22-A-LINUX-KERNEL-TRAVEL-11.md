@@ -111,7 +111,374 @@ static void __init dcache_init(void)
 
 ```CPP
 int open (const char *pathname, int flags, mode_t mode);
+int openat(int dirfd, const char *pathname, int flags, mode_t mode);
 ```
+
+####   nameidata/path/vfsmount结构
+[`nameidata`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L506)
+
+```CPP
+struct nameidata {
+	struct path	path;
+	struct qstr	last;
+	struct path	root;
+	struct inode	*inode; /* path.dentry.d_inode */
+	unsigned int	flags;
+
+    //...
+
+	struct filename	*name;
+	struct nameidata *saved;
+	struct inode	*link_inode;
+	unsigned	root_seq;
+	int		dfd;
+};
+```
+
+![nameidata-path-vfsmount]()
+
+####   核心流程
+1、[`do_sys_open`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/open.c#L1036)
+
+```cpp
+long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
+{
+	struct open_flags op;
+	int fd = build_open_flags(flags, mode, &op);
+	struct filename *tmp;
+
+	if (fd)
+		return fd;
+
+	tmp = getname(filename);
+	if (IS_ERR(tmp))
+		return PTR_ERR(tmp);
+    
+    // 获取一个空闲的文件描述符
+	fd = get_unused_fd_flags(flags);
+	if (fd >= 0) {
+        //调用 do_filp_open() 函数打开文件，返回打开文件的struct file结构
+		struct file *f = do_filp_open(dfd, tmp, &op);
+		if (IS_ERR(f)) {
+			put_unused_fd(fd);
+			fd = PTR_ERR(f);
+		} else {
+            // 通知fsnotify机制
+			fsnotify_open(f);
+            //调用 fd_install() 函数把文件描述符fd与file结构关联起来
+			fd_install(fd, f);
+		}
+	}
+	putname(tmp);
+    //返回文件描述符，也就是 open() 系统调用的返回值
+	return fd;
+}
+
+void fd_install(unsigned int fd, struct file *file)
+{
+	__fd_install(current->files, fd, file);
+}
+```
+
+可以看到，`open`系统调用的目的就是建立新建fd与`struct file`的绑定关系，但是实际上，间接建立的VFS内存映射关系可能如下图（假设路径`b`文件并不在dcache中）
+
+![dcache-build](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/open/open-2-dentry-build.png)
+
+2、[`do_filp_open`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L3515)
+
+```CPP
+struct file *do_filp_open(int dfd, struct filename *pathname,
+		const struct open_flags *op)
+{
+	struct nameidata nd;
+	int flags = op->lookup_flags;
+	struct file *filp;
+
+	set_nameidata(&nd, dfd, pathname);
+	filp = path_openat(&nd, op, flags | LOOKUP_RCU);
+	if (unlikely(filp == ERR_PTR(-ECHILD)))
+		filp = path_openat(&nd, op, flags);
+	if (unlikely(filp == ERR_PTR(-ESTALE)))
+		filp = path_openat(&nd, op, flags | LOOKUP_REVAL);
+	restore_nameidata();
+	return filp;
+}
+```
+
+3、[`path_openat`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L3457)，在`path_openat`中，先调用`get_empty_filp`方法分配一个空的`struct file`实例，再调用`path_init`、`link_path_walk`、`do_last`等方法执行后续的open操作，如果都成功了，则返回`struct file`给上层。核心方法是`link_path_walk`、`do_last`
+
+```CPP
+static struct file *path_openat(struct nameidata *nd,
+			const struct open_flags *op, unsigned flags)
+{
+	const char *s;
+	struct file *file;
+	int opened = 0;
+	int error;
+
+	file = get_empty_filp();
+	if (IS_ERR(file))
+		return file;
+
+	file->f_flags = op->open_flag;
+
+	if (unlikely(file->f_flags & __O_TMPFILE)) {
+		error = do_tmpfile(nd, flags, op, file, &opened);
+		goto out2;
+	}
+
+	if (unlikely(file->f_flags & O_PATH)) {
+		error = do_o_path(nd, flags, file);
+		if (!error)
+			opened |= FILE_OPENED;
+		goto out2;
+	}
+
+	s = path_init(nd, flags);
+	if (IS_ERR(s)) {
+		put_filp(file);
+		return ERR_CAST(s);
+	}
+    // 核心方法
+	while (!(error = link_path_walk(s, nd)) &&
+		(error = do_last(nd, file, op, &opened)) > 0) {
+		nd->flags &= ~(LOOKUP_OPEN|LOOKUP_CREATE|LOOKUP_EXCL);
+		s = trailing_symlink(nd);
+		if (IS_ERR(s)) {
+			error = PTR_ERR(s);
+			break;
+		}
+	}
+	terminate_walk(nd);
+out2:
+	if (!(opened & FILE_OPENED)) {
+		BUG_ON(!error);
+		put_filp(file);
+	}
+	if (unlikely(error)) {
+		if (error == -EOPENSTALE) {
+			if (flags & LOOKUP_RCU)
+				error = -ECHILD;
+			else
+				error = -ESTALE;
+		}
+		file = ERR_PTR(error);
+	}
+	return file;
+}
+```
+
+4、`path_init`方法，`path_init`方法主要是用来初始化`struct nameidata`实例中的`path`、`root`、`inode`等字段
+
+TODO
+
+5、`link_path_walk`
+
+```CPP
+/*
+ * Name resolution.
+ * This is the basic name resolution function, turning a pathname into
+ * the final dentry. We expect 'base' to be positive and a directory.
+ *
+ * Returns 0 and nd will have valid dentry and mnt on success.
+ * Returns error and drops reference to input namei data on failure.
+ */
+static int link_path_walk(const char *name, struct nameidata *nd)
+{
+	int err;
+
+    //跳过开始的/字符
+	while (*name=='/')
+		name++;
+	if (!*name)
+		return 0;
+
+	/* At this point we know we have a real path component. */
+	for(;;) {
+		u64 hash_len;
+		int type;
+
+		err = may_lookup(nd);
+		if (err)
+			return err;
+
+		hash_len = hash_name(nd->path.dentry, name);
+
+		type = LAST_NORM;
+		if (name[0] == '.') switch (hashlen_len(hash_len)) {
+			case 2:
+				if (name[1] == '.') {
+					type = LAST_DOTDOT;
+					nd->flags |= LOOKUP_JUMPED;
+				}
+				break;
+			case 1:
+				type = LAST_DOT;
+		}
+		if (likely(type == LAST_NORM)) {
+			struct dentry *parent = nd->path.dentry;
+			nd->flags &= ~LOOKUP_JUMPED;
+			if (unlikely(parent->d_flags & DCACHE_OP_HASH)) {
+				struct qstr this = { { .hash_len = hash_len }, .name = name };
+				err = parent->d_op->d_hash(parent, &this);
+				if (err < 0)
+					return err;
+				hash_len = this.hash_len;
+				name = this.name;
+			}
+		}
+
+		nd->last.hash_len = hash_len;
+		nd->last.name = name;
+		nd->last_type = type;
+
+		name += hashlen_len(hash_len);
+		if (!*name)
+			goto OK;
+		/*
+		 * If it wasn't NUL, we know it was '/'. Skip that
+		 * slash, and continue until no more slashes.
+		 */
+		do {
+			name++;
+		} while (unlikely(*name == '/'));
+		if (unlikely(!*name)) {
+OK:
+			/* pathname body, done */
+			if (!nd->depth)
+				return 0;
+			name = nd->stack[nd->depth - 1].name;
+			/* trailing symlink, done */
+			if (!name)
+				return 0;
+			/* last component of nested symlink */
+			err = walk_component(nd, WALK_FOLLOW);
+		} else {
+			/* not the last component */
+			err = walk_component(nd, WALK_FOLLOW | WALK_MORE);
+		}
+		if (err < 0)
+			return err;
+
+		if (err) {
+			const char *s = get_link(nd);
+
+			if (IS_ERR(s))
+				return PTR_ERR(s);
+			err = 0;
+			if (unlikely(!s)) {
+				/* jumped */
+				put_link(nd);
+			} else {
+				nd->stack[nd->depth - 1].name = name;
+				name = s;
+				continue;
+			}
+		}
+		if (unlikely(!d_can_lookup(nd->path.dentry))) {
+			if (nd->flags & LOOKUP_RCU) {
+				if (unlazy_walk(nd))
+					return -ECHILD;
+			}
+			return -ENOTDIR;
+		}
+	}
+}
+```
+
+`link_path_walk`函数中会调用`walk_component`函数来进行路径搜索（向上或者向下），这个是较为复杂的逻辑，有很多场景，典型的如：
+
+-   `.`或`..`
+-   普通的目录，这里又会检测当前目录是否为其他文件系统的挂载点
+-   符号链接
+
+6、`do_last`方法，先调用`lookup_fast`，寻找路径中的最后一个component，如果成功，就会跳到`finish_lookup`对应的label，然后执行`step_into`方法，更新`nd`中的`path`、`inode`等信息，使其指向目标路径。然后调用`vfs_open`方法，继续执行open操作
+
+```CPP
+// fs/namei.c
+static int do_last(struct nameidata *nd,
+                   struct file *file, const struct open_flags *op)
+{
+        ...
+        if (!(open_flag & O_CREAT)) {
+                ...
+                error = lookup_fast(nd, &path, &inode, &seq);
+                if (likely(error > 0))
+                        goto finish_lookup;
+                ...
+        } else {
+                ...
+        }
+        ...
+finish_lookup:
+        error = step_into(nd, &path, 0, inode, seq);
+        ...
+        error = vfs_open(&nd->path, file);
+        ...
+        return error;
+}
+```
+
+7、`vfs_open->do_dentry_open`方法，该方法中看到了熟悉的`inode->i_fop`成员，该成员的值是在[`init_special_inode`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/inode.c#L1973)中设置的，由于笔者的文件系统是`ext4`，所以会命中`S_ISBLK(mode)`的逻辑
+
+当用户调用 `open()` 系统调用时，VFS 层会初始化一个 `struct file` 对象`f`，`f->f_op` 被赋值为目标文件所属文件系统的 `file_operations` 结构体，此处为 `ext4_file_operations`，因此，执行 `f->f_op->open` 实际调用的是 `ext4_file_open()`。这里体现了VFS的协作流程，即**VFS 通过路径解析找到文件的 dentry 和 inode，根据 inode 关联的文件系统类型（如 `ext4`），将file结构 `f->f_op` 绑定到 `ext4_file_operations`，那么执行 `open` 操作时，路由到具体文件系统的实现函数`ext4_file_open`**
+
+```CPP
+// fs/open.c
+int vfs_open(const struct path *path, struct file *file)
+{
+        file->f_path = *path;
+        return do_dentry_open(file, d_backing_inode(path->dentry), NULL);
+}
+
+// fs/open.c
+static int do_dentry_open(struct file *f,
+                          struct inode *inode,
+                          int (*open)(struct inode *, struct file *))
+{
+        ...
+        f->f_inode = inode;
+        ...
+        f->f_op = fops_get(inode->i_fop);
+        ...
+        if (!open)
+                open = f->f_op->open;
+        if (open) {
+                error = open(inode, f);
+                ...
+        }
+        f->f_mode |= FMODE_OPENED;
+        ...
+        return 0;
+        ...
+}
+
+void init_special_inode(struct inode *inode, umode_t mode, dev_t rdev)
+{
+        inode->i_mode = mode;
+        if (S_ISCHR(mode)) {
+                inode->i_fop = &def_chr_fops;
+                inode->i_rdev = rdev;
+        } else if (S_ISBLK(mode)) {
+                //https://elixir.bootlin.com/linux/v4.11.6/source/fs/block_dev.c#L2142
+                inode->i_fop = &def_blk_fops;
+                inode->i_rdev = rdev;
+        }
+        //...
+}
+```
+
+8、[`ext4_file_open`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/file.c#L365)方法，在 `ext4` 文件系统中，`f->f_op->open` 对应的实际函数是 `ext4_file_open()`，这一关联通过 `ext4` 定义的 [`file_operations`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/file.c#L718) 结构体实现。`ext4_file_open`最终完成这些工作：
+
+-   初始化文件状态：检查文件是否加密（fscrypt）、是否启用日志（jbd2）等
+-   处理大文件标志：若文件超过 `2GB`，设置 `O_LARGEFILE` 标志
+-   调用通用逻辑：最终通过 `generic_file_open()` 完成 VFS 层的通用文件打开流程
+
+```CPP
+static int ext4_file_open(struct inode * inode, struct file * filp)
+```
+
+####    补充：`walk_component`的细节
 
 ##  0x04  write流程
 [`vfs_write`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/read_write.c#L542)实现：
