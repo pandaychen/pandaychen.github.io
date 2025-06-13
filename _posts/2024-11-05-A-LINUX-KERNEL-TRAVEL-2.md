@@ -461,9 +461,51 @@ mmap_region(struct file *file, unsigned long addr, unsigned long len,
 }
 ```
 
-##  0x0  参考
+##  0x03  mmap的原理分析
+
+```CPP
+int start_mmap(){
+    /*
+    #define SHM_SIZE 1024
+    int fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);  // POSIX共享内存文件
+    ftruncate(fd, SHM_SIZE);
+    */
+    int fd = open(name, O_RDWR | O_CREAT, 0666);	
+
+	if (fd == -1) {
+		exit(-1);
+	}
+
+	//set total_size
+	TotalSizeInit();
+
+	ret = ftruncate(fd, total_size);
+	if (ret == -1) {
+		exit(-1);
+	} 
+
+	mem_base = (char *)mmap(NULL, total_size,
+				PROT_READ | PROT_WRITE,
+				MAP_SHARED, fd, 0); 
+	if (mem_base == MAP_FAILED) {
+		exit(-1);
+	}
+
+	if (mlock_open_flag == OPEN_MLOCK) {	
+		ret = mlock(mem_base, total_size);
+		if (ret == -1) {
+			exit(-1);
+		} 
+	}
+    //....
+}
+```
+
+##  0x04  参考
 -   [4.6 深入理解 Linux 虚拟内存管理](https://www.xiaolincoding.com/os/3_memory/linux_mem.html)
 -   [4.7 深入理解 Linux 物理内存管理](https://www.xiaolincoding.com/os/3_memory/linux_mem2.html#_6-1-%E5%8C%BF%E5%90%8D%E9%A1%B5%E7%9A%84%E5%8F%8D%E5%90%91%E6%98%A0%E5%B0%84)
 -   [mmap 源码分析](https://leviathan.vip/2019/01/13/mmap%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90/)
 -   [linux源码解读（十六）：红黑树在内核的应用——虚拟内存管理](https://www.cnblogs.com/theseventhson/p/15820092.html)
 -   [图解 Linux 虚拟内存空间管理](https://github.com/liexusong/linux-source-code-analyze/blob/master/process-virtual-memory-manage.md)
+-   [认真分析mmap：是什么为什么怎么用](https://www.cnblogs.com/huxiao-tee/p/4660352.html)
+-   [从内核世界透视 mmap 内存映射的本质（原理篇）](https://www.cnblogs.com/binlovetech/p/17712761.html)

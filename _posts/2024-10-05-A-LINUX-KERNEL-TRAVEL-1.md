@@ -237,7 +237,7 @@ struct pid
 	 /* 使用该pid的进程的列表*/
 	struct hlist_head tasks[PIDTYPE_MAX];
 	struct rcu_head rcu;
-	struct upid numbers[1];
+	struct upid numbers[1];		// 重要：包含了namespace信息
 };
 
 struct upid {
@@ -272,22 +272,52 @@ struct task_struct{
  struct pid_link pids[PIDTYPE_MAX];
 };
 
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/pid.h#L57
 struct pid
 {
-	//...
+	//......
 	struct hlist_head tasks[PIDTYPE_MAX];
 };
 
 struct pid_link
 {
 	struct hlist_node node;
-	struct pid *pid;		//
+	struct pid *pid;		//包含了ns信息：level与 numbers[]数组
+};
+```
+
+不过，在较新版本内核如[6.15.1](https://elixir.bootlin.com/linux/v6.15.1/source/include/linux/sched.h#L1090)中，这里的成员略有调整（更简洁了，参考下图的指向关系）：
+
+```CPP
+struct task_struct{
+	//......
+	/* PID/PID hash table linkage. */
+	struct pid			*thread_pid;	//thread_pid指向struct pid结构
+	struct hlist_node		pid_links[PIDTYPE_MAX];
+	struct list_head		thread_node;
+}
+
+struct pid
+{
+	refcount_t count;
+	unsigned int level;
+	spinlock_t lock;
+	struct dentry *stashed;
+	u64 ino;
+	struct rb_node pidfs_node;
+	/* lists of tasks that use this pid */
+	struct hlist_head tasks[PIDTYPE_MAX];
+	struct hlist_head inodes;
+	/* wait queue for pidfd notifications */
+	wait_queue_head_t wait_pidfd;
+	struct rcu_head rcu;
+	struct upid numbers[];
 };
 ```
 
 这里以`PIDTYPE_PGID`说明，为了方便查找，同属于一个进程组的所有进程对应的`task_struct`都被链接到同一个hash链表上：
 
-![PIDTYPE_PGID](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/PIDTYPE_PGID.png)
+![PIDTYPE_PGID_kernel_new](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/PIDTYPE_PGID.png)
 
 ####	signal_struct（tty处理相关）
 `struct signal_struct *signal`成员中的`struct pid *pids[PIDTYPE_MAX]`这个成员的意义是什么？
@@ -371,7 +401,7 @@ struct pidmap {
 3.	`pid_hash`表是由pid（`tgid`）加上namespace两个属性hash之后形成的hashtable，用于提高检索性能
 4. 一个`struct pid`会属于多个命名空间，通过柔性数组`struct upid numbers[1]`扩展，每个`numbers[i]->nr`存储了对应namespace上可见的pid的值，`numbers[i]->ns`指向了对应的namespace
 
-![pid_pidnamespace_upid](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/pid_pidnamespace_upid.png)
+![pid_pidnamespace_upid_kernel_new](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/pid_pidnamespace_upid.png)
 
 
 ####	pid_hash表
@@ -387,7 +417,7 @@ struct pidmap {
 `pid_hash`中存放的是链表头，指向`upid`中的`pid_chain`，对于不同`level`但`pid`号相同的`upid`可能会被挂到同一串`pid_chain`，所以通过`pid`号查找`struct pid`的情况下需要指定`namespace`
 
 ####    查询PID：分类讨论
-根据上图，来看下相关的函数
+根据上图，来看下相关的函数实现
 
 1、获取与 `task_struct` 相关的 pid 结构体实例：`pid`/`tgid`/`pgrp`/`session`
 
@@ -430,9 +460,8 @@ static inline struct pid_namespace *ns_of_pid(struct pid *pid)
 }
 ```
 
-3、获取 `pid` 实例中的 PID
+3、获取 `pid` 实例中的 PID，参数如下
 
-参数：
 -   `pid`：指向 struct pid 结构体的指针，代表了一个进程的PID
 -   `ns`：指向 struct pid_namespace 结构体的指针，代表了一个PID命名空间
 
@@ -930,7 +959,7 @@ struct path {
 
 ![fs_struct](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/task-struct-5-files.png)
 
-在 `fs_struct` 中包含了两个 `path` 对象，而每个 `path` 中都指向了一个 `struct dentry`。在 Linux `内核中，denty` 结构是对一个目录项的描述。以 `pwd` 为例，该指针指向的是进程当前目录所处的 `denty` 目录项。如在 shell 进程中执行 `pwd`命令，或用户进程查找当前目录下的配置文件的时候，都是通过访问 `pwd` 这个对象，进而找到当前目录的 `denty`
+在 `fs_struct` 中包含了两个 `path` 对象，而每个 `path` 中都指向了一个 `struct dentry`。在 Linux 内核中，`dentry` 结构是对一个目录项的描述。以 `pwd` 为例，该指针指向的是进程当前目录所处的 `dentry` 目录项。如在 shell 进程中执行 `pwd`命令，或用户进程查找当前目录下的配置文件的时候，都是通过访问 `pwd` 这个对象，进而找到当前目录的 `dentry`
 
 ####  进程打开的文件信息（files）
 每个进程用一个 `files_struct` 结构（用户打开文件表）来记录文件描述符的使用情况
