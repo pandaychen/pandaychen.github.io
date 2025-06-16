@@ -403,14 +403,6 @@ static const char *path_init(struct nameidata *nd, unsigned flags)
 5、[`link_path_walk`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L2042)
 
 ```CPP
-/*
- * Name resolution.
- * This is the basic name resolution function, turning a pathname into
- * the final dentry. We expect 'base' to be positive and a directory.
- *
- * Returns 0 and nd will have valid dentry and mnt on success.
- * Returns error and drops reference to input namei data on failure.
- */
 static int link_path_walk(const char *name, struct nameidata *nd)
 {
 	int err;
@@ -436,7 +428,7 @@ static int link_path_walk(const char *name, struct nameidata *nd)
 
         //static inline u64 hash_name(const vo id *salt, const char *name)
         // 用父 dentry 的地址 + 当前 denty 的 name 计算 hash 值
-        // 逐个字符的计算出，当前节点名称的哈希值，遇到 / 或者 \ 0 退出
+        // 逐个字符的计算出，当前节点名称的哈希值，遇到 '/' 或者 '\0' 退出
         // 计算当前目录的 hash_len，这个变量高 4 byte 是当前目录 name 字串长度，低 4byte 是当前目录（路径）的 hash 值，hash 值的计算是基于当前目录的父目录 dentry（nd->path.dentry）来计算的，所以它跟其目录（路径）dentry 是关联的
 		hash_len = hash_name(nd->path.dentry, name);
 
@@ -462,7 +454,7 @@ static int link_path_walk(const char *name, struct nameidata *nd)
 			nd->flags &= ~LOOKUP_JUMPED;
 			if (unlikely(parent->d_flags & DCACHE_OP_HASH)) {
                 // 当前目录项需要重新计算一下 hash 值
-				struct qstr this = {{ .hash_len = hash_len}, .name = name };
+				struct qstr this;	//初始化并设置this的值
                 // 调用 parent 这个 dentry 的 parent->d_op->d_hash 方法计算 hash 值
 				err = parent->d_op->d_hash(parent, &this);
 				if (err < 0)
@@ -472,7 +464,7 @@ static int link_path_walk(const char *name, struct nameidata *nd)
 			}
 		}
 
-        // 更新 nameidata last 结构体，last.hash_len，name
+        // 更新 nameidata last 结构体
 		nd->last.hash_len = hash_len;
 		nd->last.name = name;
 		nd->last_type = type;
@@ -490,7 +482,7 @@ static int link_path_walk(const char *name, struct nameidata *nd)
 		if (unlikely(!*name)) {
             // 假设 open file 文件名路径上没有任何 symlink，则如果这个条件满足，说明整个路径都解析完了，还剩最后的 filename 留给 do_last() 解析，此函数将从下面的! nd->depth 条件处返回
 OK:
-			/* pathname body, done */
+			// pathname body, done
 			if (!nd->depth)
                 // 此时已经到达了最终目标，路径行走任务完成
                  // 如果 open file 完整路径上没有任何 symlink，nd->depth 等于 0
