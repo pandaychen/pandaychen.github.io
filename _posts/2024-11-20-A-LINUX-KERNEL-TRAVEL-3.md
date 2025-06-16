@@ -13,6 +13,8 @@ tags:
 ##  0x00    前言
 Linux 支持多种文件系统格式（如 `ext2`、`ext3`、`reiserfs`、`FAT`、`NTFS`、`iso9660` 等），不同的磁盘分区或其它存储设备都有不同的文件系统格式，然而这些文件系统都可以 `mount` 到某个目录下，使开发者看到一个统一的目录树，各种文件系统上的目录和文件，读写操作用起来也都是一样的。Linux 内核在各种不同的文件系统格式之上做了一个抽象层，使得文件、目录、读写访问等概念成为抽象层的概念，因此各种文件系统看起来用起来都一样，这个抽象层称为虚拟文件系统（VFS，Virtual Filesystem）
 
+本文代码基于 [v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include) 版本
+
 ![arch](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/linux_vfs_arch.png)
 
 ####	目录树
@@ -89,8 +91,10 @@ build  docker  home  lost+found  test  subdir
        └── file3
    └── file2
 ```
+
 上面的目录对应如下关系：
 ![dentry-inode-relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/practice/dentry_inode_relation.jpg)
+进一步说，由于有hard link机制的存在，对一个inode每增加一个hard link，该inode的路径指向就增加一个（即一个inode可以被多个dentry所指向）
 
 3、process 与 vfs主要结构的关系
 
@@ -165,7 +169,7 @@ struct inode {
 
 -	`i_sb`：inode 所属文件系统的超级块指针
 -	`i_ino`：索引节点号，每个 inode 都是唯一的
--	`i_dentry`：指向目录项链表指针，注意一个 `inodes` 可以对应多个 `dentry`，因为一个实际的文件可能被链接到其他的文件，那么就会有另一个 `dentry`，这个链表就是将所有的与本 `inode` 有关的 `dentry` 都link到一起
+-	`i_dentry`：指向目录项链表指针，注意一个 `inodes` 可以对应多个 `dentry`，因为一个实际的文件可能被链接到其他的文件（硬链接hard link），那么就会有另一个 `dentry`，这个链表就是将所有的与本 `inode` 有关的 `dentry` 都link到一起（对一个inode每增加一个hard link，该inode的路径指向就增加一个）。**因此一个inode会对应多个dentry，通过`i_dentry`链表组织，而一个dentry只会对应一个inode，且这种关系仅存在于内存中（在磁盘中是不直接存在）**
 
 3、`struct dentry`：目录项是描述文件的逻辑属性，只存在于内存中，并没有实际对应的磁盘上的描述，更确切的说是**存在于内存的目录项缓存，为了提高查找性能而设计**。文件或目录（本质也是文件）都对应于`dentry`，即属于目录项，所有的目录项在一起构成一颗目录树（dentry tree）。例如`open` 一个文件 `/home/xxx/yyy`，那么`/`、`home`、`xxx`、`yyy` 都是一个`dentry`，VFS 在查找的时候，根据一层一层的`dentry`定位到对应的每个目录项的 inode，那么沿着目录项进行操作就可以找到最终的文件
 
@@ -205,11 +209,21 @@ struct dentry {
 ```
 
 -	`d_name`：dentry名称（相对，见图）
--	`d_parent`：指向父目录的`dentry`结构
 -	`d_inode`：与该dentry关联的 inode
 -	`d_iname`：存放短的文件名（和 `d_name` 的区别），为了节省内存用
 -	`d_sb`：该目录项所属的文件系统的超级块（注意：与`dentry->d_sb`与`dentry->d_inode->i_sb`都是指向同一个`super_block`）
--	`d_subdirs`：本目录的所有孩子目录链表头
+-	`d_parent`：指向父目录的`dentry`结构，对`..`表示的上级目录将借助`dentry->d_parent`进行遍历
+-	`d_child`：
+-	`d_subdirs`：
+-	`d_alias`：
+
+先描述下dentry与inode的关系，即`dentry->d_alias`/`inode->i_dentry`/`dentry->d_inode`（再强调一下这种对应关系在磁盘中是不直接存在的，dentry只存在内存中，它缓存了磁盘文件查找的结果）
+
+![dentry-2-inode](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/inode-2-dentry.png)
+
+此外，查找的起点通常是根目录`/`或者当前目录`CWD`，对`.`表示的同级目录将跳过解析，对`..`上级目录搜索将借助`dentry->d_parent`，`dentry->d_child`，`dentry->d_subdirs`三者的关系如下：
+
+![dentry-parent-child-subdirs](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/dentry-parent-child-subdirs.jpg)
 
 4、[`file`](https://elixir.bootlin.com/linux/v6.5/source/include/linux/fs.h#L961)：文件结构体代表一个打开的文件，系统中的每个打开的文件在内核空间都有一个关联的 `struct file`，它由内核在打开文件时创建，并传递给在文件上进行操作的任何函数。在文件的所有实例都关闭后，内核负责释放此数据结构。**注意文件对象描述的是进程已经打开的文件，因为一个文件可以被多个进程打开，所以一个文件可以存在多个文件对象**，但是由于文件是唯一的，那么 inode 就是唯一的，dentry也是确定的（针对一个指定路径的文件）
 
@@ -297,6 +311,8 @@ struct path {
 	int mnt_flags;                  /* 此文件系统的挂载标志 */
 } __randomize_layout;
 ```
+
+`struct path`结构体存在的另一个意义是**一个非文件系统挂载点的普通路径，必然处于某个文件系统的子路径中**，比如在`/mnt/opt`目录下挂载一个新的文件系统，而后在该目录下创建名为`foo`的目录，`/foo`下再创建名为`bar`的文件，那么对于这个新建的文件路径来说，其`path->dentry`对应的是`/mnt/opt/foo/bar`，而`path->mnt->dentry`对应的则是`/mnt/opt`
 
 2、`mount`[结构](https://elixir.bootlin.com/linux/v6.5/source/fs/mount.h#L39)：`struct mount`代表着一个mount实例（一次真正挂载对应一个mount实例），其中`struct vfsmount`定义的`mnt`成员是它最核心的部分（旧版本`mount`和`vfsmount`的成员都在`vfsmount`里，现在内核将`vfsmount`改作`mount`结构体，并将`mount`中`mnt_root`, `mnt_sb`, `mnt_flags`成员移到`vfsmount`结构体中）
 
@@ -428,6 +444,29 @@ struct files_struct {
 
 -	`fd_array`：已打开文件对象指针的初始化数组
 
+6、`nameidata`结构用于在`open/mkdir`等系统调用中，逐级向下，一层层地解析目录项，保存中间的查询信息。最核心的成员为`path`，`path`包含了路径dentry本身的信息，还包含了其所在文件系统的挂载点vfsmount的信息。**由于文件系统本身的挂载点也是一个路径，描述挂载点的数据结构vfsmount是将表示路径关系的dentry和表示文件系统实体的super_block结合了**
+
+这里`path`的意义在于，`nameidata->path->dentry`暂存的是路径中当前解析的最后一个dentry，如果某一个目录节点是另一个文件系统的mount point，那么将借助`nameidata->path->mnt`跳转到新的文件系统继续查找
+
+
+```CPP
+struct nameidata {
+    struct path path;
+    ...
+}
+
+struct path {
+    struct vfsmount *mnt;
+    struct dentry *dentry;
+}
+
+struct vfsmount {
+    struct dentry *mnt_root;	/* root of the mounted tree */
+    struct super_block *mnt_sb;	/* pointer to superblock */
+    ...
+}
+```
+
 ####	vfs 相关 API
 文件系统相关的一些对象，和对应的数据结构：
 
@@ -442,7 +481,7 @@ struct files_struct {
 	-	`inode_operaions`：inode 操作
 	-	`address_space_operations`：数据和 page cache 操作
 
-![vfs-relation]()
+![vfs-relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/vfs-core-struct-relation.png)
 
 从上图可以看出
 
@@ -482,7 +521,8 @@ struct dentry {
 struct qstr { //quick string
 	union {
 		struct {
-			HASH_LEN_DECLARE;  //注意此结构体中有hash，还有一个len变量隐藏在struct HASH_LEN_DECLARE中
+			HASH_LEN_DECLARE;  //注意此结构体中可以包含hash值
+			// 还有一个len变量隐藏在struct HASH_LEN_DECLARE中
 		};
 		u64 hash_len;
 	};
@@ -505,7 +545,7 @@ static inline struct hlist_bl_head *d_hash(const struct dentry *parent,
 
 小结一下：
 
--	 内核中有一个哈希表`dentry_hashtable` ，是一个`list_head`的指针数组。一旦在内存中建立起一个目录节点的dentry 结构，该dentry结构就通过其`d_hash`域链入哈希表中的某个队列中；内核中还有一个队列`dentry_unused`，凡是已经没有用户（`count`域为`0`）使用的dentry结构就通过其`d_lru`域挂入这个队列
+-	 内核中有一个哈希表`dentry_hashtable`（作为全局变量[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L105)），是一个`list_head`的指针数组。一旦在内存中建立起一个目录节点的dentry 结构，该dentry结构就通过其`d_hash`域链入哈希表中的某个队列中；内核中还有一个队列`dentry_unused`，凡是已经没有用户（`count`域为`0`）使用的dentry结构就通过其`d_lru`域挂入这个队列
 -	`struct qstr` 中字段hash的意义：如果一个目录book，但是每一次都要计算该`basename`的hash值，就会每次查找不得不计算一次book的hash，这样会降低效率，因此采用空间换时间，计算一次后保存，提高查询效率
 -	某个目录对应的dentry不在cache中？一开始可能某个目录对应的dentry根本就不在内存中，因此内核提供了`d_lookup`函数，以父dentry和`struct qstr`[类型](https://docs.huihoo.com/doxygen/linux/kernel/3.7/structqstr.html)的`name`为依据，来查找内存中是否已经有了对应的dentry，当然如果没有，就需要分配一个dentry（`d_alloc`函数负责分配dentry结构体，初始化相应的变量，建立与父dentry的关系）
 
