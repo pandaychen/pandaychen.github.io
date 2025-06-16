@@ -550,27 +550,159 @@ OK:
 static int do_last(struct nameidata *nd,
                    struct file *file, const struct open_flags *op)
 {
-        ...
+        //...
         if (!(open_flag & O_CREAT)) {
-                ...
+                //...
                 error = lookup_fast(nd, &path, &inode, &seq);
                 if (likely(error> 0))
                         goto finish_lookup;
-                ...
+                //...
         } else {
-                ...
+                //...
         }
-        ...
+        //...
+
+		error = lookup_open(nd, &path, file, op, got_write, opened);
+
+		//...
+
 finish_lookup:
         error = step_into(nd, &path, 0, inode, seq);
-        ...
+        //...
         error = vfs_open(&nd->path, file);
-        ...
+        //...
         return error;
 }
 ```
 
-7、`vfs_open->do_dentry_open` 方法，该方法中看到了熟悉的 `inode->i_fop` 成员，该成员的值是在 [`init_special_inode`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/inode.c#L1973) 中设置的，由于笔者的文件系统是 `ext4`，所以会命中 `S_ISBLK(mode)` 的逻辑
+7、`lookup_open`
+
+```CPP
+//do_sys_open->do_sys_openat2->do_filp_open->path_openat->do_last->lookup_open
+static int lookup_open(struct nameidata *nd, struct path *path,
+			struct file *file,
+			const struct open_flags *op,
+			bool got_write, int *opened)
+{
+	struct dentry *dir = nd->path.dentry;
+	struct inode *dir_inode = dir->d_inode;
+	int open_flag = op->open_flag;
+	struct dentry *dentry;
+	int error, create_error = 0;
+	umode_t mode = op->mode;
+	DECLARE_WAIT_QUEUE_HEAD_ONSTACK(wq);
+
+	if (unlikely(IS_DEADDIR(dir_inode)))
+		return -ENOENT;
+
+	*opened &= ~FILE_CREATED;
+	dentry = d_lookup(dir, &nd->last);	//从缓存中查找dentry
+	for (;;) {
+		if (!dentry) {
+			dentry = d_alloc_parallel(dir, &nd->last, &wq);
+			if (IS_ERR(dentry))
+				return PTR_ERR(dentry);
+		}
+		if (d_in_lookup(dentry))
+			break;
+
+		error = d_revalidate(dentry, nd->flags);
+		if (likely(error > 0))
+			break;
+		if (error)
+			goto out_dput;
+		d_invalidate(dentry);
+		dput(dentry);
+		dentry = NULL;
+	}
+	if (dentry->d_inode) {
+		/* Cached positive dentry: will open in f_op->open */
+		goto out_no_open;
+	}
+
+	if (open_flag & O_CREAT) {
+		if (!IS_POSIXACL(dir->d_inode))
+			mode &= ~current_umask();
+		if (unlikely(!got_write)) {
+			create_error = -EROFS;
+			open_flag &= ~O_CREAT;
+			if (open_flag & (O_EXCL | O_TRUNC))
+				goto no_open;
+			/* No side effects, safe to clear O_CREAT */
+		} else {
+			create_error = may_o_create(&nd->path, dentry, mode);
+			if (create_error) {
+				open_flag &= ~O_CREAT;
+				if (open_flag & O_EXCL)
+					goto no_open;
+			}
+		}
+	} else if ((open_flag & (O_TRUNC|O_WRONLY|O_RDWR)) &&
+		   unlikely(!got_write)) {
+		/*
+		 * No O_CREATE -> atomicity not a requirement -> fall
+		 * back to lookup + open
+		 */
+		goto no_open;
+	}
+
+	if (dir_inode->i_op->atomic_open) {
+		error = atomic_open(nd, dentry, path, file, op, open_flag,
+				    mode, opened);
+		if (unlikely(error == -ENOENT) && create_error)
+			error = create_error;
+		return error;
+	}
+
+no_open:
+	if (d_in_lookup(dentry)) {
+		//如果没有找到， 调用文件系统的lookup 方法进行查找
+		struct dentry *res = dir_inode->i_op->lookup(dir_inode, dentry,
+							     nd->flags);
+		d_lookup_done(dentry);
+		if (unlikely(res)) {
+			if (IS_ERR(res)) {
+				error = PTR_ERR(res);
+				goto out_dput;
+			}
+			dput(dentry);
+			dentry = res;
+		}
+	}
+
+	/* Negative dentry, just create the file */
+	if (!dentry->d_inode && (open_flag & O_CREAT)) {
+		*opened |= FILE_CREATED;
+		audit_inode_child(dir_inode, dentry, AUDIT_TYPE_CHILD_CREATE);
+		if (!dir_inode->i_op->create) {
+			error = -EACCES;
+			goto out_dput;
+		}
+		//如果没有找到且设置了O_CREAT， 调用文件系统的create方法进行创建
+		// 对应ext4文件系统，ext4_create方法
+		// 正常情况下，ext4_create会成功创建inode并且和dentry建立关联关系（前文）
+		error = dir_inode->i_op->create(dir_inode, dentry, mode,
+						open_flag & O_EXCL);
+		if (error)
+			goto out_dput;
+		fsnotify_create(dir_inode, dentry);
+	}
+	if (unlikely(create_error) && !dentry->d_inode) {
+		error = create_error;
+		goto out_dput;
+	}
+out_no_open:
+	path->dentry = dentry;
+	path->mnt = nd->path.mnt;
+	return 1;
+
+out_dput:
+	dput(dentry);
+	return error;
+}
+```
+
+8、`vfs_open->do_dentry_open` 方法，该方法中看到了熟悉的 `inode->i_fop` 成员，该成员的值是在 [`init_special_inode`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/inode.c#L1973) 中设置的，由于笔者的文件系统是 `ext4`，所以会命中 `S_ISBLK(mode)` 的逻辑
 
 当用户调用 `open()` 系统调用时，VFS 层会初始化一个 `struct file` 对象 `f`，`f->f_op` 被赋值为目标文件所属文件系统的 `file_operations` 结构体，此处为 `ext4_file_operations`，因此，执行 `f->f_op->open` 实际调用的是 `ext4_file_open()`。这里体现了 VFS 的协作流程，即 **VFS 通过路径解析找到文件的 dentry 和 inode，根据 inode 关联的文件系统类型（如 `ext4`），将 file 结构 `f->f_op` 绑定到 `ext4_file_operations`，那么执行 `open` 操作时，路由到具体文件系统的实现函数 `ext4_file_open`**
 
@@ -627,6 +759,60 @@ void init_special_inode(struct inode *inode, umode_t mode, dev_t rdev)
 
 ```CPP
 static int ext4_file_open(struct inode * inode, struct file * filp)
+```
+
+####	补充：operations成员
+针对ext4系统，相应注册的inode实例化方法[如下](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/namei.c#L3903)
+
+```CPP
+const struct inode_operations ext4_dir_inode_operations = {
+	.create		= ext4_create,
+	.lookup		= ext4_lookup,
+	.link		= ext4_link,
+	.unlink		= ext4_unlink,
+	.symlink	= ext4_symlink,
+	.mkdir		= ext4_mkdir,
+	.rmdir		= ext4_rmdir,
+	.mknod		= ext4_mknod,
+	.tmpfile	= ext4_tmpfile,
+	.rename		= ext4_rename2,
+	.setattr	= ext4_setattr,
+	.getattr	= ext4_getattr,
+	.listxattr	= ext4_listxattr,
+	.get_acl	= ext4_get_acl,
+	.set_acl	= ext4_set_acl,
+	.fiemap     = ext4_fiemap,
+};
+```
+
+以inode的创建函数`ext4_create`为例，核心调用关系如下：
+
+```CPP
+ext4_create
+  --ext4_new_inode_start_handle
+  --ext4_add_nondir
+	--ext4_add_nondir
+		--d_instantiate
+```
+
+-	`ext4_new_inode_start_handle`：为新创建的文件分配一个inode结构，接着为该文件找一个有空闲inode和空闲block的块组group，然后在该块组的inode bitmap找一个空闲inode编号，最后把该inode编号赋值给`inode->i_ino`
+-	`ext4_add_nondir`： 把dentry和inode对应的文件或目录添加到它父目录的`ext4_dir_entry_2`结构里
+
+绑定dentry与inode的方法[`__d_set_inode_and_type`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L280)：
+
+```CPP
+static inline void __d_set_inode_and_type(struct dentry *dentry,
+					  struct inode *inode,
+					  unsigned type_flags)
+{
+	unsigned flags;
+
+	dentry->d_inode = inode;
+	flags = READ_ONCE(dentry->d_flags);
+	flags &= ~(DCACHE_ENTRY_TYPE | DCACHE_FALLTHRU);
+	flags |= type_flags;
+	WRITE_ONCE(dentry->d_flags, flags);
+}
 ```
 
 ####    补充：`walk_component` 的细节
