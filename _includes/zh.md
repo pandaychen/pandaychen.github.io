@@ -28,11 +28,11 @@ Hey，这里是熊喵君的博客，后台程序员，现居深圳。
 -	`eBPF`技术
 
 ##### 编程技能
--   `Golang`
--   `C`
--   `Python`
--   `Perl`
+-   `Golang`：主
+-   `C`：主
 -   `Shell`
+-   `Perl`
+-   `Python`
 -	`rust`
 
 ##### 个人推荐
