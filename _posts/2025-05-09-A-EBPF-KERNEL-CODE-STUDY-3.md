@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      EBPF 内核态代码学习（三）：networking/tcp-ip stack tracing
+title:      EBPF 内核态代码学习（三）：network stack tracing
 subtitle:   tcpstate、tcprtt、tcpconnlat等工具实现分析
 date:       2025-05-09
 author:     pandaychen
@@ -11,7 +11,7 @@ tags:
 ---
 
 ##  0x00 前言
-本文学习下基于ebpf技术的网络协议栈追踪
+本文学习下基于ebpf技术的网络（协议栈）追踪
 
 -   [tcpstates]()：用于记录 TCP 连接的状态变化
 -   [tcprtt]()：则用于记录 TCP 的往返时间（RTT, Round-Trip Time）
@@ -139,7 +139,7 @@ int handle_set_state(struct trace_event_raw_inet_sock_set_state *ctx)
 ##  0x03    tcprtt分析
 
 ##  0x04 一个关于ip_local_port_range的观测问题
-这个问题来自司内分享，在Linux内核版本过高（如`4.14.X`）的场景下，监控本地端口的占用情况，如果此值持续过高（如处于`EST`的状态超过3W）且客户端主动connect并发较高的情况下可能会出现CPU高负载，且负载主要来自于`sys`占用。那么在这种场景下，使用`netstate`/`ss`命令定期统计当前`EST`的端口占用总数就不太合适。如何利用ebpf的方式解决？
+这个问题来自司内分享，在Linux内核版本过高（如`4.14.x`）的场景下，监控本地端口的占用情况，如果此值持续过高（如处于`EST`的状态超过3W）且客户端主动connect并发较高的情况下可能会出现CPU高负载，且负载主要来自于`sys`占用。那么在这种场景下，使用`netstate`/`ss`命令定期统计当前`EST`的端口占用总数就不太合适。如何利用ebpf的方式解决？
 
 
 ##  0x05  参考
