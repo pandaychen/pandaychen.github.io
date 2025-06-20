@@ -28,7 +28,7 @@ int main(int argc, char const *argv[])
 }
 ```
 
-##	0x01	socket创建
+##	0x01	server：socket实现
 当调用`socket`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L1258)创建`struct socket`结构时，在用户层视角只看到返回了一个文件描述符 fd，内核做了哪些事情？
 
 ####	socket调用的细节
@@ -270,6 +270,197 @@ static int sock_map_fd(struct socket *sock, int flags)
 -	协议族函数`proto_ops`，内核会将一系列内核协议栈相关的处理函数提前注册好，比如针对`AF_INET`注册的是`inet_create`
 -	初始化`struct sock`结构内部的相关队列信息
 
+##	0x02	server：listen实现
+`listen`[系统调用](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/af_inet.c#L194)的主要作用就是申请和初始化接收队列，包括全连接队列（链表）和半连接队列（hash表），如图
+
+![listen]()
+
+```CPP
+SYSCALL_DEFINE2(listen, int, fd, int, backlog)
+{
+	//...
+	//根据 fd 查找 socket 内核对象
+	sock = sockfd_lookup_light(fd, &err, &fput_needed);
+	if (sock) {
+	//获取内核参数 net.core.somaxconn
+	somaxconn = sock_net(sock->sk)->core.sysctl_somaxconn;
+	if ((unsigned int)backlog > somaxconn)
+	backlog = somaxconn;
+	
+	//调用协议栈注册的 listen 函数：inet_listen
+	err = sock->ops->listen(sock, backlog);
+	//...
+}
+```
+
+`sock->ops->listen` 调用的是 `inet_listen`函数：
+
+```CPP
+int inet_listen(struct socket *sock, int backlog)
+{
+ //还不是 listen 状态（尚未 listen 过）
+ if (old_state != TCP_LISTEN) {
+  //开始监听
+  err = inet_csk_listen_start(sk, backlog);
+ }
+
+ //设置全连接队列长度
+ sk->sk_max_ack_backlog = backlog;
+}
+```
+
+[`inet_csk_listen_start`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/inet_connection_sock.c#L864)，其中`icsk->icsk_accept_queue` 定义在 `inet_connection_sock`（类型为`request_sock_queue`），是内核用来接收客户端请求的主要数据结构，其中包含了重要的全连接队列`request_sock`结构成员`rskq_accept_head`和`rskq_accept_tail`，这里**注意对于全连接队列来说，在它上面不需要进行复杂的查找工作，accept 的时候只是先进先出处理就好了，因此全连接队列通过 `rskq_accept_head` 和 `rskq_accept_tail` 以链表的形式来管理**，而半连接队列由于需要快速的查找，所以使用hash表来实现
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/net/request_sock.h#L161
+struct request_sock_queue {
+	spinlock_t		rskq_lock;
+	u8			rskq_defer_accept;
+
+	atomic_t		qlen;
+	atomic_t		young;
+ 	//全连接队列
+	struct request_sock	*rskq_accept_head;
+	struct request_sock	*rskq_accept_tail;
+	//...
+};
+
+int inet_csk_listen_start(struct sock *sk, int backlog)
+{
+	//将 struct sock 对象强制转换成了 inet_connection_sock
+	struct inet_connection_sock *icsk = inet_csk(sk);
+	struct inet_sock *inet = inet_sk(sk);
+	int err = -EADDRINUSE;
+
+	reqsk_queue_alloc(&icsk->icsk_accept_queue);
+
+	sk->sk_max_ack_backlog = backlog;
+	sk->sk_ack_backlog = 0;
+	inet_csk_delack_init(sk);
+
+	/* There is race window here: we announce ourselves listening,
+	 * but this transition is still not validated by get_port().
+	 * It is OK, because this socket enters to hash table only
+	 * after validation is complete.
+	 */
+	sk_state_store(sk, TCP_LISTEN);
+	if (!sk->sk_prot->get_port(sk, inet->inet_num)) {
+		inet->inet_sport = htons(inet->inet_num);
+
+		sk_dst_reset(sk);
+		err = sk->sk_prot->hash(sk);
+
+		if (likely(!err))
+			return 0;
+	}
+
+	sk->sk_state = TCP_CLOSE;
+	return err;
+}
+EXPORT_SYMBOL_GPL(inet_csk_listen_start);
+```
+
+在4.11.6版本的`reqsk_queue_alloc`并未发现半连接hash表初始化的代码，事实上该版本的实现已经不同于2.6了，主要区别是：
+-	全局整合：移除独立哈希表，半连接请求（`struct request_sock`）直接插入全局连接哈希表 `ehash`，与其他状态的 socket 共用同一hash表
+-	无预分配：`reqsk_queue_alloc` 仅初始化锁和全连接队列头，半连接队列无独立内存预分配
+
+####	ehash的初始化
+全局 ehash（Established Hash）是 Linux 内核中用于管理所有非 LISTEN 状态的 TCP 连接的核心哈希表（包括 `SYN_RECV`、`ESTABLISHED`、`TIME_WAIT` 等），其初始化发生在内核启动阶段，位于[`tcp_init`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp.c#L3378)
+
+```cpp
+void __init tcp_init(void)
+{
+	//...
+	tcp_hashinfo.ehash =
+		alloc_large_system_hash("TCP established",
+					sizeof(struct inet_ehash_bucket),
+					thash_entries,
+					17, /* one slot per 128 KB of memory */
+					0,
+					NULL,
+					&tcp_hashinfo.ehash_mask,
+					0,
+					thash_entries ? 0 : 512 * 1024);
+	for (i = 0; i <= tcp_hashinfo.ehash_mask; i++)
+		INIT_HLIST_NULLS_HEAD(&tcp_hashinfo.ehash[i].chain, i);
+
+	if (inet_ehash_locks_alloc(&tcp_hashinfo))
+		panic("TCP: failed to alloc ehash_locks");
+
+	//...
+}
+```
+
+
+##	0x	总结
+
+#### socket VS	accept
+🔧 ​一、socket() 函数中 sock_init_data() 的意义​
+当用户调用 socket() 创建套接字时（如监听套接字），内核通过以下流程初始化 struct sock：
+
+​队列初始化​：
+sock_init_data() 初始化核心队列
+：
+​接收队列​（sk_receive_queue）：用于存储接收到的数据包（sk_buff），但监听套接字本身不使用此队列传输数据。
+​发送队列​（sk_write_queue）：预留缓存待发送数据，监听套接字通常不主动发送数据。
+​等待队列​（sk_sleep）：管理因 I/O 事件（如 accept() 阻塞）而休眠的进程
+。
+同时设置回调函数（如 sk_data_ready = sock_def_readable），用于数据到达时唤醒进程
+。
+​监听套接字的特殊性​：
+虽然队列被初始化，但监听套接字的核心功能是管理连接，而非数据传输。
+实际用于新连接管理的队列（如全连接队列 icsk_accept_queue）在 listen() 时创建
+。
+​设计意义​：
+​统一接口​：所有套接字（无论类型）均初始化相同基础结构，简化内核逻辑。
+​预留能力​：为可能的协议扩展或特殊操作（如监听套接字发送错误信息）提供支持。
+🔄 ​二、accept() 中 struct sock 的队列作用​
+通过 accept() 创建的新套接字关联的 struct sock 是三次握手期间已创建的​（非 accept 新建），其队列作用完全不同：
+
+​队列来源​：
+新连接的 struct sock 在握手完成时创建，并加入监听套接字的 icsk_accept_queue 队列
+。
+accept() 仅将其取出，并与新 socket 结构绑定
+。
+​队列的核心作用​：
+​接收队列​（sk_receive_queue）：存储客户端发送的数据包，用户调用 recv() 时从此队列读取数据
+。
+​发送队列​（sk_write_queue）：缓存待发送给客户端的数据，由协议栈逐步发送
+。
+​等待队列​（sk_sleep）：管理因 recv() 或 send() 阻塞的进程（如缓冲区空/满时）
+。
+​数据传输的载体​：
+这些队列是实际数据收发的核心通道，与监听套接字的预留队列有本质区别。
+📊 ​三、关键对比：监听套接字 vs. 连接套接字​
+​特性​	​监听套接字（socket() 创建）​​	​连接套接字（accept() 返回）​​
+​队列初始化时机​	sock_init_data() 在 socket() 中调用	struct sock 在三次握手时创建并初始化队列
+​接收/发送队列作用​	预留但不使用	实际存储收发数据
+​等待队列触发场景​	accept() 阻塞时休眠	recv()/send() 阻塞时休眠
+​核心功能队列​	全连接队列（icsk_accept_queue）	sk_receive_queue/sk_write_queue
+mermaid
+复制
+graph TD
+  A[socket() 创建监听套接字] --> B[sock_init_data() 初始化基础队列]
+  B --> C[队列预留但不用于数据传输]
+  C --> D[listen() 创建全连接队列 icsk_accept_queue]
+  D --> E[三次握手完成时创建新连接的 struct sock]
+  E --> F[新 sock 的队列用于实际数据传输]
+  F --> G[accept() 取出 sock 并关联新 socket]
+💎 ​四、总结：设计哲学与一致性​
+​**sock_init_data() 的意义**​：
+在 socket() 中为所有套接字提供统一的基础设施，确保协议无关层的完整性。
+对监听套接字而言，队列是“占位符”，实际功能由协议专属队列（如 icsk_accept_queue）实现
+。
+​与 accept() 队列的一致性​：
+​结构相同​：二者均包含同名队列（如 sk_receive_queue），但作用完全独立。
+​分工明确​：
+监听套接字：​连接管理​（通过全连接队列）。
+连接套接字：​数据传输​（通过收/发队列）。
+​性能优化​：
+复用握手阶段创建的 struct sock 减少 accept() 开销
+。
+分离队列职责避免资源竞争，提升并发能力。
+💎 ​核心结论​：sock_init_data() 在 socket() 中的初始化是基础性、通用性的，而 accept() 关联的队列是功能性、专用性的。二者名称相同但角色迥异，体现了 Linux 网络栈“统一接口，分层实现”的设计智慧。
 
 ##  0x  参考
 -   [深入理解Linux TCP的三次握手](https://mp.weixin.qq.com/s/vlrzGc5bFrPIr9a7HIr2eA)
