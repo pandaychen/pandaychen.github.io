@@ -12,6 +12,7 @@ tags:
 ---
 
 ##  0x00    前言
+本文代码基于 [v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include) 版本
 
 ##  0x01   报文发送过程
 本小节使用以太网的物理网卡，以一个UDP包的发送过程作为示例，了解下具体的发包过程
