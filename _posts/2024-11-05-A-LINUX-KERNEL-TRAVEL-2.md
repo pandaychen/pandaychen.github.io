@@ -535,8 +535,21 @@ int start_mmap(){
 }
 ```
 
-####    
+####    mmap的原理
+mmap 系统调用的本质是首先要在进程虚拟内存空间里的文件映射与匿名映射区中划分出一段虚拟内存区域 VMA 出来 ，这段 VMA 区域的大小用 `vm_start`/`vm_end` 来表示，它们由 `mmap` 系统调用参数 `addr`/`length` 决定；进一步说，`mmap` 内存文件映射的本质其实就是将虚拟映射区 vma 的相关操作 `vma->vm_ops` 映射成文件的相关操作 `ext4_file_vm_ops`（以ext4文件系统为例）
 
+```CPP
+struct vm_area_struct {
+    unsigned long vm_start;     /* Our start address within vm_mm. */
+    unsigned long vm_end;       /* The first byte after our end address */
+
+    //with fd
+    struct file * vm_file;      /* File we map to (can be NULL). */
+    unsigned long vm_pgoff;     /* Offset (within vm_file) in PAGE_SIZE */
+}
+```
+
+随后内核会对该段 VMA 进行相关的映射，如果是文件映射的话，内核会将要映射的文件，以及要映射的文件区域在文件中的 `offset`，与 VMA 结构中的 `vm_file`/`vm_pgoff` 关联映射起来，它们由 `mmap` 系统调用参数 `fd`/`offset` 决定。由 `mmap` 在文件映射与匿名映射区中映射出来的这一段虚拟内存区域同进程虚拟内存空间中的其他虚拟内存区域一样，也都是有权限控制的
 
 ####    mmap文件映射的原理
 
