@@ -73,6 +73,10 @@ echo function_graph > current_tracer
 #设置目标追踪函数
 echo __x64_sys_openat > set_graph_function
 
+#注意：若追踪函数不存在会设置报错
+#echo do_sys_openat > set_graph_function 
+#-bash: echo: write error: Invalid argument
+
 cat set_graph_function
 __x64_sys_openat
 
@@ -168,3 +172,4 @@ perf采样过程大概分为两步：
 -   [Linux可观测性](https://qiankunli.github.io/2019/11/25/linux_observability.html#tracepoint-%E5%92%8C-kprobe)
 -   [一文学会ftrace的基础用法](https://www.daodaodao123.com/?p=959)
 -   [2.4 perf 的使用](https://hotttao.github.io/posts/linux/linux_perf/06_perf_use/)
+-   [CPU平均负载为多少更合理？](https://mp.weixin.qq.com/s/utbtKusx-gBgemh94f6trg)
