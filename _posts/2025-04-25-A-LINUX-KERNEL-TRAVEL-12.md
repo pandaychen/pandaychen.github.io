@@ -28,6 +28,80 @@ int main(int argc, char const *argv[])
 }
 ```
 
+客户端代码：
+
+```CPP
+int main(){
+ fd = socket(AF_INET,SOCK_STREAM, 0);
+ connect(fd, ...);
+ ...
+}
+```
+
+####	socket vs sock
+`struct socket` 是用于负责对（上层）给用户提供接口，并且和文件系统关联。而 `struct sock` 负责向下对接内核网络协议栈
+
+![sock-relation]()
+
+####	inetsw_array
+
+```CPP
+static struct inet_protosw inetsw_array[] =
+{
+  {
+    .type =       SOCK_STREAM,
+    .protocol =   IPPROTO_TCP,
+    .prot =       &tcp_prot,	//重要
+    .ops =        &inet_stream_ops,
+    .flags =      INET_PROTOSW_PERMANENT |
+            INET_PROTOSW_ICSK,
+  },
+  {
+    .type =       SOCK_DGRAM,
+    .protocol =   IPPROTO_UDP,
+    .prot =       &udp_prot,
+    .ops =        &inet_dgram_ops,
+    .flags =      INET_PROTOSW_PERMANENT,
+     },
+     {
+    .type =       SOCK_DGRAM,
+    .protocol =   IPPROTO_ICMP,
+    .prot =       &ping_prot,
+    .ops =        &inet_sockraw_ops,
+    .flags =      INET_PROTOSW_REUSE,
+     },
+	//....
+}
+```
+
+其中`tcp_prot` 的定义如下（sock 之下内核协议栈的动作）
+
+```CPP
+struct proto tcp_prot = {
+  .name      = "TCP",
+  .owner      = THIS_MODULE,
+  .close      = tcp_close,
+  .connect    = tcp_v4_connect,
+  .disconnect    = tcp_disconnect,
+  .accept      = inet_csk_accept,
+  .ioctl      = tcp_ioctl,
+  .init      = tcp_v4_init_sock,
+  .destroy    = tcp_v4_destroy_sock,
+  .shutdown    = tcp_shutdown,
+  .setsockopt    = tcp_setsockopt,
+  .getsockopt    = tcp_getsockopt,
+  .keepalive    = tcp_set_keepalive,
+  .recvmsg    = tcp_recvmsg,
+  .sendmsg    = tcp_sendmsg,
+  .sendpage    = tcp_sendpage,
+  .backlog_rcv    = tcp_v4_do_rcv,
+  .release_cb    = tcp_release_cb,
+  .hash      = inet_hash,
+    .get_port    = inet_csk_get_port,
+   //......
+}
+```
+
 ##	0x01	server：socket实现
 当调用`socket`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L1258)创建`struct socket`结构时，在用户层视角只看到返回了一个文件描述符 fd，内核做了哪些事情？
 
@@ -156,7 +230,7 @@ int sock_register(const struct net_proto_family *ops)
 }
 ```
 
-TCP协议对应的`family`字段是`AF_INET`，`pf->create`对应的函数即为`inet_create`，核心逻辑如下：
+TCP协议对应的`family`字段是`AF_INET`，`pf->create`对应的函数即为`inet_create`，此外，在 `sk_alloc` 函数中，`struct inet_protosw *answer` 结构的 `tcp_prot` 赋值给了 `struct sock *sk` 的 `sk_prot` 成员（后续看到`sock`结构关联的`sk_prot`调用即参考`tcp_prot`结构的函数搜索即可）。核心逻辑如下：
 
 ```CPP
 static int inet_create(struct net *net, struct socket *sock, int protocol,
@@ -391,78 +465,176 @@ void __init tcp_init(void)
 }
 ```
 
+##	0x03	client：connect实现（发起三次握手）
 
-##	0x	总结
 
-#### socket VS	accept
-🔧 ​一、socket() 函数中 sock_init_data() 的意义​
-当用户调用 socket() 创建套接字时（如监听套接字），内核通过以下流程初始化 struct sock：
+##	0x04	server：接收SYN包
 
-​队列初始化​：
-sock_init_data() 初始化核心队列
-：
-​接收队列​（sk_receive_queue）：用于存储接收到的数据包（sk_buff），但监听套接字本身不使用此队列传输数据。
-​发送队列​（sk_write_queue）：预留缓存待发送数据，监听套接字通常不主动发送数据。
-​等待队列​（sk_sleep）：管理因 I/O 事件（如 accept() 阻塞）而休眠的进程
-。
-同时设置回调函数（如 sk_data_ready = sock_def_readable），用于数据到达时唤醒进程
-。
-​监听套接字的特殊性​：
-虽然队列被初始化，但监听套接字的核心功能是管理连接，而非数据传输。
-实际用于新连接管理的队列（如全连接队列 icsk_accept_queue）在 listen() 时创建
-。
-​设计意义​：
-​统一接口​：所有套接字（无论类型）均初始化相同基础结构，简化内核逻辑。
-​预留能力​：为可能的协议扩展或特殊操作（如监听套接字发送错误信息）提供支持。
-🔄 ​二、accept() 中 struct sock 的队列作用​
-通过 accept() 创建的新套接字关联的 struct sock 是三次握手期间已创建的​（非 accept 新建），其队列作用完全不同：
 
-​队列来源​：
-新连接的 struct sock 在握手完成时创建，并加入监听套接字的 icsk_accept_queue 队列
-。
-accept() 仅将其取出，并与新 socket 结构绑定
-。
-​队列的核心作用​：
-​接收队列​（sk_receive_queue）：存储客户端发送的数据包，用户调用 recv() 时从此队列读取数据
-。
-​发送队列​（sk_write_queue）：缓存待发送给客户端的数据，由协议栈逐步发送
-。
-​等待队列​（sk_sleep）：管理因 recv() 或 send() 阻塞的进程（如缓冲区空/满时）
-。
-​数据传输的载体​：
-这些队列是实际数据收发的核心通道，与监听套接字的预留队列有本质区别。
-📊 ​三、关键对比：监听套接字 vs. 连接套接字​
-​特性​	​监听套接字（socket() 创建）​​	​连接套接字（accept() 返回）​​
-​队列初始化时机​	sock_init_data() 在 socket() 中调用	struct sock 在三次握手时创建并初始化队列
-​接收/发送队列作用​	预留但不使用	实际存储收发数据
-​等待队列触发场景​	accept() 阻塞时休眠	recv()/send() 阻塞时休眠
-​核心功能队列​	全连接队列（icsk_accept_queue）	sk_receive_queue/sk_write_queue
-mermaid
-复制
-graph TD
-  A[socket() 创建监听套接字] --> B[sock_init_data() 初始化基础队列]
-  B --> C[队列预留但不用于数据传输]
-  C --> D[listen() 创建全连接队列 icsk_accept_queue]
-  D --> E[三次握手完成时创建新连接的 struct sock]
-  E --> F[新 sock 的队列用于实际数据传输]
-  F --> G[accept() 取出 sock 并关联新 socket]
-💎 ​四、总结：设计哲学与一致性​
-​**sock_init_data() 的意义**​：
-在 socket() 中为所有套接字提供统一的基础设施，确保协议无关层的完整性。
-对监听套接字而言，队列是“占位符”，实际功能由协议专属队列（如 icsk_accept_queue）实现
-。
-​与 accept() 队列的一致性​：
-​结构相同​：二者均包含同名队列（如 sk_receive_queue），但作用完全独立。
-​分工明确​：
-监听套接字：​连接管理​（通过全连接队列）。
-连接套接字：​数据传输​（通过收/发队列）。
-​性能优化​：
-复用握手阶段创建的 struct sock 减少 accept() 开销
-。
-分离队列职责避免资源竞争，提升并发能力。
-💎 ​核心结论​：sock_init_data() 在 socket() 中的初始化是基础性、通用性的，而 accept() 关联的队列是功能性、专用性的。二者名称相同但角色迥异，体现了 Linux 网络栈“统一接口，分层实现”的设计智慧。
+##	0x05	client：响应SYN-ACK包
 
-##  0x  参考
+##	0x06	server：响应ACK包
+
+##	0x07	server：accept操作
+服务端`accept`系统调用的功能就是从已经建立好的全连接队列（链表）中取出一个返回给用户进程。当 `accept` 之后，通常服务端进程会创建一个新的 socket 出来，专门用于和对应的客户端通信，然后把它放到当前进程的打开文件列表中，这里内核数据结构关系如下（注意到`file.file_operations`是指向`socket_file_ops`）
+
+![]()
+
+![]()
+
+先回想一下`struct socket`的[结构]()，其中包含了非常重要的`sock`成员，也是 socket 的核心内核对象，其中发送队列、接收队列、等待队列等核心数据结构都位于此
+
+```CPP
+struct socket {
+	//...
+    struct file     *file;
+    struct sock     *sk;
+	//...
+}
+```
+
+`accept`系统调用核心代码如下，主要分为四步：
+
+```CPP
+// 返回一个新fd，用于后续客户端连接
+SYSCALL_DEFINE4(accept4, int, fd, struct sockaddr __user *, upeer_sockaddr,
+        int __user *, upeer_addrlen, int, flags)
+{
+    struct socket *sock, *newsock;
+
+    //根据 fd 查找到监听的 socket
+	//这里的fd关联的是listen（socket）API 使用的那个fd
+    sock = sockfd_lookup_light(fd, &err, &fput_needed);
+
+    //申请并初始化新的 socket
+    newsock = sock_alloc();
+    newsock->type = sock->type;
+    newsock->ops = sock->ops;
+
+    //申请新的 file 对象，并设置到新 socket 上
+    newfile = sock_alloc_file(newsock, flags, sock->sk->sk_prot_creator->name);
+    ......
+
+    //接收连接
+    err = sock->ops->accept(sock, newsock, sock->file->f_flags);
+
+    //添加新文件fd到当前进程的打开文件列表fdtable中
+	//newfd为与客户端连接使用的fd
+    fd_install(newfd, newfile);
+}
+```
+
+1、初始化 `struct socket` 对象，`accept`中首先是调用 `sock_alloc` 申请一个`newsock`（类型为 `struct socket`），然后接着把 `listen` 状态的 `socket` 对象上的协议操作函数集合 `ops` 赋值给新的 `socket`（对于所有的 `AF_INET` 协议族下的 `socket` 来说，它们的 `ops` 方法都是一样的）。其中 `inet_stream_ops` 的定义如下：
+
+```CPP
+const struct proto_ops inet_stream_ops = {
+    //...
+    .accept        = inet_accept,
+    .listen        = inet_listen,
+    .sendmsg       = inet_sendmsg,
+    .recvmsg       = inet_recvmsg,
+    //...
+}
+```
+
+2、调用`sock_alloc_file`函数：为新 `socket` 对象申请 `file`（初始化`struct socket`的`file`成员），`sock_alloc_file` 又会调用 `alloc_file`对`struct file`结构进行初始化，注意在 `alloc_file` 方法中，把 `socket_file_ops` 函数集合设置到 `file->f_op`了，最后注意到**在accept里创建的新 `socket` 里的 `file->f_op->poll` 函数指向的是 `sock_poll`** TODO
+
+```CPP
+struct file *sock_alloc_file(struct socket *sock, int flags, 
+    const char *dname)
+{
+    struct file *file;
+    file = alloc_file(&path, FMODE_READ | FMODE_WRITE,
+            &socket_file_ops);
+    ......
+
+	// 将alloc的file对象挂到sock的file成员上
+    sock->file = file;
+
+	//......
+}
+
+//alloc_file
+struct file *alloc_file(struct path *path, fmode_t mode,
+        const struct file_operations *fop)
+{
+    struct file *file;
+    file->f_op = fop;
+
+	// file 对象的成员 socket 指针，指向 socket 对象
+    ......
+}
+
+// file_operations的实例化：socket_file_ops
+static const struct file_operations socket_file_ops = {
+    ...
+    .aio_read   = sock_aio_read,
+    .aio_write  = sock_aio_write,
+    .poll     = sock_poll,		//核心：记住这个poll成员及对应的方法`sock_poll`
+    .release  = sock_close,
+    ...
+};
+```
+
+3、接收连接的核心逻辑：`sock->ops->accept(sock, newsock, sock->file->f_flags)`，对应的方法是 [`inet_accept`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/af_inet.c#L692)。它执行的时候会从握手队列里直接获取创建好的 sock
+
+```CPP
+int inet_accept(struct socket *sock, struct socket *newsock, int flags,
+		bool kern)
+{
+	//....
+	//这里对应的是inet_csk_accept
+	//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/inet_connection_sock.c#L427
+	struct sock *sk2 = sk1->sk_prot->accept(sk1, flags, &err, kern);
+	sock_graft(sk2, newsock);
+
+	newsock->state = SS_CONNECTED;
+	//....
+}
+EXPORT_SYMBOL(inet_accept);
+```
+
+`inet_accept` 会调用 `struct sock` 的 `sk1->sk_prot->accept`，也即 `tcp_prot` 的 `accept` 函数即`inet_csk_accept` 函数
+
+```CPP
+void sock_init_data(struct socket *sock, struct sock *sk)
+{
+    sk->sk_wq   =   NULL;
+	//将sock 对象的 sk_data_ready 函数指针设置为 sock_def_readable
+    sk->sk_data_ready   =   sock_def_readable;
+}
+```
+
+4、添加新文件到当前进程的打开文件列表中，当 `file`、`socket`、`sock` 等关键内核对象创建完毕以后，剩下要做的一件事情就是把它挂到当前进程的打开文件列表即完成
+
+##	0x08	数据传输
+
+
+##	0x09	总结
+
+#### socket  VS	accept
+在分析三次握手源码时产生的疑问：`socket`系统调用创建`struct socket`结构，与`accept`系统调用创建的`struct socket`结构，作用上有哪些不同？
+
+1、监听套接字（socket）的核心功能是管理连接，而非数据传输。当用户调用 `socket()` 创建套接字时（如监听套接字），内核会通过`sock_init_data`初始化 `struct sock`的核心队列，包括：
+
+-	接收队列（`sk_receive_queue`）：用于存储接收到的数据包（`sk_buff`），但监听套接字本身不使用此队列传输数据
+-	发送队列（`sk_write_queue`）：缓存待发送数据，监听套接字通常不主动发送数据
+-	等待队列（`sk_sleep`）：管理因 I/O 事件（如 `accept()` 阻塞）而休眠的进程
+
+同时设置回调函数（如 `sk_data_ready = sock_def_readable`），用于数据到达（主要是有新连接到达时）时唤醒进程
+
+2、通过 `accept()` 创建的新套接字关联的 `struct sock` 是三次握手期间内核已经创建的（非 `accept()` 新建），其队列作用完全不同，主要过程描述如下：
+
+-	新建连接的 `struct sock` 在握手完成时[创建]()，并加入监听套接字的 `icsk_accept_queue` 即全连接队列，`accept()` 函数仅将其取出，并与新 `struct socket` 结构绑定
+-	此接收队列（`sk_receive_queue`）的核心作用是存储客户端发送的数据包，用户调用 `recv()` 时从此队列读取数据
+-	发送队列（`sk_write_queue`）的作用是缓存待发送给客户端的数据，由协议栈逐步发送
+-	等待队列（`sk_sleep`）会管理因 `recv()` 或 `send()` 阻塞的进程（如缓冲区空/满时）
+
+因此在`accept()`系统调用新建的`struct socket`并关联的`struct sock`结构对应的队列是作为数据传输的载体，这些队列是实际数据收发的核心通道，与监听套接字的预留队列有本质区别
+
+##  0x0A 参考
+-	<<深入理解Linux网络>>
 -   [深入理解Linux TCP的三次握手](https://mp.weixin.qq.com/s/vlrzGc5bFrPIr9a7HIr2eA)
 -   [为什么服务端程序都需要先 listen 一下](https://mp.weixin.qq.com/s/hv2tmtVpxhVxr6X-RNWBsQ)
 -	[Linux内核网络（三）：Linux内核中socket函数的实现](https://www.kerneltravel.net/blog/2020/network_ljr_no3/)
+-	[数据包发送](https://www.cnblogs.com/mysky007/p/12347293.html)
