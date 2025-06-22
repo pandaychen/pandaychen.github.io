@@ -12,32 +12,36 @@ tags:
 ---
 
 ##  0x00    前言
-前文讨论了进程，正在执行的程序，是可执行程序的动态实例，它是一个承担分配系统资源的实体，但操作系统创建进程时，会为进程创建相应的内存空间，这个内存空间称为进程的地址空间，**每一个进程的地址空间（虚拟内存空间）都是独立的**；当一个进程有了进程的地址空间，那么其管理结构被称为内存描述符`mm_struct`
+前文讨论了进程，正在执行的程序，是可执行程序的动态实例，它是一个承担分配系统资源的实体，但操作系统创建进程时，会为进程创建相应的内存空间，这个内存空间称为进程的地址空间，**每一个进程的地址空间（虚拟内存空间）都是独立的**；当一个进程有了进程的地址空间，那么其管理结构被称为内存描述符`mm_struct`。有趣的说，虚拟内存其实是 CPU 和操作系统使用的一个障眼法，联手给进程编织了一个假象，让进程误以为自己独占了全部的内存空间
 
 ####    虚拟内存地址
 
 ####    虚拟内存空间分布（32位）
 
-![32]()
+![32-vm]()
 
 `32`位机器上进程的用户空间大小为 `3GB`。内核将一个进程的用户空间划分为多个段：
 -   代码段：用于存放程序中可执行代码的段
 -   数据段：用于存放已经初始化的全局变量或静态变量的段（如 `int global = 10;` 定义的全局变量）
 -   未初始化数据段：用于存放未初始化的全局变量或静态变量的段（如`int global;` 定义的全局变量）
 -   堆：用于存放使用 `malloc` 函数申请的内存
--   `mmap`区：用于存放使用 `mmap` 函数映射的内存区
+-   `mmap`区：用于存放使用 `mmap` 函数映射的内存区（文件映射与匿名映射区），详见后文描述
 -   栈：用于存放函数局部变量和函数参数
 
 ####    虚拟内存空间分布（64位）
 
-![64]()
+![64-vm]()
+
+
+####    页表
+参考[一步一图带你构建 Linux 页表体系 —— 详解虚拟内存如何与物理内存进行映射](https://mp.weixin.qq.com/s?__biz=Mzg2MzU3Mjc3Ng==&mid=2247488477&idx=1&sn=f8531b3220ea3a9ca2a0fdc2fd9dabc6&chksm=ce77d59af9005c8c2ef35c7e45f45cbfc527bfc4b99bbd02dbaaa964d174a4009897dd329a4d&scene=178&cur_album_id=2559805446807928833#rd)
 
 ##  0x01    进程虚拟内存空间管理
 无论是在 `32` 位机器上还是在 `64` 位机器上，进程虚拟内存空间的核心区域分布的相对位置是一样的，这个结构是怎么在内核反映的？
 
 ![]()
 
-####    内存描述符：mm_struct
+####    进程虚拟内存描述符：mm_struct
 已知每个内核进程描述符结构体`task_struct`中嵌套了一个`mm_struct`结构体指针，该结构体中包含了的该进程虚拟内存空间的全部信息。同时每个进程都有唯一的 `mm_struct` 结构体，这说明每个进程的虚拟地址空间都是独立，互不干扰的。当调用 `fork()` 函数创建进程的时候，表示进程地址空间的 `mm_struct` 结构会随着进程描述符 `task_struct` 的创建而创建
 
 创建`mm_struct`的逻辑在内核函数[`copy_mm`](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/fork.c#L1174)中，注意这里区分用户态进程和用户态线程，前者会单独复制出一份`mm_struct`，后者是共享父进程的`mm_struct`。`copy_mm` 函数首先会将父进程的虚拟内存空间 `current->mm` 赋值给指针 `oldmm`，然后通过 `dup_mm` 函数将父进程的虚拟内存空间以及相关页表拷贝到子进程的 `mm_struct` 结构中，最后将拷贝出来的 `mm_struct` 赋值给子进程的 `task_struct` 结构，最终布局[参考](https://pandaychen.github.io/2024/10/02/A-LINUX-KERNEL-TRAVEL-1/#%E8%BF%9B%E7%A8%8B%E4%B8%8E%E7%BA%BF%E7%A8%8B)
@@ -267,7 +271,7 @@ struct mm_struct {
 使用rbtree组织VMA区域的场景如下：
 -   需要根据特定虚拟内存地址在虚拟内存空间中查找特定的VMA虚拟内存区域，尤其在进程虚拟内存空间中包含的内存区域 VMA 比较多的情况下，使用rbtree查找更为高效
 
-![final]()
+![final](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/memory/mm_struct_all_view.jpg)
 
 ##  0x02    进程虚拟内存管理：ELF加载
 本小节主要讨论下进程的虚拟内存区是如何建立起来的，主要涉及到：
@@ -463,6 +467,36 @@ mmap_region(struct file *file, unsigned long addr, unsigned long len,
 
 ##  0x03  mmap的原理分析
 
+####    mmap API
+```CPP
+#include <sys/mman.h>
+void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset);
+
+// 内核文件：/arch/x86/kernel/sys_x86_64.c
+SYSCALL_DEFINE6(mmap, unsigned long, addr, unsigned long, len,
+		unsigned long, prot, unsigned long, flags,
+		unsigned long, fd, unsigned long, off)
+```
+
+`mmap` 内存映射里所谓的内存其实指的是虚拟内存，常见有两种场景：
+-   匿名映射：在调用 `mmap` 进行匿名映射的时候（比如进行堆内存的分配），是将进程虚拟内存空间中的某一段虚拟内存区域与物理内存中的匿名内存页进行映射
+-   文件映射：当调用 `mmap` 进行文件映射的时候，是将进程虚拟内存空间中的某一段虚拟内存区域与磁盘中某个文件中的某段区域进行映射
+
+####    mmap的参数&&功能
+`mmap`的参数决定了申请虚拟内存的起始地址与size（`addr`/`length` 必须要按照 `PAGE_SIZE` `4k`对齐）
+
+-   `addr`：表示要映射的这段虚拟内存区域在进程虚拟内存空间中的起始地址（虚拟内存地址），一般会设置为 `NULL`，意思就是完全交由内核来帮决定虚拟映射区的起始地址
+-   `length`：表示要申请的这段虚拟内存的size。如果是匿名映射，`length` 决定了要映射的匿名物理内存有多大；如果是文件映射，`length`决定了要映射的文件区域有多大
+
+mmap常见的参数组合搭配如下：
+
+-   私有匿名映射：`MAP_PRIVATE | MAP_ANONYMOUS` 表示私有匿名映射，常常利用这种映射方式来申请虚拟内存。比如使用 glibc的 `malloc` 函数进行虚拟内存申请时，当申请的内存大于 `128K` 的时候，`malloc` 就会调用 `mmap` 采用私有匿名映射的方式来申请堆内存。由于它是私有映射，所以申请到的内存是进程独占的，多进程之间不能共享。特别强调一下 `mmap` 私有匿名映射申请到的只是虚拟内存，内核只是在进程虚拟内存空间中划分一段虚拟内存区域 VMA 出来，并将 VMA 该初始化的属性初始化好，mmap 系统调用就结束了，这里和物理内存还没有发生任何关系
+-   私有文件映射：调用 `mmap` 进行内存文件映射的时候可以通过指定参数 `flags` 为 `MAP_PRIVATE`，然后将参数 `fd` 指定为要映射文件的文件描述符来实现对文件的私有映射
+-   共享文件映射：通过将 `mmap` 系统调用中的 `flags` 参数指定为 `MAP_SHARED` , 参数 `fd` 指定为要映射文件的文件描述符来实现对文件的共享映射，共享文件映射其实和私有文件映射前面的映射过程是一样的，唯一不同的点在于**私有文件映射仅仅是读共享的，写的时候会发生写时复制（copy on write），并且多进程针对同一映射文件的修改不会回写到磁盘文件上**。而共享文件映射因为是共享的，多个进程中的虚拟内存映射区最终会通过缺页中断的方式映射到文件的 page cache 中，后续多个进程对各自的这段虚拟内存区域的读写都会直接发生在 page cache 上。因为映射文件的 page cache 在内核中只有一份，所以对于共享文件映射来说，多进程读写都是共享的，由于多进程直接读写的是 page cache ，所以多进程对共享映射区的任何修改，最终都会通过内核回写线程 pdflush 刷新到磁盘文件中
+-    共享匿名映射：通过将 `mmap` 系统调用中的 `flags` 参数指定为 `MAP_SHARED | MAP_ANONYMOUS`，并将 `fd` 参数指定为 `-1` 来实现共享匿名映射，常用于父子进程之间共享内存通信
+
+例如，基于`mmap`实现共享内存（文件映射）的示例代码如下：
+
 ```CPP
 int start_mmap(){
     /*
@@ -501,7 +535,53 @@ int start_mmap(){
 }
 ```
 
-##  0x04  参考
+####    
+
+
+####    mmap文件映射的原理
+
+![mmap-file-mapping]()
+
+由上图，调用 `mmap` 进行内存文件映射的时候，内核首先会在进程的虚拟内存空间中创建一个新的虚拟内存区域 VMA 用于映射文件，通过 `vm_area_struct->vm_file` 将映射文件的 `struct flle` 结构与虚拟内存映射关联起来，即下面的成员：
+
+```CPP
+struct vm_area_struct {
+    //...
+    struct file * vm_file;      /* File we map to (can be NULL). */
+    unsigned long vm_pgoff;     /* Offset (within vm_file) in PAGE_SIZE */
+    // ...
+}
+
+struct inode {
+    //...
+    struct address_space	*i_mapping;
+}
+
+//page cache 在内核中是使用 struct address_space 结构来描述
+//page cache 是和文件相关的，与进程无关
+struct address_space {
+    // 这里就是 page cache，里边缓存了文件的所有缓存页面
+    struct radix_tree_root  page_tree; 
+}
+```
+
+根据[Linux 内核之旅（二）：VFS（基础篇）](https://pandaychen.github.io/2024/11/20/A-LINUX-KERNEL-TRAVEL-3/)一文的介绍，`vm_file->f_inode` 可以关联到映射文件的 `struct inode`，近而关联到映射文件在磁盘中的磁盘块 `i_block`以及对应的page cache成员`i_mapping`等（内核会将已经访问过的磁盘块缓存在page cache中）
+
+在VFS中，映射文件中的数据是按照磁盘块来存储的，读写文件数据也是按照磁盘块为单位进行的，磁盘块大小为 `4K`，当进程读取磁盘块的内容到内存之后，站在内存管理系统的视角，磁盘块中的数据被 DMA 拷贝到了物理内存页（即文件页）中。一个文件包含多个磁盘块，当它们被读取到内存之后，一个文件也就对应了多个文件页，这些文件页在内存中统一被 page cache 的结构所组织。每一个文件在内核中都会有一个唯一的 page cache 与之对应，用于缓存文件中的数据
+
+##  0x04    mmap应用的四大场景
+
+####    方式1：私有匿名映射
+-   场景1：`malloc`申请大块（虚拟）内存
+-   场景2：在`execve`系统调用中，在当前进程中加载并执行一个新的二进制执行文件
+
+####    方式2：私有文件映射
+
+####    方式3：共享文件映射
+
+####    方式4：匿名文件映射
+
+##  0x05  参考
 -   [4.6 深入理解 Linux 虚拟内存管理](https://www.xiaolincoding.com/os/3_memory/linux_mem.html)
 -   [4.7 深入理解 Linux 物理内存管理](https://www.xiaolincoding.com/os/3_memory/linux_mem2.html#_6-1-%E5%8C%BF%E5%90%8D%E9%A1%B5%E7%9A%84%E5%8F%8D%E5%90%91%E6%98%A0%E5%B0%84)
 -   [mmap 源码分析](https://leviathan.vip/2019/01/13/mmap%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90/)
@@ -509,3 +589,4 @@ int start_mmap(){
 -   [图解 Linux 虚拟内存空间管理](https://github.com/liexusong/linux-source-code-analyze/blob/master/process-virtual-memory-manage.md)
 -   [认真分析mmap：是什么为什么怎么用](https://www.cnblogs.com/huxiao-tee/p/4660352.html)
 -   [从内核世界透视 mmap 内存映射的本质（原理篇）](https://www.cnblogs.com/binlovetech/p/17712761.html)
+-   [聊聊Linux内核](https://mp.weixin.qq.com/mp/appmsgalbum?__biz=Mzg2MzU3Mjc3Ng==&action=getalbum&album_id=2559805446807928833&scene=173&from_msgid=2247486879&from_itemidx=1&count=3&nolastread=1#wechat_redirect)

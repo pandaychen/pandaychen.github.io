@@ -398,10 +398,14 @@ int main(void)
 }
 ```
 
-##  0x09  安全软件收集
+##  0x09    漏洞利用
+
+####    Redis漏洞利用
+
+##  0x0A  安全软件收集
 参考[开源安全项目清单](https://raw.githubusercontent.com/Bypass007/Safety-Project-Collection/master/README.md)
 
-##  0x0A  参考
+##  0x0B  参考
 -   [反弹Shell，看这一篇就够了](https://xz.aliyun.com/t/9488?u_atoken=ba042e2abcd2eb75127d6e0d58f1fcba&u_asig=0a472f9017303729323367295e0040)
 -   [HIDS 常见检测原理](https://segmentfault.com/a/1190000043496037?u_atoken=9d1b6e7ba6f45bfc74e3197aafdfacae&u_asig=1a0c65c917304505664322721e003d)
 -   [如何优雅的隐藏你的 Webshell](https://zu1k.com/posts/security/web-security/hide-your-webshell/#%E7%9B%B4%E6%8E%A5%E6%89%A7%E8%A1%8C)
@@ -421,3 +425,5 @@ int main(void)
 -   [Linux ELF无文件内存执行学习小记](https://xeldax.top/article/linux_no_file_elf_mem_execute)
 -   [How BPF-Enabled Malware Works](https://www.trendmicro.com/vinfo/us/security/news/threat-landscape/how-bpf-enabled-malware-works-bracing-for-emerging-threats)
 -   [零系统调用的暗度陈仓：深度解构io_uring新型Rootkit的攻击防护](https://mp.weixin.qq.com/s?__biz=MzU3ODAyMjg4OQ==&mid=2247496377&idx=1&sn=27cbb8a50866b909bd9a1cb441df1a6f&subscene=0)
+-   [Polkit pkexec 权限提升漏洞（CVE-2021-4034）](https://github.com/vulhub/vulhub/blob/master/polkit/CVE-2021-4034/README.zh-cn.md)
+-   [【云原生攻防研究】容器逃逸技术概览](https://mp.weixin.qq.com/s?__biz=MzIyODYzNTU2OA==&mid=2247487393&idx=1&sn=6cec3da009d25cb1c766bb9dae809a86&scene=21#wechat_redirect)
