@@ -20,7 +20,7 @@ tags:
 
 ####    offset_of 机制
 
-```c
+```cpp
 // 说明：获得结构体 (TYPE) 的变量成员 (MEMBER) 在此结构体中的偏移量
 #define offsetof(TYPE, MEMBER) ((size_t) &((TYPE *)0)->MEMBER)
 ```
@@ -250,7 +250,100 @@ struct rb_node {
 4. 动态任务管理：CFS需要频繁插入新任务和删除已完成任务，红黑树的高效动态操作能力满足了这一需求
 5. 内存效率：红黑树每个节点只需额外存储一个颜色标记，内存开销较小，适合内核这种对内存敏感的环境
 
-##  0x04  参考
+##	0x04		等待队列
+当进程要获取某些资源（例如从网卡读取数据）的时候，但资源并没有准备好（例如网卡还没接收到数据），这时候内核必须切换到其他进程运行，直到资源准备好再唤醒进程。**waitqueue 机制就是内核用于管理等待资源的进程，当某个进程获取的资源没有准备好的时候，可以通过调用 `add_wait_queue()` 函数把进程添加到 waitqueue 中，然后切换到其他进程继续执行。当资源准备好，由资源提供方通过调用 `wake_up()` 函数来唤醒等待的进程**
+
+####	等待队列结构
+和linklist类似，waitqueue 本质上是一个链表，waitqueue包含了`wait_queue_head_t`（头）以及`__wait_queue`（节点）两个基础结构
+```CPP
+struct __wait_queue_head {
+    spinlock_t lock;	//lock 字段用于保护等待队列在多核环境下数据被破坏
+    struct list_head task_list;	//task_list 字段用于保存等待资源的进程列表
+};
+
+struct __wait_queue {
+    unsigned int flags;	//可以设置为 WQ_FLAG_EXCLUSIVE，表示等待的进程应该独占资源（解决惊群现象）
+    void *private;	//一般用于保存等待进程的进程描述符 task_struct
+    wait_queue_func_t func;	//唤醒函数，一般设置为 default_wake_function() 函数，当然也可以设置为自定义的唤醒函数
+    struct list_head task_list;	//用于链接其他等待资源的进程
+};
+```
+
+![waitqueue](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/datastructure/waitqueue-1.jpg)
+
+####	等待队列操作
+
+1、waitqueue 初始化：通过调用 `init_waitqueue_head()` 函数来初始化 `wait_queue_head_t` 结构，首先调用 `spin_lock_init()` 来初始化自旋锁 lock，然后调用 `INIT_LIST_HEAD()` 来初始化进程链表
+
+```CPP
+void init_waitqueue_head(wait_queue_head_t *q)
+{
+    spin_lock_init(&q->lock);
+    INIT_LIST_HEAD(&q->task_list);
+}
+```
+
+2、向waitqueue添加等待进程，要向 waitqueue 添加等待进程，首先要声明一个 `wait_queue_t` 结构的变量即等待队列成员，通过`init_waitqueue_entry`实现。初始化完 `wait_queue_t` 结构变量后，可以通过调用 `add_wait_queue()` 函数把等待进程添加到等待队列，其中`add_wait_queue()` 函数的实现逻辑为首先通过调用 `spin_lock_irqsave()` 上锁，然后调用 `list_add()` 函数把节点添加到等待队列链表即可
+
+```CPP
+// init_waitqueue_entry 初始化为系统默认的等待唤醒函数
+static inline void init_waitqueue_entry(wait_queue_t *q, struct task_struct *p)
+{
+    q->flags = 0;
+    q->private = p;
+    q->func = default_wake_function;
+}
+
+//可以通过调用 init_waitqueue_func_entry() 函数来初始化为自定义的唤醒函数
+static inline void init_waitqueue_func_entry(wait_queue_t *q, wait_queue_func_t func)
+{
+    q->flags = 0;
+    q->private = NULL;
+    q->func = func;
+}
+
+void add_wait_queue(wait_queue_head_t *q, wait_queue_t *wait)
+{
+    unsigned long flags;
+
+    wait->flags &= ~WQ_FLAG_EXCLUSIVE;
+    spin_lock_irqsave(&q->lock, flags);
+    __add_wait_queue(q, wait);
+    spin_unlock_irqrestore(&q->lock, flags);
+}
+
+static inline void __add_wait_queue(wait_queue_head_t *head, wait_queue_t *new)
+{
+    list_add(&new->task_list, &head->task_list);
+}
+```
+
+3、休眠等待进程，当把进程添加到等待队列后，就可以休眠当前进程，让出CPU给其他进程运行。通常按照下面的代码可以完成**休眠当前进程->让出当前CPU的操作**：
+
+```CPP
+set_current_state(TASK_INTERRUPTIBLE);	//把当前进程运行状态设置为可中断休眠状态`TASK_INTERRUPTIBLE`
+schedule();	//调用 schedule() 函数可以使当前进程让出CPU，切换到其他进程执行
+```
+
+4、唤醒等待队列，当资源准备好后，就可以唤醒等待队列中的进程，可以通过 `wake_up()->__wake_up_common()` 函数来唤醒等待队列中的进程。唤醒等待队列就是遍历等待队列的等待进程（即`list_for_each_entry_safe`方法），然后调用唤醒函数来唤醒它们
+
+```CPP
+static void __wake_up_common(wait_queue_head_t *q, 
+    unsigned int mode, int nr_exclusive, int sync, void *key)
+{
+    wait_queue_t *curr, *next;
+
+    list_for_each_entry_safe(curr, next, &q->task_list, task_list) {
+        unsigned flags = curr->flags;
+
+        if (curr->func(curr, mode, sync, key) &&
+                (flags & WQ_FLAG_EXCLUSIVE) && !--nr_exclusive)
+            break;
+    }
+}
+```
+
+##  0x05  参考
 -   [Linux 内核中的数据结构](https://blog.csdn.net/Rong_Toa/article/details/115110811)
 -   [内核基础设施——hlist_head/hlist_node 结构解析](https://linux.laoqinren.net/kernel/hlist/)
 -   [《Linux 内核设计与实现》读书笔记（六）- 内核数据结构](https://www.cnblogs.com/wang_yb/archive/2013/04/16/3023892.html)
@@ -260,3 +353,5 @@ struct rb_node {
 -	[linux源码解读（十五）：红黑树在内核的应用——CFS调度器](https://www.cnblogs.com/theseventhson/p/15799832.html)
 -	[linux源码解读（十四）：红黑树在内核的应用——红黑树原理和api解析](https://www.cnblogs.com/theseventhson/p/15798449.html)
 -	[数据结构可视化](http://www.u396.com/wp-content/collection/data-structure-visualizations/)
+-	[Linux 中的等待队列机制](https://zhuanlan.zhihu.com/p/97107297)
+-	[等待队列原理与实现](https://github.com/liexusong/linux-source-code-analyze/blob/master/waitqueue.md)
