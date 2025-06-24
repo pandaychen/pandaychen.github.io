@@ -251,7 +251,7 @@ struct rb_node {
 5. 内存效率：红黑树每个节点只需额外存储一个颜色标记，内存开销较小，适合内核这种对内存敏感的环境
 
 ##	0x04		等待队列
-当进程要获取某些资源（例如从网卡读取数据）的时候，但资源并没有准备好（例如网卡还没接收到数据），这时候内核必须切换到其他进程运行，直到资源准备好再唤醒进程。**waitqueue 机制就是内核用于管理等待资源的进程，当某个进程获取的资源没有准备好的时候，可以通过调用 `add_wait_queue()` 函数把进程添加到 waitqueue 中，然后切换到其他进程继续执行。当资源准备好，由资源提供方通过调用 `wake_up()` 函数来唤醒等待的进程**
+**等待（waiter） - 唤醒（waker）**模型是 Linux 中的一种基础机制。当进程要获取某些资源（例如从网卡读取数据）的时候，但资源并没有准备好（例如网卡还没接收到数据），这时候内核必须切换到其他进程运行，直到资源准备好再唤醒进程。**waitqueue 机制就是内核用于管理等待资源的进程，当某个进程获取的资源没有准备好的时候，可以通过调用 `add_wait_queue()` 函数把进程添加到 waitqueue 中，然后切换到其他进程继续执行。当资源准备好，由资源提供方通过调用 `wake_up()` 函数来唤醒等待的进程**
 
 ####	等待队列结构
 和linklist类似，waitqueue 本质上是一个链表，waitqueue包含了`wait_queue_head_t`（头）以及`__wait_queue`（节点）两个基础结构
@@ -268,6 +268,8 @@ struct __wait_queue {
     struct list_head task_list;	//用于链接其他等待资源的进程
 };
 ```
+
+等待同一事件的任务（由`private` 指向）通过双向链表串接（对应`__wait_queue` 节点），形成一个等待队列，在等待的事件发生后，waitqueue上的任务被唤醒，并执行`func` 回调函数
 
 ![waitqueue](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/datastructure/waitqueue-1.jpg)
 
@@ -325,7 +327,26 @@ set_current_state(TASK_INTERRUPTIBLE);	//把当前进程运行状态设置为可
 schedule();	//调用 schedule() 函数可以使当前进程让出CPU，切换到其他进程执行
 ```
 
+关联的函数有如下：
+
+```CPP
+wait_event(wq_head, condition)
+wait_event_timeout(wq_head, condition, timeout) 
+wait_event_interruptible(wq_head, condition)
+wait_event_interruptible_timeout(wq_head, condition, timeout)
+```
+
 4、唤醒等待队列，当资源准备好后，就可以唤醒等待队列中的进程，可以通过 `wake_up()->__wake_up_common()` 函数来唤醒等待队列中的进程。唤醒等待队列就是遍历等待队列的等待进程（即`list_for_each_entry_safe`方法），然后调用唤醒函数来唤醒它们
+
+关联的函数有如下：
+
+```CPP
+wake_up(&wq_head)
+wake_up_interruptible(&wq_head)
+wake_up_nr(&wq_head, nr)
+wake_up_interruptible_nr(&wq_head, nr)
+wake_up_interruptible_all(&wq_head)
+```
 
 ```CPP
 static void __wake_up_common(wait_queue_head_t *q, 
@@ -342,6 +363,132 @@ static void __wake_up_common(wait_queue_head_t *q,
     }
 }
 ```
+
+####    一些细节
+1、`wait_event`的实现细节
+
+Linux 内核的 `___wait_event` 宏通过**循环检查条件（`condition`）+ 主动让出 CPU（`cmd`） + 唤醒后重新检查条件**的机制实现了等待队列的核心逻辑
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/wait.h#L266
+#define ___wait_event(wq, condition, state, exclusive, ret, cmd)	\
+({									\
+	__label__ __out;						\
+	wait_queue_t __wait;						\
+	long __ret = ret;	/* explicit shadow */			\
+									\
+	init_wait_entry(&__wait, exclusive ? WQ_FLAG_EXCLUSIVE : 0);	\
+	for (;;) {							\
+		long __int = prepare_to_wait_event(&wq, &__wait, state);\
+									\
+        // 被唤醒后再次检查condition是否满足
+		if (condition)						\
+			break;						\
+									\
+		if (___wait_is_interruptible(state) && __int) {		\
+			__ret = __int;					\
+			goto __out;					\
+		}							\
+									\
+        //内置schedule实现，让出CPU
+		cmd;							\
+	}								\
+	finish_wait(&wq, &__wait);					\
+__out:	__ret;								\
+})
+
+// finish_wait ...
+void finish_wait(wait_queue_head_t *q, wait_queue_t *wait)
+{
+	unsigned long flags;
+
+	__set_current_state(TASK_RUNNING);
+
+	if (!list_empty_careful(&wait->task_list)) {
+		spin_lock_irqsave(&q->lock, flags);
+		list_del_init(&wait->task_list);
+		spin_unlock_irqrestore(&q->lock, flags);
+	}
+}
+```
+
+1、在`for`主循环里，`condition` 是一个`true/false`的标志位，通常由 waker 设置（需要保证并发安全），当 waiter 检测到其值为 `true`时，表明事件发生，通过`break`跳出循环
+
+2、跳出循环后，调用 `finish_wait()`将状态重置为运行态`TASK_RUNNING`，并从 waitqueue 移除，等待的过程彻底结束
+
+3、如果没有收到信号，`condition` 条件也没满足，那么任务应该已经在 waitqueue 上面了，接下来调用`cmd`执行任务切换，`cmd`是由上一层的宏或者函数传入的参数，通常为`schedule`/`schedule_timeout`，底层的调用链为`__schedule() --> deactivate_task() --> dequeue_task()` ，最后`dequeue_task()` 将作为 waiter 的任务从所在CPU的 runqueue 移除，正式让出 CPU 的控制权，当前进程由运行态切换为睡眠态
+
+4、当发生上下文切换时，内核保存了进程的寄存器状态、栈指针、程序计数器（PC）等，恢复时直接从 `schedule()` 的下一条指令开始，当进程再次被调度时，确实从 `schedule()`后的代码继续执行
+
+5、当从 `schedule`/`schedule_timeout` 函数返回时，意味着事件到了或者信号来了或者超时了，即被唤醒了，继续回到`for`循环的开头，再次判断`condition`是否为`true`，这里引出一个问题，内核为何要执行先唤醒后重新检查条件这个策略呢？
+
+TODO
+
+2、关于`wait_event*`函数中`condition`的理解，`condition`是谁负责更新的？
+
+3、内核的典型用法一：一个队列等待多个事件
+
+如果一个 page 正在经历 I/O 换出，为了避免同时访问造成的数据不一致，需要上锁，之后试图使用这个 page 的任务将调用 `wait_on_page_locked()` 排队。当 I/O 操作完成，page 解锁，等待任务被唤醒
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/pagemap.h#L497
+static inline void wait_on_page_locked(struct page *page)
+{
+	if (PageLocked(page))
+		wait_on_page_bit(compound_head(page), PG_locked);
+}
+```
+
+直觉上应该每个 page 有一个 waitqueue，但这样开销太大了，内核的做法是将 page 按照一定的 hash 规则分组（一共 `256` 个分组），等待同一组内的 page 的任务都将被挂接在同一个 waitqueue 上。当分组内的某一个 page 解锁时，通过 hash 比对，查找 waitqueue 中等待该 page 的所有任务并唤醒
+
+```CPP
+#define PAGE_WAIT_TABLE_SIZE (1 << 8)
+wait_queue_head_t page_wait_table[PAGE_WAIT_TABLE_SIZE];
+
+wait_queue_head_t *page_waitqueue(struct page *page)
+{
+    return &page_wait_table[hash_ptr(page, PAGE_WAIT_TABLE_BITS)];
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/filemap.c#L912
+void add_page_wait_queue(struct page *page, wait_queue_t *waiter)
+{
+	wait_queue_head_t *q = page_waitqueue(page);
+	unsigned long flags;
+
+	spin_lock_irqsave(&q->lock, flags);
+	__add_wait_queue(q, waiter);
+	SetPageWaiters(page);
+	spin_unlock_irqrestore(&q->lock, flags);
+}
+EXPORT_SYMBOL_GPL(add_page_wait_queue);
+```
+
+4、内核的典型用法二：一个任务等待多个队列
+
+I/O 多路复用场景下，一个任务可以同时等待多个事件，这里的同时等待就利用了等待队列的机制来实现。以`epoll`机制为例，通过accept获取的fd关联的`eppoll_entry` 结构体就包含了等待队列的相关数据结构，如下
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L230
+struct eppoll_entry {
+	/* List header used to link this structure to the "struct epitem" */
+	struct list_head llink;
+
+	/* The "base" pointer is set to the container "struct epitem" */
+	struct epitem *base;
+
+	/*
+	 * Wait queue item that will be linked to the target file wait
+	 * queue head.
+	 */
+	wait_queue_t wait;
+
+	/* The wait queue head that linked the "wait" wait queue item */
+	wait_queue_head_t *whead;
+};
+```
+
+而通过`epoll_ctl()` 增加监听fd及事件的过程，也包含了加入 waitqueue 的动作（注册socket就绪时的`wait_queue_t`结构，包含了就绪回调函数）等，主要内核函数调用链为`epoll_ctl(EPOLL_CTL_ADD) --> ep_insert() --> ep_ptable_queue_proc() --> add_wait_queue()`，调用它的任务会被挂在多个 waitqueue 上面，当其中一个 waitqueue 上的事件到来时（比如文件有可读的内容，或者腾出了可写的空闲区域），创建 waitqueue 节点时填入的回调函数 `ep_poll_callback()` 会将这个 entry 移入 ready list（或者 ovflist），等待任务唤醒后处理
 
 ##  0x05  参考
 -   [Linux 内核中的数据结构](https://blog.csdn.net/Rong_Toa/article/details/115110811)
