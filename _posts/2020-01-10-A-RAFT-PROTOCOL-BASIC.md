@@ -461,6 +461,6 @@ Leader完备性，意义为被选举人必须比自己知道的更多（比较te
 - [Etcd Raft库的工程化实现](https://www.codedump.info/post/20210515-raft/)
 - [浅谈分布式一致性算法raft](https://www.cnblogs.com/wyq178/p/13899534.html)
 - [raft算法中，5.4.2节一疑问？](https://www.zhihu.com/question/68287713)
-- [为什么Raft不能“直接”提交之前任期的日志?](http://www.ilovecpp.com/2022/03/01/raft-prevlog-commit/)
+- [为什么Raft不能直接提交之前任期的日志?](http://www.ilovecpp.com/2022/03/01/raft-prevlog-commit/)
 - [5.4.2：提交之前任期的日志条目](https://knowledge-sharing.gitbooks.io/raft/content/chapter5/5-4/5-4-2.html)
 - [5.3：日志复制](https://knowledge-sharing.gitbooks.io/raft/content/chapter5/5-3.html)
