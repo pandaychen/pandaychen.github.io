@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:  Linux 内核之旅（十一）：epoll
+title:  Linux 内核之旅（十三）：epoll
 subtitle:   epoll机制在内核的运行原理
 date:       2025-05-22
 author:     pandaychen
@@ -89,20 +89,20 @@ void epoll_server_run()
 }
 ```
 
-##  0x01    前置知识
+##  0x01    前置知识 && 问题
 1、`struct socket/sock/sock_common`等结构与`struct file`关系
 
-2、`struct sock`的等待队列
+2、`struct sock`的等待队列`sock->wq`的作用及何时被唤醒、唤醒条件是什么？这里分为两种socket，其一是listener fd，其二是通过accept拿到的fd
 
-3、`epoll`（通过`epoll_create`创建）的等待队列
+3、`epoll`（通过`epoll_create`创建）的等待队列的作用及机制，调用`epoll_wait`系统调用的进程何时主动让出CPU（睡眠）？何时被唤醒？唤醒之后的流程是什么？
 
-4、同步阻塞IO机制下的收包流程，参考此文[深入理解高性能网络开发路上的绊脚石 - 同步阻塞网络 IO](https://mp.weixin.qq.com/s?__biz=MjM5Njg5NDgwNA==&mid=2247484834&idx=1&sn=b8620f402b68ce878d32df2f2bcd4e2e&scene=21#wechat_redirect)
+4、同步阻塞IO机制下的收包流程，在软中断核心逻辑中，当数据包送到某个socket（sock）关联的接收队列上时，内核是如何通知应用层有数据到达的？参考此文[深入理解高性能网络开发路上的绊脚石 - 同步阻塞网络 IO](https://mp.weixin.qq.com/s?__biz=MjM5Njg5NDgwNA==&mid=2247484834&idx=1&sn=b8620f402b68ce878d32df2f2bcd4e2e&scene=21#wechat_redirect)
 
 5、内核协议栈的收包过程，[前文](https://pandaychen.github.io/2025/03/02/A-LINUX-KERNEL-TRAVEL-8/)已描述
 
-6、epoll机制下，各个内核struct之间的关系以及回调函数（赋值为何种函数）
+6、`epoll`机制下，各个内核struct之间的关系以及回调函数（赋值为何种函数）
 
-7、epoll机制下，为何要使用红黑树而不是hashtable？
+7、`epoll`机制下，为何要使用红黑树而不是hashtable？
 
 ####    struct sock/socket/sock_comm
 
@@ -361,7 +361,113 @@ SYSCALL_DEFINE4(epoll_ctl, int, epfd, int, op, int, fd,
 
 ##  0x06    connection到达后的流程
 
-##  0x07    总结
+
+##  0x07    番外
+
+####    epoll机制中的等待队列
+1、`epoll_wait`中的等待队列机制实现：`epoll_wait->ep_poll`，在`ep_poll`函数的实现中发现了经典的等待->唤醒机制的模式，类似于`wait_event`内核调用中的`condition`参数，这里可以看到`condition`为`ep_events_available`函数的实现，即检查`eventpoll`的就绪队列`rdllist`是否不为空`!list_empty(&ep->rdllist)`，具体流程请看注释
+
+```CPP
+// 检查就绪队列是否可用（不为空）
+static inline int ep_events_available(struct eventpoll *ep)
+{
+	return !list_empty(&ep->rdllist) || ep->ovflist != EP_UNACTIVE_PTR;
+}
+
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L1614
+static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
+		   int maxevents, long timeout)
+{
+	int res = 0, eavail, timed_out = 0;
+	unsigned long flags;
+	u64 slack = 0;
+	wait_queue_t wait;
+	ktime_t expires, *to = NULL;
+
+	if (timeout > 0) {
+		struct timespec64 end_time = ep_set_mstimeout(timeout);
+
+		slack = select_estimate_accuracy(&end_time);
+		to = &expires;
+		*to = timespec64_to_ktime(end_time);
+	} else if (timeout == 0) {
+		/*
+		 * Avoid the unnecessary trip to the wait queue loop, if the
+		 * caller specified a non blocking operation.
+		 */
+		timed_out = 1;
+		spin_lock_irqsave(&ep->lock, flags);
+		goto check_events;
+	}
+
+fetch_events:
+	spin_lock_irqsave(&ep->lock, flags);
+
+	if (!ep_events_available(ep)) {
+		/*
+		 * We don't have any available event to return to the caller.
+		 * We need to sleep here, and we will be wake up by
+		 * ep_poll_callback() when events will become available.
+		 */
+        // 1. 先初始化等待队列并移入
+		init_waitqueue_entry(&wait, current);
+		__add_wait_queue_exclusive(&ep->wq, &wait);
+
+		for (;;) {
+			/*
+			 * We don't want to sleep if the ep_poll_callback() sends us
+			 * a wakeup in between. That's why we set the task state
+			 * to TASK_INTERRUPTIBLE before doing the checks.
+			 */
+			set_current_state(TASK_INTERRUPTIBLE);
+
+            // 2. 检查condition条件是否成立
+			if (ep_events_available(ep) || timed_out)
+                // 3. 若condition成立，则跳出for(;;)循环
+				break;
+			if (signal_pending(current)) {
+				res = -EINTR;
+				break;
+			}
+
+			spin_unlock_irqrestore(&ep->lock, flags);
+            // 4. 走到这里说明condition不成立，那么就先让出CPU
+            // 进程第一调度定律
+            // 那么内核执行进程切换，上下文保存到堆栈至此
+			if (!schedule_hrtimeout_range(to, slack, HRTIMER_MODE_ABS))
+				timed_out = 1;
+
+            //5. 执行到这里大概率说明内核通过wakeup机制唤醒了当前的进程，继续for(;;)循环
+            // 下一步是检查condition是否满足
+			spin_lock_irqsave(&ep->lock, flags);
+		}
+
+        // 6. 已经被唤醒了，且condition也满足了，那么就移除等待队列
+        // 且设置当前的进程的运行状态的TASK_RUNNING
+		__remove_wait_queue(&ep->wq, &wait);
+		__set_current_state(TASK_RUNNING);
+	}
+check_events:
+	/* Is it worth to try to dig for events ? */
+	eavail = ep_events_available(ep);
+
+	spin_unlock_irqrestore(&ep->lock, flags);
+
+	/*
+	 * Try to transfer events to user space. In case we get 0 events and
+	 * there's still timeout left over, we go trying again in search of
+	 * more luck.
+	 */
+	if (!res && eavail &&
+	    !(res = ep_send_events(ep, events, maxevents)) && !timed_out)
+		goto fetch_events;
+
+	return res;
+}
+```
+
+##  0x08    总结
 
 ####    epoll 事件处理流程的完整步骤
 1、构建内核`eventpoll`结构，其中包含了 epoll进程的等待队列`wq`、fd（`epitem`）管理结构rbtree（`rbr`）以及事件就绪链表`rdllist`等核心成员，并初始化这些成员
@@ -380,6 +486,6 @@ SYSCALL_DEFINE4(epoll_ctl, int, epfd, int, op, int, fd,
 
 ####    Why rbtree？
 
-##  0x08 参考
+##  0x0 参考
 -	[linux源码解读（十七）：红黑树在内核的应用——epoll](https://www.cnblogs.com/theseventhson/p/15829130.html)
 -   [深入揭秘 epoll 是如何实现 IO 多路复用的](https://mp.weixin.qq.com/s/OmRdUgO1guMX76EdZn11UQ)
