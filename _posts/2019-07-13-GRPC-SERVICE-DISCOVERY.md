@@ -34,22 +34,22 @@ tags:
 把 LB 看作一个组件，根据组件位置的不同，大致上分为三种：
 ####    集中式 LB（Proxy Model）
 &emsp;&emsp; 独立的 LB, 可以是硬件实现，如 F5，或者是 nginx 这种内置 Proxy-pass 或者 upstream 功能的网关，亦或是 LVS/HAPROXY，之前也使用 [DPDK](http://core.dpdk.org/doc/quick-start/) 开发过类似的专用网关。<br>
-![image](https://image-static.segmentfault.com/376/097/3760970390-58c6367e9e8e5_articlex)
 
+![proxy-model](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/loadbalance/proxy-model.png)
 
 ####    进程内 LB（Balancing-aware Client）
 &emsp;&emsp; 进程内 LB（集成到客户端），此方案将 LB 的功能集成到服务消费方进程里，也被称为软负载或者客户端负载方案。服务提供方启动时，首先将服务地址注册到服务注册表，同时定期报心跳到服务注册表以表明服务的存活状态，相当于健康检查，服务消费方要访问某个服务时，它通过内置的 LB 组件向服务注册表查询，同时缓存并定期刷新目标服务地址列表，然后以某种负载均衡策略选择一个目标服务地址，最后向目标服务发起请求。LB 和服务发现能力被分散到每一个服务消费者的进程内部，同时服务消费方和服务提供方之间是直接调用，没有额外开销，性能比较好。<br>
-![image](https://image-static.segmentfault.com/816/567/816567186-58c636a93e391_articlex)
+![Balancing-aware-Client](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/loadbalance/Balancing-aware-Client.png)
 
 
 ####    独立 LB 进程（External Load Balancing Service）
 &emsp;&emsp; 该方案是针对上一种方案的不足而提出的一种折中方案，原理和第二种方案基本类似。不同之处是将 LB 和服务发现功能从进程内移出来，变成主机上的一个独立进程。主机上的一个或者多个服务要访问目标服务时，他们都通过同一主机上的独立 LB 进程做服务发现和负载均衡。该方案也是一种分布式方案没有单点问题，一个 LB 进程挂了只影响该主机上的服务调用方，服务调用方和 LB 之间是进程内调用性能好，同时该方案还简化了服务调用方，不需要为不同语言开发客户库，LB 的升级不需要服务调用方改代码。 公司的 L5 是这种方式，每台机器上都安装了 L5 的 agent，供其他服务调用。该方案主要问题：部署较复杂，环节多，出错调试排查问题不方便。
-![](https://image-static.segmentfault.com/157/460/1574606891-58c636b7d0619_articlex)
+![External-Load-Balancing-Service](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/loadbalance/External-Load-Balancing-Service.png)
 
 
 ### gRPC 内置的方案
 &emsp;&emsp;gRPC 的内置方案如下图所示：
-![image](https://image-static.segmentfault.com/210/753/2107536928-58c636c2d6702_articlex)
+![grpc-lb](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/loadbalance/grpc_loadbalance_design.png)
 <br>
 &emsp;&emsp;gRPC 在官网文档中提供了实现 LB 的思路，并在不同语言的 gRPC 代码 API 中已提供了命名解析和负载均衡接口供扩展。默认提供了 [DNS-resolver 的实现](https://github.com/gRPC/gRPC-go/blob/v1.8.0/resolver/resolver.go)，接口相当规范，实现起来也不复杂，只需要实现服务注册（Registry）和服务监听 + 解析（Watcher+Resolver）的逻辑就行了，这里简单介绍其基本实现过程：
 
