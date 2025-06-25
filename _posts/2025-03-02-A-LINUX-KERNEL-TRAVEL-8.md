@@ -16,7 +16,9 @@ tags:
 
 本文代码基于 [v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include) 版本
 
+推荐阅读：
 -	[Linux 网络栈接收数据（RX）：原理及内核实现（2022）](https://arthurchiao.art/blog/linux-net-stack-implementation-rx-zh/)
+-	[图解Linux网络包接收过程](https://zhuanlan.zhihu.com/p/256428917)
 
 ##  0x01   网卡的报文接收过程
 一些背景知识：
@@ -30,13 +32,21 @@ tags:
 -	Busy-polling（持续轮询）：给网卡预留专门的 CPU 和线程，100% 用于收发包，典型的方式是 DPDK
 -	硬件中断（IRQ）：在绝大部分场景下，预留专门的 CPU 用于收发包属于资源浪费。简单来说， 只需要在网卡有包达到时，通知 CPU 来收即可；如果没有包，CPU 做别的事情去就可以了。当网卡有包到达时，通过硬件中断（IRQ）机制通知CPU，这是最高优先级的通知机制，告诉 CPU 需要马上处理
 
-而中断方式针对高吞吐场景的改进是 NAPI ，其结合了轮询和中断两种方式，工作流程如下：
+而中断方式针对高吞吐场景的改进是 NAPI ，其结合了轮询和中断两种方式，它允许设备驱动注册一个 `poll` 方法，然后调用这个方法完成收包。和传统方式相比，NAPI 机制一次中断会接收多个包，因此可以减少硬件中断的数量。工作流程如下：
 
-![napi]()
+1.	网卡驱动打开 NAPI 功能，默认处于未工作状态（没有在收包）
+2.	数据包到达，网卡通过 DMA 写到内存
+3.	网卡触发一个硬中断，中断处理函数开始执行
+4.	软中断（softirq），唤醒 NAPI 子系统。这会触发在一个单独的线程里，调用网卡驱动注册的 `poll` 方法收包
+5.	**网卡驱动禁止网卡产生新的硬件中断，这样做是为了 NAPI 能够在收包的时候不会被新的中断打扰**
+6.	**一旦没有包需要收了，NAPI 关闭，网卡的硬中断重新开启**
+7.	转步骤 `2`
 
--	每次执行到 NAPI 的 poll() 方法时，也就是会执行到网卡注册的 poll() 方法时，会批量从 RingBuffer 收包；在此 poll 工作时，会尽量把所有待收的包都收完（通过内核 budget 配置和调优）；在此期间内新到达网卡的包，也不会再触发硬件中断 IRQ
+![irq-and-napi-poll](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/net-stack-implementation/irq-and-napi-poll.png)
+
+-	每次执行到 NAPI 的 `poll()` 方法时，也就是会执行到网卡注册的 poll() 方法时，会批量从 RingBuffer 收包；在此 poll 工作时，会尽量把所有待收的包都收完（通过内核 budget 配置和调优）；在此期间内新到达网卡的包，也不会再触发硬件中断 IRQ
 -	当 NAPI poll() 未正在运行或不在这个调度周期内，收到的包会触发 IRQ，然后内核来启动 poll() 再收包（下面要讨论的`igb_msix_ring`硬件中断处理函数的流程）
--	**NAPI 存在的意义是无需硬件中断通知就可以接收网络数据**。NAPI 的轮询循环（poll loop）是受硬件中断（IRQ）触发而运行起来的。NAPI 功能启用，但默认是没有工作的，直到第一个包到达的时候，网卡触发的一个硬件将它唤醒。当然内核又有其他的情况导致NAPI 功能也会被关闭，直到下一个硬中断再次将它唤起
+-	**NAPI 存在的意义是无需硬件中断通知就可以接收网络数据**。NAPI 的轮询循环（poll loop）是受硬件中断（IRQ）触发而运行起来的。NAPI 功能启用，但默认是没有工作的，直到第一个包到达的时候，网卡触发的一个硬件将它唤醒。当然内核也有其他的情况导致NAPI 功能也会被关闭，直到下一个硬中断再次将它唤起
 
 ####	网卡收包：一个例子
 本小节使用以太网的物理网卡结合一个UDP packet的接收过程为例子描述下内核收包过程，如下：
@@ -246,6 +256,16 @@ tags:
 
 ####    网卡收包的若干细节
 
+1、数据复制
+
+在数据包从网卡到达应用层的过程中，会经历两次数据复制，这里对性能是有影响的：
+
+-	第一次：将包从网卡通过 DMA 复制到 ringbuffer（图中第 `3` 步）
+-	第二次：从 ringbuffer 复制到 `skb` 结构体（图中第 `6` 步）
+
+![rx](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/rx-overview.png)
+
+![dma](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/dma-ringbuffer.png)
 
 ##  0x02  核心数据结构
 -   `struct socket`：传输层使用的[数据结构](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/net.h#L111)，用于声明、定义套接字
@@ -621,6 +641,10 @@ struct socket {
 };
 ```
 
+此外，`struct socket`的另一个重要成员即 `file` 内核对象指针，该指针关联了与`struct file`即`struct file_operations`的关系（初始化时为空），看下图
+
+![socket-2-file](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/epoll/fdtable-file-socket-sock-relation.png)
+
 ####    struct sock结构
 
 ```CPP
@@ -663,7 +687,7 @@ struct sock {
 	struct proto		*sk_prot_creator;
 	rwlock_t		sk_callback_lock;
 	int			sk_err,					  // 上次错误
-				sk_err_soft;			  // “软”错误：不会导致失败的错误
+				sk_err_soft;			  // 软错误：不会导致失败的错误
 	u32			sk_ack_backlog;			   // ack队列长度
 	u32			sk_max_ack_backlog;		   // 最大ack队列长度
 	kuid_t			sk_uid;				  // user id
@@ -688,6 +712,14 @@ struct sock {
 ......
 };
 ```
+
+`struct sock`这里重点看这几个成员：
+-	`struct sk_buff_head	sk_receive_queue`：socket的接收包队列
+-	`struct socket_wq __rcu	*sk_wq`：socket的等待队列
+
+![sk_wq_and_sk_receive_queue](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/kfngxl/recv/sk_wq_and_sk_receive_queue.png)
+
+这两个成员在后文[Linux 内核之旅（十二）：内核视角下的三次握手](https://pandaychen.github.io/2025/04/25/A-LINUX-KERNEL-TRAVEL-12/)将会详述
 
 ####    struct sock_common结构
 `struct sock_common`是套接口在网络层的最小表示，即最基本的网络层套接字信息
@@ -943,14 +975,43 @@ void __raise_softirq_irqoff(unsigned int nr)
 
 2、 `ksoftirqd`内核线程处理软中断
 
+先介绍下内核调度器与调用栈，调度执行到某个特定线程的调用栈如下表所示，如果此时调度到的是 `ksoftirqd` 线程，那 `thread_fn()` 执行的就是 `run_ksoftirqd()`函数。并且从下面的流程还可以看出，在NAPI工作模式下，`__do_softirq()`即软中断核心逻辑会不停地收包直至返回，然后再次打开硬中断
+
+```TEXT
+smpboot_thread_fn
+  |-while (1) {
+      set_current_state(TASK_INTERRUPTIBLE); // 设置当前 CPU 为可中断状态
+
+      if !thread_should_run {                // 无 pending 的软中断
+          preempt_enable_no_resched();
+          schedule();
+      } else {                               // 有 pending 的软中断
+          __set_current_state(TASK_RUNNING);
+          preempt_enable();
+          thread_fn(td->cpu);                // 如果此时执行的是 ksoftirqd 线程，
+            |-run_ksoftirqd                  // 那会执行 run_ksoftirqd() 回调函数
+                |-local_irq_disable();       // 关闭所在 CPU 的所有硬中断
+                |
+                |-if local_softirq_pending() {
+                |    __do_softirq();
+                |    local_irq_enable();      // 重新打开所在 CPU 的所有硬中断
+                |    cond_resched();          // 将 CPU 交还给调度器
+                |    return;
+                |-}
+                |
+                |-local_irq_enable();         // 重新打开所在 CPU 的所有硬中断
+      }
+    }
+```
+
 ksoftirqd中两个线程函数`ksoftirqd_should_run`和`run_ksoftirqd`的主要逻辑如下：
 
 ![kfngxl]()
 
 -   `ksoftirqd_should_run`：读取`local_softirq_pending`函数的结果（硬中断也调用此函数，硬中断位置会修改写入标记），如果硬中断中设置了`NET_RX_SOFTIRQ`，接下来会真正进入线程函数中`run_ksoftirqd`处理
--   `run_ksoftirqd`函数：在软中断线程初始化时，就会注册`run_ksoftirqd()`函数。首先调用`local_irq_disable()`关闭所在 CPU 的所有硬中断，接下来，判断如果有 pending softirq，则执行`__do_softirq()` 处理软中断，软中断流程完成后，然后重新打开所在 CPU 的硬中断，然后返回；否则直接打开所在 CPU 的硬中断，然后返回
+-   `run_ksoftirqd`函数：在软中断线程初始化时，就会注册`run_ksoftirqd()`函数。首先调用`local_irq_disable()`，`local_irq_disable()`是个宏，会展开成处理器架构相关的函数，**功能是关闭所在 CPU 的所有硬中断**，接下来，判断如果有 pending softirq，则执行`__do_softirq()` 处理软中断，软中断流程完成后，然后重新打开所在 CPU 的硬中断，然后返回；否则直接打开所在 CPU 的硬中断，然后返回
 
-![run_ksoftirqd]()
+![run_ksoftirqd](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/net-stack-implementation/run_ksoftirqd.png)
 
 ```CPP
 static int ksoftirqd_should_run(unsigned int cpu)
@@ -963,7 +1024,7 @@ static int ksoftirqd_should_run(unsigned int cpu)
 
 static void run_ksoftirqd(unsigned int cpu)
 {
-    //屏蔽当前CPU上的所有中断
+    // 屏蔽当前CPU上的所有中断
 	// 关闭所在 CPU 的所有硬中断
     local_irq_disable();
     if (local_softirq_pending()) {
@@ -988,6 +1049,10 @@ static void run_ksoftirqd(unsigned int cpu)
 
 -   [`__do_softirq`](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/softirq.c#L241)：判断根据当前CPU的软中断类型，调用其注册的`action`方法（前文描述过为`NET_RX_SOFTIRQ`注册的处理函数[`net_rx_action`](https://elixir.bootlin.com/linux/v4.11.6/source/net/core/dev.c#L5313)）
 -   网络软中断下半部处理由 `net_rx_action` 函数完成，其主要功能就是从待处理队列中获取一个数据包，然后根据数据包的网络层协议类型来找到相应的处理接口来处理
+
+这里总结下`__do_softirq() -> net_rx_action()`的流程：
+
+![do_softirq_net_rx_action](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/net-stack-implementation/uu_do_softirq.png)
 
 ```CPP
 asmlinkage void __do_softirq(void)
@@ -1022,6 +1087,13 @@ asmlinkage void __do_softirq(void)
 -	`netdev_budget_usecs`：每个设备能够处理的最大时间长度（最长可以占用的 CPU 时间）
 -	`netdev_budget`：单个设备一次能处理的最大包的配额
 
+配额的意义是在NAPI模式下，系统会为软中断线程及NAPI各分配一个额度值（软中断的额度为`netdev_budget`，默认值是`300`，所有NAPI共用；每个NAPI的额度是`weight_p`，默认值是`64`），在一次poll流程里，`ixgbe_poll`每接收一个报文就消耗一个额度，**如果`ixgbe_poll`消耗的额度为NAPI的额度，说明此时网卡收到的报文比较多，因此需要继续下一次poll，每次`napi_poll`消耗的额度会累加，当超过软中断线程的额度时，退出本次软中断处理流程；当`ixgbe_poll`消耗的额度没有达到NAPI的额度时，说明网卡报文不多，因此重新开启队列中断，进入中断模式**
+
+5、NAPI 子系统和设备驱动之间的就是否关闭 NAPI 有一份契约（可以参考igb驱动的实现`igb_poll`）
+
+-	如果一次 `poll()` 用完了它的全部 weight，那它不要更改 NAPI 状态，接下来 `net_rx_action()` 会做这个事情
+-	如果一次 `poll()` 没有用完全部 weight（说明包量不多），那它必须关闭 NAPI。下次有硬件中断触发，驱动的硬件处理函数调用 `napi_schedule()` 时，NAPI 会被重新打开
+
 ```CPP
 //https://elixir.bootlin.com/linux/v4.11.6/source/net/core/dev.c#L5269
 static __latent_entropy void net_rx_action(struct softirq_action *h)
@@ -1052,6 +1124,7 @@ static __latent_entropy void net_rx_action(struct softirq_action *h)
 		// napi的poll收包
 		// 注意：执行网卡驱动注册的 poll() 方法，返回的是处理的数据帧数量，
     	// 函数返回时，那些数据帧都已经发送到上层栈进行处理了
+		// 每次napi_poll之后，额度会减掉已经处理的包的数量n
 		budget -= napi_poll(n, &repoll);
 
 		/* If softirq window is exhausted then punt.
@@ -1077,8 +1150,10 @@ static __latent_entropy void net_rx_action(struct softirq_action *h)
 	// 在给定的 time/budget 内，没有能够处理完全部 napi
 	// 关闭 NET_RX_SOFTIRQ 类型软中断，将 CPU 让给其他任务用
     // 主动让出 CPU，不要让这种 softirq 独占 CPU 太久
+
+	// 若 poll_list 非空，则重新触发 NET_RX_SOFTIRQ 软中断，继续处理剩余设备
 	if (!list_empty(&sd->poll_list))
-		__raise_softirq_irqoff(NET_RX_SOFTIRQ);
+		__raise_softirq_irqoff(NET_RX_SOFTIRQ);	//再次调度软中断
 
 	// Receive Packet Steering：唤醒其他 CPU 从 ring buffer 收包
 	net_rps_action_and_irq_enable(sd);
@@ -1105,15 +1180,31 @@ static int napi_poll(struct napi_struct *n, struct list_head *repoll)
 	 * accidentally calling ->poll() when NAPI is not scheduled.
 	 */
 	work = 0;
+	//状态检查：若 NAPI 实例未处于 NAPI_STATE_SCHED 状态（即未被调度），则跳过处理
 	if (test_bit(NAPI_STATE_SCHED, &n->state)) {
 		// igb_poll for igb driver
 		// mlx5 for mlx5 driver
-		work = n->poll(n, weight);
+		work = n->poll(n, weight);	// 调用设备驱动的 poll 函数，注意参数中的weight（配额）
+		/*
+		设备驱动的 poll 函数（如 ixgbe_poll/igb_poll/e1000_clean等）负责从 DMA 环形缓冲区（Rx Ring）提取数据包：
+		1. 数据包提取：遍历 Rx Ring 的 Descriptor，将数据从 DMA 区域拷贝到 sk_buff 结构体
+		2. 协议栈提交：通过 napi_gro_receive 或 netif_receive_skb 将数据包提交至网络协议栈
+		3. 额度消耗：每处理一个数据包，消耗 1 点额度（work 计数递增）
+
+		n->poll的正常退出条件：
+		1. 达到 weight 额度上限
+		2. Rx Ring 无新数据包
+		*/
 		trace_napi_poll(n, work, weight);
 	}
 
+	//如果数据包超过了配额，WARN
 	WARN_ON_ONCE(work > weight);
+	//下面是轮询结果处理与状态更新
+	//napi_poll 根据驱动 poll 函数的返回值（实际处理的包数 work）决定后续操作
 
+	// NAPI与网卡驱动之间的contract
+	// 本次napi poll的配额没有用完，说明网卡包已经被处理完了（配额充足），此时需要重新进入中断模式
 	if (likely(work < weight))
 		goto out_unlock;
 
@@ -1123,6 +1214,7 @@ static int napi_poll(struct napi_struct *n, struct list_head *repoll)
 	 * move the instance around on the list at-will.
 	 */
 	if (unlikely(napi_disable_pending(n))) {
+		// 完成处理，启用中断
 		napi_complete(n);
 		goto out_unlock;
 	}
@@ -1143,12 +1235,96 @@ static int napi_poll(struct napi_struct *n, struct list_head *repoll)
 		goto out_unlock;
 	}
 
+	// 本次额度用完（说明网卡还有包需要处理），还需要继续poll，则将napi->poll_list重新加回到repoll
+	// 移至链表尾部
 	list_add_tail(&n->poll_list, repoll);
 
 out_unlock:
 	netpoll_poll_unlock(have);
 
 	return work;
+}
+```
+
+通过上面的代码，总结下`net_rx_action`、`napi_poll`的主要工作过程：
+
+先总结下`napi_poll`的主要流程：
+
+1、`test_bit(NAPI_STATE_SCHED, &n->state)`：先执行状态检查，若 NAPI 实例未处于 `NAPI_STATE_SCHED` 状态（即未被调度），则跳过处理
+
+2、`work = n->poll(n, weight)`，调用具体网卡设备驱动的 `poll` 函数从 DMA 环形缓冲区（Rx Ring）提取数据包
+
+-	数据包提取：遍历 Rx Ring 的 Descriptor，将数据从 DMA 区域拷贝到 `sk_buff` 结构体
+-	协议栈提交：通过 `napi_gro_receive` 或 `netif_receive_skb` 将数据包提交至网络协议栈
+-	额度消耗：每处理一个数据包，消耗 `1` 点额度（`work` 计数递增）
+-	正常退出条件：达到 `weight` 额度上限或者Rx Ring 无新数据包
+
+3、轮询结果处理与状态更新，`napi_poll` 根据驱动 `poll` 函数的返回值（实际处理的包数 `work`）决定后续操作
+
+-	case1：当数据包未处理完（`work >= weight`）时，将 NAPI 实例移至当前 CPU 的 `softnet_data.poll_list` 尾部，这样做的目的是避免单一设备独占 CPU，保证其他设备的轮询机会（Round-Robin 调度）
+-	case2：数据包已处理完（`work < weight`）时，调用 `napi_complete(n)`函数，依次完成**清除 `NAPI_STATE_SCHED` 状态、将实例从 `poll_list` 移除、以及重新启用网卡硬件中断（允许下次数据到达时触发新中断）**
+
+4、软中断退出与重新调度，回到`net_rx_action`的流程
+
+继续梳理下`net_rx_action`的主要流程：
+
+1、从 ringbuffer 读数据，ringbuffer 是内核内存，其中存放的包是网卡通过 DMA 直接送过来的，`net_rx_action()` 从处理 ringbuffer 开始
+
+2、`napi_poll`（igb驱动为`igb_poll`方法）的主要工作是在给定的预算范围内，函数遍历当前 CPU 队列的 NAPI 变量列表，依次执行其 `poll` 方法
+
+3、	在`net_rx_action()`函数的持续收包逻辑中，有三种情况会退出循环（收包轮询）：
+
+-	`list_empty(&list) == true`：说明 `list` 已经为空，没有 NAPI 需要 `poll`
+-	`budget <= 0`：说明收包的数量已经超过 `netdev_budget`（`budget`每次会减掉`napi_poll`的返回值），全局额度已经耗尽
+-	`time_after_eq(jiffies, time_limit) == true`：说明累计运行时间已经超过 `netdev_budget_us`，即分配的时间片超时了
+
+4、 接下来，如果处理时间超时或处理的报文数到了最多允许处理的个数的场景，说明还有 NAPI 上有报文需要处理，调度软中断。否则，说明这次软中断处理完全部的NAPI上的需要处理的报文，不再需要调度软中断了
+
+在`net_rx_action`流程中涉及到的几个关键数据结构：
+
+-	`napi_struct`，包含`poll_list`（链入 CPU 的轮询队列）、`poll`（指向设备驱动的轮询函数）、`weight`（单次轮询最大包数）
+-	`softnet_data`（PerCPU 结构），包含`poll_list`（当前 CPU 待轮询的 NAPI 实例链表）、`time_squeeze`（统计因超时退出的次数），其中`time_squeeze`可以作为性能调优的依据，直观上理解这个变量表示**rx ringbuffer 还有包等待接收，但 softirq 预算用完了**，当`time_squeeze` 升高并不一定表示系统有丢包，只是表示 softirq 的收包预算用完时，RX queue 中仍然有包等待处理。只要 RX queue 在下次 softirq 处理之前没有溢出，那就不会因为 `time_squeeze` 而导致丢包；但如果有持续且大量的 `time_squeeze`，那确实有 RX queue 溢出导致丢包的可能。在这种情况下，调大 `budget` 参数是更合理的选择，与其让网卡频繁触发 IRQ->SoftIRQ 来收包，不如让 SoftIRQ 每次多执行一会，处理掉 RX queue 中尽量多的包再返回，因为中断和线程切换开销也是很大的
+
+`net_rx_action() -> napi_poll()`的整体流程如下图：
+
+![net_rx_action](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/kfngxl/recv/net_rx_action.png)
+
+
+最后，阅读代码有一个疑问，在[`likely(work < weight)`]()这里为`true`之后没有直接调用`napi_complete`关闭NAPI，原因为何？这里结合上面提到的网卡驱动poll函数与NAPI之间的契约就容易理解了 
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L6600
+
+static int igb_poll(struct napi_struct *napi, int budget)
+{
+	struct igb_q_vector *q_vector = container_of(napi,
+						     struct igb_q_vector,
+						     napi);
+	bool clean_complete = true;
+	int work_done = 0;
+
+	if (q_vector->tx.ring)
+		clean_complete = igb_clean_tx_irq(q_vector, budget);
+
+	if (q_vector->rx.ring) {
+		int cleaned = igb_clean_rx_irq(q_vector, budget);
+
+		work_done += cleaned;
+		if (cleaned >= budget)
+			clean_complete = false;
+	}
+
+	/* If all work not completed, return budget and keep polling */
+	if (!clean_complete)
+		// 一次收包把配额budget用完了，直接返回配额
+		return budget;
+
+	/* If not enough Rx work done, exit the polling mode */
+	// 在igb_poll中，根据契约，如果一次收包过程配额都没有用完，说明包不多，那么就关闭NAPi吧
+	napi_complete_done(napi, work_done);
+	igb_ring_irq_enable(q_vector);
+
+	return 0;
 }
 ```
 
@@ -1663,6 +1839,20 @@ EXPORT_SYMBOL(__skb_recv_datagram);
 ####	一图以蔽之
 ![recv](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/latelee_excellent_send_and_recv_arch_kernel3.17.1_note.png)
 
+####	数据复制的时机
+
+![dma-rb](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/dma-ringbuffer.png)
+
+![rx-overview](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/rx-overview.png)
+
+第一次数据复制
+在包从网卡到达应用层的过程中，会经历几次数据复制，这个对性能影响非常大，所以我们记录一下：
+
+第一次是将包从网卡通过 DMA 复制到 ring buffer（下图左侧部分）；
+
+第一次是将包从网卡通过 DMA 复制到 ring buffer；对应图中第 3 步；
+第二次是从 ring buffer 复制到 skb 结构体；对应图中第 6 步；
+
 ##	0x05	主要hook点
 从上图中标注的关键节点，列举下内核接收包主要的hooks，如下：
 
@@ -1676,6 +1866,20 @@ int netif_receive_skb(struct sk_buff *skb)
 	return netif_receive_skb_internal(skb);
 }
 EXPORT_SYMBOL(netif_receive_skb);
+```
+
+2、`tracepoint:tcp:tcp_retransmit_skb`：TCP状态切换
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_output.c#L2824
+int tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb, int segs)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	int err = __tcp_retransmit_skb(sk, skb, segs);
+
+	//......
+	return err;
+}
 ```
 
 ##  0x06  参考
