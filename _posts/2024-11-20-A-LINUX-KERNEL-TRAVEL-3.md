@@ -477,6 +477,7 @@ struct vfsmount {
 -	文件系统操作：`super_operations`
 -	文件或者目录：`dentry`
 -	文件或者目录操作：
+	-	`dentry_operations`：目录操作
 	-	`file_operations`：文件操作
 	-	`inode_operaions`：inode 操作
 	-	`address_space_operations`：数据和 page cache 操作
@@ -664,10 +665,10 @@ SYSCALL_DEFINE5(mount) -> do_mount() -> do_new_mount() -> do_add_mount() -> graf
 
 ##	0x03	用户态视角
 
-####	VFS实例化
-假设有一个文件`/myfile.txt`位于 `EXT4` 作为文件系统的磁盘上，那么读取这个文件（确保它没有被缓存）的流程如下：
+####	VFS的调用路径
+假设有一个文件`/myfile.txt`位于 `ext4` 作为文件系统的磁盘上，那么读取这个文件（确保它没有被缓存）的流程如下：
 
-![ext4]()
+![ext4](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/open/open-0.png)
 
 ```bash
 # 系统调用链
@@ -692,7 +693,7 @@ PID     TID     COMM            FUNC
         entry_SYSCALL_64_after_hwframe+0x3d 
 ```
 
-####	Open Then Write
+####	Open Then Write（With PageCache）
 以文件写入为例，系统调用先 `open` 再 `write`：
 
 ![vfsops](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/vfsops.png)
@@ -974,3 +975,4 @@ TODO
 -	[What is a Superblock, Inode, Dentry and a File?](https://unix.stackexchange.com/questions/4402/what-is-a-superblock-inode-dentry-and-a-file)
 -	[Linux虚拟文件系统(VFS)](https://arkingc.github.io/2017/08/18/2017-08-18-linux-code-vfs/)
 -   [LINUX SOCKFS文件系统分析：sockfs文件系统类型的定义及注册](https://blog.csdn.net/lickylin/article/details/102540200)
+-	[Linux中的VFS实现 [二]](https://zhuanlan.zhihu.com/p/107247475)
