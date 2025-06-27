@@ -534,12 +534,16 @@ __latent_entropy struct task_struct *copy_process(
 	//...
 	if (pid != &init_struct_pid) {
 		//alloc_pid：p->nsproxy->pid_ns_for_children表示当前分配pid的namespace
+		//申请pid
 		pid = alloc_pid(p->nsproxy->pid_ns_for_children, args->set_tid,
 				args->set_tid_size);
 		if (IS_ERR(pid)) {
 			retval = PTR_ERR(pid);
 			goto bad_fork_cleanup_thread;
 		}
+		// set pid
+		p->pid = pid_nr(pid);
+		p->tgid = p->pid;
 	}
 
 	//...
@@ -551,7 +555,9 @@ __latent_entropy struct task_struct *copy_process(
 所以这里也说明了，在pid namespace场景中，针对指定的微线程，其`struct pid`和`struct task_struct`都是唯一的，而不同namespace上的局部性差异则是由结构`upid`体现
 
 ```CPP
- struct pid *alloc_pid(struct pid_namespace *ns)
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid.c#L296
+// 参数传递的是新进程的 pid namespace
+struct pid *alloc_pid(struct pid_namespace *ns)
  {
  	struct pid *pid;
  	enum pid_type type;
@@ -560,17 +566,20 @@ __latent_entropy struct task_struct *copy_process(
  	struct upid *upid;
  	int retval = -ENOMEM;
     
-     // 从命名空间分配一个 pid 结构体
+     // 从命名空间分配一个 pid 结构体（非整数）
  	pid = kmem_cache_alloc(ns->pid_cachep, GFP_KERNEL);
  	if (!pid)
  		return ERR_PTR(retval);
     
      // 初始化进程在各级命名空间的 PID，直到全局命名空间（level 为0）为止
+	// 调用到alloc_pidmap来分配一个空闲的pid编号
+ 	// 注意，在每一个命令空间中都需要分配进程号
  	tmp = ns;
  	pid->level = ns->level;	//ns->level保存了当前所在的namespace层级
 
 	// 从当前所在的namespace逆序遍历，已知到level==0层级，构建每一个level的pid值，并且保存在pid->numbers数组中（upid类型）
  	for (i = ns->level; i >= 0; i--) {
+		// 注意：每个空间都调用alloc_pidmap，tmp为当前namespace的pid_namespace结构！
  		nr = alloc_pidmap(tmp);  //分配一个局部PID
  		if (nr < 0) {
  			retval = nr;
@@ -624,7 +633,8 @@ __latent_entropy struct task_struct *copy_process(
 2、从指定命名空间中分配唯一PID
 
 ```CPP
- static int alloc_pidmap(struct pid_namespace *pid_ns)
+//alloc_pidmap： 在 pid 命名空间中申请一个 pid 号
+static int alloc_pidmap(struct pid_namespace *pid_ns)
  {
  	int i, offset, max_scan, pid, last = pid_ns->last_pid;
  	struct pidmap *map;
@@ -634,6 +644,7 @@ __latent_entropy struct task_struct *copy_process(
  	if (pid >= pid_max)  
  		pid = RESERVED_PIDS;  // RESERVED_PIDS = 300
  	offset = pid & BITS_PER_PAGE_MASK;
+	// 获取bitmap所在数组的下标
  	map = &pid_ns->pidmap[pid/BITS_PER_PAGE];
  	/*
  	 * If last_pid points into the middle of the map->page we
@@ -641,6 +652,7 @@ __latent_entropy struct task_struct *copy_process(
  	 * we start with offset == 0 (or RESERVED_PIDS).
  	 */
  	max_scan = DIV_ROUND_UP(pid_max, BITS_PER_PAGE) - !offset;
+	// 扫描bitmap，找到合适的未使用的 bit
  	for (i = 0; i <= max_scan; ++i) {
  		if (unlikely(!map->page)) {
  			void *page = kzalloc(PAGE_SIZE, GFP_KERNEL);
@@ -700,6 +712,19 @@ __latent_entropy struct task_struct *copy_process(
  	clear_bit(offset, map->page);
  	atomic_inc(&map->nr_free);
  }
+```
+
+####	进程号 pid 的管理
+在`4.11.6`版本中，每个pid namespace（不同的level级别）都会有自己独立的bitmap来保存这个空间中的pid号，其中每一个 bit 位的 `0`或`1` 的状态来表示当前序号的 pid 是否被占用。在上面介绍的 `alloc_pidmap` 函数中就是以 bit 的方式来遍历整个 bitmap，找到合适的未使用的 bit，将其设置为已使用，然后返回
+
+```CPP
+#define BITS_PER_PAGE  (PAGE_SIZE * 8)
+#define PIDMAP_ENTRIES  ((PID_MAX_LIMIT+BITS_PER_PAGE-1)/BITS_PER_PAGE)
+
+struct pid_namespace {
+	struct pidmap pidmap[PIDMAP_ENTRIES];
+	//...
+}
 ```
 
 ####    查询task_struct
@@ -1103,6 +1128,174 @@ struct task_struct {
 注意：通常情况下，`real_parent` 和 `parent` 是一样的，例外如 `bash` 创建一个进程，那进程的 `parent` 和 `real_parent` 就都是 `bash`。如果在 `bash` 上使用 `GDB` 来 `debug` 一个进程，这个时候 `GDB` 是 `parent`，`bash` 则是这个进程的 `real_parent`；当用于审计、统计或需要追溯进程真实来源的场景时，使用`real_parent`比较合适
 
 ##	0x09	一些有趣的示例
+
+####	进程创建的过程
+以系统调用[`fork`](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/fork.c#L2063)为例，其调用链为`fork()->_do_fork()->copy_process()`
+
+![copy_process](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/scheduler/task_fork_flow.jpeg)
+
+1、`_do_fork`的实现，其中有三个关键节点
+
+-	`copy_process`：以拷贝父进程的方式来生成一个新的 `task_struct` 
+-	`trace_sched_process_fork`
+-	`wake_up_new_task`：子任务加入到CPU就绪队列（runqueue）中去，等待调度器调度
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/fork.c#L1491
+long _do_fork(unsigned long clone_flags,
+	      unsigned long stack_start,
+	      unsigned long stack_size,
+	      int __user *parent_tidptr,
+	      int __user *child_tidptr,
+	      unsigned long tls)
+{
+	struct task_struct *p;
+	int trace = 0;
+	long nr;
+
+	//......
+
+	p = copy_process(clone_flags, stack_start, stack_size,
+			 child_tidptr, NULL, trace, tls, NUMA_NO_NODE);
+	add_latent_entropy();
+	/*
+	 * Do this prior waking up the new thread - the thread pointer
+	 * might get invalid after that point, if the thread exits quickly.
+	 */
+	if (!IS_ERR(p)) {
+		struct completion vfork;
+		struct pid *pid;
+
+		// tracepoint with tracepoint:sched:sched_process_fork
+		trace_sched_process_fork(current, p);
+
+		pid = get_task_pid(p, PIDTYPE_PID);
+		nr = pid_vnr(pid);
+
+		if (clone_flags & CLONE_PARENT_SETTID)
+			put_user(nr, parent_tidptr);
+
+		if (clone_flags & CLONE_VFORK) {
+			p->vfork_done = &vfork;
+			init_completion(&vfork);
+			get_task_struct(p);
+		}
+
+		// 底层调度（参考CFS调度）
+		wake_up_new_task(p);
+
+		// ......
+	} else {
+		nr = PTR_ERR(p);
+	}
+	return nr;
+}
+```
+
+2、`copy_process`的实现，对于进程创建的场景其中地址空间 `mm_struct`、挂载点 `fs_struct`、打开文件列表 `files_struct` 都要是独立复制一份（子进程指向单独的空间），而命名空间`nsproxy` 是父子共享的。但对于线程而言，上述结构都是共享的。共同点是对于`task_struct`结构而言，内核会调用`dup_task_struct`单独复制一份，针对fork进程场景的核心调用如下：
+
+-	`security_task_create`
+-	`dup_task_struct`：复制进程 `task_struct` 结构体，传入的参数是 `current`，它表示的是当前进程。会申请一个新的 `task_struct` 内核对象，然后将当前进程复制给新的结构，注意此时成员指针的指向还未变化
+-	`copy_files`：由于进程之间都是独立的，所以新进程需要copy一份独立的 `files` 成员
+-	`copy_fs`：新进程也需要一份独立的文件系统信息，即 copy 一份`fs_struct` 成员
+-	`copy_mm`： copy 独立的进程地址空间（进程之间地址空间也必须是隔离的），`copy_mm`操作复制进程的页表，但是由于Linux系统采用了写时复制（Copy-On-Write）技术，因此这里仅为新进程设置自己的页目录表项和页表项，而没有实际为新进程分配物理内存页面，此时新进程与其父进程共享所有物理内存页面
+-	`copy_namespaces`：默认情况下，父子进程复用同一套命名空间对象
+-	`alloc_pid`：为子进程申请pid，前文已分析
+
+此外，还需要注意的虽然`task_struct.files_struct.fdtable`在子进程中单独复制了一份，但是这里的`fdtable`数组每个元素的指针指向是和父进程一致的，即**子进程也会继承父进程的文件描述符，也就是子进程会将父进程的文件描述符表项都复制一份**，也就是说如果父进程和子进程同时写一个文件的话可能产生并发写的问题，导致写入的数据错乱，所以在开发上就会有各种技巧来应对（参考下一小节）
+
+![fork-2-vfs](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/fork_2_vfs_relation.png)
+
+多说一句，这里的fork场景还有一个经典的地方使用到，那就是网络编程中通过`SO_REUSEPORT`技术解决惊群问题
+
+```CPP
+static __latent_entropy struct task_struct *copy_process(
+					unsigned long clone_flags,
+					unsigned long stack_start,
+					unsigned long stack_size,
+					int __user *child_tidptr,
+					struct pid *pid,
+					int trace,
+					unsigned long tls,
+					int node)
+{
+	struct task_struct *p;
+	retval = security_task_create(clone_flags);
+
+	// 复制进程 task_struct 结构体
+	p = dup_task_struct(current, node);
+
+	retval = copy_creds(p, clone_flags);
+
+	/* Perform scheduler related setup. Assign this task to a CPU. */
+	retval = sched_fork(clone_flags, p);
+
+	// 拷贝 files_struct
+	retval = copy_files(clone_flags, p);
+
+	// 拷贝 fs_struct
+	retval = copy_fs(clone_flags, p);
+
+	retval = copy_sighand(clone_flags, p);
+
+	retval = copy_signal(clone_flags, p);
+
+	// 拷贝 mm_struct
+	retval = copy_mm(clone_flags, p);
+
+	// 拷贝进程的命名空间 nsproxy
+	retval = copy_namespaces(clone_flags, p);
+	
+	retval = copy_io(clone_flags, p);
+	
+	retval = copy_thread_tls(clone_flags, stack_start, stack_size, p, tls);
+
+	if (pid != &init_struct_pid) {
+		// 申请 pid && 设置进程号
+		pid = alloc_pid(p->nsproxy->pid_ns_for_children);
+		if (IS_ERR(pid)) {
+			retval = PTR_ERR(pid);
+			goto bad_fork_cleanup_thread;
+		}
+	}
+
+	// ......
+}
+```
+
+3、`wake_up_new_task`：当 `copy_process` 执行完毕的时候，表示新进程的一个新的 `task_struct` 对象创建完成，接下来内核会调用此方法将这个新创建出来的子进程添加到就绪队列中等待调度
+
+```CPP
+void wake_up_new_task(struct task_struct *p)
+{
+	struct rq_flags rf;
+	struct rq *rq;
+
+	raw_spin_lock_irqsave(&p->pi_lock, rf.flags);
+	p->state = TASK_RUNNING;
+
+	rq = __task_rq_lock(p, &rf);
+	update_rq_clock(rq);
+	post_init_entity_util_avg(&p->se);
+
+	activate_task(rq, p, 0);
+	p->on_rq = TASK_ON_RQ_QUEUED;
+	trace_sched_wakeup_new(p);
+	check_preempt_curr(rq, p, WF_FORK);
+
+	task_rq_unlock(rq, p, &rf);
+}
+```
+
+4、补充：写时复制（Copy-On-Write）技术
+
+![COW]()
+
+写时复制的本质是共享直到修改，是一种延迟拷贝的资源优化策略，通常用在拷贝复制操作中，如果一个资源只是被拷贝但是没有被修改，那么这个资源并不会真正被创建，而是和原数据共享。因此这个技术可以推迟拷贝操作到首次写入之后进行
+
+当`fork` 函数调用之后（因为Copy-On-Write 机制），存在父子进程实际上是共享物理内存的，内核把会共享的所有的内存页的权限都设为 read-only。当父子进程都只读内存，然后执行 exec 函数时就可以省去大量的数据复制开销。当其中某个进程写内存时，内存管理单元 MMU 检测到内存页是 read-only 的，于是触发缺页异常（page-fault），处理器会从中断描述符表（IDT）中获取到对应的处理程序。在中断程序中，内核就会把触发的异常的页复制一份，于是父子进程各自持有独立的一份，之后进程再修改对应的数据
+
+Copy-On-Write的好处是显而易见的，同时也有相应的缺点，如果父子进程都需要进行大量的写操作，会产生大量的缺页异常（page-fault）。缺页异常不是没有代价的，它会处理器会停止执行当前程序或任务转而去执行专门用于处理中断或异常的程序。处理器会从中断描述符表（IDT）中获取到对应的处理程序，当异常或中断执行完毕之后，会继续回到被中断的程序或任务继续执行
 
 ####	fork+dup(dup2)
 在前文[主机入侵检测系统 Elkeid：设计与分析（一）](https://pandaychen.github.io/2024/08/19/A-ELKEID-STUDY-1/#0x01----agent)介绍进程通信的例子，父子进程+两组pipe实现全双工通信的模型，如下（one pipe）：
