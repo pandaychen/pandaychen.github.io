@@ -97,8 +97,8 @@ struct proto tcp_prot = {
   .backlog_rcv    = tcp_v4_do_rcv,
   .release_cb    = tcp_release_cb,
   .hash      = inet_hash,
-    .get_port    = inet_csk_get_port,
-   //......
+  .get_port    = inet_csk_get_port,
+  //......
 }
 ```
 
@@ -328,9 +328,35 @@ static int sock_map_fd(struct socket *sock, int flags)
 	put_unused_fd(fd);
 	return PTR_ERR(newfile);
 }
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L395
+struct file *sock_alloc_file(struct socket *sock, int flags, const char *dname)
+{
+	// ......
+	path.dentry = d_alloc_pseudo(sock_mnt->mnt_sb, &name);
+	if (unlikely(!path.dentry))
+		return ERR_PTR(-ENOMEM);
+	path.mnt = mntget(sock_mnt);
+
+	d_instantiate(path.dentry, SOCK_INODE(sock));
+
+	file = alloc_file(&path, FMODE_READ | FMODE_WRITE,
+		  &socket_file_ops);
+	if (IS_ERR(file)) {
+		/* drop dentry, keep inode */
+		ihold(d_inode(path.dentry));
+		path_put(&path);
+		return file;
+	}
+
+	sock->file = file;
+	file->f_flags = O_RDWR | (flags & O_NONBLOCK);
+	file->private_data = sock;      //file的private成员设置为 struct socket 
+	return file;
+}
 ```
 
-由于socket也是文件，所以基于VFS的这套框架，各个成员有如下关系：
+注意到上面`sock_alloc_file`函数的最后，会把`file->private_data`设置为`struct socket*`变量，由于socket也是文件，所以基于VFS的这套框架，各个成员有如下关系：
 
 ![socket-relation]()
 
