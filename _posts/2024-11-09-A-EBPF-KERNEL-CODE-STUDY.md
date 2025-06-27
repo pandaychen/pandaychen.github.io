@@ -403,7 +403,9 @@ print fmt: "prev_comm=%s prev_pid=%d prev_prio=%d prev_state=%s%s ==> next_comm=
 -	Wait->Run：任务被调度切换获取到CPU，准备运行，关联hook点为`sched_wakeup`
 -	Sleep->Wait：任务等待到相应的资源就绪，可以开始调度流程，关联hook为`sched_switch`
 
-![switch_and_wakeup]()
+这里的切换及调度场景其实也适用于容器场景：
+
+![switch_and_wakeup_noisy-neighbor-detection-with-ebpf](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/ebpf/tracing/noisy-neighbor-detection-with-ebpf.png)
 
 上面提到了Voluntary Switch与Involuntary Switch，在 CFS 调度策略中，当一个任务因访问的 I/O 资源暂时不可获得而让出 CPU，属于 Voluntary Switch。而一个任务因 vruntime 处于劣势（基于vruntime调度策略下）而被抢占，自然是 Involuntary Switch。但是这二者的最终都是当前正在占用CPU的进程（`task_struct`）通过主动调用`__schedule`函数来实现让出CPU的过程
 
@@ -803,3 +805,4 @@ static int handle_switch(void *ctx, struct task_struct *prev, struct task_struct
 -   [Helper function bpf_task_storage_get](https://docs.ebpf.io/linux/helper-function/bpf_task_storage_get/)
 -   [高性能：7-可用于CPU分析的BPF工具【bpf performance tools读书笔记】](https://cloud.tencent.com/developer/article/1595327)
 -	[Linux 调度 - 切换类型的划分](https://zhuanlan.zhihu.com/p/402423877)
+-	[Noisy Neighbor Detection with eBPF](https://netflixtechblog.com/noisy-neighbor-detection-with-ebpf-64b1f4b3bbdd)
