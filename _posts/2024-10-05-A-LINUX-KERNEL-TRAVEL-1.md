@@ -24,7 +24,7 @@ tags:
 ![os](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/os_kernel_arch.png)
 
 ####    linux 的开机过程
-计算机通电后，首先执行 BIOS 的自检，用于检查外围关键设备是否正常。BIOS 根据设置的启动顺序，搜索用于启动系统的驱动器，并将其 MBR 加载到内存，然后执行 MBR（BIOS 并不关心 MBR 中是什么内容，它只负责读取并执行），此时控制权被交到了 MBR，boot loader 找到和加载 Linux 内核到内存中，并将控制权移交给内核。linux 启动之后，** 内核只是存在于内存中的程序，它和其他程序一样，都是被 cpu 调度执行的 **。那么，cpu 的使用权什么情况下，会被交给内核，然后内核进行进程管理的呢？
+计算机通电后，首先执行 BIOS 的自检，用于检查外围关键设备是否正常。BIOS 根据设置的启动顺序，搜索用于启动系统的驱动器，并将其 MBR 加载到内存，然后执行 MBR（BIOS 并不关心 MBR 中是什么内容，它只负责读取并执行），此时控制权被交到了 MBR，boot loader 找到和加载 Linux 内核到内存中，并将控制权移交给内核。linux 启动之后，**内核只是存在于内存中的程序，它和其他程序一样，都是被 cpu 调度执行的**。那么，cpu 的使用权什么情况下，会被交给内核，然后内核进行进程管理的呢？
 
 ####    CPU 特权指令（分级）
 涉及到操作系统管理计算机资源的指令（敏感指令），只能被操作系统能够执行。x86 CPU 提供了 `RING0`（最高权限模式，可以执行所有指令）~`RING3`（最低权限模式，仅能执行指令集中的一部分指令）的特权分级，让 CPU 在执行操作系统代码的时候运行在 `Ring0` 模式，在执行普通应用程序代码的时候运行在 `Ring3` 模式，这样就解决了特权指令的问题
@@ -1287,7 +1287,7 @@ void wake_up_new_task(struct task_struct *p)
 }
 ```
 
-4、补充：写时复制（Copy-On-Write）技术
+4、补充：**写时复制（Copy-On-Write）技术**
 
 ![COW]()
 

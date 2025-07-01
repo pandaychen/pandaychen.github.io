@@ -38,10 +38,44 @@ int main(){
 }
 ```
 
-####	socket vs sock
+####	socket/sock/inet_sock/inet_connection_sock 
 `struct socket` 是用于负责对（上层）给用户提供接口，并且和文件系统关联。而 `struct sock` 负责向下对接内核网络协议栈
+![sock-relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/epoll/socket-family.png)
 
-![sock-relation]()
+如上图`sock -> inet_sock -> inet_connection_sock -> tcp_sock` 四个结构体呈现从通用到专用的层次关系
+
+1、`sock`基础层，内核网络栈的核心抽象，管理所有协议通用的基础设施，核心成员如下
+
+-	等待队列：``
+-	数据队列：`sk_receive_queue`（接收队列）、`sk_write_queue`（发送队列）
+-	状态与内存：套接字状态（`sk_state`）、缓冲区大小（`sk_sndbuf`/`sk_rcvbuf`）、内存计数器（`sk_wmem_alloc`）
+-	协议操作集：指向`struct proto`（如`tcp_prot`），定义协议行为函数
+
+2、`inet_sock` IP层扩展，继承`sock`，添加IPv4协议族专属字段，核心成员如下：
+
+-	地址与端口：源/目的IP（`inet_saddr`/`inet_daddr`）、源/目的端口（`inet_sport`/`inet_dport`）
+-	IP选项：TTL（`uc_ttl`）、服务类型（`tos`）、IP分片标志（`hdrincl`）等
+-	多播支持：组播地址（`mc_addr`）、设备索引（`mc_index`）
+
+3、`inet_connection_sock`为面向连接协议扩展，继承`inet_sock`，为面向连接协议（如TCP）提供基础，核心成员如下：
+
+-	连接管理：半连接队列（`request_sock_queue`）、全连接队列（`icsk_accept_queue`）
+-	定时器：重传定时器（`icsk_retransmit_timer`）、延迟ACK定时器（`icsk_delack_timer`）
+-	拥塞控制：算法操作集（`icsk_ca_ops`）、私有数据（`icsk_ca_priv`）
+
+4、`tcp_sock`TCP协议专属，继承`inet_connection_sock`，实现TCP协议完整状态机
+
+-	序列号控制：发送序列（`snd_nxt`）、接收序列（`rcv_nxt`）、未确认序列（`snd_una`）
+-	流量控制：拥塞窗口（`snd_cwnd`）、接收窗口（`rcv_wnd`）、慢启动阈值（`snd_ssthresh`）
+-	TCP的高级特性：乱序队列（`out_of_order_queue`）、SACK选项、时间戳
+
+内核通过单次内存分配与类型转换实现高效访问，创建TCP套接字时，一次性分配`struct tcp_sock`（包含所有父结构字段），当需要做层次间的类型转换时，直接通过指针强制转换访问父结构，由于父结构是子结构的首个成员，转换后可直接访问其字段（如`tp->icsk->sk->sk_receive_queue`）
+
+```CPP
+struct tcp_sock *tp = alloc_tcp_sock();  
+struct inet_connection_sock *icsk = (struct inet_connection_sock *)tp;  
+struct sock *sk = (struct sock *)icsk;  // 最终转为通用sock
+```
 
 ####	inetsw_array
 
@@ -519,7 +553,7 @@ struct socket {
 }
 ```
 
-`accept`系统调用核心代码如下，主要分为四步：
+`accept`系统调用核心代码如下，主要分为四步即新建socket并初始化、初始化socket的VFS结构、接收连接（fd），最后添加新fd到当前进程的打开文件列表中
 
 ```CPP
 // 返回一个新fd，用于后续客户端连接
@@ -533,6 +567,7 @@ SYSCALL_DEFINE4(accept4, int, fd, struct sockaddr __user *, upeer_sockaddr,
     sock = sockfd_lookup_light(fd, &err, &fput_needed);
 
     //申请并初始化新的 socket
+	// 注意sock_alloc函数的返回值为 struct socket * 类型
     newsock = sock_alloc();
     newsock->type = sock->type;
     newsock->ops = sock->ops;
@@ -555,7 +590,7 @@ SYSCALL_DEFINE4(accept4, int, fd, struct sockaddr __user *, upeer_sockaddr,
 ```CPP
 const struct proto_ops inet_stream_ops = {
     //...
-    .accept        = inet_accept,
+    .accept        = inet_accept,		//新连接接收
     .listen        = inet_listen,
     .sendmsg       = inet_sendmsg,
     .recvmsg       = inet_recvmsg,
@@ -570,6 +605,7 @@ struct file *sock_alloc_file(struct socket *sock, int flags,
     const char *dname)
 {
     struct file *file;
+	// 调用alloc_file
     file = alloc_file(&path, FMODE_READ | FMODE_WRITE,
             &socket_file_ops);
     ......
@@ -585,6 +621,7 @@ struct file *alloc_file(struct path *path, fmode_t mode,
         const struct file_operations *fop)
 {
     struct file *file;
+	//注意在 alloc_file 方法中，把 socket_file_ops 函数集合一并赋到了新 file->f_op 中了
     file->f_op = fop;
 
 	// file 对象的成员 socket 指针，指向 socket 对象
@@ -602,14 +639,13 @@ static const struct file_operations socket_file_ops = {
 };
 ```
 
-3、接收连接的核心逻辑：`sock->ops->accept(sock, newsock, sock->file->f_flags)`，对应的方法是 [`inet_accept`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/af_inet.c#L692)。它执行的时候会从握手队列里直接获取创建好的 sock
+3、接收连接的核心逻辑：`sock->ops->accept(sock, newsock, sock->file->f_flags)`，对应的方法是 [`inet_accept`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/af_inet.c#L692)，此函数执行时会从握手队列（全连接队列）里直接获取创建好的 sock 并关联与该 `struct sock`的关系
 
 ```CPP
-int inet_accept(struct socket *sock, struct socket *newsock, int flags,
-		bool kern)
+int inet_accept(struct socket *sock, struct socket *newsock, int flags, bool kern)
 {
 	//....
-	//这里对应的是inet_csk_accept
+	//这里对应的是 inet_csk_accept
 	//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/inet_connection_sock.c#L427
 	struct sock *sk2 = sk1->sk_prot->accept(sk1, flags, &err, kern);
 	sock_graft(sk2, newsock);
@@ -617,10 +653,9 @@ int inet_accept(struct socket *sock, struct socket *newsock, int flags,
 	newsock->state = SS_CONNECTED;
 	//....
 }
-EXPORT_SYMBOL(inet_accept);
 ```
 
-`inet_accept` 会调用 `struct sock` 的 `sk1->sk_prot->accept`，也即 `tcp_prot` 的 `accept` 函数即`inet_csk_accept` 函数
+`inet_accept` 会调用 `struct sock` 的 `sk1->sk_prot->accept`，也即 `tcp_prot` 的 `accept` 函数即`inet_csk_accept` 函数，见下一小节
 
 ```CPP
 void sock_init_data(struct socket *sock, struct sock *sk)
@@ -632,6 +667,214 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 ```
 
 4、添加新文件到当前进程的打开文件列表中，当 `file`、`socket`、`sock` 等关键内核对象创建完毕以后，剩下要做的一件事情就是把它挂到当前进程的打开文件列表即完成
+
+这里介绍下`sockfd_lookup_light`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L489)，在`accept`系统调用中，参数`fd`指向的是listen的socket，该socket包含的VFS结构指向已经基本完整，所以从该函数的作用就是从进程->进程打开的fd->`struct file`->`file.private_data`拿到`struct socket`结构对象
+
+```CPP
+static struct socket *sockfd_lookup_light(int fd, int *err, int *fput_needed){
+	struct fd f = fdget(fd);
+	struct socket *sock;
+
+	*err = -EBADF;
+	if (f.file) {
+		// call sock_from_file
+		sock = sock_from_file(f.file, err);
+		if (likely(sock)) {
+			*fput_needed = f.flags;
+			return sock;
+		}
+		fdput(f);
+	}
+	
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L489
+static struct socket *sockfd_lookup_light(int fd, int *err, int *fput_needed)
+{
+	struct fd f = fdget(fd);
+	struct socket *sock;
+
+	*err = -EBADF;
+	if (f.file) {
+		// 实际socket *是存储在file->private_data成员上
+		sock = sock_from_file(f.file, err);
+		if (likely(sock)) {
+			*fput_needed = f.flags;
+			return sock;
+		}
+		fdput(f);
+	}
+	return NULL;
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L448
+struct socket *sock_from_file(struct file *file, int *err){
+	if (file->f_op == &socket_file_ops)
+		return file->private_data;	/* set in sock_map_fd */
+	//.....
+}
+```
+
+####	accept 的核心逻辑：inet_csk_accept
+`inet_csk_accept`主要实现了tcp协议accept操作，其主要功能是从已经完成三次握手的全连接队列（对于成员是`struct inet_connection_sock`的`icsk_accept_queue`[成员](https://elixir.bootlin.com/linux/v4.11.6/source/include/net/inet_connection_sock.h#L91)）中取控制块，如果没有已经完成的连接，则需要根据（socket）阻塞标记来来区分对待，若非阻塞则直接返回，若阻塞则需要在一定时间范围内阻塞等待。这里有两个关键的子流程：
+
+-	`inet_csk_wait_for_connect`：
+-	`reqsk_queue_remove`：
+
+```CPP
+struct sock *inet_csk_accept(struct sock *sk, int flags, int *err, bool kern){
+    struct inet_connection_sock *icsk = inet_csk(sk);
+	// 获取全连接队列
+    struct request_sock_queue *queue = &icsk->icsk_accept_queue;
+    struct request_sock *req;
+    struct sock *newsk;
+
+	//....
+
+    /* 不是listen状态 */
+    if (sk->sk_state != TCP_LISTEN)
+        goto out_err;
+
+    /* 还没有已完成的连接 */
+    if (reqsk_queue_empty(queue)) {
+
+        /* 获取等待时间，非阻塞为0 */
+        long timeo = sock_rcvtimeo(sk, flags & O_NONBLOCK);
+
+        /* If this is a non blocking socket don't sleep */
+        error = -EAGAIN;
+        /* 非阻塞立即返回错误 */
+        if (!timeo)
+            goto out_err;
+
+        /* 阻塞模式下等待连接到来 */
+		/*
+			如果请求队列中没有已完成握手的连接，
+			并且套接字已经设置了阻塞标记，
+			则需要加入调度队列等待连接的到来 
+		*/
+        error = inet_csk_wait_for_connect(sk, timeo);
+        if (error)
+            goto out_err;
+    }
+
+    /* 从已完成连接队列中移除 */
+    req = reqsk_queue_remove(queue, sk);
+
+    /* 设置新控制块指针，如果没有错误newsk会被返回给调用方 */
+    newsk = req->sk;
+
+    /* TCP协议 && fastopen */
+    if (sk->sk_protocol == IPPROTO_TCP &&
+        tcp_rsk(req)->tfo_listener) {
+        spin_lock_bh(&queue->fastopenq.lock);
+        if (tcp_rsk(req)->tfo_listener) {
+            req->sk = NULL;
+            req = NULL;
+        }
+        spin_unlock_bh(&queue->fastopenq.lock);
+    }
+out:
+    release_sock(sk);
+
+    /* 释放请求控制块 */
+    if (req)
+        reqsk_put(req);
+
+    /* 返回找到的连接控制块 */
+    return newsk;
+}
+```
+
+`inet_csk_wait_for_connect`函数实现了当请求队列中没有已完成三次握手的连接，并且套接字已经设置了阻塞标记，则需要加入等待队列等待连接的到来，这又是一个很典型的内核等待队列的应用，核心代码如下：
+
+```CPP
+static int inet_csk_wait_for_connect(struct sock *sk, long timeo)
+{
+    struct inet_connection_sock *icsk = inet_csk(sk);
+    DEFINE_WAIT(wait);
+    int err;
+
+	//熟悉的循环
+    for (;;) {
+        /* 加入等待队列 */
+        prepare_to_wait_exclusive(sk_sleep(sk), &wait,
+                      TASK_INTERRUPTIBLE);
+        release_sock(sk);
+
+        /* 如果全连接队列为空，说明还是等待的条件不满足，进行CPU切换调度，主动让出CPU */
+        if (reqsk_queue_empty(&icsk->icsk_accept_queue))
+            timeo = schedule_timeout(timeo);	//进程第一调度定律
+        sched_annotate_sleep();
+        lock_sock(sk);
+        err = 0;
+        /* 走到这里说明进程已经被唤醒，重新拿到CPU的执行权，需要检查全连接队列不为空（等待的条件），如果满足即可退出等待队列*/
+		/* 这里唤醒方会把当前阻塞在等待队列上的task_struct移除，然后再唤醒 */
+		/* 所以解释了为何在for()循环开始要重新把进程加入到等待队列中	*/
+        if (!reqsk_queue_empty(&icsk->icsk_accept_queue))
+            break;
+        err = -EINVAL;
+        /* 连接状态非LISTEN */
+        if (sk->sk_state != TCP_LISTEN)
+            break;
+        /* 信号打断 */
+        err = sock_intr_errno(timeo);
+        if (signal_pending(current))
+            break;
+        err = -EAGAIN;
+        /* 调度超时也需要退出等待 */
+        if (!timeo)
+            break;
+    }
+    /* 结束等待 */
+	/* sk_sleep(sk) 的作用是获取sk的等待队列头 */
+    finish_wait(sk_sleep(sk), &wait);
+    return err;
+}
+```
+
+`reqsk_queue_remove`函数作用是将完成三次握手的控制块从请求队列移除：
+
+```CPP
+static inline struct request_sock *reqsk_queue_remove(struct request_sock_queue *queue,
+                              struct sock *parent)
+{
+    struct request_sock *req;
+	/* 需要加锁 */
+    spin_lock_bh(&queue->rskq_lock);
+
+    /* 找到队列头 */
+    req = queue->rskq_accept_head;
+    if (req) {
+        /* 减少已连接计数 */
+        sk_acceptq_removed(parent);
+        /* 头部指向下一节点 */
+        queue->rskq_accept_head = req->dl_next;
+
+        /* 队列为空 */
+        if (queue->rskq_accept_head == NULL)
+            queue->rskq_accept_tail = NULL;
+    }
+    spin_unlock_bh(&queue->rskq_lock);
+    return req;
+}
+```
+
+####	`struct sock`创建的区别（TODO）
+
+```CPP
+void sock_init_data(struct socket *sock, struct sock *sk)
+{
+	if (sock) {
+		sk->sk_type	=	sock->type;
+		sk->sk_wq	=	sock->wq;
+		sock->sk	=	sk;
+		sk->sk_uid	=	SOCK_INODE(sock)->i_uid;
+	} else {
+		sk->sk_wq	=	NULL;
+		sk->sk_uid	=	make_kuid(sock_net(sk)->user_ns, 0);
+	}
+}
+```
 
 ##	0x08	数据传输
 
