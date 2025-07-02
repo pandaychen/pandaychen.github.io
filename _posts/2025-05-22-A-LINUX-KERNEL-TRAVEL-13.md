@@ -281,10 +281,10 @@ SYSCALL_DEFINE4(accept4, int, fd, struct sockaddr __user *, upeer_sockaddr,
     newfile = sock_alloc_file(newsock, flags, sock->sk->sk_prot_creator->name);
     ......
 
-    //1.3 接收连接
+    //4、 接收连接
     err = sock->ops->accept(sock, newsock, sock->file->f_flags);
 
-    //1.4 添加新文件到当前进程的打开文件列表
+    //5、 添加新文件到当前进程的打开文件列表
     fd_install(newfd, newfile);
 ```
 
@@ -536,9 +536,9 @@ static int ep_insert(struct eventpoll *ep,
 }
 ```
 
-对于上面的代码，这里拆开来分析：
+对于上面的`ep_insert`的实现代码，这里拆开来分析：
 
-1、初始化`epitem`，建立成员关系
+1、**初始化`epitem`，建立成员关系**
 
 ```CPP
 // 参数ffd为 新建的epitem成员
@@ -551,7 +551,8 @@ static inline void ep_set_ffd(struct epoll_filefd *ffd,
 }
 ```
 
-2、设置`epoll_ctl`监控fd（socket）对象的`struct socket/sock`的等待队列（非常重要），
+2、**设置`epoll_ctl`监控fd（socket）对象的`struct socket/sock`的等待队列（非常重要）**
+
 
 **在创建 `epitem` 并初始化之后，`ep_insert` 会设置 socket 对象上的等待任务队列，并把函数 `ep_poll_callback` 设置为数据就绪时候的回调函数**，这里需要搞懂几个细节
 
@@ -572,6 +573,8 @@ static int ep_insert(...)
     epq.epi = epi;
     init_poll_funcptr(&epq.pt, ep_ptable_queue_proc);
     ...
+	//ep_item_poll：核心
+	//作用：调用 ep_ptable_queue_proc 注册回调函数（实际注入的函数为 ep_poll_callback）
 	revents = ep_item_poll(epi, &epq.pt);
 	// ......
 }
@@ -586,7 +589,7 @@ static inline void init_poll_funcptr(poll_table *pt,
 
 ![ep_pqueue_relation]()
 
-3、`ep_item_poll`在`init_poll_funcptr`之后被调用，注意它的参数是`struct ep_pqueue`的两个成员
+在`ep_insert`的实现中，`ep_item_poll`函数在`init_poll_funcptr`之后被调用，注意它的参数是`struct ep_pqueue`的两个成员
 
 -	`ep_item_poll`中，走到`epi->ffd.file->f_op->poll`调用，对应的函数是`sock_poll`，这个`epi`是关联`epoll_ctl`操作的那个fd
 -	`sock_poll`中，走到`sock->ops->poll`调用，对应的函数是`tcp_poll`
@@ -603,9 +606,12 @@ static inline unsigned int ep_item_poll(struct epitem *epi, poll_table *pt)
     return epi->ffd.file->f_op->poll(epi->ffd.file, pt) & epi->event.events;
 }
 
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L1041
 static unsigned int sock_poll(struct file *file, poll_table *wait)
 {
-    ...
+    struct socket *sock;
+	sock = file->private_data;
+	// ......
 	//tcp_poll
     return sock->ops->poll(file, sock, wait);
 }
@@ -621,7 +627,7 @@ unsigned int tcp_poll(struct file *file, struct socket *sock, poll_table *wait)
 在进入`sock_poll_wait`函数之前，先看下`sk_sleep(sk)`获取的是啥结构？从实现来看，返回结果为`wait_queue_head_t *`结构，在此函数它获取了 `struct sock` 对象下的等待队列列表头 `wait_queue_head_t`，待会等待队列项就插入这里，还是需要强调两点：
 
 -	这个`struct sock`是`epoll_ctl`函数操作的目标fd（listenerfd或acceptfd）
--	这个等待队列是 socket/sock 的等待队列，非 epoll 对象，二者的作用完全不同（见附录）
+-	这个等待队列是 socket/sock 的等待队列，非 epoll 对象的等待队列，二者的作用完全不同（见附录说明）
 
 ```CPP
 static inline wait_queue_head_t *sk_sleep(struct sock *sk)
@@ -631,7 +637,7 @@ static inline wait_queue_head_t *sk_sleep(struct sock *sk)
 }
 ```
 
-4、分析下`sock_poll_wait->poll_wait`的实现，其参数为：
+分析下`sock_poll_wait->poll_wait`的实现（记住调用路径为`ep_item_poll->sock_poll->tcp_poll->sock_poll_wait`），其参数为：
 
 -	`file *filp`：`p->_qproc`的回调参数之一，需要操作哪个fd的file结构
 -	`wait_queue_head_t *wait_address`：等待队列的头部
@@ -659,7 +665,7 @@ static inline void poll_wait(struct file * filp, wait_queue_head_t * wait_addres
 
 所以，`ep_insert`最终的逻辑是在 `ep_ptable_queue_proc` 函数中，新建了一个等待队列项，并注册其回调函数为 `ep_poll_callback` 函数，然后再将这个等待项添加到fd关联的 socket 的等待队列中
 
-5、回调函数`ep_ptable_queue_proc`真正完成了socket等待队列的初始化及添加等工作，注意到参数`whead`是socket等待队列的头结点，等待队列项最终会通过`whead`插入
+继续分析，回调函数`ep_ptable_queue_proc`真正完成了socket等待队列的初始化及添加等工作，注意到参数`whead`是socket等待队列的头结点，等待队列项最终会通过`whead`插入
 
 ```CPP
 //file: fs/eventpoll.c
@@ -699,19 +705,250 @@ static inline void init_waitqqueue_func_entry(
 }
 ```
 
+3、**将`epitem`对象插入epoll的红黑树**
+
+分配完 epitem 对象后，最后通过[`ep_rbtree_insert`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L1136)函数把它插入到红黑树`eventpoll.rbr`中，注意eventpoll红黑树的key为`epitem.ffd`（即`epoll_ctl`操作的fd）
+
+```cpp
+static void ep_rbtree_insert(struct eventpoll *ep, struct epitem *epi)
+{
+	int kcmp;
+	struct rb_node **p = &ep->rbr.rb_node, *parent = NULL;
+	struct epitem *epic;
+
+	while (*p) {
+		parent = *p;
+		epic = rb_entry(parent, struct epitem, rbn);
+		kcmp = ep_cmp_ffd(&epi->ffd, &epic->ffd);
+		if (kcmp > 0)
+			p = &parent->rb_right;
+		else
+			p = &parent->rb_left;
+	}
+	rb_link_node(&epi->rbn, parent, p);
+	rb_insert_color(&epi->rbn, &ep->rbr);
+}
+```
+
+![eventpoll-with-sockets](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/epoll/eventpoll_rbr_epitem.png)
+
 总结下`epoll_ctl(ADD)`的过程：
 
 1.	建立epoll机制的事件结构，并为其建立关联关系（这样某个`sk`上有数据到达时，内核可以通过此`sk`找到对应的`fd`，从而告知epoll哪些fd上有事件发生了）
 2.	为操作参数fd关联的socket的等待队列，注册等待队列项及数据就绪时候的回调函数
 3.	操作eventpoll的红黑树，变更信息
-
+ 
 ![epoll_ctl_flow]()
 
 ##  0x05    epoll_wait实现：等待就绪connection
+[`epoll_wait`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L2005) 系统调用的核心流程如下，核心调用链为`sys_epoll_wait->ep_poll`
+
+`epoll_wait`的主要工作流程是它会检查 `eventpoll->rdllist` 链表里有无数据，有数据就返回，没有数据就创建一个等待队列项，将其添加到 `eventpoll` 的等待队列上，然后把自己阻塞掉（让出CPU），等待唤醒重复上述过程
+
+```CPP
+SYSCALL_DEFINE4(epoll_wait, int, epfd, struct epoll_event __user *, events,
+		int, maxevents, int, timeout)
+{
+	int error;
+	struct fd f;
+	struct eventpoll *ep;
+
+	/* Get the "struct file *" for the eventpoll file */
+	f = fdget(epfd);
+	if (!f.file)
+		return -EBADF;
+
+	/*
+	 * We have to check that the file structure underneath the fd
+	 * the user passed to us _is_ an eventpoll file.
+	 */
+	error = -EINVAL;
+	if (!is_file_epoll(f.file))
+		goto error_fput;
+
+	/*
+	 * At this point it is safe to assume that the "private_data" contains
+	 * our own data structure.
+	 */
+	ep = f.file->private_data;
+
+	/* Time to fish for events ... */
+	error = ep_poll(ep, events, maxevents, timeout);
+
+	//.....
+}
+```
+
+epoll_wait的核心工作都在[`ep_poll`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L1597)中完成，`ep_poll`的实现亦是一个典型的等待-唤醒模式
+
+```CPP
+static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
+		   int maxevents, long timeout)
+{
+	int res = 0, eavail, timed_out = 0;
+	unsigned long flags;
+	u64 slack = 0;
+	// 定义一个等待队列
+	wait_queue_t wait;
+	ktime_t expires, *to = NULL;
+
+	//.......
+
+fetch_events:
+	spin_lock_irqsave(&ep->lock, flags);
+
+	//1、判断就绪队列上有没有事件就绪
+	if (!ep_events_available(ep)) {
+
+		//2、定义等待事件并关联当前进程（current为当前进程）
+		init_waitqueue_entry(&wait, current);
+
+		//3、 把新 waitqueue 添加到 epoll->wq 链表（eventpoll的等待队列）里
+		__add_wait_queue_exclusive(&ep->wq, &wait);
+		
+		//4、启动等待-唤醒 循环机制
+		for (;;) {
+			// 将当前进程状态设置为可打断状态
+			set_current_state(TASK_INTERRUPTIBLE);
+
+			//5、current进入CPU切换前，先检查唤醒事件是否满足
+			// 满足则退出等待
+			// 不满足继续执行，让出CPU（进程调度切换）
+			if (ep_events_available(ep) || timed_out)
+				break;
+			if (signal_pending(current)) {
+				res = -EINTR;
+				break;
+			}
+
+			spin_unlock_irqrestore(&ep->lock, flags);
+			//6、让出CPU 主动进入睡眠状态
+			if (!schedule_hrtimeout_range(to, slack, HRTIMER_MODE_ABS))
+				timed_out = 1;
+			
+			//7、说明被唤醒了，拿到CPU的控制权，继续循环（检测等待条件是否满足....）
+			spin_lock_irqsave(&ep->lock, flags);
+		}
+
+		__remove_wait_queue(&ep->wq, &wait);
+		__set_current_state(TASK_RUNNING);
+	}
+check_events:
+	/* Is it worth to try to dig for events ? */
+	eavail = ep_events_available(ep);
+
+	spin_unlock_irqrestore(&ep->lock, flags);
+
+	/*
+	 * Try to transfer events to user space. In case we get 0 events and
+	 * there's still timeout left over, we go trying again in search of
+	 * more luck.
+	 */
+	if (!res && eavail &&
+	    !(res = ep_send_events(ep, events, maxevents)) && !timed_out)
+		goto fetch_events;
+
+	return res;
+}
+```
+
+上面对`ep_poll`的核心流程都加了注释，这里再拆解下步骤：
+
+1、判断就绪队列上有没有事件就绪
+
+在`ep_poll`中首先调用 `ep_events_available` 来判断就绪链表`eventpoll.rdllist`中是否有可处理（已就绪）IO的事件
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L374
+static inline int ep_events_available(struct eventpoll *ep)
+{
+	return !list_empty(&ep->rdllist) || ep->ovflist != EP_UNACTIVE_PTR;
+}
+```
+
+2、初始化定义等待队列事件（`wait_queue_t`结构）并关联当前进程`current`
+
+当检测`rdllist`上没有已就绪的连接时，那就使用内核的等待队列把当前进程`current`挂到等待队列waitqueue上，此时epoll进程也会被阻塞
+```CPP
+static inline void init_waitqueue_entry(wait_queue_t *q, struct task_struct *p)
+{
+    q->flags = 0;
+    q->private = p;	//current
+    q->func = default_wake_function;	//等待被唤醒时的调用函数为default_wake_function
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/core.c#L3665
+int default_wake_function(wait_queue_t *curr, unsigned mode, int wake_flags,
+			  void *key)
+{
+	return try_to_wake_up(curr->private, mode, wake_flags);
+}
+```
+
+3、添加等待队列结构`wait_queue_t`到`eventpoll`的等待队列`wq`中，注意这里的`wait->flags`是被强行加上了一个`WQ_FLAG_EXCLUSIVE`参数的，`WQ_FLAG_EXCLUSIVE`的作用见下文
+
+```CPP
+static inline void __add_wait_queue_exclusive(wait_queue_head_t *q,
+                                wait_queue_t *wait)
+{
+    wait->flags |= WQ_FLAG_EXCLUSIVE;	//注意这个WQ_FLAG_EXCLUSIVE
+    __add_wait_queue(q, wait);
+}
+```
+
+4-5、等待-唤醒机制的经典循环以及唤醒时再检测
+
+6、当前进程主动调用`schedule`让出CPU（`schedule_hrtimeout_range`），主动进入睡眠状态，调度流程可以参考前文[]()
+
+```CPP
+int __sched schedule_hrtimeout_range(ktime_t *expires, 
+    unsigned long delta, const enum hrtimer_mode mode)
+{
+    return schedule_hrtimeout_range_clock(
+            expires, delta, mode, CLOCK_MONOTONIC);
+}
+
+int __sched schedule_hrtimeout_range_clock(...)
+{
+	//在 schedule 中选择下一个进程调度
+    schedule();
+    ...
+}
+
+static void __sched __schedule(void)
+{
+    next = pick_next_task(rq);
+    ...
+    context_switch(rq, prev, next);
+}
+```
+
+问题：这里epoll等待队列的唤醒的逻辑是由谁完成的？
 
 ##  0x06    connection到达后的流程
+本节将分析下软中断softirq是如何处理协议栈数据以及处理完之后依次进入各个回调函数（包括唤醒阻塞等待在`epoll_wait`上的进程），最后通知到用户进程的
+
+1.	内核从协议栈收到数据之后完成的事情
+2.	内核如何通知上层应用数据就绪了
+3.	内核通知应用层的机制（epoll）
+4.	ET/LT模式在内核层面的区别
+5.	epoll惊群及解决
 
 ####	如何根据sk（有数据）找到epitem/eventpoll结构？
+[`ep_item_from_wait`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L350)
+
+```CPP
+/* Get the "struct epitem" from a wait queue pointer */
+static inline struct epitem *ep_item_from_wait(wait_queue_t *p)
+{
+	return container_of(p, struct eppoll_entry, wait)->base;
+}
+```
+
+####	epoll机制下的两类等待队列
+-	等待队列1：当`epoll_ctl` 执行注册监听fd时，内核为每一个 socket关联的sock 成员上都添加了一个等待队列项
+-	等待队列2：当`epoll_wait` 运行时，在 `eventpoll` 对象上添加了等待队列元素
+
+####	唤醒1：协议栈数据到达，唤醒sock/socket的等待队列
 
 
 ##  0x07    番外
@@ -847,6 +1084,7 @@ check_events:
 
 
 ####    Why rbtree？
+
 
 ##  0x0 参考
 -	[linux源码解读（十七）：红黑树在内核的应用——epoll](https://www.cnblogs.com/theseventhson/p/15829130.html)
