@@ -921,7 +921,7 @@ static void __sched __schedule(void)
 }
 ```
 
-问题：这里epoll等待队列的唤醒的逻辑是由谁完成的？
+先埋个问题：这里epoll等待队列的唤醒的逻辑是由谁完成的？
 
 ##  0x06    connection到达后的流程
 本节将分析下软中断softirq是如何处理协议栈数据以及处理完之后依次进入各个回调函数（包括唤醒阻塞等待在`epoll_wait`上的进程），最后通知到用户进程的
@@ -1051,7 +1051,7 @@ init_waitqueue_func_entry(wait_queue_t *q, wait_queue_func_t func)
 {
 	q->flags	= 0;
 	q->private	= NULL;		//注意！这里是NULL
-	q->func		= func;
+	q->func		= func;		// 这里是ep_poll_callback
 }
 
 // 追加到等待队列的成员task_list上
@@ -1212,9 +1212,11 @@ static void __wake_up_common(wait_queue_head_t *q, unsigned int mode,
 }
 ```
 
+####	唤醒2：根据sock.wq->epitem->eventpoll.wq，唤醒因epoll_wait睡眠的进程
+
 4、执行 `epoll` 就绪通知（`default_wake_function`）
 
-在`default_wake_function` 中找到等待队列项里的进程描述符，然后唤醒它，这里等待队列项 `curr->private` 指针是在 epoll 对象上等待而被阻塞掉的进程。上一小节提出的问题的答案就在这里，唤醒后，内核将`epoll_wait`进程推入CPU 可运行队列runqueue，等待内核重新调度进程，继而当`epoll_wait`对应的这个进程重新运行后，就从 `schedule` 恢复，继续执行下面的代码
+在`default_wake_function` 中找到等待队列项里的进程描述符，然后唤醒它，这里等待队列项 `curr->private` 指针是在 epoll 对象上等待而被阻塞掉的进程。上一小节提出的问题的答案就在这里，经过两步唤醒后，内核将`epoll_wait`进程推入CPU 可运行队列runqueue，等待内核重新调度进程，继而当`epoll_wait`对应的这个进程重新运行后，就从 `schedule` 恢复，继续执行下面的代码
 
 ```CPP
 int default_wake_function(wait_queue_t *curr, unsigned mode, int wake_flags, void *key)
