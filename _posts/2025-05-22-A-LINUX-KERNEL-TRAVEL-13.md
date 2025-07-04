@@ -16,8 +16,7 @@ Linux的IO 多路复用机制（I/O Multiplexing）是一种通过单个线程�
 
 ####    epoll 简单服务端示例
 ```CPP
-void epoll_server_run()
-{   
+void epoll_server_run(){   
     //....
 	char buf[BUF_SIZE];
 	struct sockaddr_in srv_addr;
@@ -248,15 +247,17 @@ free_uid:
 }
 ```
 
-至此，完成了epoll机制最核心的管理结构`struct eventpoll`的创建及初始化工作
+至此，完成了epoll机制最核心的管理结构`struct eventpoll`的创建及初始化工作，进程打开的`epfd`在内核的关系如下图：
+
+![epoll_create](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/epoll/relation_after_epollcreate.png)
 
 ##  0x03    服务端accept新连接（fd）
-前文[]()已经介绍了服务端accept的内核实现，这里再回顾下accept时`struct socket` 内核结构的创建、以及和内核已存在的`struct sock`关联的主要过程：
+前文[Linux 内核之旅（十二）：内核视角下的三次握手](https://pandaychen.github.io/2025/04/25/A-LINUX-KERNEL-TRAVEL-12/#0x07-serveraccept操作)已经介绍了服务端accept的内核实现，这里再回顾下accept时`struct socket` 内核结构的创建、以及和内核已存在的`struct sock`关联的主要过程：
 
 1.	初始化 `struct socket` 对象，并使用listnerfd关联的socket信息初始化（如`type`、`ops`等）
 2.	为新 `struct socket` 对象申请 `struct file` 结构，关联`sock->file`指针，在 `accept` 方法里会调用 `sock_alloc_file` 函数来申请内存并初始化，该指针的主要目的是通过`task_struct->fdtable(fd)->file(private)->socket->sock....`，即通过进程+fd找到对应的`struct socket/sock`结构
 3.	在`sock_alloc_file->alloc_file`函数中，会把`socket_file_ops`赋值给新建的`socket->file->f_op`
-4.	调用`sock->ops->accept`（即`inet_accept`）接收新连接，
+4.	调用`sock->ops->accept`（即`inet_accept`）接收新连接
 5.	调用`fd_install`将`accept`返回的新连接`fd`加到当前进程打开文件列表`fdtable`
 
 ```CPP
