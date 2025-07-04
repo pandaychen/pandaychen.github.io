@@ -108,6 +108,16 @@ void epoll_server_run(){
 
 ![sock-relation]()
 
+`struct sock`结构关联的等待队列`socket_wq`，包含了内核等待队列的头节点：
+
+```CPP
+struct socket_wq {
+	/* Note: wait MUST be first field of socket_wq */
+	wait_queue_head_t	wait;
+	......
+};
+```
+
 ####    epoll的API
 1、`epoll_create`：创建一个 `epoll` 对象，返回fd
 
@@ -363,9 +373,11 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 
 -	`struct epoll_filefd`：
 -   `struct epitem`：
--   `struct eppoll_entry`：
--	[`struct poll_table`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/poll.h#L40)
--	[`ep_pqueue`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L248)
+-	[`ep_pqueue`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L248)：临时粘合剂，传递 `epitem` 并注册回调到 `poll_table`
+-	[`struct poll_table`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/poll.h#L40)：标准化桥梁，触发文件操作并执行回调创建 `eppoll_entry`
+-   `struct eppoll_entry`：持久枢纽，绑定sock、sock等待队列与 `epitem`，实现事件驱动的高效通知
+
+其中，`ep_pqueue`、`poll_table`和`eppoll_entry`这三者完成了初始化 -> 注册 -> 持久监听的高效机制，非常优雅
 
 
 1、`epitem`，从其成员定义易知，这就是红黑树的元素节点
@@ -686,6 +698,8 @@ static void ep_ptable_queue_proc(struct file *file, wait_queue_head_t *whead,
 ```
 
 `ep_ptable_queue_proc`调用`init_waitqueue_func_entry`初始化一个等待队列项，等待队列项中仅仅只设置了回调函数 `q->func` 为 `ep_poll_callback`，其定义在[`ep_poll_callback`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L1004)
+
+![eppoll_entry-relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/epoll/epitem_relation_eppollentry.png)
 
 在内核软中断ksoftirqd将数据收到 socket 的接收队列后，内核会唤醒这个socket等待队列上的所有项，会通过注册的这个 `ep_poll_callback` 函数来回调（依次调用其注册的回调函数），进而通知到 `epoll` 对象
 
@@ -1038,7 +1052,7 @@ static void ep_ptable_queue_proc(struct file *file, wait_queue_head_t *whead, po
 	//新建一个eppoll_entry对象
     struct eppoll_entry *pwq;
     f (epi->nwait >= 0 && (pwq = kmem_cache_alloc(pwq_cache, GFP_KERNEL))) {
-		//初始化pwq回调方法
+		//初始化pwq（eppoll_entry对象）回调方法
 		init_waitqueue_func_entry(&pwq->wait, ep_poll_callback);
 		//将ep_poll_callback放入socket的等待队列whead（注意不是epoll的等待队列）
 		add_wait_queue(whead, &pwq->wait);
@@ -1132,6 +1146,8 @@ static void __wake_up_common(wait_queue_head_t *q, unsigned int mode,
         unsigned flags = curr->flags;
 
 		//curr->func 为 ep_poll_callback
+		// 注意ep_poll_callback的参数为
+		// wait_queue_t *wait, unsigned mode, int sync, void *key
         if (curr->func(curr, mode, wake_flags, key) &&
                 (flags & WQ_FLAG_EXCLUSIVE) && !--nr_exclusive)
             break;
@@ -1146,7 +1162,7 @@ static void __wake_up_common(wait_queue_head_t *q, unsigned int mode,
 `ep_poll_callback`的主要流程为：
 
 1.	把自己的 `epitem` 添加到 `epoll` 的就绪队列`rdllist`中
-2.	查看 eventpoll 对象上的等待队列里是否有等待项（`epoll_wait` 执行的时候会设置）
+2.	查看 `eventpoll` 对象上的等待队列里是否有等待项（`epoll_wait` 执行的时候会设置）
 3.	如果有等待项，那就查找到等待项里设置的回调函数
 
 ```CPP
@@ -1405,6 +1421,60 @@ check_events:
 
 ####    Why rbtree？
 
+
+####	`ep_pqueue`、`poll_table`与`eppoll_entry`结构的关系
+在介绍`ep_insert`的实现中，出现了三个数据结构`ep_pqueue`、`poll_table` 和 `eppoll_entry`（其中`ep_pqueue`包含了`poll_table`与`epitem`指针）这三者共同实现了高效的事件监听与回调机制。其中**ep_pqueue 是临时桥梁，用于向文件注册回调；poll_table 是标准接口，传递回调函数；eppoll_entry 是持久纽带，绑定文件等待队列与 epoll 监听项**
+
+这里再稍微回顾下`epoll_ctl(EPOLL_CTL_ADD)`的流程，当调用 `epoll_ctl(EPOLL_CTL_ADD)` 添加监听fd时
+
+**步骤1：初始化 `ep_pqueue` 与 `poll_table`**
+
+1、内核创建 `ep_pqueue` 对象，其成员 `epi` 指向当前监听的 `epitem`
+
+2、初始化 `ep_pqueue.pt`（即 `poll_table`），将其回调函数 `poll_table._qproc` 设为 `ep_ptable_queue_proc`
+
+```CPP
+struct ep_pqueue {
+    poll_table pt;          // 内含 _qproc 回调函数指针
+    struct epitem *epi;     // 指向监听的 epitem
+};
+init_poll_funcptr(&epq.pt, ep_ptable_queue_proc); // 关键初始化
+```
+
+**步骤2：触发文件操作，创建 `eppoll_entry`（关联`ep_item_poll()`）**
+
+1、调用目标文件（socket）的 `f_op->poll()` 方法（`tcp_poll()`），传入 `poll_table` 参数
+
+2、文件操作内部调用 `poll_table._qproc`（即 `ep_ptable_queue_proc`）
+
+3、`ep_ptable_queue_proc` 创建 `eppoll_entry` 对象并初始化
+
+```CPP
+struct eppoll_entry {
+    struct epitem *base;        // 指向 epitem（来自 ep_pqueue.epi）
+    wait_queue_entry_t wait;     // 等待队列项，回调函数设为 ep_poll_callback
+    wait_queue_head_t *whead;    // 指向文件的等待队列头
+};
+
+init_waitqueue_func_entry(&pwq->wait, ep_poll_callback); // 注册回调
+```
+
+4、将 `eppoll_entry.wait` 加入文件的等待队列（ socket 的 `sk_wq`）后，这里就返回了
+
+**步骤3：事件触发与回调，当文件事件（如数据到达）发生时**
+
+1、内核调用文件的等待队列回调函数 `ep_poll_callback`
+
+2、通过 `eppoll_entry.base` 找到 `epitem`，将其加入 `eventpoll` 的就绪队列（`rdllist`）
+
+3、唤醒阻塞在 `epoll_wait()` 的进程
+
+
+| 左对齐 | 功能 | 依赖 | 存在周期 |意义|
+| :-----| :---- | :---- |:---- |:---- |
+| `ep_pqueue` | 作为临时粘合的结构体，用于关联 `poll_table` 与 `epitem`，用于向sock注册回调函数 | 依赖 `epitem` 传递监听上下文 |仅在 `epoll_ctl(EPOLL_CTL_ADD)` 期间存在，临时结构 | 避免每次调用重复创建实体，仅作为注册回调的媒介，提升性能| 
+| `poll_table` | 作为标准轮询接口，封装回调函数指针（`_qproc`），由sock操作（`tcp_poll()`）调用 | 作为 `ep_pqueue` 的成员被初始化 |仅在 `epoll_ctl(EPOLL_CTL_ADD)` 期间存在，临时结构 | 提供通用接口，兼容不同文件操作（如 socket、pipe等），解耦 epoll 与具体设备|
+|`eppoll_entry`| 作为持久结构体，绑定sock等待队列与 `epitem`结构，事件发生时触发回调通知 epoll | 由 `ep_pqueue` 的回调函数创建 |存在直到该fd监听被从epoll中移除 | 通过 `wait` 成员长期驻留文件等待队列，实现一次注册+永久监听的高效模型，此外，它还双向链接到 `epitem.pwqlist`，便于监听移除时清理资源（调用 `ep_remove()` 时遍历删除）| 
 
 ##  0x0 参考
 -	[linux源码解读（十七）：红黑树在内核的应用——epoll](https://www.cnblogs.com/theseventhson/p/15829130.html)
