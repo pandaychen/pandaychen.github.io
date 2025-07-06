@@ -1125,11 +1125,10 @@ static inline bool skwq_has_sleeper(struct socket_wq *wq)
 继续分析下`sock_def_readable`函数中，当检测到等待队列不为空时，`wake_up_interruptible_sync_poll`的实现，核心调用链为`wake_up_interruptible_sync_poll->__wake_up_sync_key->__wake_up_common`，在 `__wake_up_common` 中，会遍历等待队列项`task_list`选出等待队列里注册的每个元素 `curr`， 调用回调函数 `curr->func`（注意在`ep_insert` 调用时会设置 `func`为 `ep_poll_callback`）
 
 ```CPP
-//file: include/linux/wait.h
 #define wake_up_interruptible_sync_poll(x, m)       \
     __wake_up_sync_key((x), TASK_INTERRUPTIBLE, 1, (void *) (m))
 
-//file: kernel/sched/core.c
+
 void __wake_up_sync_key(wait_queue_head_t *q, unsigned int mode,
             int nr_exclusive, void *key)
 {
@@ -1261,6 +1260,7 @@ static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
 			// 唤醒后，继续从这里开始执行
 	}
 
+	// 将先前epoll_wait阻塞的进程，移除epoll的等待队列
     __remove_wait_queue(&ep->wq, &wait);
     set_current_state(TASK_RUNNING);
 check_events:
@@ -1269,7 +1269,7 @@ check_events:
 }
 ```
 
-`ep_send_events->ep_scan_ready_list`
+最后看下`ep_send_events->ep_scan_ready_list`的实现，其中在`ep_scan_ready_list`中遍历事件就绪列表，发送就绪事件到用户空间，注意到该函数的参数为函数指针`ep_send_events_proc`，这二者协作完成事件从内核到用户态的传递，同时确保并发安全和高效率
 
 ```CPP
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L584
@@ -1280,14 +1280,151 @@ static int ep_send_events(struct eventpoll *ep,
 
 	esed.maxevents = maxevents;
 	esed.events = events;
-
-	return ep_scan_ready_list(ep, ep_send_events_proc, &esed, 0, false);
+    // 遍历事件就绪列表，发送就绪事件到用户空间
+	return ep_scan_ready_list(ep, ep_send_events_proc/**/, &esed, 0, false);
 }
 ```
 
-TODO：ET/LT
+`ep_scan_ready_list`与`ep_send_events_proc`的核心流程如下。其中`ep_scan_ready_list`主要完成就绪事件的分割与回调调度，在 `epoll_wait` 调用时，从 `eventpoll` 的就绪队列`rdllist`中提取事件并分发给用户态，同时处理新到达事件的并发冲突
+
+1.	锁定与状态切换：通过自旋锁`spin_lock_irqsave`锁定 `eventpoll` 实例，暂停事件回调向 `rdllist` 的写入，然后将 `ovflist`（单链表）设置为临时接收区，后续新到达的事件会暂存于此（避免与当前处理冲突）
+2.	分割就绪队列`rdllist`，将 `rdllist` 中的事件全部转移到临时链表 `txlist` 中，并清空 `rdllist`
+3.	执行回调函数，调用传入的回调函数 `sproc`（`ep_send_events_proc`），将 `txlist` 作为参数传递，处理事件回传
+4.	处理新事件与回滚：遍历 `ovflist`，将未处理的就绪事件重新加入 `rdllist`（如在回调执行期间新到达的事件），然后恢复 `ovflist` 为初始状态（`EP_UNACTIVE_PTR`），解自旋锁
+5.	唤醒等待进程，若回调处理后仍有事件未完成（如 LT 模式重入），唤醒阻塞在 `epoll_wait` 的进程
+
+```CPP
+static __poll_t ep_scan_ready_list(struct eventpoll *ep,
+                  __poll_t (*sproc)(struct eventpoll *,
+                       struct list_head *, void *),
+                  void *priv, int depth, bool ep_locked) {
+    __poll_t res;
+    struct epitem *epi, *nepi;
+    LIST_HEAD(txlist);
+    ......
+    // 将就绪队列分片链接到 txlist 链表中
+	//分割就绪队列`rdllist`，将 `rdllist` 中的事件全部转移到临时链表 `txlist` 中，并清空 `rdllist`
+    list_splice_init(&ep->rdllist, &txlist);
+
+	//CALL ep_send_events_proc
+    res = (*sproc)(ep, &txlist, priv);
+    ......
+    // 在处理 sproc 回调处理过程中，可能产生新的就绪事件被写入 ovflist，将 ovflist 回写 rdllist
+    for (nepi = READ_ONCE(ep->ovflist); (epi = nepi) != NULL;
+         nepi = epi->next, epi->next = EP_UNACTIVE_PTR) {
+        if (!ep_is_linked(epi)) {
+            list_add(&epi->rdllink, &ep->rdllist);
+            ep_pm_stay_awake(epi);
+        }
+    }
+    ......
+    // txlist 在 epitem 回调中，可能没有完全处理完，那么重新放回到 rdllist，下次处理
+    list_splice(&txlist, &ep->rdllist);
+    ......
+}
+```
+
+`ep_send_events_proc`主要处理事件回传，将 `txlist` 中的事件逐个拷贝到用户空间，并根据触发模式（`ET/LT`）决定是否重新加入就绪队列
+
+1.	遍历事件链表，循环处理 `txlist` 中的每个`epitem`（代表一个就绪的文件描述符）
+2.	事件有效性校验，调用 `ep_item_poll` 重新检查文件状态（避免状态变更导致无效事件）
+3.	用户空间数据拷贝，通过 `__put_user` 将事件类型`revents`和用户数据`event.data`拷贝到用户态数组，若copy失败，将事件重新链入 `txlist` 等待后续重试
+4.	针对触发模式处理（`ET/LT`），对于`ET`边缘触发模式，事件处理后不重新加入 `rdllist`，仅当文件状态再次变化时重新触发；而`LT` 水平触发模式，事件处理后重新加入 `rdllist`，确保下次 `epoll_wait` 会再次检查（即使数据未读完）
+5.	额外对`EPOLLONESHOT` 处理，若设置单次触发，事件处理后禁用后续监听（需重新注册）
+
+```CPP
+static int ep_send_events_proc(struct eventpoll *ep, struct list_head *head,
+			       void *priv)
+{
+	struct ep_send_events_data *esed = priv;
+	int eventcnt;
+	unsigned int revents;
+	struct epitem *epi;
+	struct epoll_event __user *uevent;
+	struct wakeup_source *ws;
+	poll_table pt;
+
+	......
+	for (eventcnt = 0, uevent = esed->events;
+	     !list_empty(head) && eventcnt < esed->maxevents;) {
+		epi = list_first_entry(head, struct epitem, rdllink);
+		......
+
+		list_del_init(&epi->rdllink);
+
+		revents = ep_item_poll(epi, &pt);
+
+		if (revents) {
+			// copy to 用户态
+			if (__put_user(revents, &uevent->events) ||
+			    __put_user(epi->event.data, &uevent->data)) {
+				//copy error
+				//把未处理的事件，再加回rdllink
+				list_add(&epi->rdllink, head);
+				ep_pm_stay_awake(epi);
+				return eventcnt ? eventcnt : -EFAULT;
+			}
+			eventcnt++;
+			uevent++;
+			if (epi->event.events & EPOLLONESHOT)
+				epi->event.events &= EP_PRIVATE_BITS;
+			else if (!(epi->event.events & EPOLLET)) {
+				// 非ET模式下，需要加回ep->rdllist
+				list_add_tail(&epi->rdllink, &ep->rdllist);
+				ep_pm_stay_awake(epi);
+			}//ET模式，不加回
+		}
+	}
+
+	return eventcnt;
+}
+```
 
 ##  0x07    番外
+
+####	`EPOLL_CTL_DEL` AND `EPOLL_CTL_MOD`的流程
+`EPOLL_CTL_DEL`关联实现为`ep_remove()`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L697)，主要流程围绕解绑事件关联、清理数据结构、释放资源等
+
+
+```CPP
+static int ep_remove(struct eventpoll *ep, struct epitem *epi)
+{
+	unsigned long flags;
+	struct file *file = epi->ffd.file;
+	//1、解绑等待队列，移除事件回调
+	//从 sock 等待队列中移除 eppoll_entry（通过 epi->pwqlist 链表定位）
+	//解除事件回调函数 ep_poll_callback 的注册，确保后续事件不再触发通知
+	ep_unregister_pollwait(ep, epi);
+
+	/* Remove the current item from the list of epoll hooks */
+	spin_lock(&file->f_lock);
+	//将epitem从该fd关联的file结构的f_ep_links链表上移除
+	// 从文件的 f_ep_links 链表中移除 epi（反向链接关系）
+	// 解除文件与 epitem 的关联，确保文件关闭时不会误操作已移除的监听项
+	// 添加代码位于：https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L1349
+	list_del_rcu(&epi->fllink);
+	spin_unlock(&file->f_lock);
+
+	//2、从红黑树中删除epitem节点，解除全局监听
+	//将 epi 从 epoll 实例的红黑树（rbr）中移除，此后内核不再监听该 fd 的事件
+	rb_erase(&epi->rbn, &ep->rbr);
+
+	//3、清理就绪队列，移除待处理事件（fd）
+	//若 epi 已就绪但尚未被 epoll_wait 处理，需将其移出队列，避免无效事件上报
+	spin_lock_irqsave(&ep->lock, flags);
+	if (ep_is_linked(&epi->rdllink))
+		list_del_init(&epi->rdllink);	// 从 rdllist 中移除epi
+	spin_unlock_irqrestore(&ep->lock, flags);
+
+	wakeup_source_unregister(ep_wakeup_source(epi));
+
+	//5、释放资源：销毁 epitem，并减少文件引用计数
+	// 若文件无其他引用，可触发关闭操作
+	atomic_long_dec(&ep->user->epoll_watches);
+
+	return 0;
+}
+```
 
 ####    epoll机制中的等待队列
 1、`epoll_wait`中的等待队列机制实现：`epoll_wait->ep_poll`，在`ep_poll`函数的实现中发现了经典的等待->唤醒机制的模式，类似于`wait_event`内核调用中的`condition`参数，这里可以看到`condition`为`ep_events_available`函数的实现，即检查`eventpoll`的就绪队列`rdllist`是否不为空`!list_empty(&ep->rdllist)`，具体流程请看注释
@@ -1420,7 +1557,7 @@ check_events:
 
 
 ####    Why rbtree？
-
+epoll机制中，红黑树的作用主要是在`epoll_ctl`操作海量fd时能够快速的定位到相关`epitem`节点，此外还兼顾了查找效率、插入效率、内存开销等多方面因素
 
 ####	`ep_pqueue`、`poll_table`与`eppoll_entry`结构的关系
 在介绍`ep_insert`的实现中，出现了三个数据结构`ep_pqueue`、`poll_table` 和 `eppoll_entry`（其中`ep_pqueue`包含了`poll_table`与`epitem`指针）这三者共同实现了高效的事件监听与回调机制。其中**ep_pqueue 是临时桥梁，用于向文件注册回调；poll_table 是标准接口，传递回调函数；eppoll_entry 是持久纽带，绑定文件等待队列与 epoll 监听项**
