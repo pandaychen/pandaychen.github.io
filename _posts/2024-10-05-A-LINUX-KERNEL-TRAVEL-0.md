@@ -255,6 +255,7 @@ struct rb_node {
 
 ####	等待队列结构
 和linklist类似，waitqueue 本质上是一个链表，waitqueue包含了`wait_queue_head_t`（头）以及`__wait_queue`（节点）两个基础结构
+
 ```CPP
 struct __wait_queue_head {
     spinlock_t lock;	//lock 字段用于保护等待队列在多核环境下数据被破坏
@@ -262,14 +263,16 @@ struct __wait_queue_head {
 };
 
 struct __wait_queue {
-    unsigned int flags;	//可以设置为 WQ_FLAG_EXCLUSIVE，表示等待的进程应该独占资源（解决惊群现象）
-    void *private;	//一般用于保存等待进程的进程描述符 task_struct
+    unsigned int flags;	// 重要：可以设置为 WQ_FLAG_EXCLUSIVE，表示等待的进程应该独占资源（解决惊群现象）
+    void *private;	//一般用于保存等待进程的进程描述符 task_struct，也可以设置为NULL（epoll下的acceptfd）
     wait_queue_func_t func;	//唤醒函数，一般设置为 default_wake_function() 函数，当然也可以设置为自定义的唤醒函数
     struct list_head task_list;	//用于链接其他等待资源的进程
 };
 ```
 
 等待同一事件的任务（由`private` 指向）通过双向链表串接（对应`__wait_queue` 节点），形成一个等待队列，在等待的事件发生后，waitqueue上的任务被唤醒，并执行`func` 回调函数
+
+重点指出`flags`、`private`及`func`成员，在后面的文章中会有不同的用途
 
 ![waitqueue](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/datastructure/waitqueue-1.jpg)
 
@@ -502,3 +505,4 @@ struct eppoll_entry {
 -	[数据结构可视化](http://www.u396.com/wp-content/collection/data-structure-visualizations/)
 -	[Linux 中的等待队列机制](https://zhuanlan.zhihu.com/p/97107297)
 -	[等待队列原理与实现](https://github.com/liexusong/linux-source-code-analyze/blob/master/waitqueue.md)
+-	[如何阅读内核源码](https://cloud.tencent.com/developer/article/1963196)
