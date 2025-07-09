@@ -14,7 +14,12 @@ tags:
 本文学习下基于ebpf技术的网络（协议栈）追踪
 
 -   [tcpstates]()：用于记录 TCP 连接的状态变化
--   [tcprtt]()：则用于记录 TCP 的往返时间（RTT, Round-Trip Time）
+-   [tcprtt]()：用于记录 TCP 的往返时间（RTT, Round-Trip Time），同样也可以基于cgroup 统计一段时间内 tcp rtt 的分布，显示连接的状态信息
+-   [tcpconnect]()：基于 cgroup 监控 tcp 网络连接，显示源IP、目的IP、目的端口等状态信息以及基于 cgroup 统计一段时间内的 tcp 连接数量
+-   [tcpconnlat]()：基于 cgroup 监控 tcp 建立连接的时间，显示连接的状态信息
+-   [tcptrace]()：基于过滤条件监控 tcp 网络连接，跟踪 skb 报文在内核中的生命周期，输出每个报文在协议栈中各个点的时间延迟、所在 CPU、网络接口等信息
+-   [tcplife]()：基于 cgroup 跟踪 tcp 连接的生命周期，显示连接的存活时间等统计信息
+-   [tcpdrop]()：基于 cgroup 监控 tcp 网络连接，追踪内核丢弃的数据包，显示数据包地址、端口和调用栈等信息
 
 ```BASH
 [root@VM-X-X-centos edriver]#  perf list 'tcp:*' 'sock:inet*'
