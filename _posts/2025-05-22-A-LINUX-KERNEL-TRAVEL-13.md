@@ -44,20 +44,38 @@ void epoll_server_run(){
 		for (i = 0; i < nfds; i++) {
 			if (events[i].data.fd == listen_sock) {
 				/* handle new connection */
-				conn_sock =
-				    accept(listen_sock,
-					   (struct sockaddr *)&cli_addr,
-					   &socklen);
+				// 若为listenfd，在ET模式下
+				// 用 while 循环包裹住 accept 调用，处理完 TCP 就绪队列中的所有连接后再退出循环
+				// 如何知道是否处理完就绪队列中的所有连接呢？ 
+				// accept  返回 -1 并且 errno 设置为 EAGAIN 就表示所有连接都处理完
+				// 当然读/写在ET模式下也是一样
+				//读：只要可读, 就一直读, 直到返回 0, 或者 errno = EAGAIN 
+				//写：只要可写, 就一直写, 直到数据发送完, 或者 errno = EAGAIN 
+				while(1){
+					conn_sock =
+						accept(listen_sock,
+						(struct sockaddr *)&cli_addr,
+						&socklen);
+					if (conn_sock == -1) {
+						if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
+							break;  // We have processed all incoming connections.
+						} else {
+							perror("accept");
+							break;
+						}
+					}
 
-				inet_ntop(AF_INET, (char *)&(cli_addr.sin_addr),
-					  buf, sizeof(cli_addr));
-				printf("[+] connected with %s:%d\n", buf,
-				       ntohs(cli_addr.sin_port));
+					inet_ntop(AF_INET, (char *)&(cli_addr.sin_addr),
+						buf, sizeof(cli_addr));
+					printf("[+] connected with %s:%d\n", buf,
+						ntohs(cli_addr.sin_port));
 
-				setnonblocking(conn_sock);
-				epoll_ctl_add(epfd, conn_sock,
-					      EPOLLIN | EPOLLET | EPOLLRDHUP |
-					      EPOLLHUP);
+					setnonblocking(conn_sock);
+					epoll_ctl_add(epfd, conn_sock,
+							EPOLLIN | EPOLLET | EPOLLRDHUP |
+							EPOLLHUP);
+					//check epoll_ctl_add return value
+				}
 			} else if (events[i].events & EPOLLIN) {
 				/* handle EPOLLIN event */
 				for (;;) {
@@ -371,13 +389,13 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 ####    相关数据结构
 `epoll_ctl`操作`eventpoll`对象时会涉及到多个数据结构：
 
--	`struct epoll_filefd`：
--   `struct epitem`：
+-	`struct epoll_filefd`
+-   `struct epitem`
 -	[`ep_pqueue`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L248)：临时粘合剂，传递 `epitem` 并注册回调到 `poll_table`
 -	[`struct poll_table`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/poll.h#L40)：标准化桥梁，触发文件操作并执行回调创建 `eppoll_entry`
 -   `struct eppoll_entry`：持久枢纽，绑定sock、sock等待队列与 `epitem`，实现事件驱动的高效通知
 
-其中，`ep_pqueue`、`poll_table`和`eppoll_entry`这三者完成了初始化 -> 注册 -> 持久监听的高效机制，非常优雅
+其中，`ep_pqueue`、`poll_table`和`eppoll_entry`这三者完成了初始化 -> 注册 -> 持久监听的高效机制，非常优雅（这三者关系见附录描述）
 
 
 1、`epitem`，从其成员定义易知，这就是红黑树的元素节点
@@ -507,7 +525,7 @@ SYSCALL_DEFINE4(epoll_ctl, int, epfd, int, op, int, fd,
 ####    EPOLL_CTL_ADD的过程（重点）
 [`ep_insert`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L1293)又是`epoll_ctl`函数的核心实现过程，所有的注册都是在这个函数中完成的。`ep_insert`的核心逻辑：
 
-1.	将需要监听的fd（不区分listenerfd或acceptfd）包装为`epitem`对象，这个结构是作为`eventpoll`管理结构红黑树上的某个树节点
+1.	将需要监听的fd（不区分listenfd或acceptfd）包装为`epitem`对象，这个结构是作为`eventpoll`管理结构红黑树上的某个树节点
 2.	`ep_insert`的最终目的是让告诉内核，这个`fd`上面发生了事件（读写错误等），要怎么处理。所以涉及到事件及事件的回调方法注册，这里还包含了一个隐藏的细节，当`fd`有事件发生时，还需要具备（内核）能够通过这个`fd`找到其归属的`task_struct`（进程），然后唤醒它，让它来干活（处理连接）了
 3.	根据上面的描述，所以`ep_insert`就会利用内核的机制（如waitqueue）把上面的工作完成
 4.	内核还需要考虑，如何在海量fd的集合中快速的定位到`fd`节点（`epoll_ctl`针对fd的CRUD操作）
@@ -639,7 +657,7 @@ unsigned int tcp_poll(struct file *file, struct socket *sock, poll_table *wait)
 
 在进入`sock_poll_wait`函数之前，先看下`sk_sleep(sk)`获取的是啥结构？从实现来看，返回结果为`wait_queue_head_t *`结构，在此函数它获取了 `struct sock` 对象下的等待队列列表头 `wait_queue_head_t`，待会等待队列项就插入这里，还是需要强调两点：
 
--	这个`struct sock`是`epoll_ctl`函数操作的目标fd（listenerfd或acceptfd）
+-	这个`struct sock`是`epoll_ctl`函数操作的目标fd（listenfd或acceptfd）
 -	这个等待队列是 socket/sock 的等待队列，非 epoll 对象的等待队列，二者的作用完全不同（见附录说明）
 
 ```CPP
@@ -996,11 +1014,10 @@ int tcp_v4_rcv(struct sk_buff *skb)
 int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 {
     if (sk->sk_state == TCP_ESTABLISHED) {
-        //TCP_ESTABLISHED：执行连接状态下的数据处理
+        // TCP_ESTABLISHED：执行连接状态下的数据处理
 		// 暂时只关注这个状态下的数据传输
         if (tcp_rcv_established(sk, skb, tcp_hdr(skb), skb->len)) {
-            rsk = sk;
-            goto reset;
+			......
         }
         return 0;
     }
@@ -1009,7 +1026,7 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
     ......
 }
 
-//tcp_rcv_established
+//tcp_rcv_established：非常复杂，基于TCP FSM处理
 int tcp_rcv_established(struct sock *sk, struct sk_buff *skb,
             const struct tcphdr *th, unsigned int len)
 {
@@ -1018,7 +1035,7 @@ int tcp_rcv_established(struct sock *sk, struct sk_buff *skb,
     // 1、调用 tcp_queue_rcv ，将接收数据放到 sock 的接收队列sk_receive_queue
     eaten = tcp_queue_rcv(sk, skb, tcp_header_len,
                                     &fragstolen);
-
+	......
     // 2、数据 ready，唤醒 sock 上阻塞掉的进程
     sk->sk_data_ready(sk, 0);
 	
@@ -1607,11 +1624,29 @@ init_waitqueue_func_entry(&pwq->wait, ep_poll_callback); // 注册回调
 3、唤醒阻塞在 `epoll_wait()` 的进程
 
 
-| 左对齐 | 功能 | 依赖 | 存在周期 |意义|
+| 结构 | 功能 | 依赖 | 存在周期 |意义|
 | :-----| :---- | :---- |:---- |:---- |
 | `ep_pqueue` | 作为临时粘合的结构体，用于关联 `poll_table` 与 `epitem`，用于向sock注册回调函数 | 依赖 `epitem` 传递监听上下文 |仅在 `epoll_ctl(EPOLL_CTL_ADD)` 期间存在，临时结构 | 避免每次调用重复创建实体，仅作为注册回调的媒介，提升性能| 
 | `poll_table` | 作为标准轮询接口，封装回调函数指针（`_qproc`），由sock操作（`tcp_poll()`）调用 | 作为 `ep_pqueue` 的成员被初始化 |仅在 `epoll_ctl(EPOLL_CTL_ADD)` 期间存在，临时结构 | 提供通用接口，兼容不同文件操作（如 socket、pipe等），解耦 epoll 与具体设备|
 |`eppoll_entry`| 作为持久结构体，绑定sock等待队列与 `epitem`结构，事件发生时触发回调通知 epoll | 由 `ep_pqueue` 的回调函数创建 |存在直到该fd监听被从epoll中移除 | 通过 `wait` 成员长期驻留文件等待队列，实现一次注册+永久监听的高效模型，此外，它还双向链接到 `epitem.pwqlist`，便于监听移除时清理资源（调用 `ep_remove()` 时遍历删除）| 
+
+####	listenfd 与 acceptfd 
+在 Linux 的 epoll 机制中，通过 `epoll_ctl` 注册的监听套接字（listenfd）和通过 accept 获取的客户端套接字（acceptfd）在内核数据结构、队列机制以及唤醒后的处理流程都是有差异的，如下表：
+
+| - | listenfd（监听套接字）  | acceptfd（客户端套接字） |
+| :-----| :---- | :---- |
+| 类型 | 被动套接字（仅监听），for accept	|  主动套接字（数据通信），for read/write|
+| 关联内核队列	| 全连接队列（Accept Queue），包含连接的 struct sock 结构|读/写缓冲区|
+| 等待队列触发条件 |全连接队列非空（有新连接）|读缓冲区有数据/写缓冲区有空闲空间|
+| 注册事件 | EPOLLIN（新连接到达）	| EPOLLIN（可读）、EPOLLOUT（可写）	|
+
+对于sock等待队列机制与唤醒，二者些许区别：
+-	对于acceptfd（sock）：某个已经处于`TCP_ESTABLISHED`状态的socket上有数据到达时，经由`tcp_rcv_established->tcp_queue_rcv`数据被挂在sock的接收队列`sk_receive_queue`上，然后内核[触发]()唤醒过程`sk->sk_data_ready(sk, 0)`
+-	对于 listenfd（sock）：新连接到达，内核完成TCP三次握手流程后加入全连接队列，由于全连接队列非空（有新连接就绪），会[触发]()唤醒流程，内核唤醒 listenfd 的等待队列，调用 `ep_poll_callback` ，会把 `epitem` 加入 `eventpoll` 的就绪队列`rdllist`，从而 `epoll_wait` 返回 `EPOLLIN` 事件
+
+但是注册、唤醒之后（到达应用层之前）的流程本质上是一样的，对于listenfd，epoll 将 `ep_poll_callback` 注册到等待队列，触发后会将 listenfd 对应的 `epitem` 加入 `eventpoll` 的就绪队列`rdllist`；而对于 acceptfd，同样注册 `ep_poll_callback`，当数据到达或缓冲区可写时，将 acceptfd 的 epitem 加入 `rdllist`
+
+此外，对 listenfd而言，其本身无数据收发能力，其接收队列实为全连接队列，存储的是 struct sock 结构（代表已建立的连接），而非数据包。换句话说，listenfd 关联的sock结构的`sk_receive_queue`接收队列实际上是没用的
 
 ##  0x0 参考
 -	[linux源码解读（十七）：红黑树在内核的应用——epoll](https://www.cnblogs.com/theseventhson/p/15829130.html)
