@@ -701,6 +701,236 @@ PID     TID     COMM            FUNC
 -	`open`：工作流程大致为，系统调用将创建一个 `file` 对象（首先通过查找 dentry cache 来确定 `file` 存在的位置），并且在 open files tables 中（即 `task_struct` 的 fd table）分配一个索引
 -	`write`：由于 block I/O 非常耗时，所以 Linux 内核会使用 page cache 来缓存每次 read file 的内容， 当 write system call 时，系统将这个 page 标记为 dirty，并且将这个 page 移动到 dirty list 上， 系统会定时将这些 page flush 到磁盘上
 
+####	chroot操作
+
+
+####	目录遍历 in VFS
+文件遍历主要通过是系统调用`getdents`或`getdents64`实现，它们的作用是获取目录项，先看下`getdents`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/readdir.c#L294)：
+
+```CPP
+struct linux_dirent {
+	unsigned long	d_ino; /* Inode number */
+	unsigned long	d_off; /* Offset to next linux_dirent */
+	unsigned short	d_reclen; /* Length of this linux_dirent */
+	char		d_name[1];
+};
+
+SYSCALL_DEFINE3(getdents64, unsigned int, fd,
+		struct linux_dirent64 __user *, dirent, unsigned int, count)
+{
+	struct fd f;
+	struct linux_dirent64 __user * lastdirent;
+	struct getdents_callback64 buf = {
+		.ctx.actor = filldir64,
+		.count = count,
+		.current_dir = dirent
+	};
+	int error;
+
+	......
+
+	error = iterate_dir(f.file, &buf.ctx);
+	if (error >= 0)
+		error = buf.error;
+	lastdirent = buf.previous;
+	if (lastdirent) {
+		typeof(lastdirent->d_off) d_off = buf.ctx.pos;
+		//吐回数据到用户态
+		if (__put_user(d_off, &lastdirent->d_off))
+			error = -EFAULT;
+		else
+			error = count - buf.count;
+	}
+	fdput_pos(f);
+	return error;
+}
+```
+
+系统调用中包含两个十分重要的接口：`filldir64`作为回调函数，用于把一项记录（如一个目录下的文件或目录）填到返回的缓冲区里。而`iterate_dir`则是经过若干层次后调用`filldir64`，跟踪一下`iterate_dir`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/readdir.c#L24)
+
+着重提一下：**`filldir64`的实现是与文件系统类型无关的，它仅仅是一个用于目录数据回填的函数实现，由具体的文件类型调用，统一完成对目录的规范化数据**
+
+```CPP
+// fs/readdir.c
+int iterate_dir(struct file *file, struct dir_context *ctx)
+{
+	......
+	if (!IS_DEADDIR(inode)) {
+		ctx->pos = file->f_pos;
+		if (shared) // 通过 iterate_shared 调用回调
+			res = file->f_op->iterate_shared(file, ctx);
+		else // 通过 iterate 调用回调
+			res = file->f_op->iterate(file, ctx);
+		file->f_pos = ctx->pos;
+		fsnotify_access(file);
+		file_accessed(file);
+	}
+    ......
+}
+```
+
+从`iterate_dir`的实现可以了解到继续又调用到`iterate_shared`或者`iterate`（都是`file_operations`的抽象定义）继续完成剩下的过程。很容易想到这个和具体的文件系统有关系了，这里以ext4、procfs两种类型来举例（对应着普通目录遍历以及`/proc/`遍历）
+
+```CPP
+struct file_operations {
+	...
+	int (*iterate) (struct file *, struct dir_context *);
+	int (*iterate_shared) (struct file *, struct dir_context *);
+	...
+};
+
+struct dir_context;
+typedef int (*filldir_t)(struct dir_context *, const char *, int, loff_t, u64, unsigned);
+struct dir_context {
+	const filldir_t actor;	//注意：这个actor成员正是之前的filldir64（函数）
+	loff_t pos;
+};
+```
+
+1、ext4文件系统
+
+回想本文的介绍，`iterate`、`iterate_shared`等`file_operations`成员都是在具体的文件系统重初始化的，ext4文件系统对应的实现正是`ext4_dir_operations`，可以看到ext4文件系统并没有实现`iterate`，仅实现了`iterate_shared`成员。继续跟进看一下`ext4_readdir`：
+
+核心调用链为`ext4_readdir->ext4_dx_readdir->call_filldir->dir_emit`，最终在`dir_emit`函数中看到了调用了`ctx->actor`，即VFS的实现`filldir64`
+
+```CPP
+const struct file_operations ext4_dir_operations = {
+	.llseek		= ext4_dir_llseek,
+	.read		= generic_read_dir,
+	.iterate_shared	= ext4_readdir,
+	.unlocked_ioctl = ext4_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl	= ext4_compat_ioctl,
+#endif
+	.fsync		= ext4_sync_file,
+	.open		= ext4_dir_open,
+	.release	= ext4_release_dir,
+};
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/dir.c#L102
+static int ext4_readdir(struct file *file, struct dir_context *ctx)
+{
+	...
+	if (is_dx_dir(inode)) {
+		err = ext4_dx_readdir(file, ctx);
+		...
+	}
+	...
+}
+
+static int ext4_dx_readdir(struct file *file, struct dir_context *ctx)
+{
+	...
+    	if (call_filldir(file, ctx, fname))
+	...
+}
+
+static int call_filldir(struct file *file, struct dir_context *ctx,
+			struct fname *fname)
+{
+	...
+	while (fname) {
+		if (!dir_emit(ctx, fname->name,
+				fname->name_len,
+				fname->inode,
+				get_dtype(sb, fname->file_type))) {
+			info->extra_fname = fname;
+			return 1;
+		}
+		fname = fname->next;
+	}
+    ...
+}
+
+static inline bool dir_emit(struct dir_context *ctx,
+			    const char *name, int namelen,
+			    u64 ino, unsigned type)
+{
+	//在ext4_readdir函数的最深处调用了VFS的filldir64函数
+	return ctx->actor(ctx, name, namelen, ctx->pos, ino, type) == 0;
+}
+```
+
+2、procfs文件系统
+
+这里以进程打开的文件fd列表为例（对于可以遍历的`/proc`目录都需要实现`iterate_shared`系列方法），procfs对应的实现如下：
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/fd.c#L268
+const struct file_operations proc_fd_operations = {
+	.read		= generic_read_dir,
+	.iterate_shared	= proc_readfd,	//procfs的实现
+	.llseek		= generic_file_llseek,
+};
+```
+
+```CPP
+static int proc_readfd(struct file *file, struct dir_context *ctx)
+{
+	return proc_readfd_common(file, ctx, proc_fd_instantiate);
+}
+
+static int proc_readfd_common(struct file *file, struct dir_context *ctx,
+			      instantiate_t instantiate)
+{
+	struct task_struct *p = get_proc_task(file_inode(file));
+	struct files_struct *files;
+	unsigned int fd;
+
+	if (!p)
+		return -ENOENT;
+
+	if (!dir_emit_dots(file, ctx))
+		goto out;
+	files = get_files_struct(p);
+	if (!files)
+		goto out;
+
+	rcu_read_lock();
+	for (fd = ctx->pos - 2;
+	     fd < files_fdtable(files)->max_fds;
+	     fd++, ctx->pos++) {
+		char name[PROC_NUMBUF];
+		int len;
+
+		if (!fcheck_files(files, fd))
+			continue;
+		rcu_read_unlock();
+
+		len = snprintf(name, sizeof(name), "%u", fd);
+		//proc_fill_cache->dir_emit
+		if (!proc_fill_cache(file, ctx,
+				     name, len, instantiate, p,
+				     (void *)(unsigned long)fd))
+			goto out_fd_loop;
+		cond_resched();
+		rcu_read_lock();
+	}
+	rcu_read_unlock();
+out_fd_loop:
+	put_files_struct(files);
+out:
+	put_task_struct(p);
+	return 0;
+}
+```
+
+可以看到，procfs文件系统最终在`proc_fill_cache`调用了`dir_emit`，继而调用了`ctx->actor`函数
+
+```CPP
+bool proc_fill_cache(struct file *file, struct dir_context *ctx,
+	const char *name, int len,
+	instantiate_t instantiate, struct task_struct *task, const void *ptr)
+{
+	......
+	return dir_emit(ctx, name, len, ino, type);
+
+}
+```
+
+3、基于VFS层的恶意rootkit
+
+
 ##	0x04	VFS的应用（项目相关）
 
 ####	VFS 关联 task_struct
