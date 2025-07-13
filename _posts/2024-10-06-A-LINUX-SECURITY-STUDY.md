@@ -220,7 +220,7 @@ WebShell 是一种可执行 Shell 命令的脚本文件（常见的有 PHP等）
 
 ##  0x05    网络相关
 
-####    异常外连检
+####    异常外连检测
 基于ebpf机制的检测，思路是通过 `krobe/kretprobe/tracepoint` 等跟踪所有 IPv4 连接尝试，针对非保留地址的dest IP 匹配是否命中恶意IP库
 
 典型的hook点有：
@@ -244,8 +244,8 @@ WebShell 是一种可执行 Shell 命令的脚本文件（常见的有 PHP等）
 3.  将WebShell注入内核，无法通过常规内存检测
 4.  可改造为内核马，适配HTTP协议以外的所有协议
 
-##  0x07  Linux Rootkit
-Linux Rootkit特指以Linux内核模块（LKM）形式加载到操作系统中，从内核态实现更高权限的操作，或直接对内核态代码进行篡改，从而劫持整个系统正常程序的运行。借助Rootkit，黑客可以实现对任意目录、文件、磁盘内容、进程、网络连接与流量的隐藏、窃取和篡改，并提供隐蔽的后门可供黑客直接登录到受害服务器执行更多操作
+##  0x07  Linux rootkit
+Linux rootkit特指以Linux内核模块（LKM）形式加载到操作系统中，从内核态实现更高权限的操作，或直接对内核态代码进行篡改，从而劫持整个系统正常程序的运行。借助rootkit，黑客可以实现对任意目录、文件、磁盘内容、进程、网络连接与流量的隐藏、窃取和篡改，并提供隐蔽的后门可供黑客直接登录到受害服务器执行更多操作
 
 ####  利用Linux预加载型恶意动态链接库
 
@@ -260,7 +260,7 @@ Linux Rootkit特指以Linux内核模块（LKM）形式加载到操作系统中�
 - [cub3](https://github.com/mempodippy/cub3)：用于预加载的恶意动态链接库
 
 ####    利用io_uring异步IO执行机制绕过
-参考文章[深度解构io_uring新型Rootkit的攻击防护](https://mp.weixin.qq.com/s?__biz=MzU3ODAyMjg4OQ==&mid=2247496377&idx=1&sn=27cbb8a50866b909bd9a1cb441df1a6f&subscene=0)。基于io_uring技术实现的工具curing，通过不同的`opcode`[组合](https://github.com/axboe/liburing/blob/master/src/include/liburing/io_uring.h#L207)，完成了不同的功能，典型的如文件打开`IORING_OP_OPENAT`/网络连接`IORING_OP_CONNECT`等，curing工具通过传入`IORING_OP_OPENAT`完成打开文件操作，在内核中通过`IORING_OP_OPENAT`对应的函数回调`io_openat`完成内核操作，从而可以绕过依赖监控syscall行为发现风险的安全产品
+参考文章[深度解构io_uring新型rootkit的攻击防护](https://mp.weixin.qq.com/s?__biz=MzU3ODAyMjg4OQ==&mid=2247496377&idx=1&sn=27cbb8a50866b909bd9a1cb441df1a6f&subscene=0)。基于io_uring技术实现的工具curing，通过不同的`opcode`[组合](https://github.com/axboe/liburing/blob/master/src/include/liburing/io_uring.h#L207)，完成了不同的功能，典型的如文件打开`IORING_OP_OPENAT`/网络连接`IORING_OP_CONNECT`等，curing工具通过传入`IORING_OP_OPENAT`完成打开文件操作，在内核中通过`IORING_OP_OPENAT`对应的函数回调`io_openat`完成内核操作，从而可以绕过依赖监控syscall行为发现风险的安全产品
 
 ![curing](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/hids/rootkit/curing_rootkit.png)
 
@@ -414,7 +414,7 @@ int main(void)
 -   [Linux中基于eBPF的恶意利用与检测机制](https://www.cnxct.com/evil-use-ebpf-and-how-to-detect-ebpf-rootkit-in-linux/)
 -   [通过chkrootkit学习如何在linux下检测RootKit](https://www.giantbranch.cn/2018/10/09/通过chkrootkit学习如何在linux下检测RootKit/)
 -   [LKM Linux rootkit](https://github.com/f0rb1dd3n/Reptile)
--   [检测Linux Rootkit入侵威胁](https://help.aliyun.com/zh/security-center/user-guide/detect-linux-rootkit-intrusions)
+-   [检测Linux rootkit入侵威胁](https://help.aliyun.com/zh/security-center/user-guide/detect-linux-rootkit-intrusions)
 -   [云安全中心反弹Shell多维检测技术详解](https://help.aliyun.com/zh/security-center/user-guide/detect-reverse-shells-from-multiple-dimensions?spm=a2c4g.11186623.help-menu-28498.d_2_5_0_3_1.57ae7370LjotGR&scm=20140722.H_206139._.OR_help-T_cn#DAS#zh-V_1)
 -   [警惕利用Linux预加载型恶意动态链接库的后门](https://www.freebuf.com/column/162604.html)
 -   [最新Linux挖矿程序kworkerds分析](https://www.freebuf.com/articles/system/201402.html)
@@ -424,6 +424,6 @@ int main(void)
 -   [ptrace实现代码注入](https://m0nkee.github.io/2015/08/20/play-ptrace/)
 -   [Linux ELF无文件内存执行学习小记](https://xeldax.top/article/linux_no_file_elf_mem_execute)
 -   [How BPF-Enabled Malware Works](https://www.trendmicro.com/vinfo/us/security/news/threat-landscape/how-bpf-enabled-malware-works-bracing-for-emerging-threats)
--   [零系统调用的暗度陈仓：深度解构io_uring新型Rootkit的攻击防护](https://mp.weixin.qq.com/s?__biz=MzU3ODAyMjg4OQ==&mid=2247496377&idx=1&sn=27cbb8a50866b909bd9a1cb441df1a6f&subscene=0)
+-   [零系统调用的暗度陈仓：深度解构io_uring新型rootkit的攻击防护](https://mp.weixin.qq.com/s?__biz=MzU3ODAyMjg4OQ==&mid=2247496377&idx=1&sn=27cbb8a50866b909bd9a1cb441df1a6f&subscene=0)
 -   [Polkit pkexec 权限提升漏洞（CVE-2021-4034）](https://github.com/vulhub/vulhub/blob/master/polkit/CVE-2021-4034/README.zh-cn.md)
 -   [【云原生攻防研究】容器逃逸技术概览](https://mp.weixin.qq.com/s?__biz=MzIyODYzNTU2OA==&mid=2247487393&idx=1&sn=6cec3da009d25cb1c766bb9dae809a86&scene=21#wechat_redirect)

