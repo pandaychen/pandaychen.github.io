@@ -983,7 +983,13 @@ static inline struct epitem *ep_item_from_wait(wait_queue_t *p)
 ####	唤醒1：协议栈数据到达，唤醒sock/socket的等待队列
 回想下软中断线程softirqd接收数据的处理逻辑，三次握手完成后最终会根据数据包中的ip与端口信息寻找到对应的sk结构（`struct sock`），然后把数据挂在`sk.sk_receive_queue`即`sock`结构关联的接收队列上，这段核心逻辑位于[`tcp_v4_rcv->tcp_v4_do_rcv->tcp_rcv_established->tcp_queue_rcv`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_ipv4.c#L1605)
 
-1、内核对已建立连接sock数据的处理
+1、内核对已建立连接sock数据的处理，这里只关注如下调用链（正常有序数据包接收）
+
+-	`tcp_v4_rcv`：处理从 IP 层传入的 TCP 数据包，完成基础校验、套接字查找和队列分发
+-	`tcp_v4_do_rcv`：根据套接字的状态（`TCP_ESTABLISHED`、`TCP_LISTEN`等）分发到具体处理逻辑
+-	`tcp_rcv_established`：处理已建立连接的数据包
+-	`tcp_queue_rcv`：将 sk_buff 加入套接字（sock）的 `sk_receive_queue`，供应用读取
+-	`tcp_data_queue`：在慢速路径中处理乱序、窗口外数据等复杂场景
 
 ```CPP
 //https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_ipv4.c#L1605
@@ -1550,7 +1556,7 @@ check_events:
 
 ####	惊群问题的本质
 
-####	解决方案一：EPOLLEXCLUSIVE选型
+####	解决方案一：EPOLLEXCLUSIVE选项
 
 ####	解决方案二：SO_REUSEPORT技术
 
@@ -1641,14 +1647,14 @@ init_waitqueue_func_entry(&pwq->wait, ep_poll_callback); // 注册回调
 | 注册事件 | EPOLLIN（新连接到达）	| EPOLLIN（可读）、EPOLLOUT（可写）	|
 
 对于sock等待队列机制与唤醒，二者些许区别：
--	对于acceptfd（sock）：某个已经处于`TCP_ESTABLISHED`状态的socket上有数据到达时，经由`tcp_rcv_established->tcp_queue_rcv`数据被挂在sock的接收队列`sk_receive_queue`上，然后内核[触发]()唤醒过程`sk->sk_data_ready(sk, 0)`
--	对于 listenfd（sock）：新连接到达，内核完成TCP三次握手流程后加入全连接队列，由于全连接队列非空（有新连接就绪），会[触发]()唤醒流程，内核唤醒 listenfd 的等待队列，调用 `ep_poll_callback` ，会把 `epitem` 加入 `eventpoll` 的就绪队列`rdllist`，从而 `epoll_wait` 返回 `EPOLLIN` 事件
+1、对于acceptfd（sock）：某个已经处于`TCP_ESTABLISHED`状态的socket上有数据到达时，经由`tcp_rcv_established->tcp_queue_rcv`数据被挂在sock的接收队列`sk_receive_queue`上，然后内核触发唤醒过程`sk->sk_data_ready(sk, ...)`
+2、对于 listenfd（sock）：新连接到达，内核完成TCP三次握手流程后加入全连接队列，由于全连接队列非空（有新连接就绪），会[触发]()唤醒流程，内核唤醒 listenfd 的等待队列，调用 `ep_poll_callback` ，会把 `epitem` 加入 `eventpoll` 的就绪队列`rdllist`，从而 `epoll_wait` 返回 `EPOLLIN` 事件
 
 但是注册、唤醒之后（到达应用层之前）的流程本质上是一样的，对于listenfd，epoll 将 `ep_poll_callback` 注册到等待队列，触发后会将 listenfd 对应的 `epitem` 加入 `eventpoll` 的就绪队列`rdllist`；而对于 acceptfd，同样注册 `ep_poll_callback`，当数据到达或缓冲区可写时，将 acceptfd 的 epitem 加入 `rdllist`
 
 此外，对 listenfd而言，其本身无数据收发能力，其接收队列实为全连接队列，存储的是 struct sock 结构（代表已建立的连接），而非数据包。换句话说，listenfd 关联的sock结构的`sk_receive_queue`接收队列实际上是没用的
 
-##  0x0 参考
+##  0x0A 参考
 -	[linux源码解读（十七）：红黑树在内核的应用——epoll](https://www.cnblogs.com/theseventhson/p/15829130.html)
 -   [深入揭秘 epoll 是如何实现 IO 多路复用的](https://mp.weixin.qq.com/s/OmRdUgO1guMX76EdZn11UQ)
 -	[epoll和惊群](https://plantegg.github.io/2019/10/31/epoll和惊群/)
