@@ -979,13 +979,12 @@ int fake_filldir(struct dir_context *ctx, const char *name, int namlen,
     }while(0)
 
 #define ROOT_PATH "/"
-// in init
+// init
 set_f_op(iterate, ROOT_PATH, fake_iterate, real_iterate);
 
 if(!real_iterate){
     return -ENOENT;
 }
-// in exit
 if(real_iterate){
     void *dummy;
     set_f_op(iterate, ROOT_PATH, real_iterate, dummy);
@@ -1006,7 +1005,7 @@ if(real_iterate){
 其他相关知识点可以参考[Linux 内核之旅（一）：进程](https://pandaychen.github.io/2024/10/02/A-LINUX-KERNEL-TRAVEL-1/#0x05-关联文件系统)
 
 ####	SOCK_FS文件系统
-socket在Linux中对应的文件系统叫sockfs，每创建一个socket，就在sockfs中创建了一个特殊的文件，同时创建了sockfs文件系统中的inode，该inode唯一标识当前socket的通信，那么sockfs是如何注册到VFS中的？本节就简单讨论这个问题
+socket在Linux中对应的特殊文件系统叫sockfs，每创建一个socket，就在sockfs中创建了一个特殊的文件，同时创建了sockfs文件系统中的inode，该inode唯一标识当前socket的通信，那么sockfs是如何注册到VFS中的？本节就简单讨论这个问题
 
 1、核心结构体（参考上文）
 
@@ -1015,6 +1014,7 @@ socket在Linux中对应的文件系统叫sockfs，每创建一个socket，就在
 -	`struct vfsmount`与`struct mount`：
 
 ```CPP
+//sock 文件类型
 static struct file_system_type sock_fs_type = {
 	.name = "sockfs",
 	.mount = sockfs_mount,	//for mount
@@ -1022,11 +1022,81 @@ static struct file_system_type sock_fs_type = {
 };
 ```
 
+**进程创建一个 socket，需要把该 socket 关联到一个已打开文件，这样才方便进程进行管理**
+
+```CPP
+/* include/linux/mount.h */
+struct vfsmount {
+    struct dentry *mnt_root;    /* root of the mounted tree */
+    struct super_block *mnt_sb;    /* pointer to superblock */
+    int mnt_flags;
+} __randomize_layout;
+
+/* net/socket.c */
+static struct vfsmount *sock_mnt __read_mostly;
+
+/* sock 文件操作 */
+static const struct super_operations sockfs_ops = {
+    .alloc_inode    = sock_alloc_inode,
+    .destroy_inode  = sock_destroy_inode,
+    .statfs         = simple_statfs,
+};
+
+/* include/sock.h 
+ * sock 与 inode 文件节点关联结构。*/
+struct socket_alloc {
+    struct socket socket;
+    struct inode vfs_inode;
+};
+
+/* include/net/sock.h 
+ * 从文件节点结构获得 socket 成员。*/
+static inline struct socket *SOCKET_I(struct inode *inode) {
+    return &container_of(inode, struct socket_alloc, vfs_inode)->socket;
+}
+
+/* include/linux/fs.h */
+struct file_operations {
+    struct module *owner;
+    loff_t (*llseek) (struct file *, loff_t, int);
+    ssize_t (*read) (struct file *, char __user *, size_t, loff_t *);
+    ssize_t (*write) (struct file *, const char __user *, size_t, loff_t *);
+    ...
+} __randomize_layout;
+
+/* net/socket.c
+ * Socket files have a set of 'special' operations as well as the generic file ones. These don't appear
+ * in the operation structures but are done directly via the socketcall() multiplexor.
+ */
+static const struct file_operations socket_file_ops = {
+    .owner      =    THIS_MODULE,
+    .llseek     =    no_llseek,
+    .read_iter  =    sock_read_iter,
+    .write_iter =    sock_write_iter,
+    .poll       =    sock_poll,
+    .unlocked_ioctl = sock_ioctl,
+    .mmap         = sock_mmap,
+    .release      = sock_close,
+    .fasync       = sock_fasync,
+    .sendpage     = sock_sendpage,
+    .splice_write = generic_splice_sendpage,
+    .splice_read  = sock_splice_read,
+};
+```
+
+sockfs关联的`file_operations`、`inode_operaions`、`dentry_operations`以及`super_operations`的定义：
+
+```CPP
+
+```
+
 2、sockfs文件系统的注册过程
 
 内核初始化时，执行`sock_init()`函数注册sockfs，相关实现如下：
 
 ```CPP
+core_initcall(sock_init);    /* early initcall */
+
 static int __init sock_init(void)
 {
 	//......
@@ -1157,6 +1227,7 @@ mount_fs(struct file_system_type *type, int flags, const char *name, void *data)
 			goto out_free_secdata;
 	}
 
+	// 这里的type->mount是sockfs_mount函数
 	root = type->mount(type, flags, name, data);//调用file_system_type中的 mount方法
 	if (IS_ERR(root)) {
 		error = PTR_ERR(root);
@@ -1245,9 +1316,130 @@ const struct dentry_operations *dops, unsigned long magic)
 }
 ```
 
-5、`sock_alloc_inode`函数
+5、`sock_alloc->sock_alloc_inode`函数：用来创建及初始化inode节点
 
-TODO
+```CPP
+struct socket *sock_alloc(void) {
+    struct inode *inode;
+    struct socket *sock;
+
+    // 创建inode节点
+    inode = new_inode_pseudo(sock_mnt->mnt_sb);
+    if (!inode)
+        return NULL;
+
+    sock = SOCKET_I(inode);
+
+    inode->i_ino = get_next_ino();
+    inode->i_mode = S_IFSOCK | S_IRWXUGO;
+    inode->i_uid = current_fsuid();
+    inode->i_gid = current_fsgid();
+    inode->i_op = &sockfs_inode_ops;
+
+    return sock;
+}
+
+struct inode *new_inode_pseudo(struct super_block *sb) {
+    struct inode *inode = alloc_inode(sb);
+    ......
+    return inode;
+}
+
+static struct inode *alloc_inode(struct super_block *sb) {
+    struct inode *inode;
+
+    if (sb->s_op->alloc_inode)
+        /* socket 调用这个。 */
+        inode = sb->s_op->alloc_inode(sb);
+    ...
+    return inode;
+}
+
+/* 初始化 socket 结构成员。 */
+static struct inode *sock_alloc_inode(struct super_block *sb) {
+    struct socket_alloc *ei;
+    struct socket_wq *wq;
+
+    ei = kmem_cache_alloc(sock_inode_cachep, GFP_KERNEL);
+    if (!ei)
+        return NULL;
+    wq = kmalloc(sizeof(*wq), GFP_KERNEL);
+    if (!wq) {
+        kmem_cache_free(sock_inode_cachep, ei);
+        return NULL;
+    }
+    init_waitqueue_head(&wq->wait);
+    wq->fasync_list = NULL;
+    wq->flags = 0;
+    ei->socket.wq = wq;
+
+    ei->socket.state = SS_UNCONNECTED;
+    ei->socket.flags = 0;
+    ei->socket.ops = NULL;
+    ei->socket.sk = NULL;
+    ei->socket.file = NULL;
+
+    return &ei->vfs_inode;
+}
+```
+
+6、最后，构建VFS的关联关系sock 与进程（task_struct）关联
+
+```CPP
+static int sock_map_fd(struct socket *sock, int flags) {
+    struct file *newfile;
+
+    /* 进程分配空闲 fd。 */
+    int fd = get_unused_fd_flags(flags);
+    if (unlikely(fd < 0)) {
+        sock_release(sock);
+        return fd;
+    }
+
+    /* 进程为 sock 分配新的文件。 */
+    newfile = sock_alloc_file(sock, flags, NULL);
+    if (likely(!IS_ERR(newfile))) {
+        /* fd 与 file 进行关联。 */
+        fd_install(fd, newfile);
+        return fd;
+    }
+    ...
+}
+
+struct file *sock_alloc_file(struct socket *sock, int flags, const char *dname) {
+    struct file *file = alloc_file_pseudo(SOCK_INODE(sock), ...); // 
+    file->f_path.dentry = d_alloc(sock_mnt->mnt_sb->s_root, &(struct qstr){dname}); // 创建 dentry
+    d_add(file->f_path.dentry, SOCK_INODE(sock)); // 建立 dentry 与 inode 的关联
+    return file;
+}
+
+struct file *sock_alloc_file(struct socket *sock, int flags, const char *dname) {
+    ...
+	// 创建fake文件
+    file = alloc_file_pseudo(SOCK_INODE(sock), sock_mnt, dname,
+                O_RDWR | (flags & O_NONBLOCK),
+                &socket_file_ops);
+    ...
+    sock->file = file;
+	file->f_flags = O_RDWR | (flags & O_NONBLOCK);
+	file->private_data = sock;
+    return file;
+}
+
+void fd_install(unsigned int fd, struct file *file) {
+    __fd_install(current->files, fd, file);
+}
+
+void __fd_install(struct files_struct *files, unsigned int fd,
+        struct file *file) {
+    struct fdtable *fdt;
+    ...
+    fdt = rcu_dereference_sched(files->fdt);
+    ...
+    rcu_assign_pointer(fdt->fd[fd], file);
+    ..
+}
+```
 
 ##  0x05  参考
 -   [VFS](https://akaedu.github.io/book/ch29s03.html)
