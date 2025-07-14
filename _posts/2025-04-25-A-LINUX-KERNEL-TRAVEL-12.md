@@ -298,7 +298,6 @@ lookup_protocol:
 	err = -ESOCKTNOSUPPORT;
 	rcu_read_lock();
 	list_for_each_entry_rcu(answer, &inetsw[sock->type], list) {
-
 		err = 0;
 		/* Check the non-wild match. */
 		if (protocol == answer->protocol) {
@@ -697,6 +696,7 @@ static struct inet_protosw inetsw_array[] = {
 2.  父子sock
 3.  `tcp_v4_rcv->tcp_v4_do_rcv->tcp_rcv_established`的核心过程
 4.  `tcp_v4_rcv`的参数`struct sk_buff *skb`是在哪里获取的，代表什么意义？
+5.  半连接队列及操作实现
 
 ```CPP
 inet_reqsk_alloc(const struct request_sock_ops * ops, struct sock * sk_listener, bool attach_listener) 
@@ -706,7 +706,21 @@ tcp_v4_do_rcv(struct sock * sk, struct sk_buff * skb)
 tcp_v4_rcv(struct sk_buff * skb) 
 ```
 
-####    tcp_v4_rcv的核心流程
+####    主要过程
+1、协议校验与安全防御（`tcp_v4_rcv->tcp_v4_do_rcv`）
+
+2、连接对象创建与初始化（`tcp_rcv_state_process->tcp_v4_conn_request`）
+
+在 `tcp_rcv_state_process` 的 `TCP_LISTEN` 分支中，主要两个步骤：
+-   拒绝非法报文
+-   创建连接请求对象，调用 `icsk->icsk_af_ops->conn_request`（实际为 `tcp_v4_conn_request`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L6205)），此函数中`struct request_sock *req = inet_reqsk_alloc(&tcp_request_sock_ops, sk, false)`代码用来分配 `request_sock`结构，存储连接元数据（即源/目的 IP、端口、序列号），然后对序列号初始化，生成服务端初始序列号（ISN）并预测客户端序列号（用于后续 ACK 验证）
+
+3、半连接队列管理与定时器设置（`tcp_v4_conn_request`）
+
+4、SYN+ACK 报文构造与发送（`tcp_v4_conn_request`）
+
+####    tcp_v4_rcv的核心流程（ALL sk_state）
+先梳理下TCP报文在内核流转的主要代码以及不同状态的处理，函数调用链为`tcp_v4_rcv->tcp_v4_do_rcv->tcp_rcv_state_process`
 
 ```CPP
 int tcp_v4_rcv(struct sk_buff *skb)
@@ -741,11 +755,286 @@ lookup:
 			       th->dest, &refcounted);
 	if (!sk)
 		goto no_tcp_socket;
+    
+    // 处理TIME_WAIT
+    if (sk->sk_state == TCP_TIME_WAIT)
+		goto do_time_wait;
+
+    // 处理TCP_NEW_SYN_RECV
+    if (sk->sk_state == TCP_NEW_SYN_RECV) {
+        // 半连接状态下的处理
+        .....
+    }
+
+    if (sk->sk_state == TCP_LISTEN) {
+		ret = tcp_v4_do_rcv(sk, skb);
+		goto put_and_return;
+	}
 
     .......
 }
 ```
 
+`tcp_v4_do_rcv`函数：
+
+```CPP
+int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
+{
+	struct sock *rsk;
+
+    // TCP_ESTABLISHED
+	if (sk->sk_state == TCP_ESTABLISHED) { /* Fast path */
+        ......
+		tcp_rcv_established(sk, skb, tcp_hdr(skb), skb->len);
+		return 0;
+	}
+
+	if (tcp_checksum_complete(skb))
+		goto csum_err;
+
+    // TCP_LISTEN
+	if (sk->sk_state == TCP_LISTEN) {
+		struct sock *nsk = tcp_v4_cookie_check(sk, skb);
+
+		if (!nsk)
+			goto discard;
+		if (nsk != sk) {
+			sock_rps_save_rxhash(nsk, skb);
+			sk_mark_napi_id(nsk, skb);
+			if (tcp_child_process(sk, nsk, skb)) {
+				rsk = nsk;
+				goto reset;
+			}
+			return 0;
+		}
+	}
+
+	if (tcp_rcv_state_process(sk, skb)) {
+		rsk = sk;
+		goto reset;
+	}
+    ......
+}
+```
+
+`tcp_rcv_state_process`函数：
+
+```CPP
+int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	struct inet_connection_sock *icsk = inet_csk(sk);
+	const struct tcphdr *th = tcp_hdr(skb);
+	struct request_sock *req;
+	int queued = 0;
+	bool acceptable;
+
+	switch (sk->sk_state) {
+	case TCP_CLOSE:
+		goto discard;
+
+    // 这里的case对应的是服务端三次握手的逻辑
+	case TCP_LISTEN:
+		if (th->ack)
+			return 1;
+
+		if (th->rst)
+			goto discard;
+
+		if (th->syn) {
+			if (th->fin)
+				goto discard;
+			local_bh_disable();
+			acceptable = icsk->icsk_af_ops->conn_request(sk, skb) >= 0;
+			local_bh_enable();
+
+			if (!acceptable)
+				return 1;
+			consume_skb(skb);
+			return 0;
+		}
+		goto discard;
+    //客户端第二次握手处理
+	case TCP_SYN_SENT:
+		tp->rx_opt.saw_tstamp = 0;
+        //客户端响应 SYN+ACK 的主要逻辑
+		queued = tcp_rcv_synsent_state_process(sk, skb, th);
+		if (queued >= 0)
+			return queued;
+
+		/* Do step6 onward by hand. */
+		tcp_urg(sk, skb, th);
+		__kfree_skb(skb);
+		tcp_data_snd_check(sk);
+		return 0;
+	}
+
+	tp->rx_opt.saw_tstamp = 0;
+	req = tp->fastopen_rsk;
+	if (req) {
+		WARN_ON_ONCE(sk->sk_state != TCP_SYN_RECV &&
+		    sk->sk_state != TCP_FIN_WAIT1);
+
+		if (!tcp_check_req(sk, skb, req, true))
+			goto discard;
+	}
+
+	if (!th->ack && !th->rst && !th->syn)
+		goto discard;
+
+	if (!tcp_validate_incoming(sk, skb, th, 0))
+		return 0;
+
+	/* step 5: check the ACK field */
+	acceptable = tcp_ack(sk, skb, FLAG_SLOWPATH |
+				      FLAG_UPDATE_TS_RECENT) > 0;
+
+	switch (sk->sk_state) {
+	case TCP_SYN_RECV:
+		if (!acceptable)
+			return 1;
+
+		if (!tp->srtt_us)
+			tcp_synack_rtt_meas(sk, req);
+
+		if (req) {
+			inet_csk(sk)->icsk_retransmits = 0;
+			reqsk_fastopen_remove(sk, req, false);
+		} else {
+			/* Make sure socket is routed, for correct metrics. */
+			icsk->icsk_af_ops->rebuild_header(sk);
+			tcp_init_congestion_control(sk);
+
+			tcp_mtup_init(sk);
+			tp->copied_seq = tp->rcv_nxt;
+			tcp_init_buffer_space(sk);
+		}
+		smp_mb();
+		tcp_set_state(sk, TCP_ESTABLISHED);
+		sk->sk_state_change(sk);
+
+		if (sk->sk_socket)
+			sk_wake_async(sk, SOCK_WAKE_IO, POLL_OUT);
+
+		tp->snd_una = TCP_SKB_CB(skb)->ack_seq;
+		tp->snd_wnd = ntohs(th->window) << tp->rx_opt.snd_wscale;
+		tcp_init_wl(tp, TCP_SKB_CB(skb)->seq);
+
+		if (tp->rx_opt.tstamp_ok)
+			tp->advmss -= TCPOLEN_TSTAMP_ALIGNED;
+
+		if (req) {
+			tcp_rearm_rto(sk);
+		} else
+			tcp_init_metrics(sk);
+
+		if (!inet_csk(sk)->icsk_ca_ops->cong_control)
+			tcp_update_pacing_rate(sk);
+
+		tp->lsndtime = tcp_time_stamp;
+
+		tcp_initialize_rcv_mss(sk);
+		tcp_fast_path_on(tp);
+		break;
+
+	case TCP_FIN_WAIT1: {
+		int tmo;
+		if (req) {
+			if (!acceptable)
+				return 1;
+			reqsk_fastopen_remove(sk, req, false);
+			tcp_rearm_rto(sk);
+		}
+		if (tp->snd_una != tp->write_seq)
+			break;
+
+		tcp_set_state(sk, TCP_FIN_WAIT2);
+		sk->sk_shutdown |= SEND_SHUTDOWN;
+
+		sk_dst_confirm(sk);
+
+		if (!sock_flag(sk, SOCK_DEAD)) {
+			/* Wake up lingering close() */
+			sk->sk_state_change(sk);
+			break;
+		}
+
+		if (tp->linger2 < 0 ||
+		    (TCP_SKB_CB(skb)->end_seq != TCP_SKB_CB(skb)->seq &&
+		     after(TCP_SKB_CB(skb)->end_seq - th->fin, tp->rcv_nxt))) {
+			tcp_done(sk);
+			NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPABORTONDATA);
+			return 1;
+		}
+
+		tmo = tcp_fin_time(sk);
+		if (tmo > TCP_TIMEWAIT_LEN) {
+			inet_csk_reset_keepalive_timer(sk, tmo - TCP_TIMEWAIT_LEN);
+		} else if (th->fin || sock_owned_by_user(sk)) {
+			inet_csk_reset_keepalive_timer(sk, tmo);
+		} else {
+			tcp_time_wait(sk, TCP_FIN_WAIT2, tmo);
+			goto discard;
+		}
+		break;
+	}
+
+	case TCP_CLOSING:
+		if (tp->snd_una == tp->write_seq) {
+			tcp_time_wait(sk, TCP_TIME_WAIT, 0);
+			goto discard;
+		}
+		break;
+
+	case TCP_LAST_ACK:
+		if (tp->snd_una == tp->write_seq) {
+			tcp_update_metrics(sk);
+			tcp_done(sk);
+			goto discard;
+		}
+		break;
+	}
+
+	/* step 6: check the URG bit */
+	tcp_urg(sk, skb, th);
+
+	/* step 7: process the segment text */
+	switch (sk->sk_state) {
+	case TCP_CLOSE_WAIT:
+	case TCP_CLOSING:
+	case TCP_LAST_ACK:
+		if (!before(TCP_SKB_CB(skb)->seq, tp->rcv_nxt))
+			break;
+	case TCP_FIN_WAIT1:
+	case TCP_FIN_WAIT2:
+		if (sk->sk_shutdown & RCV_SHUTDOWN) {
+			if (TCP_SKB_CB(skb)->end_seq != TCP_SKB_CB(skb)->seq &&
+			    after(TCP_SKB_CB(skb)->end_seq - th->fin, tp->rcv_nxt)) {
+				NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPABORTONDATA);
+				tcp_reset(sk);
+				return 1;
+			}
+		}
+		/* Fall through */
+	case TCP_ESTABLISHED:
+		tcp_data_queue(sk, skb);
+		queued = 1;
+		break;
+	}
+
+	/* tcp_data could move socket to TIME-WAIT */
+	if (sk->sk_state != TCP_CLOSE) {
+		tcp_data_snd_check(sk);
+		tcp_ack_snd_check(sk);
+	}
+
+	if (!queued) {
+discard:
+		tcp_drop(sk, skb);
+	}
+	return 0;
+}
+```
 
 ####    状态机切换流程
 `tcp_v4_rcv`是TCP协议的核心处理函数，处理从 IP 层传入的 TCP 数据包，它的入口在IP层的结束位置`ip_local_deliver_finish`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/ip_input.c#L192)
@@ -760,11 +1049,20 @@ static int ip_local_deliver_finish(struct net *net, struct sock *sk, struct sk_b
 }
 ```
 
-`tcp_v4_rcv`
+从IP进入到TCP层时`tcp_v4_rcv`被调用，主要涉及的核心代码如下，其中包含了这些重要函数：
+
+-   [`tcp_conn_request`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L6277)
 
 ```CPP
 int tcp_v4_rcv(struct sk_buff *skb) {
+    struct sock *sk;
     ......
+    // 从连接表（ehash、lhash等）获取sk最新结构
+    // __inet_lookup_skb的实现
+    sk = __inet_lookup_skb(&tcp_hashinfo, skb, __tcp_hdrlen(th), th->source,
+			       th->dest, &refcounted);
+    
+    //server响应SYN packet时，sk_state为TCP_LISTEN状态
     if (sk->sk_state == TCP_LISTEN) {
         // sk_state 
         ret = tcp_v4_do_rcv(sk, skb);
@@ -772,25 +1070,51 @@ int tcp_v4_rcv(struct sk_buff *skb) {
     ......
 }
 
-/* net/ipv4/tcp_ipv4.c */
 int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb) {
-    ...
-    if (tcp_rcv_state_process(sk, skb)) {
-        ...
+    ......
+    //服务器收到客户端的第一步握手 SYN 或者第三步 ACK 都会走到这里
+    if (sk->sk_state == TCP_LISTEN) {
+        //SYN Cookie 检查
+		struct sock *nsk = tcp_v4_cookie_check(sk, skb);
+		if (!nsk)
+			goto discard;
+        //  创建新 socket 处理连接
+		if (nsk != sk) {
+			sock_rps_save_rxhash(nsk, skb);
+			sk_mark_napi_id(nsk, skb);
+            // 服务端收到客户端的ACK（三次握手最后步骤）：处理子 socket（视为完整新连接）
+            // 这里的逻辑见下文
+			if (tcp_child_process(sk, nsk, skb)) {
+				rsk = nsk;
+				goto reset;
+			}
+			return 0;
+		}
+	} else{
+		sock_rps_save_rxhash(sk, skb);
     }
+
+    // 注意：处理 SYN 包，这里传入的sk仍然是旧sk
+    if (tcp_rcv_state_process(sk, skb)) {
+        rsk = sk;
+		goto reset;
+    }
+
+reset:
+	tcp_v4_send_reset(rsk, skb);
     ...
 }
 
-/* net/ipv4/tcp_input.c */
+
 int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb) {
     ...
     switch (sk->sk_state) {
         ...
-    case TCP_LISTEN:
+    case TCP_LISTEN:    // 这里sk的sk_state仍然是TCP_LISTEN状态
         ...
         if (th->syn) {
             ...
-            // 调用tcp_conn_request
+            // 实际上对应的是tcp_v4_conn_request，然后调用tcp_conn_request
             acceptable = icsk->icsk_af_ops->conn_request(sk, skb) >= 0;
             ...
         }
@@ -799,6 +1123,15 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb) {
     ...
 }
 
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_ipv4.c#L1266
+int tcp_v4_conn_request(struct sock *sk, struct sk_buff *skb)
+{
+    ......
+	return tcp_conn_request(&tcp_request_sock_ops,
+				&tcp_request_sock_ipv4_ops, sk, skb);
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L6277
 int tcp_conn_request(struct request_sock_ops *rsk_ops,
              const struct tcp_request_sock_ops *af_ops,
              struct sock *sk, struct sk_buff *skb) {
@@ -809,7 +1142,11 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
         ...
     } else {
         ...
-        /* 服务端给客户端发送 SYN + ACK 包。 */
+        if (!want_cookie)
+            // 加入半连接队列并启动定时器
+			inet_csk_reqsk_queue_hash_add(sk, req, TCP_TIMEOUT_INIT);
+        // 服务端给客户端发送 SYN + ACK 包
+        // https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L6414
         af_ops->send_synack(sk, dst, &fl, req, &foc,
                     !want_cookie ? TCP_SYNACK_NORMAL :
                            TCP_SYNACK_COOKIE);
@@ -826,7 +1163,7 @@ struct request_sock *inet_reqsk_alloc(const struct request_sock_ops *ops,
     if (req) {
         struct inet_request_sock *ireq = inet_rsk(req);
         ...
-        /* 设置 TCP_NEW_SYN_RECV 状态。*/
+        // 设置 TCP_NEW_SYN_RECV 状态（本文内核版本）
         ireq->ireq_state = TCP_NEW_SYN_RECV;
         ...
     }
@@ -835,10 +1172,13 @@ struct request_sock *inet_reqsk_alloc(const struct request_sock_ops *ops,
 }
 ```
 
-##	0x06	client：响应SYN-ACK包
-客户端发送完SYN包，等待接收服务端的SYN-ACK，当该报文到来时，同样会进入到 `tcp_rcv_state_process` 函数中，默认阻塞（`inet_wait_for_connect`）的进程被唤醒处理 SYN-ACK（注意当前socket 的状态是 `TCP_SYN_SENT`）
+####    
 
-不过由于自身 socket 的状态是 TCP_SYN_SENT，所以会进入到另一个不同的分支中去。默认阻塞（`inet_wait_for_connect`）的进程被唤醒处理 ACK。在正常三次握手的情况下，客户端将当前 TCP 状态改变为 `TCP_ESTABLISHED`，并给服务端返回的 SYN 包，发送对应的 ACK
+##	0x06	client：响应SYN-ACK包
+客户端发送完SYN包，等待接收服务端的SYN+ACK，当该报文到来时，同样会进入到 `tcp_rcv_state_process` 函数中，默认阻塞（`inet_wait_for_connect`）的进程被唤醒处理 SYN+ACK（注意客户端当前socket 的状态是 `TCP_SYN_SENT`）。在正常三次握手的情况下，客户端将当前 TCP 状态改变为 `TCP_ESTABLISHED`，并给服务端返回的 SYN 包，发送对应的 ACK
+
+####    主要逻辑
+`tcp_rcv_synsent_state_process`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L5647) 是客户端响应 SYN+ACK 的主要逻辑
 
 ####    状态机切换
 ```CPP
@@ -850,12 +1190,12 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb) {
     ...
 }
 
-/* net/ipv4/tcp_input.c */
+// 除了 ESTABLISHED、TCP_NEW_SYN_RECV 和 TIME_WAIT，其他状态下的 TCP 处理都会走到这个函数
 int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb) {
     ...
     switch (sk->sk_state) {
         ...
-        case TCP_SYN_SENT:
+        case TCP_SYN_SENT:  //客户端处理SYN+ACK包
             ...
             queued = tcp_rcv_synsent_state_process(sk, skb, th);
             ...
@@ -863,18 +1203,27 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb) {
     ...
 }
 
-/* net/ipv4/tcp_input.c */
+//核心逻辑
 static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
                      const struct tcphdr *th) {
+    struct inet_connection_sock *icsk = inet_csk(sk);
+	struct tcp_sock *tp = tcp_sk(sk);
+
     ...
     if (th->ack) {
         ...
-        // 将 TCP 状态改变为 TCP_ESTABLISHED
+        // tcp_ack
+        // https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L3538
+        // tcp_ack->tcp_clean_rtx_queue
+        tcp_ack(sk, skb, FLAG_SLOWPATH);
+
+        // 将 TCP 状态改变为 TCP_ESTABLISHED，连接建立完成
         tcp_finish_connect(sk, skb);
         ...
         if (sk->sk_write_pending ||
             icsk->icsk_accept_queue.rskq_defer_accept ||
             icsk->icsk_ack.pingpong) {
+            //延迟确认
             ...
         } else {
             // 向服务发送 ack
@@ -883,23 +1232,84 @@ static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
     }
 }
 
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L5547
 void tcp_finish_connect(struct sock *sk, struct sk_buff *skb) {
     ...
-    // 客户端设置状态为TCP_ESTABLISHED
+    // 修改socket状态，客户端设置状态为TCP_ESTABLISHED
     tcp_set_state(sk, TCP_ESTABLISHED);
+
+    //初始化拥塞控制
+    tcp_init_congestion_control(sk);
+
+    //开启TCP保活计时器
+    if (sock_flag(sk, SOCK_KEEPOPEN))
+		inet_csk_reset_keepalive_timer(sk, keepalive_time_when(tp));
     ...
+}
+```
+
+`tcp_send_ack`主要用于向服务端发回ACK报文
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_output.c#L3462
+void tcp_send_ack(struct sock *sk)
+{
+	struct sk_buff *buff;
+
+	/* If we have been reset, we may not send again. */
+	if (sk->sk_state == TCP_CLOSE)
+		return;
+    
+    //申请和构造 ACK 包
+	buff = alloc_skb(MAX_TCP_HEADER,
+			 sk_gfp_mask(sk, GFP_ATOMIC | __GFP_NOWARN));
+	if (unlikely(!buff)) {
+        // 异常处理
+		inet_csk_schedule_ack(sk);
+		inet_csk(sk)->icsk_ack.ato = TCP_ATO_MIN;
+		inet_csk_reset_xmit_timer(sk, ICSK_TIME_DACK,
+					  TCP_DELACK_MAX, TCP_RTO_MAX);
+		return;
+	}
+
+    // 发送ACK
+	tcp_transmit_skb(sk, buff, 0, (__force gfp_t)0);
+}
+```
+
+小结下当客户端处理SYN+ACK时，清除了 `connect` 时设置的重传定时器，把当前 socket 状态设置为 `ESTABLISHED`，开启保活计时器后发出第三次握手的 ACK 确认报文
+
+####    tcp_ack的主要过程
+
+```CPP
+static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
+{
+	struct inet_connection_sock *icsk = inet_csk(sk);
+	struct tcp_sock *tp = tcp_sk(sk);
+	struct tcp_sacktag_state sack_state;
+	
+	u32 ack_seq = TCP_SKB_CB(skb)->seq;
+	u32 ack = TCP_SKB_CB(skb)->ack_seq;
+
+    // 删除定时器
+	tcp_rearm_rto(sk);
+
+	//删除发送队列
+	tcp_clean_rtx_queue(sk, prior_fackets, prior_snd_una, &acked,
+				    &sack_state);
 }
 ```
 
 ##	0x07	server：响应ACK包
 服务端收到客户端第三次握手的 ACK 包，服务端将 TCP 状态从 `TCP_NEW_SYN_RECV` 更新为 `TCP_SYN_RECV`，然后才为连接结构`struct sock`分配空间，关于`TCP_NEW_SYN_RECV`的改动请参考[inet: add TCP_NEW_SYN_RECV state]()
 
+即第二次握手（服务端收到SYN报文）TCP 状态是 `TCP_NEW_SYN_RECV`，第三次握手后，TCP 状态才是 `TCP_SYN_RECV`
+
 ####    状态机切换
 
 ```CPP
 int tcp_v4_rcv(struct sk_buff *skb) {
     ...
-    if (sk->sk_state == TCP_NEW_SYN_RECV) {
+    if (sk->sk_state == TCP_NEW_SYN_RECV) { //服务器状态为TCP_NEW_SYN_RECV
         ...
         if (!tcp_filter(sk, skb)) {
             ...
@@ -915,6 +1325,7 @@ struct sock *tcp_check_req(struct sock *sk, struct sk_buff *skb,
                bool fastopen, bool *req_stolen)
 {
     ......
+    // 这里syn_recv_sock对应的是tcp_v4_syn_recv_sock
     child = inet_csk(sk)->icsk_af_ops->syn_recv_sock(sk, skb, req, NULL,
                              req, &own_req);
     ......
