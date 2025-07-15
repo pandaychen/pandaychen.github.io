@@ -153,10 +153,51 @@ struct proto tcp_prot = {
 ##	0x02	server：socket实现
 当调用`socket`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L1258)创建`struct socket`结构时，在用户层视角只看到返回了一个文件描述符 fd，内核做了哪些事情？
 ```CPP
-
+int socket(int domain, int type, int protocol);
 ```
 
 ####	socket调用的细节
+创建 socket的过程如下，由于socket也是文件，所以需要关联到VFS即sockfs文件系统，参考[前文](https://pandaychen.github.io/2024/11/20/A-LINUX-KERNEL-TRAVEL-3/#sock_fs文件系统)
+
+1.  文件部分（VFS）
+2.  网络部分
+3.  建立进程`task_struct`与打开文件描述符之间、VFS核心结构之间的关联关系
+
+```text
+#------------------- 用户态 ---------------------------
+socket
+#------------------- 内核态 ---------------------------
+__x64_sys_socket # 内核系统调用
+__sys_socket 
+    |-- sock_create 
+        |-- __sock_create 
+#------------------- VFS ---------------------------
+            |-- sock_alloc 
+                |-- new_inode_pseudo 
+                    |-- alloc_inode 
+                        |-- sock_alloc_inode 
+                            |-- kmem_cache_alloc
+#------------------- 网络部分 ---------------------------
+            |-- inet_create # pf->create 
+                |-- sk_alloc 
+                    |-- sk_prot_alloc 
+                        |-- kmem_cache_alloc
+                |-- inet_sk
+                |-- sock_init_data
+                    |-- sk_init_common 
+                    |-- timer_setup
+                |-- sk->sk_prot->init(sk) # tcp_v4_init_sock 
+                    |-- tcp_init_sock
+#------------------- 进程/VFS关系 ------------------------
+    |-- sock_map_fd # net/socket.c
+        |-- get_unused_fd_flags 
+        |-- sock_alloc_file 
+            |-- alloc_file_pseudo 
+        |-- fd_install
+            |-- __fd_install 
+                |-- fdt = rcu_dereference_sched(files->fdt)
+                |-- rcu_assign_pointer(fdt->fd[fd], file)
+```
 
 ![socket-api-flow]()
 
@@ -1078,11 +1119,12 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb) {
 		struct sock *nsk = tcp_v4_cookie_check(sk, skb);
 		if (!nsk)
 			goto discard;
-        //  创建新 socket 处理连接
 		if (nsk != sk) {
+			// 创建新 socket 处理连接
 			sock_rps_save_rxhash(nsk, skb);
 			sk_mark_napi_id(nsk, skb);
-            // 服务端收到客户端的ACK（三次握手最后步骤）：处理子 socket（视为完整新连接）
+            // 服务端收到客户端的ACK（三次握手最后步骤）
+			// 处理子 socket（视为完整新连接）
             // 这里的逻辑见下文
 			if (tcp_child_process(sk, nsk, skb)) {
 				rsk = nsk;
@@ -1094,7 +1136,8 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb) {
 		sock_rps_save_rxhash(sk, skb);
     }
 
-    // 注意：处理 SYN 包，这里传入的sk仍然是旧sk
+    // 注意：本小节的流程
+	// 处理 SYN 包，这里传入的sk仍然是旧sk
     if (tcp_rcv_state_process(sk, skb)) {
         rsk = sk;
 		goto reset;
@@ -1300,76 +1343,136 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 ```
 
 ##	0x07	server：响应ACK包
-服务端收到客户端第三次握手的 ACK 包，服务端将 TCP 状态从 `TCP_NEW_SYN_RECV` 更新为 `TCP_SYN_RECV`，然后才为连接结构`struct sock`分配空间，关于`TCP_NEW_SYN_RECV`的改动请参考[inet: add TCP_NEW_SYN_RECV state]()
+服务端收到客户端第三次握手的 ACK 包，服务端将 TCP 状态从 `TCP_NEW_SYN_RECV` 更新为 `TCP_SYN_RECV`，然后才为连接结构`struct sock`分配空间，关于`TCP_NEW_SYN_RECV`的改动请参考[inet: add TCP_NEW_SYN_RECV state](https://github.com/torvalds/linux/commit/10feb428a5045d5eb18a5d755fbb8f0cc9645626)
 
 即第二次握手（服务端收到SYN报文）TCP 状态是 `TCP_NEW_SYN_RECV`，第三次握手后，TCP 状态才是 `TCP_SYN_RECV`
 
 ####    状态机切换
 
+1、`tcp_v4_rcv->tcp_check_req->tcp_v4_syn_recv_sock->inet_csk_complete_hashdance`：`tcp_check_req` 是处理 TCP 第三次握手（ACK 包）的核心函数，负责验证 ACK 合法性、创建child socket 并迁移连接状态，TCP状态由`TCP_NEW_SYN_RECV`切换为`TCP_SYN_RECV`。涉及到的核心函数
+
+-	`__inet_lookup_skb`
+-	`tcp_check_req`
+
 ```CPP
 int tcp_v4_rcv(struct sk_buff *skb) {
-    ...
+    ......
+	sk = __inet_lookup_skb(&tcp_hashinfo, skb, __tcp_hdrlen(th), th->source,
+			       th->dest, &refcounted);
+
     if (sk->sk_state == TCP_NEW_SYN_RECV) { //服务器状态为TCP_NEW_SYN_RECV
-        ...
-        if (!tcp_filter(sk, skb)) {
-            ...
-            nsk = tcp_check_req(sk, skb, req, false, &req_stolen);
-        }
-        ...
+        // 获取半连接结构request_sock
+		struct request_sock *req = inet_reqsk(sk);	
+		struct sock *nsk;	//NULL
+
+		sk = req->rsk_listener;
+		......
+		// 第一步：tcp_check_req
+		nsk = tcp_check_req(sk, skb, req, false);
+		if (!nsk) {
+			// nsk == NULL,quit
+			reqsk_put(req);
+			goto discard_and_relse;
+		}
+		if (nsk == sk) {
+			// 释放半连接对象，但监听 socket 引用不变
+			reqsk_put(req);
+		} else if (tcp_child_process(sk, nsk, skb)) {	// nsk!=sk，说明成功创建子 socket
+			// 尝试将子 socket 加入全连接队列失败
+			// 向客户端发送RST
+			tcp_v4_send_reset(nsk, skb);
+			// 释放资源
+			goto discard_and_relse;
+		} else {
+			sock_put(sk);
+			return 0;
+		}
     }
-    ...
+    ......
 }
 
 struct sock *tcp_check_req(struct sock *sk, struct sk_buff *skb,
                struct request_sock *req,
                bool fastopen, bool *req_stolen)
 {
+	struct sock *child;
     ......
-    // 这里syn_recv_sock对应的是tcp_v4_syn_recv_sock
+    // 这里syn_recv_sock对应的是 tcp_v4_syn_recv_sock
     child = inet_csk(sk)->icsk_af_ops->syn_recv_sock(sk, skb, req, NULL,
                              req, &own_req);
     ......
-}
 
+	// 完成连接的最终状态迁移与资源移交
+	// 核心作用是将新创建的子 socket 加入全连接队列（AcceptQueue）
+	return inet_csk_complete_hashdance(sk, child, req, own_req);
+}
+```
+
+
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_ipv4.c#L1286
 struct sock *tcp_v4_syn_recv_sock(const struct sock *sk, struct sk_buff *skb,
                   struct request_sock *req,
                   struct dst_entry *dst,
                   struct request_sock *req_unhash,
                   bool *own_req) {
-    ...
-    if (sk_acceptq_is_full(sk))
+    ......
+    if (sk_acceptq_is_full(sk))	
+		//全连接队列满了
         goto exit_overflow;
 
     //创建 sock && 初始化
     newsk = tcp_create_openreq_child(sk, req, skb);
     if (!newsk)
         goto exit_nonewsk;
-    ...
+    ......
+
+	return newsk;
 }
 
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_minisocks.c#L432
 struct sock *tcp_create_openreq_child(const struct sock *sk,
                       struct request_sock *req,
                       struct sk_buff *skb) {
     struct sock *newsk = inet_csk_clone_lock(sk, req, GFP_ATOMIC);
-    ...
+    ......
 }
 
+//
 struct sock *inet_csk_clone_lock(const struct sock *sk,
                  const struct request_sock *req,
                  const gfp_t priority) {
+	// 根据原始sk 复制一个新的struct sock结构出来
     struct sock *newsk = sk_clone_lock(sk, priority);
 
     if (newsk) {
         struct inet_connection_sock *newicsk = inet_csk(newsk);
         //为新连接分配 sock 空间，tcp 改变为 TCP_SYN_RECV
         inet_sk_set_state(newsk, TCP_SYN_RECV);
-        ...
+        ......
     }
     return newsk;
 }
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/core/sock.c#L1483
+struct sock *sk_clone_lock(const struct sock *sk, const gfp_t priority)
+{
+	struct sock *newsk;
+	bool is_charged = true;
+
+	newsk = sk_prot_alloc(sk->sk_prot, priority, sk->sk_family);
+	if (newsk != NULL) {
+		......
+		// newsk 初始化
+	}
+	return newsk;
+}
 ```
 
-也同样是在这个阶段，内核将 TCP 状态更新为 `TCP_SYN_RECV`，处理完逻辑后，随后将状态更新为 `TCP_ESTABLISHED`
+
+2、`tcp_v4_rcv->tcp_check_req->tcp_child_process`：`TCP_SYN_RECV`切换为`TCP_ESTABLISHED`，在这个阶段，内核将 TCP 状态更新为 `TCP_SYN_RECV`，处理完逻辑后，随后将状态更新为 `TCP_ESTABLISHED`
 
 ```CPP
 int tcp_v4_rcv(struct sk_buff *skb) {
@@ -1419,6 +1522,35 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb) {
 ```
 
 在`tcp_child_process`函数中这段代码`parent->sk_data_ready(parent)`的作用是什么？为什么需要使用`parent`来调用？
+
+####	重要函数：tcp_v4_syn_recv_sock
+
+
+```cpp
+struct sock *inet_csk_reqsk_queue_add(struct sock *sk,
+				      struct request_sock *req,
+				      struct sock *child)
+{
+	struct request_sock_queue *queue = &inet_csk(sk)->icsk_accept_queue;
+
+	spin_lock(&queue->rskq_lock);
+	if (unlikely(sk->sk_state != TCP_LISTEN)) {
+		inet_child_forget(sk, req, child);
+		child = NULL;
+	} else {
+		req->sk = child;
+		req->dl_next = NULL;
+		if (queue->rskq_accept_head == NULL)
+			queue->rskq_accept_head = req;
+		else
+			queue->rskq_accept_tail->dl_next = req;
+		queue->rskq_accept_tail = req;
+		sk_acceptq_added(sk);
+	}
+	spin_unlock(&queue->rskq_lock);
+	return child;
+}
+```
 
 ##	0x08	server：accept操作
 服务端`accept`系统调用的功能就是从已经建立好的全连接队列（链表）中取出一个返回给用户进程。当 `accept` 之后，通常服务端进程会创建一个新的 socket 出来，专门用于和对应的客户端通信，然后把它放到当前进程的打开文件列表中，这里内核数据结构关系如下（注意到`file.file_operations`是指向`socket_file_ops`）
@@ -1793,5 +1925,6 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 -	[Linux内核网络（三）：Linux内核中socket函数的实现](https://www.kerneltravel.net/blog/2020/network_ljr_no3/)
 -	[数据包发送](https://www.cnblogs.com/mysky007/p/12347293.html)
 -	[[内核源码] 网络协议栈 - tcp 三次握手状态](https://wenfh2020.com/2021/08/17/kernel-tcp-handshakes/)
--	[](https://wenfh2020.com/2021/08/07/linux-kernel-connect/)
+-	[[内核源码] 网络协议栈 - connect (tcp)](https://wenfh2020.com/2021/08/07/linux-kernel-connect/)
 -   [[内核源码] 网络协议栈 - listen (tcp)](https://wenfh2020.com/2021/07/21/kernel-sys-listen/)
+-   [[内核源码] 网络协议栈 - socket (tcp)](https://wenfh2020.com/2021/07/13/kernel-sys-socket/)
