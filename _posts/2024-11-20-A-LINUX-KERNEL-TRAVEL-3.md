@@ -1005,69 +1005,73 @@ if(real_iterate){
 其他相关知识点可以参考[Linux 内核之旅（一）：进程](https://pandaychen.github.io/2024/10/02/A-LINUX-KERNEL-TRAVEL-1/#0x05-关联文件系统)
 
 ####	SOCK_FS文件系统
-socket在Linux中对应的特殊文件系统叫sockfs，每创建一个socket，就在sockfs中创建了一个特殊的文件，同时创建了sockfs文件系统中的inode，该inode唯一标识当前socket的通信，那么sockfs是如何注册到VFS中的？本节就简单讨论这个问题
+socket在Linux中对应的特殊文件系统叫sockfs，每创建一个socket，就在sockfs中创建了一个特殊的文件，同时创建了sockfs文件系统中的inode，该inode唯一标识当前socket的通信，那么sockfs是如何注册到VFS中的？
 
 1、核心结构体（参考上文）
 
 -	`struct file_system_type`：每一种文件系统必须要有自己的`file_system_type`结构
 -	`struct sock_fs_type`：在Linux内核中`sock_fs_type`结构定义代表了sockfs的网络文件系统
--	`struct vfsmount`与`struct mount`：
+-	`struct vfsmount`与`struct mount`
+-	`*_operations`
 
 ```CPP
-//sock 文件类型
+//sockfs 文件类型
 static struct file_system_type sock_fs_type = {
 	.name = "sockfs",
 	.mount = sockfs_mount,	//for mount
 	.kill_sb = kill_anon_super,
 };
-```
 
-**进程创建一个 socket，需要把该 socket 关联到一个已打开文件，这样才方便进程进行管理**
-
-```CPP
-/* include/linux/mount.h */
 struct vfsmount {
     struct dentry *mnt_root;    /* root of the mounted tree */
     struct super_block *mnt_sb;    /* pointer to superblock */
     int mnt_flags;
 } __randomize_layout;
 
-/* net/socket.c */
+// sockfs mount类型
 static struct vfsmount *sock_mnt __read_mostly;
+```
 
-/* sock 文件操作 */
+进程创建一个 socket，需要把该 socket 关联到一个已打开文件，这样才方便进程进行管理，那么是如何把`struct socket`与VFS以及`task_struct`进行关联的？从`socket_alloc`结构可以略微看出些端倪（直观上通过`task_struct->fdtable->file->dentry->inode`就可以找到对应的`struct socket`结构）
+
+```CPP
+// socket_alloc：sock 与 inode 文件节点关联结构
+struct socket_alloc {
+	struct socket socket;
+	struct inode vfs_inode;
+};
+
+// 从 inode 节点结构获得 socket 成员
+static inline struct socket *SOCKET_I(struct inode *inode)
+{
+	return &container_of(inode, struct socket_alloc, vfs_inode)->socket;
+}
+
+static inline struct inode *SOCK_INODE(struct socket *socket)
+{
+	return &container_of(socket, struct socket_alloc, socket)->vfs_inode;
+}
+```
+
+sockfs关联的`file_operations`、`inode_operaions`、`dentry_operations`以及`super_operations`的定义：
+
+```CPP
+//super_block
 static const struct super_operations sockfs_ops = {
-    .alloc_inode    = sock_alloc_inode,
+    .alloc_inode    = sock_alloc_inode,	//在alloc_inode函数中sb->s_op->alloc_inode(sb)调用，用于创建一个inode（sock）
     .destroy_inode  = sock_destroy_inode,
     .statfs         = simple_statfs,
 };
 
-/* include/sock.h 
- * sock 与 inode 文件节点关联结构。*/
-struct socket_alloc {
-    struct socket socket;
-    struct inode vfs_inode;
+static const struct inode_operations sockfs_inode_ops = {
+	.listxattr = sockfs_listxattr,
+	.setattr = sockfs_setattr,
 };
 
-/* include/net/sock.h 
- * 从文件节点结构获得 socket 成员。*/
-static inline struct socket *SOCKET_I(struct inode *inode) {
-    return &container_of(inode, struct socket_alloc, vfs_inode)->socket;
-}
+static const struct dentry_operations sockfs_dentry_operations = {
+	.d_dname  = sockfs_dname, //readlink /proc/self/fd/0
+};
 
-/* include/linux/fs.h */
-struct file_operations {
-    struct module *owner;
-    loff_t (*llseek) (struct file *, loff_t, int);
-    ssize_t (*read) (struct file *, char __user *, size_t, loff_t *);
-    ssize_t (*write) (struct file *, const char __user *, size_t, loff_t *);
-    ...
-} __randomize_layout;
-
-/* net/socket.c
- * Socket files have a set of 'special' operations as well as the generic file ones. These don't appear
- * in the operation structures but are done directly via the socketcall() multiplexor.
- */
 static const struct file_operations socket_file_ops = {
     .owner      =    THIS_MODULE,
     .llseek     =    no_llseek,
@@ -1082,12 +1086,6 @@ static const struct file_operations socket_file_ops = {
     .splice_write = generic_splice_sendpage,
     .splice_read  = sock_splice_read,
 };
-```
-
-sockfs关联的`file_operations`、`inode_operaions`、`dentry_operations`以及`super_operations`的定义：
-
-```CPP
-
 ```
 
 2、sockfs文件系统的注册过程
@@ -1139,7 +1137,7 @@ static struct file_system_type **find_filesystem(const char *name, unsigned len)
 }
 ```
 
-在返回`register_filesystem`函数后，若检查OK，就把当前要注册的文件系统挂到尾端`file_system_type`的`next`指针上，串联进链表，至此SOCK_FS文件系统模块就注册完成
+在返回`register_filesystem`函数后，若检查OK，就把当前要注册的文件系统挂到尾端`file_system_type`的`next`指针上，串联进链表，至此`SOCK_FS`文件系统模块就注册完成
 
 3、sockfs文件系统的安装
 
@@ -1156,10 +1154,6 @@ struct vfsmount *kern_mount_data(struct file_system_type *type, void *data)
 	//调用vfs_kern_mount
 	mnt = vfs_kern_mount(type, SB_KERNMOUNT, type->name, data);
 	if (!IS_ERR(mnt)) {
-		/*
-		* it is a longterm mount, don't release mnt until
-		* we unmount before file sys is unregistered
-		*/
 		real_mount(mnt)->mnt_ns = MNT_NS_INTERNAL;
 	}
 	return mnt;
@@ -1227,12 +1221,13 @@ mount_fs(struct file_system_type *type, int flags, const char *name, void *data)
 			goto out_free_secdata;
 	}
 
-	// 这里的type->mount是sockfs_mount函数
+	// 这里的type->mount是 sockfs_mount 函数
 	root = type->mount(type, flags, name, data);//调用file_system_type中的 mount方法
 	if (IS_ERR(root)) {
 		error = PTR_ERR(root);
 		goto out_free_secdata;
 	}
+	// 
 	sb = root->d_sb;
 	BUG_ON(!sb);
 	WARN_ON(!sb->s_bdi);
@@ -1243,7 +1238,7 @@ mount_fs(struct file_system_type *type, int flags, const char *name, void *data)
 }
 ```
 
-4、`sockfs_mount`的实现，可以看到`mount_pseudo_xattr`的入参`"socket:"`、`SOCKFS_MAGIC`和`sockfs_ops`，这里关注下`SOCKFS_MAGIC`这个常量，定义在[`magic.h`](https://elixir.bootlin.com/linux/v4.11.6/source/include/uapi/linux/magic.h#L75)
+继续看`sockfs_mount->mount_pseudo_xattr`的实现，可以看到`mount_pseudo_xattr`的入参`"socket:"`、`SOCKFS_MAGIC`和`sockfs_ops`，这里关注下`SOCKFS_MAGIC`这个常量，定义在[`magic.h`](https://elixir.bootlin.com/linux/v4.11.6/source/include/uapi/linux/magic.h#L75)
 
 
 `sockfs_mount`函数进行超级块sb、根root、根dentry相关的创建及初始化操作，其中这段`s->s_d_op=dops`就说指向了`sockfs_ops`结构体，也就是该sockfs文件系统的`struct super_block`的函数操作集指向了`sockfs_ops`（`sockfs_dentry_operations`）
@@ -1267,6 +1262,7 @@ int flags, const char *dev_name, void *data)
 	&sockfs_dentry_operations, SOCKFS_MAGIC);
 }
 
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/libfs.c#L240
 struct dentry *mount_pseudo_xattr(struct file_system_type *fs_type, char *name,
 const struct super_operations *ops, const struct xattr_handler **xattr,
 const struct dentry_operations *dops, unsigned long magic)
@@ -1274,12 +1270,8 @@ const struct dentry_operations *dops, unsigned long magic)
 	struct super_block *s;
 	struct dentry *dentry;
 	struct inode *root;
-	struct qstr d_name = QSTR_INIT(name, strlen(name));
-
-	s = sget_userns(fs_type, NULL, set_anon_super, SB_KERNMOUNT|SB_NOUSER,
-	&init_user_ns, NULL);
-	if (IS_ERR(s))
-		return ERR_CAST(s);
+	struct qstr d_name = QSTR_INIT(name/* "socket:"*/, strlen(name));
+	......
 
 	s->s_maxbytes = MAX_LFS_FILESIZE;
 	s->s_blocksize = PAGE_SIZE;
@@ -1288,35 +1280,39 @@ const struct dentry_operations *dops, unsigned long magic)
 	s->s_op = ops ? ops : &simple_super_operations;
 	s->s_xattr = xattr;
 	s->s_time_gran = 1;
+	// 新建一个fake inode
 	root = new_inode(s);
 	if (!root)
 		goto Enomem;
-	/*
-	* since this is the first inode, make it number 1. New inodes created
-	* after this must take care not to collide with it (by passing
-	* max_reserved of 1 to iunique).
-	*/
+
 	root->i_ino = 1;
 	root->i_mode = S_IFDIR | S_IRUSR | S_IWUSR;
 	root->i_atime = root->i_mtime = root->i_ctime = current_time(root);
+	// 初始化dentry，并且建立dentry与sb的关联
 	dentry = __d_alloc(s, &d_name);
 	if (!dentry) {
 		iput(root);
 		goto Enomem;
 	}
+	// 建立dentry与inode的关联
 	d_instantiate(dentry, root);
+	// sb的 s_root 指向根dentry
 	s->s_root = dentry;	//设置根root dentry
 	s->s_d_op = dops;	//重要
 	s->s_flags |= SB_ACTIVE;
 	return dget(s->s_root);
-
-	Enomem:
-	deactivate_locked_super(s);
-	return ERR_PTR(-ENOMEM);
+	......
 }
 ```
 
-5、`sock_alloc->sock_alloc_inode`函数：用来创建及初始化inode节点
+可以看出`mount_pseudo_xattr`承担了为伪文件系统sockfs初始化并挂载一个虚拟的根目录结构，建立内核管理文件系统所需的核心对象关联，而无需依赖物理存储设备的主要工作，至此sockfs的安装工作完成
+
+4、最后再介绍下socket在VFS文件系统层面的构造过程：`sock_alloc`函数，在`socket`系统调用执行时会调用，用来创建及初始化inode节点，调用链为`socket()->__sock_create->sock_alloc->sock_alloc_inode`
+
+`sock_alloc` 的主要工作包括：
+-	调用 `new_inode_pseudo` 创建套接字专用的伪文件系统 inode（与 `mount_pseudo_xattr` 中的根 inode 分离）
+-	初始化套接字 inode 的属性
+-	返回 `struct socket` 对象，后续由 `sock_map_fd` 映射到文件描述符
 
 ```CPP
 struct socket *sock_alloc(void) {
@@ -1324,6 +1320,9 @@ struct socket *sock_alloc(void) {
     struct socket *sock;
 
     // 创建inode节点
+	// sock_mnt->mnt_sb指向 sockfs的 sb 节点
+	// https://elixir.bootlin.com/linux/v4.11.6/source/fs/inode.c#L877
+	// new_inode_pseudo->alloc_inode->sock_alloc_inode
     inode = new_inode_pseudo(sock_mnt->mnt_sb);
     if (!inode)
         return NULL;
@@ -1349,26 +1348,20 @@ static struct inode *alloc_inode(struct super_block *sb) {
     struct inode *inode;
 
     if (sb->s_op->alloc_inode)
-        /* socket 调用这个。 */
+		// 去看 struct super_operations sockfs_ops 这里定义了什么函数
         inode = sb->s_op->alloc_inode(sb);
     ...
     return inode;
 }
 
-/* 初始化 socket 结构成员。 */
+// sock_alloc_inode：初始化 socket 结构成员
 static struct inode *sock_alloc_inode(struct super_block *sb) {
     struct socket_alloc *ei;
     struct socket_wq *wq;
 
-    ei = kmem_cache_alloc(sock_inode_cachep, GFP_KERNEL);
-    if (!ei)
-        return NULL;
-    wq = kmalloc(sizeof(*wq), GFP_KERNEL);
-    if (!wq) {
-        kmem_cache_free(sock_inode_cachep, ei);
-        return NULL;
-    }
-    init_waitqueue_head(&wq->wait);
+	.......
+    // 初始化socket等待队列
+	init_waitqueue_head(&wq->wait);
     wq->fasync_list = NULL;
     wq->flags = 0;
     ei->socket.wq = wq;
@@ -1379,67 +1372,88 @@ static struct inode *sock_alloc_inode(struct super_block *sb) {
     ei->socket.sk = NULL;
     ei->socket.file = NULL;
 
+	// 返回给调用方 struct inode的地址
+	// 通过这个地址可以找到socket_alloc首地址，从而找到socket_alloc.socket成员
     return &ei->vfs_inode;
 }
 ```
 
-6、最后，构建VFS的关联关系sock 与进程（task_struct）关联
+socket系统调用在VFS层面的最后工作是构建VFS中sock 与进程（`task_struct`）关联，即将新创建的 socket 结构体与文件描述符fd关联，使其能通过 VFS 以文件形式被用户空间操作
 
 ```CPP
 static int sock_map_fd(struct socket *sock, int flags) {
     struct file *newfile;
 
-    /* 进程分配空闲 fd。 */
+    // 进程分配空闲 fd
     int fd = get_unused_fd_flags(flags);
-    if (unlikely(fd < 0)) {
-        sock_release(sock);
-        return fd;
-    }
 
-    /* 进程为 sock 分配新的文件。 */
+    // 进程为 sock 分配新的文件，见下面
     newfile = sock_alloc_file(sock, flags, NULL);
     if (likely(!IS_ERR(newfile))) {
-        /* fd 与 file 进行关联。 */
+        // fd 与 file 进行关联
         fd_install(fd, newfile);
         return fd;
     }
-    ...
+    ......
 }
 
-struct file *sock_alloc_file(struct socket *sock, int flags, const char *dname) {
-    struct file *file = alloc_file_pseudo(SOCK_INODE(sock), ...); // 
-    file->f_path.dentry = d_alloc(sock_mnt->mnt_sb->s_root, &(struct qstr){dname}); // 创建 dentry
-    d_add(file->f_path.dentry, SOCK_INODE(sock)); // 建立 dentry 与 inode 的关联
-    return file;
-}
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L395
+struct file *sock_alloc_file(struct socket *sock, int flags, const char *dname)
+{
+	struct qstr name;
+	struct path path;
+	struct file *file;
 
-struct file *sock_alloc_file(struct socket *sock, int flags, const char *dname) {
-    ...
+	if (dname) {
+		name.name = dname;
+		name.len = strlen(name.name);
+	} else if (sock->sk) {
+		name.name = sock->sk->sk_prot_creator->name;
+		name.len = strlen(name.name);
+	}
+
+	// 创建 dentry
+	path.dentry = d_alloc_pseudo(sock_mnt->mnt_sb, &name);
+
+	path.mnt = mntget(sock_mnt);
+
+	// 建立 dentry 与 inode 的关联
+	d_instantiate(path.dentry, SOCK_INODE(sock));
+
 	// 创建fake文件
-    file = alloc_file_pseudo(SOCK_INODE(sock), sock_mnt, dname,
-                O_RDWR | (flags & O_NONBLOCK),
-                &socket_file_ops);
-    ...
-    sock->file = file;
+	file = alloc_file(&path, FMODE_READ | FMODE_WRITE,
+		  &socket_file_ops);
+
+	......
+	// socket指向file
+	sock->file = file;
 	file->f_flags = O_RDWR | (flags & O_NONBLOCK);
+	// 将file的private_data 指向socket，方便定位
 	file->private_data = sock;
-    return file;
+	return file;
 }
 
+// fd_install：将fd文件描述符加入fdtable中
 void fd_install(unsigned int fd, struct file *file) {
     __fd_install(current->files, fd, file);
 }
 
 void __fd_install(struct files_struct *files, unsigned int fd,
-        struct file *file) {
+    struct file *file) {
     struct fdtable *fdt;
-    ...
+    ......
     fdt = rcu_dereference_sched(files->fdt);
-    ...
+    ......
     rcu_assign_pointer(fdt->fd[fd], file);
-    ..
+    ......
 }
 ```
+
+上面有个细节是在`sock_alloc_file`函数中`file->private_data=sock`与`file->dentry->inode->socket(socket_alloc)`二者最终指向同一个 `struct socket` 对象，但是访问路径和设计目的是不同的，这里也能够反映出VFS设计者分层的意义（VFS中很多这种case）
+
+-	性能优化：`file->private_data` 提供零开销直达 socket 的路径，避免 inode 层级的查找，适合数据收/发等高频操作
+-	统一文件模型：inode 维护文件系统层面的通用属性（如权限、时间戳），确保 socket 文件能被 `ls`、`stat` 等识别
+-	VFS的架构分层：`struct socket` 封装协议无关的操作，如 `bind/connect`等；而`struct inode` 处理文件系统通用逻辑，如路径解析、权限检查等）
 
 ##  0x05  参考
 -   [VFS](https://akaedu.github.io/book/ch29s03.html)
