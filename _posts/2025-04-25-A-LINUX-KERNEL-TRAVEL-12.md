@@ -1599,6 +1599,70 @@ struct sock *sk_clone_lock(const struct sock *sk, const gfp_t priority)
 }
 ```
 
+在跟踪完`syn_rcv_sock`之后，正常情况下会运行到`inet_csk_complete_hashdance(sk, child, req, own_req)`，此函数负责将新建立的连接从半连接队列转移到全连接队列（accept 队列）
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/inet_connection_sock.c#L947
+/*
+struct sock *sk         // 监听套接字（父套接字）
+struct sock *child      // 新创建的子套接字（代表新连接）
+struct request_sock *req // 半连接队列中的请求块
+bool own_req              // 资源所有权标志
+*/
+struct sock *inet_csk_complete_hashdance(struct sock *sk, struct sock *child,
+					 struct request_sock *req, bool own_req)
+{
+	if (own_req) {
+		// 从半连接队列移除请求req
+		inet_csk_reqsk_queue_drop(sk, req);
+		// 更新半连接队列计数
+		reqsk_queue_removed(&inet_csk(sk)->icsk_accept_queue, req);
+		// 加入全连接队列（重要）
+		if (inet_csk_reqsk_queue_add(sk, req, child))
+			return child;	//返回child socket
+	}
+	/*
+	own_req的核心作用：
+	若为 true，表示当前路径成功创建了 child且需处理队列转移；
+	若为 false，说明其他路径已处理该请求，需释放 child避免重复操作
+	*/
+	bh_unlock_sock(child);
+	sock_put(child);
+	return NULL;
+}
+```
+
+继续分析下`inet_csk_reqsk_queue_add`的实现，根据上文可以了解到，当前版本的全连接队列通过链表管理（`rskq_accept_head`和 `rskq_accept_tail`）
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/inet_connection_sock.c#L922
+struct sock *inet_csk_reqsk_queue_add(struct sock *sk,
+				      struct request_sock *req,
+				      struct sock *child)
+{
+	struct request_sock_queue *queue = &inet_csk(sk)->icsk_accept_queue;
+
+	// 加自旋锁保护队列
+	spin_lock(&queue->rskq_lock);
+	if (unlikely(sk->sk_state != TCP_LISTEN)) {
+		inet_child_forget(sk, req, child);
+		child = NULL;
+	} else {
+		// 关联子套接字到请求块
+		req->sk = child;
+		req->dl_next = NULL;
+		// 链表插入操作
+		if (queue->rskq_accept_head == NULL)	// 队列为空时
+			queue->rskq_accept_head = req;	 	// 设为头节点
+		else									// 队列非空
+			queue->rskq_accept_tail->dl_next = req;	// 尾插法
+		queue->rskq_accept_tail = req;			// 更新尾指针
+		sk_acceptq_added(sk);					// 增加全连接队列计数（sk->sk_ack_backlog++）
+	}
+	spin_unlock(&queue->rskq_lock);				 // 解锁
+	return child;
+}
+```
 
 2、`tcp_v4_rcv->tcp_check_req->tcp_child_process`：`TCP_SYN_RECV`切换为`TCP_ESTABLISHED`，在这个阶段，内核将 TCP 状态更新为 `TCP_SYN_RECV`，处理完逻辑后，随后将状态更新为 `TCP_ESTABLISHED`，这一阶段的核心函数是`tcp_child_process`
 
