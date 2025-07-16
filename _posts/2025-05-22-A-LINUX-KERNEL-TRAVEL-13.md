@@ -988,7 +988,7 @@ static inline struct epitem *ep_item_from_wait(wait_queue_t *p)
 -	`tcp_v4_rcv`：处理从 IP 层传入的 TCP 数据包，完成基础校验、套接字查找和队列分发
 -	`tcp_v4_do_rcv`：根据套接字的状态（`TCP_ESTABLISHED`、`TCP_LISTEN`等）分发到具体处理逻辑
 -	`tcp_rcv_established`：处理已建立连接的数据包
--	`tcp_queue_rcv`：将 sk_buff 加入套接字（sock）的 `sk_receive_queue`，供应用读取
+-	`tcp_queue_rcv`：将 `sk_buff` 加入套接字（sock）的 `sk_receive_queue`，供应用读取
 -	`tcp_data_queue`：在慢速路径中处理乱序、窗口外数据等复杂场景
 
 ```CPP

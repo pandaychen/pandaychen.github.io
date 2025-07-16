@@ -96,7 +96,7 @@ struct sock *sk = (struct sock *)icsk;  // 最终转为通用sock
 ```CPP
 static struct inet_protosw inetsw_array[] =
 {
-  {
+  {		//TCP 协议
     .type =       SOCK_STREAM,
     .protocol =   IPPROTO_TCP,
     .prot =       &tcp_prot,	//重要
@@ -104,20 +104,20 @@ static struct inet_protosw inetsw_array[] =
     .flags =      INET_PROTOSW_PERMANENT |
             INET_PROTOSW_ICSK,
   },
-  {
+  {		//UDP 协议
     .type =       SOCK_DGRAM,
     .protocol =   IPPROTO_UDP,
     .prot =       &udp_prot,
     .ops =        &inet_dgram_ops,
     .flags =      INET_PROTOSW_PERMANENT,
-     },
-     {
+  },
+  {	 // ICMP 协议
     .type =       SOCK_DGRAM,
     .protocol =   IPPROTO_ICMP,
     .prot =       &ping_prot,
     .ops =        &inet_sockraw_ops,
     .flags =      INET_PROTOSW_REUSE,
-     },
+  },
 	//....
 }
 ```
@@ -1258,6 +1258,7 @@ static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
         // tcp_ack
         // https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L3538
         // tcp_ack->tcp_clean_rtx_queue
+		// 见下面
         tcp_ack(sk, skb, FLAG_SLOWPATH);
 
         // 将 TCP 状态改变为 TCP_ESTABLISHED，连接建立完成
@@ -1349,7 +1350,7 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 
 ####    状态机切换
 
-1、`tcp_v4_rcv->tcp_check_req->tcp_v4_syn_recv_sock->inet_csk_complete_hashdance`：`tcp_check_req` 是处理 TCP 第三次握手（ACK 包）的核心函数，负责验证 ACK 合法性、创建child socket 并迁移连接状态，TCP状态由`TCP_NEW_SYN_RECV`切换为`TCP_SYN_RECV`。涉及到的核心函数
+1、`tcp_v4_rcv->tcp_check_req->tcp_v4_syn_recv_sock->inet_csk_complete_hashdance`：`tcp_check_req` 是处理 TCP 第三次握手（ACK 包）的核心函数，负责验证 ACK 合法性、创建child socket 并迁移连接状态，TCP状态由`TCP_NEW_SYN_RECV`切换为`TCP_SYN_RECV`。涉及到的核心函数流转如下
 
 -	`__inet_lookup_skb`
 -	`tcp_check_req`
@@ -1371,47 +1372,160 @@ int tcp_v4_rcv(struct sk_buff *skb) {
 		nsk = tcp_check_req(sk, skb, req, false);
 		if (!nsk) {
 			// nsk == NULL,quit
-			reqsk_put(req);
+			reqsk_put(req);	 // 释放半连接对象
 			goto discard_and_relse;
 		}
 		if (nsk == sk) {
 			// 释放半连接对象，但监听 socket 引用不变
 			reqsk_put(req);
 		} else if (tcp_child_process(sk, nsk, skb)) {	// nsk!=sk，说明成功创建子 socket
-			// 尝试将子 socket 加入全连接队列失败
+			// tcp_child_process失败
 			// 向客户端发送RST
 			tcp_v4_send_reset(nsk, skb);
 			// 释放资源
 			goto discard_and_relse;
 		} else {
+			// tcp_child_process成功、
+			// 释放监听 socket 的引用计数
 			sock_put(sk);
 			return 0;
 		}
     }
     ......
-}
 
+discard_it:
+	/* Discard frame. */
+	kfree_skb(skb);
+	return 0;
+
+discard_and_relse:
+	sk_drops_add(sk, skb);
+	if (refcounted)
+		sock_put(sk);
+	goto discard_it;
+}
+```
+
+`tcp_check_req`函数主要用于负责验证 ACK 合法性、创建子 socket 并迁移连接状态，注意`tcp_check_req`函数有三种返回值（`NULL`、`sk`、`child`），需要结合`tcp_v4_rcv`中调用`nsk = tcp_check_req(sk, skb, req, false)`之后的处理来看
+
+```CPP
+nsk = tcp_check_req(sk, skb, req, false); // 处理第三次握手 ACK，创建子 socket
+if (!nsk) { ... }      // case 1: nsk 为 NULL
+if (nsk == sk) { ... } // case 2: nsk 等于原监听 socket
+else if { tcp_child_process(sk, nsk, skb) } // case 3: nsk 为新创建的子 socket（成功），
+else { ... } //case 4 ：创建子socket成功 && 加全连接队列成功
+```
+
+1、case1，当`nsk == NULL`时，说明无法创建子 socket，可能原因为packet非法或者全连接队列已满`sk_acceptq_is_full(sk)==true`，如果为全连接队列满导致，则参考`tcp_check_req`中标签`listen_overflow`的处理。默认内核的行为如下：
+
+```CPP
+reqsk_put(req);       // 释放半连接对象（request_sock）
+goto discard_and_relse; // 丢弃数据包，释放资源
+```
+
+可增大 `net.core.somaxconn` 和 `listen()` 的 `backlog` 参数，避免队列溢出
+
+2、case2，当`nsk == sk`时（`nsk` 等于原监听 socket `sk`），触发原因为收到重复或无效 ACK，比如收到重复 ACK报文，半连接队列中无匹配的 `request_sock`，但 ACK 序列号合法，可能是重传导致；另一种情况是开启了SYN Cookie 验证通过，未创建半连接对象，需重新生成 `request_sock`，默认内核的行为如下：
+
+```CPP
+reqsk_put(req); // 释放当前临时 req（非必需对象）
+// 继续用监听 socket 处理后续数据包
+```
+
+3、case3，当 `nsk != sk`且`tcp_child_process`返回非`0`表示成功创建子 Socket，但`tcp_child_process`失败，内核默认行为：
+
+```CPP
+tcp_v4_send_reset(nsk, skb); // 向客户端发送 RST
+goto discard_and_relse;       // 释放资源
+```
+
+4、case4，`nsk != sk`且`tcp_child_process`调用成功，此时内核会将子 socket 状态从 `TCP_SYN_RECV` 转为 `TCP_ESTABLISHED`（连接已经先前就移入了全连接队列），随后唤醒因 `accept()` 阻塞进程
+
+```CPP
+/*
+参数 
+sk：监听 Socket（TCP_LISTEN 状态）
+skb：收到的 ACK 数据包
+req：半连接队列中对应的 request_sock（存储 SYN 包信息）
+fastopen：是否启用 TCP Fast Open
+*/
 struct sock *tcp_check_req(struct sock *sk, struct sk_buff *skb,
                struct request_sock *req,
                bool fastopen, bool *req_stolen)
 {
 	struct sock *child;
     ......
+
+	/* Check for pure retransmitted SYN. */
+	// 检查是否为重传的SYN包
+	if (TCP_SKB_CB(skb)->seq == tcp_rsk(req)->rcv_isn &&
+	    flg == TCP_FLAG_SYN &&
+	    !paws_reject) {
+		if (!tcp_oow_rate_limited(sock_net(sk), skb,
+					  LINUX_MIB_TCPACKSKIPPEDSYNRECV,
+					  &tcp_rsk(req)->last_oow_ack_time) &&
+
+		    !inet_rtx_syn_ack(sk, req)) {
+			unsigned long expires = jiffies;
+
+			expires += min(TCP_TIMEOUT_INIT << req->num_timeout,
+				       TCP_RTO_MAX);
+			if (!fastopen)
+				mod_timer_pending(&req->rsk_timer, expires);
+			else
+				req->rsk_timer.expires = expires;
+		}
+		return NULL;
+	}
+
     // 这里syn_recv_sock对应的是 tcp_v4_syn_recv_sock
+	/* OK, ACK is valid, create big socket and
+	 * feed this segment to it. It will repeat all
+	 * the tests. THIS SEGMENT MUST MOVE SOCKET TO
+	 * ESTABLISHED STATE. If it will be dropped after
+	 * socket is created, wait for troubles.
+	 */
     child = inet_csk(sk)->icsk_af_ops->syn_recv_sock(sk, skb, req, NULL,
                              req, &own_req);
+	if (!child)
+		goto listen_overflow;
     ......
 
 	// 完成连接的最终状态迁移与资源移交
 	// 核心作用是将新创建的子 socket 加入全连接队列（AcceptQueue）
 	return inet_csk_complete_hashdance(sk, child, req, own_req);
+listen_overflow:
+	if (!sysctl_tcp_abort_on_overflow) {
+		// 注意：对应net.ipv4.tcp_abort_on_overflow配置
+		// 如果为0（默认配置），则返回NULL，服务端静默丢弃 ACK，客户端重传 ACK 直至超时
+		// 如果为1，则服务端发送 RST 复位连接，客户端收到 ECONNREFUSED
+		inet_rsk(req)->acked = 1;
+		return NULL;
+	}
+embryonic_reset:
+	if (!(flg & TCP_FLAG_RST)) {
+		req->rsk_ops->send_reset(sk, skb);
+	} else if (fastopen) { /* received a valid RST pkt */
+		reqsk_fastopen_remove(sk, req, true);
+		tcp_reset(sk);
+	}
+	.......
+	return NULL;
 }
 ```
 
+`tcp_v4_syn_recv_sock`函数是处理第三次握手ACK包的核心函数，负责创建子套接字并完成连接状态迁移，其核心流程为：
 
+1.	创建子套接字`newsk`：调用`tcp_create_openreq_child(sk, req, skb)`克隆监听套接字，基于监听套接字 `sk` 和半连接对象 `req` 创建子套接字 `newsk`
+2.	初始化子套接字成员，从半连接对象 `req` 中提取客户端和服务端 IP/端口，初始化子套接字`newsk`，初始化顺序为`inet_csk_clone_lock->sk_clone_lock->sk_prot_alloc`
+3.	关联路由与传输层初始化`struct tcp_sock *newtp = tcp_sk(newsk)`
 
 ```CPP
 //https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_ipv4.c#L1286
+// sk：监听套接字（TCP_LISTEN）
+// skb：收到的 ACK 数据包
+// req：半连接对象（存储 SYN 包信息）
+// dst：路由缓存
 struct sock *tcp_v4_syn_recv_sock(const struct sock *sk, struct sk_buff *skb,
                   struct request_sock *req,
                   struct dst_entry *dst,
@@ -1428,9 +1542,14 @@ struct sock *tcp_v4_syn_recv_sock(const struct sock *sk, struct sk_buff *skb,
         goto exit_nonewsk;
     ......
 
+	sk_daddr_set(newsk, ireq->ir_rmt_addr);
+	sk_rcv_saddr_set(newsk, ireq->ir_loc_addr);
+	newinet->inet_saddr	      = ireq->ir_loc_addr;
+
+	......
+
 	return newsk;
 }
-
 
 //https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_minisocks.c#L432
 struct sock *tcp_create_openreq_child(const struct sock *sk,
@@ -1450,7 +1569,12 @@ struct sock *inet_csk_clone_lock(const struct sock *sk,
     if (newsk) {
         struct inet_connection_sock *newicsk = inet_csk(newsk);
         //为新连接分配 sock 空间，tcp 改变为 TCP_SYN_RECV
-        inet_sk_set_state(newsk, TCP_SYN_RECV);
+		newsk->sk_state = TCP_SYN_RECV;
+		newicsk->icsk_bind_hash = NULL;
+
+		inet_sk(newsk)->inet_dport = inet_rsk(req)->ir_rmt_port;	//目的端口
+		inet_sk(newsk)->inet_num = inet_rsk(req)->ir_num;
+		inet_sk(newsk)->inet_sport = htons(inet_rsk(req)->ir_num);	//源端口
         ......
     }
     return newsk;
@@ -1466,13 +1590,19 @@ struct sock *sk_clone_lock(const struct sock *sk, const gfp_t priority)
 	if (newsk != NULL) {
 		......
 		// newsk 初始化
+		// 初始化sock接收队列
+		skb_queue_head_init(&newsk->sk_receive_queue);
+		// 初始化sock等待队列
+		skb_queue_head_init(&newsk->sk_write_queue);
 	}
 	return newsk;
 }
 ```
 
 
-2、`tcp_v4_rcv->tcp_check_req->tcp_child_process`：`TCP_SYN_RECV`切换为`TCP_ESTABLISHED`，在这个阶段，内核将 TCP 状态更新为 `TCP_SYN_RECV`，处理完逻辑后，随后将状态更新为 `TCP_ESTABLISHED`
+2、`tcp_v4_rcv->tcp_check_req->tcp_child_process`：`TCP_SYN_RECV`切换为`TCP_ESTABLISHED`，在这个阶段，内核将 TCP 状态更新为 `TCP_SYN_RECV`，处理完逻辑后，随后将状态更新为 `TCP_ESTABLISHED`，这一阶段的核心函数是`tcp_child_process`
+
+
 
 ```CPP
 int tcp_v4_rcv(struct sk_buff *skb) {
@@ -1495,15 +1625,29 @@ int tcp_v4_rcv(struct sk_buff *skb) {
     }
     ......
 }
+```
 
+重点看一下`tcp_child_process`的实现，该函数的主要作用是将新创建的子 socket 从协议栈移交至应用层，主要工作为：
+
+1. 处理子 socket 的状态迁移，当内核收到第三次 ACK 包后，`tcp_child_process` 通过调用 `tcp_rcv_state_process` 驱动子 socket 状态机，将其状态从 `TCP_SYN_RECV` 更新为 `TCP_ESTABLISHED`，即完成连接的协议栈层就绪，标志连接可传输数据
+2. 触发父进程唤醒（通知 accept()），若子 socket 状态从 `SYN_RECV` 成功迁移至 `ESTABLISHED`，函数会调用监听 socket（`parent`）的 `sk_data_ready()` 回调函数（默认为 `sock_def_readable`），唤醒阻塞在 `accept` 上的进程
+
+```CPP
+// parent：listen socket
+// child：accept socket
 int tcp_child_process(struct sock *parent, struct sock *child,
               struct sk_buff *skb) {
     ...
     if (!sock_owned_by_user(child)) {
+		// 处理状态迁移
+		// TCP_SYN_RECV->TCP_ESTABLISHED
         ret = tcp_rcv_state_process(child, skb);
         /* Wakeup parent, send SIGIO */
         if (state == TCP_SYN_RECV && child->sk_state != state)
             // 非常重要：当新连接到达时，唤醒socket（listenfd）的等待队列！
+			// sk_data_ready() 通过 wake_up_interruptible() 唤醒监听队列上的进程
+			// 若listen socket 配置了异步 I/O（O_ASYNC），会额外发送 SIGIO 信号通知应用层
+			//目的：避免频繁唤醒，仅在连接真正就绪（状态变更）时通知应用层
             parent->sk_data_ready(parent);
     }
     ...
@@ -1522,8 +1666,11 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb) {
 ```
 
 在`tcp_child_process`函数中这段代码`parent->sk_data_ready(parent)`的作用是什么？为什么需要使用`parent`来调用？
+1.	通知对象是listen socket，即`parent`（状态为`TCP_LISTEN`），其任务是接收新连接，而新创建的子socket（`child`）用于实际数据传输，所以需要唤醒listen socket上的关联的sock等待队列。当子socket状态从`TCP_SYN_RECV`迁移到`TCP_ESTABLISHED`后，需要通知listen socket 有新连接就绪，唤醒阻塞在`accept()`进程关联在listen socket的等待队列（`sk->sk_wq`）
 
-####	重要函数：tcp_v4_syn_recv_sock
+2. 子socket，即`child`关联的sock等待队列，在同步阻塞模式下，可以用于唤醒等待数据传输的进程
+
+####	重要函数：inet_csk_reqsk_queue_add
 
 
 ```cpp

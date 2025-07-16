@@ -1449,6 +1449,8 @@ void __fd_install(struct files_struct *files, unsigned int fd,
 }
 ```
 
+![sockfs-relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/sockfs/sockfs-relation.png)
+
 上面有个细节是在`sock_alloc_file`函数中`file->private_data=sock`与`file->dentry->inode->socket(socket_alloc)`二者最终指向同一个 `struct socket` 对象，但是访问路径和设计目的是不同的，这里也能够反映出VFS设计者分层的意义（VFS中很多这种case）
 
 -	性能优化：`file->private_data` 提供零开销直达 socket 的路径，避免 inode 层级的查找，适合数据收/发等高频操作
