@@ -1215,7 +1215,20 @@ struct request_sock *inet_reqsk_alloc(const struct request_sock_ops *ops,
 }
 ```
 
-####    
+`af_ops->send_synack`对应的是 TODO
+
+####   状态迁移的可观测
+额外补充，新版本内核（如`6.16`）提供了一个[观测点](https://elixir.bootlin.com/linux/v6.16-rc6/source/net/ipv4/af_inet.c#L1343)`tracepoint:sock:inet_sock_set_state`，可以用来获取TCP状态的变迁
+
+```CPP
+void inet_sk_set_state(struct sock *sk, int state)
+{
+	//sk->sk_state：旧状态
+	//state：新状态
+	trace_inet_sock_set_state(sk, sk->sk_state, state);
+	sk->sk_state = state;
+}
+```
 
 ##	0x06	client：响应SYN-ACK包
 客户端发送完SYN包，等待接收服务端的SYN+ACK，当该报文到来时，同样会进入到 `tcp_rcv_state_process` 函数中，默认阻塞（`inet_wait_for_connect`）的进程被唤醒处理 SYN+ACK（注意客户端当前socket 的状态是 `TCP_SYN_SENT`）。在正常三次握手的情况下，客户端将当前 TCP 状态改变为 `TCP_ESTABLISHED`，并给服务端返回的 SYN 包，发送对应的 ACK
@@ -1588,12 +1601,16 @@ struct sock *sk_clone_lock(const struct sock *sk, const gfp_t priority)
 
 	newsk = sk_prot_alloc(sk->sk_prot, priority, sk->sk_family);
 	if (newsk != NULL) {
+		sock_copy(newsk, sk);
 		......
 		// newsk 初始化
 		// 初始化sock接收队列
 		skb_queue_head_init(&newsk->sk_receive_queue);
 		// 初始化sock等待队列
 		skb_queue_head_init(&newsk->sk_write_queue);
+
+		sk_set_socket(newsk, NULL);
+		newsk->sk_wq = NULL;
 	}
 	return newsk;
 }
@@ -1666,8 +1683,6 @@ struct sock *inet_csk_reqsk_queue_add(struct sock *sk,
 
 2、`tcp_v4_rcv->tcp_check_req->tcp_child_process`：`TCP_SYN_RECV`切换为`TCP_ESTABLISHED`，在这个阶段，内核将 TCP 状态更新为 `TCP_SYN_RECV`，处理完逻辑后，随后将状态更新为 `TCP_ESTABLISHED`，这一阶段的核心函数是`tcp_child_process`
 
-
-
 ```CPP
 int tcp_v4_rcv(struct sk_buff *skb) {
     ...
@@ -1694,7 +1709,7 @@ int tcp_v4_rcv(struct sk_buff *skb) {
 重点看一下`tcp_child_process`的实现，该函数的主要作用是将新创建的子 socket 从协议栈移交至应用层，主要工作为：
 
 1. 处理子 socket 的状态迁移，当内核收到第三次 ACK 包后，`tcp_child_process` 通过调用 `tcp_rcv_state_process` 驱动子 socket 状态机，将其状态从 `TCP_SYN_RECV` 更新为 `TCP_ESTABLISHED`，即完成连接的协议栈层就绪，标志连接可传输数据
-2. 触发父进程唤醒（通知 accept()），若子 socket 状态从 `SYN_RECV` 成功迁移至 `ESTABLISHED`，函数会调用监听 socket（`parent`）的 `sk_data_ready()` 回调函数（默认为 `sock_def_readable`），唤醒阻塞在 `accept` 上的进程
+2. 触发父进程唤醒（通知 `accept()`），若子 socket 状态从 `SYN_RECV` 成功迁移至 `ESTABLISHED`，函数会调用监听 socket（`parent`）的 `sk_data_ready()` 回调函数（默认为 `sock_def_readable`），唤醒阻塞在 `accept` 上的进程
 
 ```CPP
 // parent：listen socket
@@ -1718,13 +1733,13 @@ int tcp_child_process(struct sock *parent, struct sock *child,
 }
 
 int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb) {
-    ...
+    ......
     switch (sk->sk_state) {
     case TCP_SYN_RECV:
-        ...
+        ......
         // 当前服务端的socket状态是TCP_SYN_RECV，更新为TCP_ESTABLISHED
         tcp_set_state(sk, TCP_ESTABLISHED);
-        ...
+        ......
     }
 }
 ```
@@ -1734,41 +1749,55 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb) {
 
 2. 子socket，即`child`关联的sock等待队列，在同步阻塞模式下，可以用于唤醒等待数据传输的进程
 
-####	重要函数：inet_csk_reqsk_queue_add
+####	重要：__inet_lookup_listener的实现逻辑
+TODO
 
+####	重要：sock对象的创建
+这里来说明下此握手阶段的sock对象创建与系统调用`socket()`的sock对象创建的不同之处
 
-```cpp
-struct sock *inet_csk_reqsk_queue_add(struct sock *sk,
-				      struct request_sock *req,
-				      struct sock *child)
+在服务端收到客户端第一个SYN包时，`tcp_v4_rcv->tcp_child_process->tcp_child_process->tcp_child_process` 的[过程](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_ipv4.c#L1434)，通过`icsk->icsk_af_ops->conn_request(sk, skb)`创建半连接队列hashtable表项（最终调用的函数为`inet_reqsk_alloc`），这个半连接表项对应的结构为[`inet_reqsk_alloc`](https://elixir.bootlin.com/linux/v4.11.6/source/include/net/request_sock.h#L49)，并非一个完整的`struct sock`对象
+
+当服务端收到客户端第三次ACK时且正常完成握手后，才会把这个`inet_reqsk_alloc`结构升级为正常的`struct sock`，关联调用链为`tcp_v4_syn_recv_sock->tcp_create_openreq_child->inet_csk_clone_lock->sk_clone_lock`
+
+```text
+半连接结构inet_reqsk_alloc + 监听listen sock = 新连接的sock结构
+```
+
+再贴一下`sk_clone_lock`的[实现代码](https://elixir.bootlin.com/linux/v4.11.6/source/net/core/sock.c#L1490)，在克隆场景`sk_clone_lock`中，子 sock 通过复制父对象状态继承字段值，无需再次初始化（**子 sock 需继承父对象的上下文如回调函数、队列状态，确保协议栈行为一致**）。此外，这里格外关注`sk_wq`等待队列与`sk_data_ready` sock就绪回调函数两个字段
+
+```CPP
+struct sock *sk_clone_lock(const struct sock *sk, const gfp_t priority)
 {
-	struct request_sock_queue *queue = &inet_csk(sk)->icsk_accept_queue;
+	struct sock *newsk;
+	bool is_charged = true;
+	// sk_prot_alloc(prot, ...)：分配子 sock 内存
+	// prot 是父 sock->sk_prot，决定了分配的内存大小
+	// 如 TCP 对应 tcp_prot，TCPv6 对应 tcpv6_prot
+	newsk = sk_prot_alloc(sk->sk_prot, priority, sk->sk_family);
+	if (newsk != NULL) {
+		struct sk_filter *filter;
 
-	spin_lock(&queue->rskq_lock);
-	if (unlikely(sk->sk_state != TCP_LISTEN)) {
-		inet_child_forget(sk, req, child);
-		child = NULL;
-	} else {
-		req->sk = child;
-		req->dl_next = NULL;
-		if (queue->rskq_accept_head == NULL)
-			queue->rskq_accept_head = req;
-		else
-			queue->rskq_accept_tail->dl_next = req;
-		queue->rskq_accept_tail = req;
-		sk_acceptq_added(sk);
+		// 重点：复制父 sock 字段到子对象newsk
+		// 包括 sk_data_ready、sk_wq 在内的核心字段
+		sock_copy(newsk, sk);
+
+		sk_set_socket(newsk, NULL);
+		newsk->sk_wq = NULL;
 	}
-	spin_unlock(&queue->rskq_lock);
-	return child;
+out:
+	return newsk;
 }
 ```
+
+-	`sk_data_ready`成员：由父对象的 `sock_copy()` 复制，直接继承父对象的回调函数，通常为 `sock_def_readable`
+-	`sk_wq`：同样由父对象的 `sock_copy()` 复制，初始为空队列，后续由用户进程通过 `epoll_ctl()` 或 `select()` 等动态添加等待项
+
+这里着重点出`sk_wq`与`sk_data_ready`的意义是，用户态编程时，当某个fd（关联sock数据就绪时）可读可写时，内核会通过这二者配合的机制唤醒上层进程进行数据处理
 
 ##	0x08	server：accept操作
 服务端`accept`系统调用的功能就是从已经建立好的全连接队列（链表）中取出一个返回给用户进程。当 `accept` 之后，通常服务端进程会创建一个新的 socket 出来，专门用于和对应的客户端通信，然后把它放到当前进程的打开文件列表中，这里内核数据结构关系如下（注意到`file.file_operations`是指向`socket_file_ops`）
 
-![]()
-
-![]()
+![acceptfd_relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/kfngxl/epoll-nowm/acceptfd_relation-1.png)
 
 先回想一下`struct socket`的[结构]()，其中包含了非常重要的`sock`成员，也是 socket 的核心内核对象，其中发送队列、接收队列、等待队列等核心数据结构都位于此
 
@@ -1784,6 +1813,7 @@ struct socket {
 `accept`系统调用核心代码如下，主要分为四步即新建socket并初始化、初始化socket的VFS结构、接收连接（fd），最后添加新fd到当前进程的打开文件列表中
 
 ```CPP
+// https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L1470
 // 返回一个新fd，用于后续客户端连接
 SYSCALL_DEFINE4(accept4, int, fd, struct sockaddr __user *, upeer_sockaddr,
         int __user *, upeer_addrlen, int, flags)
@@ -1817,12 +1847,12 @@ SYSCALL_DEFINE4(accept4, int, fd, struct sockaddr __user *, upeer_sockaddr,
 
 ```CPP
 const struct proto_ops inet_stream_ops = {
-    //...
+	......
     .accept        = inet_accept,		//新连接接收
     .listen        = inet_listen,
     .sendmsg       = inet_sendmsg,
     .recvmsg       = inet_recvmsg,
-    //...
+
 }
 ```
 
@@ -1869,13 +1899,18 @@ static const struct file_operations socket_file_ops = {
 
 3、接收连接的核心逻辑：`sock->ops->accept(sock, newsock, sock->file->f_flags)`，对应的方法是 [`inet_accept`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/af_inet.c#L692)，此函数执行时会从握手队列（全连接队列）里直接获取创建好的 sock 并关联与该 `struct sock`的关系
 
+这里先回想下在三次握手最后阶段（服务端处理ACK包），服务端通过调用`tcp_v4_syn_recv_sock->inet_csk_complete_hashdance->inet_csk_reqsk_queue_add`将新连接加入到全连接队列中，那么对于accept，内核就需要把连接从全连接队列中取出来，并通知（应用层）来取
+
 ```CPP
 int inet_accept(struct socket *sock, struct socket *newsock, int flags, bool kern)
 {
-	//....
+	......
+	struct sock *sk1 = sock->sk;
 	//这里对应的是 inet_csk_accept
 	//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/inet_connection_sock.c#L427
 	struct sock *sk2 = sk1->sk_prot->accept(sk1, flags, &err, kern);
+
+	// 重要：struct sock与struct socket结构建立关联
 	sock_graft(sk2, newsock);
 
 	newsock->state = SS_CONNECTED;
@@ -1956,7 +1991,7 @@ struct sock *inet_csk_accept(struct sock *sk, int flags, int *err, bool kern){
     struct request_sock *req;
     struct sock *newsk;
 
-	//....
+	......
 
     /* 不是listen状态 */
     if (sk->sk_state != TCP_LISTEN)
@@ -2105,11 +2140,222 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 ```
 
 ##	0x09	数据传输
+回到`tcp_v4_rcv->tcp_v4_do_rcv`的处理过程中，数据接收的核心逻辑位于`tcp_rcv_established`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L5351)
 
+```CPP
+int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
+{
+	struct sock *rsk;
+
+	if (sk->sk_state == TCP_ESTABLISHED) { /* Fast path */
+		struct dst_entry *dst = sk->sk_rx_dst;
+
+		sock_rps_save_rxhash(sk, skb);
+		sk_mark_napi_id(sk, skb);
+		if (dst) {
+			if (inet_sk(sk)->rx_dst_ifindex != skb->skb_iif ||
+			    !dst->ops->check(dst, 0)) {
+				dst_release(dst);
+				sk->sk_rx_dst = NULL;
+			}
+		}
+		tcp_rcv_established(sk, skb, tcp_hdr(skb), skb->len);
+		return 0;
+	}
+	......
+}
+```
+
+####	tcp_rcv_established
+`tcp_rcv_established`的逻辑比较复杂，其核心逻辑是通过快速路径（Fast Path） 和 慢速路径（Slow Path）的分流机制优化数据处理效率，首先了解下：
+
+-	`tcp_queue_rcv`：负责将数据包加入接收队列
+-	`tcp_data_queue`：TODO
+
+在`tcp_rcv_established`中可以看到数据成功接收时唤醒逻辑，大致为数据入队后立即调用 `sk_data_ready` 回调函数：
+
+```CPP
+eaten = tcp_queue_rcv(.......); // 数据入队
+sk->sk_data_ready(sk, 0);  // 触发唤醒
+```
+
+####	fast path VS slow path
+
+TODO
+
+```CPP
+void tcp_rcv_established(struct sock *sk, struct sk_buff *skb,
+			 const struct tcphdr *th, unsigned int len)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+
+	if (unlikely(!sk->sk_rx_dst))
+		inet_csk(sk)->icsk_af_ops->sk_rx_dst_set(sk, skb);
+
+	tp->rx_opt.saw_tstamp = 0;
+
+	if ((tcp_flag_word(th) & TCP_HP_BITS) == tp->pred_flags &&
+	    TCP_SKB_CB(skb)->seq == tp->rcv_nxt &&
+	    !after(TCP_SKB_CB(skb)->ack_seq, tp->snd_nxt)) {
+		int tcp_header_len = tp->tcp_header_len;
+
+		/* Check timestamp */
+		if (tcp_header_len == sizeof(struct tcphdr) + TCPOLEN_TSTAMP_ALIGNED) {
+			/* No? Slow path! */
+			if (!tcp_parse_aligned_timestamp(tp, th))
+				goto slow_path;
+
+			if ((s32)(tp->rx_opt.rcv_tsval - tp->rx_opt.ts_recent) < 0)
+				goto slow_path;
+
+		}
+
+		if (len <= tcp_header_len) {
+			/* Bulk data transfer: sender */
+			if (len == tcp_header_len) {
+				if (tcp_header_len ==
+				    (sizeof(struct tcphdr) + TCPOLEN_TSTAMP_ALIGNED) &&
+				    tp->rcv_nxt == tp->rcv_wup)
+					tcp_store_ts_recent(tp);
+
+				tcp_ack(sk, skb, 0);
+				__kfree_skb(skb);
+				tcp_data_snd_check(sk);
+				return;
+			} else { /* Header too small */
+				TCP_INC_STATS(sock_net(sk), TCP_MIB_INERRS);
+				goto discard;
+			}
+		} else {
+			int eaten = 0;
+			bool fragstolen = false;
+
+			if (tp->ucopy.task == current &&
+			    tp->copied_seq == tp->rcv_nxt &&
+			    len - tcp_header_len <= tp->ucopy.len &&
+			    sock_owned_by_user(sk)) {
+				__set_current_state(TASK_RUNNING);
+
+				if (!tcp_copy_to_iovec(sk, skb, tcp_header_len)) {
+					if (tcp_header_len ==
+					    (sizeof(struct tcphdr) +
+					     TCPOLEN_TSTAMP_ALIGNED) &&
+					    tp->rcv_nxt == tp->rcv_wup)
+						tcp_store_ts_recent(tp);
+
+					tcp_rcv_rtt_measure_ts(sk, skb);
+
+					__skb_pull(skb, tcp_header_len);
+					tcp_rcv_nxt_update(tp, TCP_SKB_CB(skb)->end_seq);
+					NET_INC_STATS(sock_net(sk),
+							LINUX_MIB_TCPHPHITSTOUSER);
+					eaten = 1;
+				}
+			}
+			if (!eaten) {
+				if (tcp_checksum_complete(skb))
+					goto csum_error;
+
+				if ((int)skb->truesize > sk->sk_forward_alloc)
+					goto step5;
+
+				if (tcp_header_len ==
+				    (sizeof(struct tcphdr) + TCPOLEN_TSTAMP_ALIGNED) &&
+				    tp->rcv_nxt == tp->rcv_wup)
+					tcp_store_ts_recent(tp);
+
+				tcp_rcv_rtt_measure_ts(sk, skb);
+
+				NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPHPHITS);
+
+				/* Bulk data transfer: receiver */
+				eaten = tcp_queue_rcv(sk, skb, tcp_header_len,
+						      &fragstolen);
+			}
+
+			tcp_event_data_recv(sk, skb);
+
+			if (TCP_SKB_CB(skb)->ack_seq != tp->snd_una) {
+				/* Well, only one small jumplet in fast path... */
+				tcp_ack(sk, skb, FLAG_DATA);
+				tcp_data_snd_check(sk);
+				if (!inet_csk_ack_scheduled(sk))
+					goto no_ack;
+			}
+
+			__tcp_ack_snd_check(sk, 0);
+no_ack:
+			if (eaten)
+				kfree_skb_partial(skb, fragstolen);
+			sk->sk_data_ready(sk);
+			return;
+		}
+	}
+
+slow_path:
+	if (len < (th->doff << 2) || tcp_checksum_complete(skb))
+		goto csum_error;
+
+	if (!th->ack && !th->rst && !th->syn)
+		goto discard;
+
+	if (!tcp_validate_incoming(sk, skb, th, 1))
+		return;
+
+step5:
+	if (tcp_ack(sk, skb, FLAG_SLOWPATH | FLAG_UPDATE_TS_RECENT) < 0)
+		goto discard;
+
+	tcp_rcv_rtt_measure_ts(sk, skb);
+
+	/* Process urgent data. */
+	tcp_urg(sk, skb, th);
+
+	/* step 7: process the segment text */
+	tcp_data_queue(sk, skb);
+
+	tcp_data_snd_check(sk);
+	tcp_ack_snd_check(sk);
+	return;
+
+csum_error:
+	TCP_INC_STATS(sock_net(sk), TCP_MIB_CSUMERRORS);
+	TCP_INC_STATS(sock_net(sk), TCP_MIB_INERRS);
+
+discard:
+	tcp_drop(sk, skb);
+}
+```
+
+####	tcp_queue_rcv函数
+`tcp_queue_rcv`函数的主要作用是：
+
+1.	数据包合并优化：尝试将新收到的 skb 与接收队列尾部的 skb 合并（通过 `tcp_try_coalesce`），减少内存碎片和复制开销
+2.	队列尾部插入，若无法合并（`eaten = 0`），则调用 `__skb_queue_tail()` 将 skb 加入 `sk->sk_receive_queue` 即sock的接收队列的尾部
+3.	更新接收序号：调用 `tcp_rcv_nxt_update()` 更新下一个期望接收的 TCP 序列号
+
+```CPP
+static int __must_check tcp_queue_rcv(struct sock *sk, struct sk_buff *skb, int hdrlen,
+		  bool *fragstolen)
+{
+	int eaten;
+	struct sk_buff *tail = skb_peek_tail(&sk->sk_receive_queue);
+
+	__skb_pull(skb, hdrlen);
+	eaten = (tail &&
+		 tcp_try_coalesce(sk, tail, skb, fragstolen)) ? 1 : 0;
+	tcp_rcv_nxt_update(tcp_sk(sk), TCP_SKB_CB(skb)->end_seq);
+	if (!eaten) {
+		__skb_queue_tail(&sk->sk_receive_queue, skb);
+		skb_set_owner_r(skb, sk);
+	}
+	return eaten;
+}
+```
 
 ##	0x0A	总结
 
-#### socket  VS	accept
+####	 socket  VS	accept
 在分析三次握手源码时产生的疑问：`socket`系统调用创建`struct socket`结构，与`accept`系统调用创建的`struct socket`结构，作用上有哪些不同？
 
 1、监听套接字（socket）的核心功能是管理连接，而非数据传输。当用户调用 `socket()` 创建套接字时（如监听套接字），内核会通过`sock_init_data`初始化 `struct sock`的核心队列，包括：
