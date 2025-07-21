@@ -2375,6 +2375,57 @@ static int __must_check tcp_queue_rcv(struct sock *sk, struct sk_buff *skb, int 
 
 因此在`accept()`系统调用新建的`struct socket`并关联的`struct sock`结构对应的队列是作为数据传输的载体，这些队列是实际数据收发的核心通道，与监听套接字的预留队列有本质区别
 
+####	唤醒机制：同步阻塞	VS epoll
+在前文描述了sock结构体时，介绍了两个关键成员：`sk_wq`（套接字等待队列）和`sk_data_ready`（数据就绪回调函数），这二者共同完成了内核管理I/O事件的核心机制，下面梳理下在同步阻塞I/O和epoll多路复用场景的区别
+
+-	`struct socket_wq sk_wq`：即socket/sock的等待队列头，用于管理因等待I/O事件（如数据到达）而阻塞的进程或回调项；这个成员在同步阻塞模式中存储用户进程的等待项`wait_queue_t`结构；在epoll模式中存储epoll注册的回调项（epoll模式中又分为listenfd与acceptfd两种）
+-	`sk_data_ready`：函数指针，默认指向`sock_def_readable`的内核实现，当数据到达套接字接收队列（`sk_receive_queue`）时、或者TCP三次握手完成时被调用，用于触发事件通知，其核心行为是检查`sk_wq`并唤醒其中的等待项
+
+1、同步阻塞场景下的等待与唤醒机制：进程直接挂起
+
+举例来说，当用户进程调用`recv()`且无数据可读时，内核会将当前被阻塞的进程加入sock的`sk_wq`队列，然后内核通过`DEFINE_WAIT`创建等待项，其`.private`成员会指向当前进程，`.func`成员会被设置为`autoremove_wake_function`（即唤醒后移除），接着调用`add_wait_queue`将该等待项插入`sk_wq`，完成后内核会将该进程状态设为`TASK_INTERRUPTIBLE`并让出CPU（发生第一次上下文切换）
+
+当数据到达时的唤醒流程是，软中断处理数据包 -> 放入`sk_receive_queue` -> 调用`sk_data_ready(sk)`，即调用`sock_def_readable`，默认的`sock_def_readable`的步骤是先检查（遍历）`sk_wq`的等待项队列，调用等待项的`.func`（`autoremove_wake_function`）-> 直接唤醒进程并移出队列（又发生了一次上下文切换）
+
+所以从上述步骤可以了解，这种模式由于要进行两次进程上下文切换（挂起+唤醒），每次耗时`3–5μs`，单进程仅能处理一个连接，性能较差
+
+```CPP
+// 默认回调函数 sock_def_readable 的实现
+// 事件触发：协议栈调用 sk_data_ready(sk)
+static void sock_def_readable(struct sock *sk) {
+    struct socket_wq *wq;
+    rcu_read_lock();
+    wq = rcu_dereference(sk->sk_wq);  // 获取 sk_wq 队列
+    if (wq_has_sleeper(wq)) {         // 队列检查：检查 sk_wq 中是否有阻塞进程
+        // 唤醒操作：唤醒队列中的进程（POLLIN 表示可读事件）
+		// 遍历 sk_wq 中的等待项，执行其回调函数（如 autoremove_wake_function）唤醒进程
+		// 唤醒策略：传入参数 nr_exclusive=1，表示仅唤醒一个进程（避免惊群效应）
+        wake_up_interruptible_sync_poll(&wq->wait, POLLIN | POLLPRI);
+    }
+    sk_wake_async(sk, SOCK_WAKE_WAITD, POLL_IN); // 发送异步信号（如 SIGIO）
+    rcu_read_unlock();
+}
+```
+
+2、epoll I/O多路复用场景下的等待唤醒机制：事件驱动与回调转发
+
+**epoll通过改造`sk_wq`和`sk_data_ready`的协作实现高效多路复用**，步骤拆解如下
+
+-	epoll注册改造`sk_wq`：`epoll_ctl(EPOLL_CTL_ADD)`为每个socket添加特殊等待项，即`.private = NULL`（不关联进程）以及`.func = ep_poll_callback`（epoll自定义回调），此等待项通过`eppoll_entry`结构关联到epoll的红黑树节点`epitem`
+-	数据到达触发epoll回调：当数据就绪时，内核仍然会调用`sk_data_ready`，随后步骤调用`sock_def_readable` -> 遍历`sk_wq` -> 执行`ep_poll_callback`
+
+而`ep_poll_callback`的核心步骤为：
+
+1.	将就绪的`epitem`加入`epoll`就绪队列`rdllist`
+2.	检查`eventpoll`自身的等待队列，唤醒因`epoll_wait`阻塞的用户进程
+3.	用户进程被唤醒后，批量处理就绪事件：`epoll_wait`从`rdllist`获取所有就绪事件，仅需一次系统调用即可处理海量连接
+4.	在高并发场景下，epoll_wait机制会持续占用CPU已达到处理高并发请求的场景，性能非常高
+
+小结下，从内核的这种解耦与分层设计来看，保证了`sk_data_ready`的统一性，无论何种模式，数据到达时均调用同一回调，但根据`sk_wq`的内容动态适配行为，对同步阻塞模式是唤醒进程->进程主动读数据，对epoll模式是触发回调 -> 事件入队 -> 用户进程批量处理，`sk_wq`与`sk_data_ready`的关系本质是**事件发布-订阅模型**，同步阻塞模式下是进程直接订阅，导致高开销，而epoll通过回调中转和事件批量交付，实现高性能IO多路复用
+
+-	订阅者：`sk_wq`管理订阅该事件的实体（进程或epoll实例），作为事件订阅中心，隔离内核协议栈与上层模型
+-	发布者：`sk_data_ready`在数据到达时发布事件
+
 ##  0x0B 参考
 -	<<深入理解Linux网络>>
 -   [深入理解Linux TCP的三次握手](https://mp.weixin.qq.com/s/vlrzGc5bFrPIr9a7HIr2eA)
