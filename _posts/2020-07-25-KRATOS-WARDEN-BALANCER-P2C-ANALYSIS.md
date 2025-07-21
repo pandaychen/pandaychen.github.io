@@ -135,7 +135,7 @@ $$Z_i=w*X_{cur} + (1-w)*Z_{i-1}$$
 
 所以，关于`β`值的计算可以参考牛顿冷却定律（变种）：
 
-![ewma-3]()
+![ewma-3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/loadbalance/p2c/ewma-3.png)
 
 其中`e`是常量，`Δt`表示第`t`次请求的耗时（假定），`k`表示衰减系数（注意：`Δt`和`k`值成反比），如此这样：
 
@@ -149,23 +149,27 @@ $$Z_i=w*X_{cur} + (1-w)*Z_{i-1}$$
 全局变量：
 ```golang
 const (
-	// The mean lifetime of `cost`, it reaches its half-life after Tau*ln(2).
+	// The mean lifetime of `cost`, it reaches its half-life after Tau*ln(2)
+	// 衰减系数，单位：纳秒（600ms）
 	tau = int64(time.Millisecond * 600)
 	// if statistic not collected,we add a big penalty to endpoint
+	// 惩罚值，单位：纳秒（250ms）
 	penalty = uint64(1000 * time.Millisecond * 250)
 
+	// 闲置时间的最大容忍值，单位：纳秒（3s）
 	forceGap = int64(time.Second * 3)
 )
 ```
 
-`p2c.subConn`，封装了 `balancer.SubConn`，代表了 Client 到 Server 的一条长连接，封装了核心属性（计算权重需要）：
-其中重要的字段说明如下（牢记一个 `subConn` 代表了客户端到某个服务端 Node 的唯一属性）：
+`p2c.subConn`，封装了 `balancer.SubConn`，代表了 Client 到 Server 的一条长连接，封装了核心属性（计算权重需要），其中重要的字段说明如下（牢记一个 `subConn` 代表了客户端到某个服务端 Node 的唯一属性）：
 -	`meta`：在服务发现（Etcd）中设置的 Node 的初始值
--	`lag`：请求延迟（用于与下次实现加权计算）
--	`success`：使用加权算法拿到的客户端 RPC 调用成功率
--	`inflight`：当前正在处理的请求数
--	`svrCPU`：保存了服务端返回的最近一段时间的 CPU 使用率
+-	`lag`：**请求延迟（用于与下次实现加权计算），加权移动平均算法计算出的请求延迟度**
+-	`success`：使用加权算法拿到的客户端 RPC 调用成功率，通过加权移动平均算法计算出的请求成功率（只记录gRPC内部错误，比如context deadline）
+-	`inflight`：当前正在处理的请求数，即当前客户端正在发送给`subConn`对应的服务端并等待response的请求数（pending request）
+-	`svrCPU`：保存了服务端返回的最近一段时间的 CPU 使用率（即`subConn`对应服务端的CPU使用率）
 -	`stamp`：保存上次计算权重的时间戳（Nano）
+
+注意`lag`、`success`、`inflight`和`svrCPU`都是客户端统计数据
 
 gRPC客户端的连接池如下图所示：
 ![p2c-subconn](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kratos/loadbalance/GRPC-LB-P2C.png)
@@ -193,11 +197,15 @@ type subConn struct {
 }
 ```
 
+这里特别提一下`subConn`的`pick`与`stamp`字段：
+
+-	`pick`：保存了该Node最近被pick的时间戳，利用该值可以统计被选中后，一次请求的耗时
+-	`stamp`：保存了最近一次resp时间戳，作为牛顿冷却算式的因子参与计算（这一点和原文描述有些不太一致）
 
 `p2c.subConn` 实现的方法：
--	`valid`：
+-	`valid`：节点健康度判断
 -	`health`：获取当前长连接中存储的成功率 `sc.success` 的值
--	`load`：
+-	`load`：服务端负载率估测的值
 -	`cost`：
 
 ```golang
@@ -211,9 +219,10 @@ func (sc *subConn) health() uint64 {
 
 func (sc *subConn) load() uint64 {
 	lag := uint64(math.Sqrt(float64(atomic.LoadUint64(&sc.lag))) + 1)
+	//核心！根据cpu使用率、延迟率、拥塞度计算出负载率（估测的subConn对应的服务端Node负载率！！）
 	load := atomic.LoadUint64(&sc.svrCPU) * lag * uint64(atomic.LoadInt64(&sc.inflight))
 	if load == 0 {
-		// penalty 是初始化没有数据时的惩罚值，默认为 1e9 * 250
+		// 注意：penalty 是初始化没有数据时的惩罚值，默认为 1e9 * 250
 		load = penalty
 	}
 	return load
@@ -247,7 +256,21 @@ func (sc *subConn) cost() uint64 {
 -	`prePick`：尽量选择两个较为健康的节点（`node.valid()`）参与后续决策
 -	 从上面结果（`2`个节点），再根据最终评分选出一个合适的
 -	选定了某个`subConn`，并发送请求
--	请求完成后，利用`balancer.DoneInfo`更新当前`subConn`的指标，可以直接拿到的指标有本次调用结果（是否err）、调用延迟
+-	请求完成后，利用`balancer.DoneInfo`更新当前`subConn`的指标，可以直接拿到的指标有本次调用结果（是否err）、调用延迟，更新`pc.svrCPU`、`pc.success/pc.lag`（通过EWMA计算），其他字段如`pc.stamp`、`pc.stamp`、`pc.pick`的更新参考实现（有条件）
+
+简言之，**负载均衡策略选择的时候是基于已有记录（上一次请求结束后更新的指标）直接算出被选中的节点，被选中节点Node在完成RPC请求后，更新本Node的各项原子指标**
+
+####	`prePick`的比较细节
+
+注意到`prePick`函数中有下面的代码，若前者计算值较大则选前者，反之选择后者，其实对应的原始公式应该是下面（代码转换为乘法了）
+
+```text
+*        nodeA.load                           nodeB.load
+* ----------------------------   :   ----------------------------
+* nodeA.health * nodeA.weight        nodeB.health * nodeB.weight
+```
+
+从上面的公式易知，`health`和`weight`为提权用，而`load`值（Node负载）为降权用，所以用`load`值除以`health`和`weight`的乘积，计算出的值越大，越不容易被pick
 
 ```CPP
 if nodeA.load()*nodeB.health()*nodeB.meta.Weight > nodeB.load()*nodeA.health()*nodeA.meta.Weight {
@@ -352,16 +375,19 @@ func (p *p2cPicker) prePick() (nodeA *subConn, nodeB *subConn) {
 		b := p.r.Intn(len(p.subConns) - 1)
 		p.lk.Unlock()
 		if b >= a {
+			// 防止随机出的节点相同
 			b = b + 1
 		}
 		nodeA, nodeB = p.subConns[a], p.subConns[b]
 		if nodeA.valid() || nodeB.valid() {
+			// 节点健康度简单筛选
 			break
 		}
 	}
 	return
 }
 ```
+
 `picker` 的实现如下，重要部分已加了注释，需要关注的有如下几点信息：
 1.	`DoneInfo()` 是在 RPC 方法执行完成后的回调，主要用于在 gRPC 的 `Trailer` 返回的 `pc` 对应的服务端 CPU 信息，根据此 CPU 信息，更新 `pc` 这个 `subConn` 的相关信息
 2.	计算权重分数的方法，每次请求来时都会更新延迟，并且把之前获得的时间延迟进行权重的衰减，新获得的时间提高权重，这样就实现了滚动更新
@@ -384,6 +410,8 @@ func (p *p2cPicker) Pick(ctx context.Context, opts balancer.PickInfo) (balancer.
 
 func (p *p2cPicker) pick(ctx context.Context, opts balancer.PickInfo) (balancer.SubConn, func(balancer.DoneInfo), error) {
 	var pc, upc *subConn
+	
+	// 当前时间
 	start := time.Now().UnixNano()
 
 	if len(p.subConns) <= 0 {
@@ -396,20 +424,21 @@ func (p *p2cPicker) pick(ctx context.Context, opts balancer.PickInfo) (balancer.
 		// meta.Weight 为服务发布者在 disocvery 中设置的权重
 		if nodeA.load()*nodeB.health()*nodeB.meta.Weight > nodeB.load()*nodeA.health()*nodeA.meta.Weight {
 			//pc 为本次算法选择的节点
+			// upc为落选的节点
 			pc, upc = nodeB, nodeA
 		} else {
 			pc, upc = nodeA, nodeB
 		}
-		// 如果选中的节点，在 forceGap 期间内没有被选中一次，那么强制一次
+		// 如果落选的节点，在 forceGap 期间内没有被选中一次，那么强制选中一次
 		// 利用强制的机会，来触发成功率、延迟的衰减
 		// 原子锁 conn.pick 保证并发安全，放行一次
 		pick := atomic.LoadInt64(&upc.pick)
 		if start-pick > forceGap && atomic.CompareAndSwapInt64(&upc.pick, pick, start) {
-			pc = upc
+			pc = upc	//强制选中
 		}
 	}
 
-	// 节点未发生切换才更新 pick 时间
+	// 节点未发生切换时，才更新 pick 时间
 	if pc != upc {
 		atomic.StoreInt64(&pc.pick, start)
 	}
@@ -417,7 +446,7 @@ func (p *p2cPicker) pick(ctx context.Context, opts balancer.PickInfo) (balancer.
 	atomic.AddInt64(&pc.inflight, 1)
 	atomic.AddInt64(&pc.reqs, 1)
 
-	// RPC 方法执行完成后，更新状态
+	// RPC 方法执行完成后，更新状态，此处分析见下面代码
 	return pc.conn, func(di balancer.DoneInfo) {
 		// inflight完成：减一
 		atomic.AddInt64(&pc.inflight, -1)
@@ -476,8 +505,9 @@ func (p *p2cPicker) pick(ctx context.Context, opts balancer.PickInfo) (balancer.
 
 这里把 RPC 调用成功时的回调逻辑简单分析下：
 ```golang
+//被pick后，完成请求后触发逻辑
 start := time.Now().UnixNano()
-...
+......
 return pc.conn, func(di balancer.DoneInfo) {
 	// 当前正在处理的请求数减 1，好理解
 	atomic.AddInt64(&pc.inflight, -1)
@@ -489,15 +519,20 @@ return pc.conn, func(di balancer.DoneInfo) {
 	stamp := atomic.SwapInt64(&pc.stamp, now)
 
 	// 获取时间间隔
+	// 重点：计算距离上次response的时间差，节点本身闲置越久，这个值越大
 	td := now - stamp
 	if td < 0 {
 		td = 0
 	}
 
 	// 获取时间衰减系数
+	// 实时计算β值，利用衰减函数计算，公式为：β = e^(-t/k)
+	// 与原文衰减公式不同
+	// 这里是按照k值的反比计算的，即k值和β值成正比
 	w := math.Exp(float64(-td) / float64(tau))
 
 	// 获得本次延迟数据 1（注意 start 是在 pick 开始计时的）
+	// lag 为实际耗时
 	lag := now - start
 	if lag < 0 {
 		lag = 0
@@ -509,10 +544,11 @@ return pc.conn, func(di balancer.DoneInfo) {
 		w = 0.0
 	}
 
-	// 延迟数据 1 与延迟数据 2，计算出平均延迟（EWMA）
+	// 延迟数据 1 与延迟数据 2，计算出平均延迟
+	// 利用EWMA算法，计算指数加权移动平均响应时间
 	lag = int64(float64(oldLag)*w + float64(lag)*(1.0-w))
 
-	// 保存本地计算出的延迟数据
+	// 保存本此计算出的加权平均延迟数据
 	atomic.StoreUint64(&pc.lag, uint64(lag))
 
 	success := uint64(1000) // error value ,if error set 1
@@ -525,10 +561,12 @@ return pc.conn, func(di balancer.DoneInfo) {
 		}
 	}
 	oldSuc := atomic.LoadUint64(&pc.success)
+	// 计算指数加权移动平均成功率并更新
 	success = uint64(float64(oldSuc)*w + float64(success)*(1.0-w))
 	atomic.StoreUint64(&pc.success, success)
 
 	// 从服务端的 Trailer 中拿到 CPU 的值
+	// 并更新本次请求服务端返回的cpu使用率
 	trailer := di.Trailer
 	if strs, ok := trailer[wmd.CPUUsage]; ok {
 		if cpu, err2 := strconv.ParseUint(strs[0], 10, 64); err2 == nil && cpu > 0 {
@@ -546,7 +584,7 @@ return pc.conn, func(di balancer.DoneInfo) {
 }, nil
 ```
 
-###	统计节点
+####	统计节点
 
 ```text
 //INFO 07/24-07:50:56.452 /root/delete/kratos-note/pkg/net/rpc/warden/balancer/p2c/p2c.go:292 p2c  : [{addr:127.0.0.1:8081 score:783813.9288438039 cs:1000 lantency:2612717 cpu:789 inflight:1 reqs:1}]
