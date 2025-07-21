@@ -1552,6 +1552,13 @@ check_events:
 }
 ```
 
+####	epoll机制下的回调函数
+epoll在内核的运作机制中主要使用到`3`类回调函数：
+
+-	`sock_def_readable`：内核在三次握手创建完整的`struct sock`结构并初始化时，设置成员`sk_data_ready`的默认值
+-	`ep_poll_callback`：当调用`epoll_ctl` 时添加到 socket/sock 上，本质是向`struct sock`的`sk_wq`等待队列头添加了一个等待项（`.private`为`NULL`，`.func`为`ep_poll_callback`）
+-	`default_wake_function`：当调用`epoll_wait`时，设置到 `epollevent`等待队列上，本质是向`struct eventpoll`的`wq`等待队列头添加了一个等待项（`.private`为当前进程，`.func`为`default_wake_function`）
+
 ##	0x08	惊群问题（`epoll_wait`+IO多路复用机制下）
 
 ####	惊群问题的本质
