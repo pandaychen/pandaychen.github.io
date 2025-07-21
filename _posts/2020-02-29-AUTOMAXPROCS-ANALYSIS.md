@@ -12,7 +12,7 @@ tags:
 ---
 
 ##	0x00	前言
-&emsp;&emsp; 前一篇文章 [GOMAXPROCS 的 “坑”](https://pandaychen.github.io/2020/02/28/GOMAXPROCS-POT/)，简单描述了 GOMAXPROCS 在容器场景可能会出现的问题。解决方法是使用 Uber 提供的 Automaxprocs 包，自动的根据 CGROUP 值识别容器的 CPU quota，并自动设置 GOMAXPROCS 线程数量，本篇文章就简答分析下 Automaxprocs 是如何做到做一点的。
+&emsp;&emsp; 前一篇文章 [GOMAXPROCS 的坑](https://pandaychen.github.io/2020/02/28/GOMAXPROCS-POT/)，简单描述了 GOMAXPROCS 在容器场景可能会出现的问题。解决方法是使用 Uber 提供的 Automaxprocs 包，自动的根据 CGROUP 值识别容器的 CPU quota，并自动设置 GOMAXPROCS 线程数量，本篇文章就简答分析下 Automaxprocs 是如何做到做一点的
 
 ##	0x01	再看 Docker 中的 CPU 调度
 docker 官方文档中指出：
