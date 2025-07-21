@@ -63,8 +63,6 @@ best = least_connection_choice([nodeA, nodeB])
 
 ####	前置基础知识
 
-
-
 ##	0x03 P2C 实现
 [官方的文档](https://github.com/go-kratos/kratos/blob/master/doc/wiki-cn/warden-balancer.md) 上给出了实现的一些关键细节，先列举下，然后再结合代码做下分析：
 
@@ -83,9 +81,9 @@ best = least_connection_choice([nodeA, nodeB])
 
 上述服务端与客户端的指标最终都会在客户端呈现（基于客户端的负载均衡策略），如下图，这里对P2C算法中每个Node指标分类：
 
--	weight：常量，节点权重值，权重越大，越容易被选择到
--	inflight：
--	server_cpu：
+-	weight：常量，每个节点被赋予的权重值，权重越大，越容易被选择到（一般预埋在服务发现配置中下发）
+-	inflight：代表节点到该Node的请求拥塞度，代表着当前节点到该Node有多少个请求未完成或者正开始请求，每次pick到发送请求前先原子`+1`，response后说明一次请求完成，这时再原子`-1`；当前线程获取到的`inflight`瞬间值，就是在这个时段的拥塞度，比如一个节点如果很闲，响应速度也快，那么它的拥塞度肯定极低
+-	server_cpu：由Node回写给客户端
 -	latency：只针对该Node（服务端）的所有请求，按照EWMA算法得到，常规意义为**客户端到该Node的所有请求延迟总和/请求总数**
 -	client_success：同样只针对该Node（服务端）的所有请求，按照EWMA算法得到，常规意义为**客户端到该Node的所有成功请求总和/请求总数**
 
@@ -95,12 +93,12 @@ best = least_connection_choice([nodeA, nodeB])
 
 ![latency-and-client_success]()
 
-####	权重计算
-计算权重的公式如下：
+####	P2C算法中权重计算
+在P2C算法中，当通过random方式选出两个Node之后，要通过权重来决定选择哪个Node（参考下文`pick()`实现代码），这里计算权重的公式如下：
 
 $$\frac{success*metaWeight}{cpu*\sqrt{lag}*(inflight+1)}$$
 
-这个公式的含义很直观，对权重有积极影响的因子，如成功率，初始权重等，位于分子；对权重有消极影响的因子，如cpu负载（过高）、lag延迟（过大）、以及积压的请求数inflight，放在分母的位置。（为了防止除法溢出，`inflight`做了加`1`处理）
+这个公式的含义很直观，对权重有积极影响的因子，如成功率，初始权重等，位于分子；对权重有消极影响的因子，如cpu负载（过高）、lag延迟（过大）、以及积压的请求数inflight，放在分母的位置（为了防止除法溢出，`inflight`做了加`1`处理）
 
 ####	EWMA 算法简介
 P2C 代码实现中大量使用了 EWMA 算法（指数加权移动平均算法），此算法，是对观察值分别给予不同的权数，按不同权数求得移动平均值，并以最后的移动平均值为基础，确定预测值的方法。采用加权移动平均法，是因为观察期的近期观察值对预测值有较大影响，它更能反映近期变化的趋势。
@@ -241,8 +239,6 @@ func (sc *subConn) cost() uint64 {
 ####	指标的计算详解-inflight
 ![inflight](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kratos/loadbalance/GRPC-LB-P2C-1.png)
 
-
-
 ####	实现：总体过程
 基于gRPC实现的P2C算法的大概流程如下：
 
@@ -260,9 +256,9 @@ func (sc *subConn) cost() uint64 {
 
 简言之，**负载均衡策略选择的时候是基于已有记录（上一次请求结束后更新的指标）直接算出被选中的节点，被选中节点Node在完成RPC请求后，更新本Node的各项原子指标**
 
-####	`prePick`的比较细节
+####	`pick`多节点比较细节
 
-注意到`prePick`函数中有下面的代码，若前者计算值较大则选前者，反之选择后者，其实对应的原始公式应该是下面（代码转换为乘法了）
+注意到`pick`函数中（多Node场景处理）有下面的代码，若前者计算值较大则选前者，反之选择后者，其实对应的原始公式应该是下面（代码转换为乘法了），对应前文中的权重计算公式
 
 ```text
 *        nodeA.load                           nodeB.load
@@ -630,7 +626,6 @@ func (p *p2cPicker) printStats() {
 }
 
 ```
-
 
 ##	0x05	测试
 给关键路径加上日志，看下这里具体参数和值的变化过程，这样对算法能够有更为直观的理解，以 etcd 为注册服务，启动三个后端（单个单个启动），观察下数据的变化
