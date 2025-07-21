@@ -60,7 +60,6 @@ best = least_connection_choice([nodeA, nodeB])
 
 这些点和疑问，在阅读 Warden 负载均衡的算法时，都得到了解答
 
-
 ####	前置基础知识
 
 ##	0x03 P2C 实现
@@ -87,7 +86,7 @@ best = least_connection_choice([nodeA, nodeB])
 -	latency：只针对该Node（服务端）的所有请求，按照EWMA算法得到，常规意义为**客户端到该Node的所有请求延迟总和/请求总数**
 -	client_success：同样只针对该Node（服务端）的所有请求，按照EWMA算法得到，常规意义为**客户端到该Node的所有成功请求总和/请求总数**
 
-![node-p2c]()
+![node-p2c](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/loadbalance/p2c/GRPC-LB-P2C-optimism.png)
 
 由上图过程易知，相比普通的random算法，它是随机选择两个node，然后比较它们的负载率，然后选出当前负载率最小的node，**负载率是根据上面`5`个指标共同计算出来的**
 
