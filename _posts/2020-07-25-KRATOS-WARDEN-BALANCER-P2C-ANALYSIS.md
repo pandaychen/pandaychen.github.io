@@ -62,6 +62,8 @@ best = least_connection_choice([nodeA, nodeB])
 
 ####	前置基础知识
 
+-	如何估算服务器的负载？
+
 ##	0x03 P2C 实现
 [官方的文档](https://github.com/go-kratos/kratos/blob/master/doc/wiki-cn/warden-balancer.md) 上给出了实现的一些关键细节，先列举下，然后再结合代码做下分析：
 
@@ -202,7 +204,7 @@ type subConn struct {
 `p2c.subConn` 实现的方法：
 -	`valid`：节点健康度判断
 -	`health`：获取当前长连接中存储的成功率 `sc.success` 的值
--	`load`：服务端负载率估测的值
+-	`load`：服务端负载率估测的值，计算负载的公式是`load = svrCPU * Sqrt(EWMA{lag}) * inflight`，`EWMA{lag}` 为平均请求耗时，`inflight`为当前节点正在处理请求的数量，相乘的结果视为当前节点的网络负载，其中对`EWMA{lag}`的结果取`Sqrt`是为了降低`EWMA{lag}`的权重
 -	`cost`：
 
 ```golang
@@ -215,6 +217,7 @@ func (sc *subConn) health() uint64 {
 }
 
 func (sc *subConn) load() uint64 {
+	// 对ewma的sc.lag开根号
 	lag := uint64(math.Sqrt(float64(atomic.LoadUint64(&sc.lag))) + 1)
 	//核心！根据cpu使用率、延迟率、拥塞度计算出负载率（估测的subConn对应的服务端Node负载率！！）
 	load := atomic.LoadUint64(&sc.svrCPU) * lag * uint64(atomic.LoadInt64(&sc.inflight))
