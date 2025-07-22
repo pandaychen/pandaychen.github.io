@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:  Linux 内核之旅（十一）：追踪 open/write 系统调用
+title:  Linux 内核之旅（十一）：追踪 open 系统调用
 subtitle:   VFS
 date:       2025-04-02
 author:     pandaychen
@@ -16,7 +16,7 @@ tags:
 
 用户进程在能够读 / 写一个文件之前必须要先 open 这个文件。对文件的读 / 写从概念上说是一种进程与文件系统之间的一种有连接通信，所谓打开文件实质上就是在进程与文件之间建立起链接。在文件系统的处理中，每当一个进程重复打开同一个文件时就建立起一个由 `struct file` 结构代表的独立的上下文。通常一个 `file` 结构，即一个读 / 写文件的上下文，都由一个打开文件号（fd）加以标识。从 VFS 的层面来看，open 操作的实质就是根据参数指定的路径去获取一个该文件系统（比如 `ext4`）的 inode（硬盘上），然后触发 VFS 一系列机制（如生成 dentry、加载 inode 到内存 inode 以及将 dentry 指向内存 inode 等等），然后去填充 VFS 层的 `struct file` 结构体，这样就可以让上层使用了
 
-用户态程序调用 `open` 函数时，会产生一个中断号为 `5` 的中断请求，其值以该宏 `__NR__open` 进行标示，而后该进程上下文将会被切换到内核空间，待内核相关操作完成后，就会从内核返回至用户态，此时还需要一次进程上下文切换，本文就以内核视角追踪下 `open`（`write`）的内核调用过程
+用户态程序调用 `open` 函数时，会产生一个中断号为 `5` 的中断请求，其值以该宏 `__NR__open` 进行标示，而后该进程上下文将会被切换到内核空间，待内核相关操作完成后，就会从内核返回至用户态，此时还需要一次进程上下文切换，本文就以内核视角追踪下 `open` 的内核调用过程
 
 ##  0x01   ftrace open 系统调用
 内核调用链如下（简化）
@@ -67,7 +67,7 @@ struct dentry {
 }
 ```
 
-![dcache]()
+![dcache-pic]()
 
 2、`dentry_hashtable` 的创建过程
 
@@ -106,24 +106,183 @@ static void __init dcache_init(void)
 }
 ```
 
-##  0x03 追踪 Open 流程
-一个进程需要读 / 写一个文件，必须先通过 filename 建立和文件 inode 之间的通道，方式是通过 `open()` 函数，该函数的参数是文件所在的路径名 `pathname`，如何根据 `pathname` 找到对应的 inode？这就要依靠 dentry 结构了
+##  0x03 追踪 open 流程：
+一个进程需要读/写一个文件，必须先通过 filename 建立和文件 inode 之间的通道，方式是通过 `open()` 函数，该函数的参数是文件所在的路径名 `pathname`，如何根据 `pathname` 找到对应的 inode？这就要依靠 dentry 结构了
+
+####	系统调用
 
 ```CPP
 int open (const char *pathname, int flags, mode_t mode);
 int openat(int dirfd, const char *pathname, int flags, mode_t mode);
 ```
 
+-	参数 `pathname`：文件路径，可以是相对路径或绝对路径（以`/` 开头）
+-	参数 `dirfd`： 是打开一个目录后得到的文件描述符，作为相对路径的基准目录。如果文件路径是相对路径，那么在函数 `openat` 中解释为相对文件描述符 `dirfd` 引用的目录，`open` 函数中解释为相对调用进程的当前工作目录。如果文件路径是绝对路径, `openat` 会忽略参数 `dirfd`
+-	参数 `flags`：必须包含一种访问模式: `O_RDONLY/O_ WRONLY/O_RDWR`，`flags` 可以包含多个文件创建标志和文件状态标志，区别是文件创建标志只影响打开操作, 文件状态标志影响后面的读写操作
+
+####	文件创建标志
+-	`O_CLOEXEC`：开启 close-on-exc标志，使用系统调用 `execve()` 装载程序的时候关闭文件
+-	`CREAT`：如果文件不存在，创建文件
+-	`ODIRECTORY`：参数 `pathname` 必须是一个日录
+-	`EXCL`：通常和标志位 `CREAT` 联合使用，用来创建文件。如果文件已经存在，那么 `open()` 失败,返回错误号 `EEXIST`
+-	`NOFOLLOW`：不允许参数 `pathname` 是符号链接（最后一个分量不能是符号链接，其他分量可以是符号链接）。如果参数 `pathname` 是符号链接，那么打开失败，返回错误号 `ELOOP`
+-	`O_TMPFILE`：创建没有名字的临时普通文件，参数 `pathname` 指定目录关闭文件的时候，自动删除文件
+-	`O_TRUNC`：如果文件已经存在，是普通文件并且访问模式允许写，那么把文件截断到长度为`0`
+
+####	文件状态标志
+-	`APPEND`：使用追加模式打开文件，每次调用 `write` 写文件的时候写到文件的末尾
+-	`O_ASYNC`：启用信号驱动的输入输出，当输入或输出可用的时候,发送信号通知进程，默认的信号是 `SIGIO`
+-	`O_DIRECT`：直接读写存储设备，不使用内核的页缓存。虽然会降低读写速度，但是在某些情况下有用处，例如应用程序使用自己的缓冲区，不需要使用内核的页缓存文件
+-	`DSYNC`：调用 `write` 写文件时，把数据和检索数据所需要的元数据写回到存储设备
+-	`LARGEFILE`：允许打开长度超过 `4GB` 的大文件（`64` 位内核会强制设置）
+-	`NOATIME`：调用 `read` 读文件时，不要更新文件的访问时间
+-	`O_NONBLOCK`：使用非阻塞模式打开文件， `open` 和以后的操作不会导致调用进程阻塞
+-	`PATH`：获得文件描述符有两个用处，指示在目录树中的位置以及执行文件描述符层次的操作。不会真正打开文件，不能执行读操作和写操作
+-	`O_SYNC`：调用 `write` 写文件时，把数据和相关的元数据写回到存储设备
+
+####	mode参数
+`mode` 指定创建新文件时的文件模式，当参数 `flags` 指定标志位 `O_CREAT` 或 `O_TMPFILE` 的时候，必须指定参数 `mode`，其他情况下忽略参数 `mode`，组合如下：
+
+-	`S_IRWXU`：`0700`，用户（文件拥有者）有读、写和执行权限
+-	`S_IRUSR`：`00400`，用户有读权限
+-	`S_IWUSR`：`00200`，用户有写权限
+-	`S_IXUSR`：`00100`，用户有执行权限
+-	`S_IRWXG`：`00070`，文件拥有者所在组的其他用户有读、写和执行权限
+-	`S_IRGRP`：`00040`，文件拥有者所在组的其他用户有读权限
+-	`S_IWGRP`：`00020`，文件拥有者所在组的其他用户有写权限
+-	`S_IXGRP`：`0010`，文件拥有者所在组的其他用户有执行权限
+-	`S_IRWXO`：`0007`，其他组的用户有读、写和执行权限
+-	`S_IROTH`：`0004`，其他组的用户有读权限
+-	`S_IWOTH`：`00002`，其他组的用户有写权限
+-	`S_IXOTH`：`00001`，其他组的用户有执行权限
+
+####	AT_FDCWD
+`AT_FDCWD`表明当 filename 为相对路径的情况下，将当前进程的工作目录设置为起始路径
+
+####	flags && mode 解析
+
+-	`flags`：控制打开一个文件
+-	`mode`：新建文件的权限
+
+`build_open_flags`函数将`open`的参数转换为内核结构`open_flags`：
+
+```CPP
+struct open_flags {
+        int open_flag;
+        umode_t mode;
+        int acc_mode;
+        int intent;
+        int lookup_flags;
+};
+```
+
+```CPP
+static inline int build_open_flags(int flags, umode_t mode, struct open_flags *op)
+{
+	int lookup_flags = 0;
+    //O_CREAT 或者 `__O_TMPFILE*` 设置了，acc_mode 才有效。
+	int acc_mode;
+
+	// Clear out all open flags we don't know about so that we don't report
+	// them in fcntl(F_GETFD) or similar interfaces.
+	// 只保留当前内核支持且已被设置的标志，防止用户空间乱设置不支持的标志
+	flags &= VALID_OPEN_FLAGS;
+
+	if (flags & (O_CREAT | __ O_TMPFILE))
+		op->mode = (mode & S_IALLUGO) | S_IFREG;
+	else
+        //如果 O_CREAT | __ O_TMPFILE 标志都没有设置，那么忽略 mode
+		op->mode = 0;
+
+	// Must never be set by userspace
+	flags &= ~FMODE_NONOTIFY & ~O_CLOEXEC;
+
+
+	// O_SYNC is implemented as __ O_SYNC|O_DSYNC.  As many places only
+	// check for O_DSYNC if the need any syncing at all we enforce it's
+	// always set instead of having to deal with possibly weird behaviour
+	// for malicious applications setting only __ O_SYNC.
+	if (flags & __ O_SYNC)
+		flags |= O_DSYNC;
+
+	//如果是创建一个没有名字的临时文件，参数 pathname 用来表示一个目录，
+	//会在该目录的文件系统中创建一个没有名字的 iNode
+	if (flags & __ O_TMPFILE) {
+		if ((flags & O_TMPFILE_MASK) != O_TMPFILE)
+			return -EINVAL;
+		acc_mode = MAY_OPEN | ACC_MODE(flags);
+		if (!(acc_mode & MAY_WRITE))
+			return -EINVAL;
+	} else if (flags & O_PATH) {
+
+		// If we have O_PATH in the open flag. Then we
+		// cannot have anything other than the below set of flags
+		// 如果设置了 O_PATH 标志，那么 flags 只能设置以下 3 个标志
+		flags &= O_DIRECTORY | O_NOFOLLOW | O_PATH;
+		acc_mode = 0;
+	} else {
+		acc_mode = MAY_OPEN | ACC_MODE(flags);
+	}
+
+	op->open_flag = flags;
+
+    // O_TRUNC implies we need access checks for write permissions
+    // 如果设置了，那么写之前可能需要清空内容
+	if (flags & O_TRUNC)
+		acc_mode |= MAY_WRITE;
+
+	// Allow the LSM permission hook to distinguish append
+	// access from general write access.
+    // 让 LSM 有能力区分 追加访问和普通访问
+	if (flags & O_APPEND)
+		acc_mode |= MAY_APPEND;
+
+	op->acc_mode = acc_mode;
+
+    //设置意图，如果没有设置 O_PATH，表示此次调用有打开文件的意图
+	op->intent = flags & O_PATH ? 0 : LOOKUP_OPEN;
+
+	if (flags & O_CREAT) {
+        //是否有创建文件的意图
+		op->intent |= LOOKUP_CREATE;
+		if (flags & O_EXCL)
+			op->intent |= LOOKUP_EXCL;
+	}
+        //判断查找的目标是否是目录
+	if (flags & O_DIRECTORY)
+		lookup_flags |= LOOKUP_DIRECTORY;
+        //判断当发现符号链接时是否继续跟下去
+	if (!(flags & O_NOFOLLOW))
+		lookup_flags |= LOOKUP_FOLLOW; //查找标志设置了 LOOKUP_FOLLOW 表示会继续跟下去
+
+    //设置查找标志，lookup_flags 在路径查找时会用到
+	op->lookup_flags = lookup_flags;
+	return 0;
+}
+```
+
+####	chroot
+先说结论，`chroot` 改变当前进程所在的内核空间 `current->root` 的全局变量， 之后该进程所有的文件系统操作的路径，都以新的 path 作为根目录。关联`open*`系统调用中的`set_fs_root`函数的处理过程
+
 ####   nameidata/path/vfsmount 结构
 [`nameidata`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L506)，`nameidata` 用来存储遍历路径的中间结果（临时性存放），在路径搜索时常用到
-这个结构体在路径查找中非常重要，它记录了查找信息、保存了查找起始路径。在路径 `/a/b/c/d` 的每一个分量的查找中，它会保存当前的结果。对于一般路径名查找，在查找结束时，它会包含查询结果的信息；对于父路径名查找，在查找结束时，它会包含最后一个分量所在目录的信息。最重要的成员是 `nameidata.path`（思考下在 VFS 中只有 `path` 才能唯一标识一个路径）
+这个结构体在路径查找中非常重要，它记录了查找信息、保存了查找起始路径。在路径 `/a/b/c/d` 的每一个分量的查找中，它会保存当前的结果。对于一般路径名查找，在查找结束时，它会包含查询结果的信息；对于父路径名查找，在查找结束时，它会包含最后一个分量所在目录的信息。最重要的成员是 `nameidata.path`（记住在 VFS 中只有 `path` 才能唯一标识一个路径）
+
+如`open()`、`mkdir()`、`rename()`等系统调用，可以使用文件的路径名作为参数，VFS将解析路径名并把它拆分成一个文件序列（分量），除了最后一个文件之外，所有的文件都必须是目录。为了识别目录文件，VFS将沿着路径逐层查找，并且使用`nameidata`边查找边缓存
+
+-	`last`：存储需要解析的文件路径的分量，不仅包字符串,还包含长度和散列值
+-	`path`：存储解析得到的挂载描述符和目录项
+-	`iode`：存储目录项对应的索引节点（`path.dentry.d_inode`）
+
+1.	`path` 会保存已经成功解析到的信息，`last` 用来存放当前需要解析的信息，如果 `last` 解析成功那么就会更新 `path`
+2.	如果文件路径的分量是一个符号链接，那么接下来需要解析符号链接的目标，那么`stack`用来保存文件路径还未被解析的部分，`depth` 表示深度。假设目录`b`是符号链接（目标是 `e/f`），解析文件路径 `a/b/c/d`，那么解析到 `b`，发现 `b` 是符号链接，接下来要解析符号链接 `b` 的目标 `e/f`，需要把文件路径中没有解析的部分 `c/d` 保存到`stack`中，等解析完符号链接后继续解析
 
 ```CPP
 struct nameidata {
 	struct path	path;   //path 保存当前搜索到的路径（包含了 vfsmount 及在该 mount 下的 dentry）
 	struct qstr	last;   //last 保存当前子路径名及其散列值
 	struct path	root;   //root 用来保存根目录的信息
-	struct inode	*inode; /* path.dentry.d_inode */
+	struct inode	*inode; // path.dentry.d_inode
     // inode 指向当前找到的目录项的 inode 结构
 
 	unsigned int	flags;  //flags 是一些和查找（lookup）相关的标志位
@@ -131,7 +290,13 @@ struct nameidata {
 	int		last_type;  //last_type 表示当前节点类型
 	unsigned	depth;  // depth 用来记录在解析符号链接过程中的递归深度
 	int		total_link_count;
-    //...
+    
+	struct saved {
+		struct path link;
+		struct delayed_call done;
+		const char *name;
+		unsigned seq;
+	} *stack, internal[EMBEDDED_LEVELS];
 
 	struct filename	*name;
 	struct nameidata *saved;    // 保存上一个 nameidata 的指针
@@ -154,19 +319,38 @@ static void set_nameidata(struct nameidata *p, int dfd, struct filename *name)
 
 ![nameidata-path-vfsmount]()
 
+####	VFS中的目录查找
+
+
 ####   核心流程
+`open`系统调用如下：
+```CPP
+SYSCALL_DEFINE3(open, const char __user *, filename, int, flags, umode_t, mode)
+{
+	//64位机器下，force_o_largefile 将展开为 true 并且 O_LARGEFILE 标志将被添加到 open 系统调用的 flags 参数中
+    if (force_o_largefile())
+        flags |= O_LARGEFILE;
+
+    return do_sys_open(AT_FDCWD, filename, flags, mode);
+}
+```
+
+![open-call-flow]()
+
 1、[`do_sys_open`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/open.c#L1036)
 
 ```cpp
 long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
 {
 	struct open_flags op;
+	//检查、解析传入标志位
 	int fd = build_open_flags(flags, mode, &op);
 	struct filename *tmp;
 
 	if (fd)
 		return fd;
 
+	// 将用户空间的路径名复制到内核空间
 	tmp = getname(filename);
 	if (IS_ERR(tmp))
 		return PTR_ERR(tmp);
@@ -177,6 +361,7 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
         // 调用 do_filp_open() 函数打开文件，返回打开文件的 struct file 结构
 		struct file *f = do_filp_open(dfd, tmp, &op);
 		if (IS_ERR(f)) {
+			//若传参有误，则 do_filp_open 执行失败，并使用 put_unused_fd 释放文件描述符
 			put_unused_fd(fd);
 			fd = PTR_ERR(f);
 		} else {
@@ -188,6 +373,7 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
 			fd_install(fd, f);
 		}
 	}
+	//释放已分配的 filename 结构体
 	putname(tmp);
     // 返回文件描述符，也就是 open() 系统调用的返回值
 	return fd;
@@ -203,10 +389,20 @@ void fd_install(unsigned int fd, struct file *file)
 
 ![dcache-build](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/open/open-2-dentry-build.png)
 
-2、[`do_filp_open`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L3515)
+####	getname：复制路径名到内核
+
+`__getname` 用于在内核缓冲区专用队列里申请一块内存用来放置路径名，作用如下：
+
+##	0x04	do_filp_open
+
+[`do_filp_open`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L3515)
 
 ```CPP
-//pathname 是 open file 的完整路径名
+/*
+参数 dfd：相对路径的基准目录对应的文件描述符
+参数 pathname：指向文件完整路径
+参数 op：查找标志
+*/
 struct file *do_filp_open(int dfd, struct filename *pathname,
 		const struct open_flags *op)
 {
@@ -226,6 +422,19 @@ struct file *do_filp_open(int dfd, struct filename *pathname,
 	return filp;
 }
 ```
+
+现在让我们来简短看下 do_filp_open() 函数的实现。这个函数定义在 fs/namei.c Linux 内核源码中，函数开始就初始化了 nameidata 结构体。这个结构体提供了一个链接到文件 inode。事实上，这就是一个 do_filp_open() 函数指针，这个函数通过传递到 open 系统调用的的文件名获取 inode ，在 nameidata 结构体被初始化后，path_openat 函数会被调用。
+
+filp = path_openat(&nd, op, flags | LOOKUP_RCU);
+
+if (unlikely(filp == ERR_PTR(-ECHILD)))
+    filp = path_openat(&nd, op, flags);
+if (unlikely(filp == ERR_PTR(-ESTALE)))
+    filp = path_openat(&nd, op, flags | LOOKUP_REVAL);
+注意 path_openat 会被调用了三次。事实上，Linux 内核会以 RCU 模式打开文件。这是最有效的打开文件的方式。如果打开失败，内核进入正常模式。第三次调用相对较少（出现），仅在 nfs 文件系统中使用。path_openat 函数执行 path lookup，换句话说就是尝试寻找一个与路径相符合的 dentry (目录数据结构，Linux 内核用来追踪记录文件在目录里层次结构)。
+
+path_openat 函数从调用 get_empty_flip() 函数开始。get_empty_flip() 分配一个新 file 结构体并做一些额外的检查，像我们是否打开超出了系统中能打开的文件的数量等。在我们获得了已分配的新 file 结构体后，如果我们给 open 系统调用传递了 O_TMPFILE | O_CREATE 或 O_PATH 标志，则调用 do_tmpfile 或 do_o_path 函数。在我们想要打开已存在的文件和想要读写时这些情况是非常特殊的，因此我们仅考虑常见的情形。
+
 
 3、[`path_openat`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L3457)，在 `path_openat` 中，先调用 `get_empty_filp` 方法分配一个空的 `struct file` 实例，再调用 `path_init`、`link_path_walk`、`do_last` 等方法执行后续的 open 操作，如果都成功了，则返回 `struct file` 给上层。核心方法是 `path_init`、`link_path_walk`、`do_last`，其中 `path_init` 和 `link_path_walk` 通常合在一起调用，作用是 **可以根据给定的文件路径名称在内存中找到或者建立代表着目标文件或者目录的 dentry 结构和 inode 结构**
 
@@ -1103,3 +1312,5 @@ ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_
 -   [Linux 的 VFS 实现 - 番外 [一] - dcache](https://zhuanlan.zhihu.com/p/261669249)
 -   [Linux Kernel 文件系统写 I/O 流程代码分析（一）](https://www.cnblogs.com/jimbo17/p/10436222.html)
 -   [vfs dentry cache 模块实现分析](https://zhuanlan.zhihu.com/p/457005511)
+-	[open 系统调用实现](https://xinqiu.gitbooks.io/linux-insides-cn/content/SysCall/linux-syscall-5.html)
+-	[open(2) — Linux manual page](https://man7.org/linux/man-pages/man2/open.2.html)
