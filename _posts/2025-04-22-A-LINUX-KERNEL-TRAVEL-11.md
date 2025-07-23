@@ -436,6 +436,8 @@ if (unlikely(filp == ERR_PTR(-ESTALE)))
 path_openat 函数从调用 get_empty_flip() 函数开始。get_empty_flip() 分配一个新 file 结构体并做一些额外的检查，像我们是否打开超出了系统中能打开的文件的数量等。在我们获得了已分配的新 file 结构体后，如果我们给 open 系统调用传递了 O_TMPFILE | O_CREATE 或 O_PATH 标志，则调用 do_tmpfile 或 do_o_path 函数。在我们想要打开已存在的文件和想要读写时这些情况是非常特殊的，因此我们仅考虑常见的情形。
 
 
+##	0x0	path_openat
+
 3、[`path_openat`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L3457)，在 `path_openat` 中，先调用 `get_empty_filp` 方法分配一个空的 `struct file` 实例，再调用 `path_init`、`link_path_walk`、`do_last` 等方法执行后续的 open 操作，如果都成功了，则返回 `struct file` 给上层。核心方法是 `path_init`、`link_path_walk`、`do_last`，其中 `path_init` 和 `link_path_walk` 通常合在一起调用，作用是 **可以根据给定的文件路径名称在内存中找到或者建立代表着目标文件或者目录的 dentry 结构和 inode 结构**
 
 ```CPP
@@ -609,6 +611,8 @@ static const char *path_init(struct nameidata *nd, unsigned flags)
 }
 ```
 
+####	link_path_walk
+
 5、[`link_path_walk`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L2042)
 
 ```CPP
@@ -743,6 +747,8 @@ OK:
 -   `.` 或 `..`
 -   普通的目录，这里又会检测当前目录是否为其他文件系统的挂载点
 -   符号链接
+
+####	do_last
 
 6、`do_last` 方法，先调用 `lookup_fast`，寻找路径中的最后一个 component，如果成功，就会跳到 `finish_lookup` 对应的 label，然后执行 `step_into` 方法，更新 `nd` 中的 `path`、`inode` 等信息，使其指向目标路径。然后调用 `vfs_open` 方法，继续执行 open 操作
 
@@ -1015,6 +1021,9 @@ static inline void __d_set_inode_and_type(struct dentry *dentry,
 	WRITE_ONCE(dentry->d_flags, flags);
 }
 ```
+
+##	0x0	
+
 
 ####    补充：`walk_component` 的细节
 [`walk_component`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1763) 方法对 `nd`（中间结果）中的目录进行遍历
