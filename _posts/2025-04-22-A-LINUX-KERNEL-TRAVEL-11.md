@@ -44,7 +44,7 @@ tags:
 ##  0x02    再看文件系统缓存
 
 ####    dentry cache
-一个 `struct dentry` 结构代表文件系统中的一个目录或文件，VFS dentry 结构的意义，即需要建立文件名 filename 到 inode 的映射关系，目的为了提高系统调用在操作、查找目录 / 文件操作场景下的效率，且 dentry 是仅存在于内存的数据结构，所以内核使用了 `dentry_hashtable`（dentry 树）来管理整个系统的目录树结构。在 Linux 可通过下面方式查看 dentry cache 的指标：
+一个 `struct dentry` 结构代表文件系统中的一个目录或文件，VFS dentry 结构的意义，即需要建立文件名 filename 到 inode 的映射关系，目的为了提高系统调用在操作、查找目录/文件操作场景下的效率，且 dentry 是仅存在于内存的数据结构，所以内核使用了 `dentry_hashtable`（dentry 树）来管理整个系统的目录树结构。在 Linux 可通过下面方式查看 dentry cache 的指标：
 
 ```BASH
 [root@VM-X-X-tencentos ~]# cat /proc/sys/fs/dentry-state
@@ -106,7 +106,7 @@ static void __init dcache_init(void)
 }
 ```
 
-##  0x03 追踪 open 流程：
+##  0x03 基础知识
 一个进程需要读/写一个文件，必须先通过 filename 建立和文件 inode 之间的通道，方式是通过 `open()` 函数，该函数的参数是文件所在的路径名 `pathname`，如何根据 `pathname` 找到对应的 inode？这就要依靠 dentry 结构了
 
 ####	系统调用
@@ -272,10 +272,14 @@ static inline int build_open_flags(int flags, umode_t mode, struct open_flags *o
 
 -	`last`：存储需要解析的文件路径的分量，不仅包字符串,还包含长度和散列值
 -	`path`：存储解析得到的挂载描述符和目录项
--	`iode`：存储目录项对应的索引节点（`path.dentry.d_inode`）
+-	`inode`：存储目录项对应的索引节点（`path.dentry.d_inode`）
 
-1.	`path` 会保存已经成功解析到的信息，`last` 用来存放当前需要解析的信息，如果 `last` 解析成功那么就会更新 `path`
-2.	如果文件路径的分量是一个符号链接，那么接下来需要解析符号链接的目标，那么`stack`用来保存文件路径还未被解析的部分，`depth` 表示深度。假设目录`b`是符号链接（目标是 `e/f`），解析文件路径 `a/b/c/d`，那么解析到 `b`，发现 `b` 是符号链接，接下来要解析符号链接 `b` 的目标 `e/f`，需要把文件路径中没有解析的部分 `c/d` 保存到`stack`中，等解析完符号链接后继续解析
+1、`path` 会保存已经成功解析到的信息，`last` 用来存放当前需要解析的信息，如果 `last` 解析成功那么就会更新 `path`
+2、如果文件路径的分量是一个符号链接，那么接下来需要解析符号链接的目标，那么`stack`用来保存文件路径还未被解析的部分，`depth` 表示深度。假设目录`b`是符号链接（目标是 `e/f`），解析文件路径 `a/b/c/d`，那么解析到 `b`，发现 `b` 是符号链接，接下来要解析符号链接 `b` 的目标 `e/f`，需要把文件路径中没有解析的部分 `c/d` 保存到`stack`中，等解析完符号链接后继续解析
+
+3、`nameidata`中`inode`与`link_inode`成员的作用是什么？
+
+TODO
 
 ```CPP
 struct nameidata {
@@ -321,8 +325,7 @@ static void set_nameidata(struct nameidata *p, int dfd, struct filename *name)
 
 ####	VFS中的目录查找
 
-
-####   核心流程
+##	0x04	do_sys_open
 `open`系统调用如下：
 ```CPP
 SYSCALL_DEFINE3(open, const char __user *, filename, int, flags, umode_t, mode)
@@ -337,7 +340,13 @@ SYSCALL_DEFINE3(open, const char __user *, filename, int, flags, umode_t, mode)
 
 ![open-call-flow]()
 
-1、[`do_sys_open`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/open.c#L1036)
+[`do_sys_open`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/open.c#L1036)主要流程如下：
+
+1.	检查&&解析传入的`flags`与`mode`
+2.	复制文件名到内核空间，调用 `getname(filename)` 从用户空间复制文件名，避免直接访问用户内存引发安全问题
+3.	分配文件描述符fd，调用 `get_unused_fd_flags(flags)` 从当前进程的文件描述符表`files_struct->fdt`中分配空闲的 fd。若分配失败，返回 `EMFILE` 错误
+4.	打开文件对象 `struct file`，调用 `do_filp_open(dfd, tmp, &op)` 执行路径解析和文件打开操作
+5.	关联 fd 与 file 对象，若`do_filp_open`成功，通过 `fd_install(fd, f)` 将 `struct file` 指针存入进程的 fd 数组，完成映射
 
 ```cpp
 long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
@@ -393,9 +402,18 @@ void fd_install(unsigned int fd, struct file *file)
 
 `__getname` 用于在内核缓冲区专用队列里申请一块内存用来放置路径名，作用如下：
 
-##	0x04	do_filp_open
+##	0x05	do_filp_open->path_openat实现
+[`do_filp_open`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L3515)，主要流程如下：
 
-[`do_filp_open`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L3515)
+1.	初始化路径查找上下文，通过 `path_openat->path_init(dfd, pathname, flags, &nd)` 初始化 `struct nameidata nd`，确定起始目录（当前目录 `AT_FDCWD` 或根目录）
+2.	逐级遍历路径分量，通过`link_path_walk(pathname, &nd)` 解析每一级路径：
+	-	查找目录项（dentry）并检查权限
+	-	处理挂载点：若当前 dentry 是挂载点（`d_mountpoint` 标志），切换到新文件系统的根目录（`vfsmount->mnt_root`）
+	-	解析符号链接（symbol link）：递归处理链接目标路径
+3.	处理最终路径分量，通过`do_last(&nd, file, ...)` 处理最后一个路径分量，大致流程为：
+	-	若文件不存在且指定 `O_CREAT`，则创建新文件
+	-	检查访问权限（`may_open()`）
+	-	调用 `vfs_open(&path, file)` 执行实际文件系统的打开操作
 
 ```CPP
 /*
@@ -423,7 +441,23 @@ struct file *do_filp_open(int dfd, struct filename *pathname,
 }
 ```
 
-现在让我们来简短看下 do_filp_open() 函数的实现。这个函数定义在 fs/namei.c Linux 内核源码中，函数开始就初始化了 nameidata 结构体。这个结构体提供了一个链接到文件 inode。事实上，这就是一个 do_filp_open() 函数指针，这个函数通过传递到 open 系统调用的的文件名获取 inode ，在 nameidata 结构体被初始化后，path_openat 函数会被调用。
+函数 `do_filp_open` 三次调用函数 `path_openat`以解析文件路径：
+
+1.	第一次解析传入标志 `LOOKUP_RCU`，使用 RCU 查找(rcu-walk)方式。在散列
+表中根据{父目录, 名称}查找目录的过程中,使用 RCU 保护散列桶的链表,使用
+序列号保护目录，其他处理器可以并行地修改目录, RCU 查找方式速度最快。
+
+
+如果在第一次解析的过程中发现其他处理器修改了正在查找的目录,返回错误号
+-ECHILD，那么第二次使用引用查找（ref-walk）REF 方式，在散列表中根据{父目录, 名称}
+查找目录的过程中,使用 RCU 保护散列桶的链表,使用自旋锁保护目录，并且把目录的引用计数加1。
+引用查找方式速度比较慢。
+
+
+网络文件系统的文件在网络的服务器上，本地上次查询得到的信息可能过期,和服务器的当前状态
+不一致。如果第二次解析发现信息过期，返回错误号 -ESTALE，那么第三次解析传入标志 LOOKUP_REVAL，
+表示需要重新确认信息是否有效。
+
 
 filp = path_openat(&nd, op, flags | LOOKUP_RCU);
 

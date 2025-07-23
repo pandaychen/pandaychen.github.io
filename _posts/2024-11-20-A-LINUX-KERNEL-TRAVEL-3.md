@@ -607,7 +607,7 @@ Linux 使用父子树的形式来构造，父设备树中的一个文件夹 `str
 
 特别要注意 `struct path`->`struct vfsmount *mnt`->`struct dentry *mnt_mountpoint`，计算绝对路径要用到，指向了挂载点的 `dentry`
 
-从上图，可以看到两个路径 `struct path` 最后引用到了同一 `inode`，但是路径 `path` 是不一样的，因为 `path` 指向的 `vfsmount` 是不一样的（很好的说明的本文开头列举的例子）
+从上图，可以看到两个路径 `struct path` 最后引用到了同一 `inode`，但是路径 `path` 是不一样的，因为 `path` 指向的 `vfsmount` 是不一样的（很好的说明的本文开头列举的例子），**在VFS中，遍历目录项dentry的父节点parent时，遇到 `dentry->d_name.name` 为 `/` 的目录项，并不一定表示已到达全局根目录，这是因为 VFS 支持多文件系统挂载，每个挂载点上都有自己的局部根目录，正确判断是否到达实际根节点需要结合 `vfsmount` 结构进行验证**
 
 4、`chroot`：Linux 支持每个进程拥有不同的根目录，使用 `chroot()` 系统调用可以把当前进程的根目录设置为整棵文件系统树中的任何 path
 
