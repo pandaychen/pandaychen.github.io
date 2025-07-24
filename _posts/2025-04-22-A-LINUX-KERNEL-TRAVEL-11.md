@@ -323,6 +323,14 @@ static void set_nameidata(struct nameidata *p, int dfd, struct filename *name)
 
 ![nameidata-path-vfsmount]()
 
+`last_type`的五种类型：
+
+-	`LAST_NORM`：最后一个分量是普通文件名
+-	`LAST_ROOT`：最后一个分量是`/`（即整个路径名为`/`）
+-	`LAST_DOT`：最后一个分量是`.`
+-	`LAST_DOTDOT`：最后一个分量是`..`
+-	`LAST_BIND`：最后一个分量是链接到特殊文件系统的符号链接
+
 ####	VFS中的目录查找
 
 ##	0x04	do_sys_open
@@ -431,48 +439,32 @@ struct file *do_filp_open(int dfd, struct filename *pathname,
     // 将 pathname 保存到 nameidata 里
 	set_nameidata(&nd, dfd, pathname);
     // 调用 path_openat，此时是 flags 是带了 LOOKUP_RCU flag
+
+	//RCU 模式
 	filp = path_openat(&nd, op, flags | LOOKUP_RCU);
 	if (unlikely(filp == ERR_PTR(-ECHILD)))
+		//正常模式
 		filp = path_openat(&nd, op, flags);
-	if (unlikely(filp == ERR_PTR(-ESTALE)))
+	if (unlikely(filp == ERR_PTR(-ESTALE)))	
+		//NFS模式
 		filp = path_openat(&nd, op, flags | LOOKUP_REVAL);
 	restore_nameidata();
 	return filp;
 }
 ```
 
-函数 `do_filp_open` 三次调用函数 `path_openat`以解析文件路径：
+函数 `do_filp_open` 三次调用函数 `path_openat`以解析文件路径的目的是什么？简单说明下
 
-1.	第一次解析传入标志 `LOOKUP_RCU`，使用 RCU 查找(rcu-walk)方式。在散列
-表中根据{父目录, 名称}查找目录的过程中,使用 RCU 保护散列桶的链表,使用
-序列号保护目录，其他处理器可以并行地修改目录, RCU 查找方式速度最快。
+1.	第一次解析传入标志 `LOOKUP_RCU`，该模式 `LOOKUP_RCU` 即rcu-walk方式，在 dcache 哈希表中根据`{父目录, 名称}`查找目录的过程中，使用 RCU机制保护dcache桶上的链表，使用序列号保护目录，其他处理器可以并行地修改目录, RCU 查找方式速度最快
+2.	如果在第一次解析的过程中发现其他处理器修改了正在查找的目录（问题：内核如何发现？），返回错误号`-ECHILD`，那么第二次使用引用查找（ref-walk）即REF 方式，在dcache中根据`{父目录, 名称}`查找目录的过程中，使用 RCU 保护散列桶的链表，使用自旋锁保护目录，并且把目录的引用计数加`1`，引用查找方式速度较慢
+3.	网络文件系统的文件在网络的服务器上，本地上次查询得到的信息可能过期,和服务器的当前状态不一致。如果第二次解析发现信息过期，返回错误号 `-ESTALE`，那么第三次解析传入标志 `LOOKUP_REVAL`，表示需要重新确认信息是否有效
 
+####	do_filp_open->path_openat
+[`path_openat`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L3457)，在 `path_openat` 中，先调用 `get_empty_filp` 方法分配一个空的 `struct file` 实例，再调用 `path_init`、`link_path_walk`、`do_last` 等方法执行后续的 open 操作，如果都成功了，则返回 `struct file` 给上层
 
-如果在第一次解析的过程中发现其他处理器修改了正在查找的目录,返回错误号
--ECHILD，那么第二次使用引用查找（ref-walk）REF 方式，在散列表中根据{父目录, 名称}
-查找目录的过程中,使用 RCU 保护散列桶的链表,使用自旋锁保护目录，并且把目录的引用计数加1。
-引用查找方式速度比较慢。
+`path_openat`的主要功能是尝试寻找一个与路径相符合的 dentry 目录数据结构，核心方法是 `path_init`、`link_path_walk`、`do_last`，其中 `path_init` 和 `link_path_walk` 通常合在一起调用，作用是 **可以根据给定的文件路径名称在内存中找到或者建立代表着目标文件或者目录的 dentry 结构和 inode 结构**
 
-
-网络文件系统的文件在网络的服务器上，本地上次查询得到的信息可能过期,和服务器的当前状态
-不一致。如果第二次解析发现信息过期，返回错误号 -ESTALE，那么第三次解析传入标志 LOOKUP_REVAL，
-表示需要重新确认信息是否有效。
-
-
-filp = path_openat(&nd, op, flags | LOOKUP_RCU);
-
-if (unlikely(filp == ERR_PTR(-ECHILD)))
-    filp = path_openat(&nd, op, flags);
-if (unlikely(filp == ERR_PTR(-ESTALE)))
-    filp = path_openat(&nd, op, flags | LOOKUP_REVAL);
-注意 path_openat 会被调用了三次。事实上，Linux 内核会以 RCU 模式打开文件。这是最有效的打开文件的方式。如果打开失败，内核进入正常模式。第三次调用相对较少（出现），仅在 nfs 文件系统中使用。path_openat 函数执行 path lookup，换句话说就是尝试寻找一个与路径相符合的 dentry (目录数据结构，Linux 内核用来追踪记录文件在目录里层次结构)。
-
-path_openat 函数从调用 get_empty_flip() 函数开始。get_empty_flip() 分配一个新 file 结构体并做一些额外的检查，像我们是否打开超出了系统中能打开的文件的数量等。在我们获得了已分配的新 file 结构体后，如果我们给 open 系统调用传递了 O_TMPFILE | O_CREATE 或 O_PATH 标志，则调用 do_tmpfile 或 do_o_path 函数。在我们想要打开已存在的文件和想要读写时这些情况是非常特殊的，因此我们仅考虑常见的情形。
-
-
-##	0x0	path_openat
-
-3、[`path_openat`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L3457)，在 `path_openat` 中，先调用 `get_empty_filp` 方法分配一个空的 `struct file` 实例，再调用 `path_init`、`link_path_walk`、`do_last` 等方法执行后续的 open 操作，如果都成功了，则返回 `struct file` 给上层。核心方法是 `path_init`、`link_path_walk`、`do_last`，其中 `path_init` 和 `link_path_walk` 通常合在一起调用，作用是 **可以根据给定的文件路径名称在内存中找到或者建立代表着目标文件或者目录的 dentry 结构和 inode 结构**
+注意`while (!(error = link_path_walk(s, nd)) && (error = do_last(nd, file, op, &opened)) > 0)` 这里的循环的作用是什么？通过后续的`trailing_symlink`字面意思不难看出，是为了递归处理路径解析过程中可能存在的末尾符号链接（trailing symlink）
 
 ```CPP
 static struct file *path_openat(struct nameidata *nd,
@@ -489,10 +481,7 @@ static struct file *path_openat(struct nameidata *nd,
 
 	file->f_flags = op->open_flag;
 
-	if (unlikely(file->f_flags & __O_TMPFILE)) {
-		error = do_tmpfile(nd, flags, op, file, &opened);
-		goto out2;
-	}
+	......
 
 	if (unlikely(file->f_flags & O_PATH)) {
 		error = do_o_path(nd, flags, file);
@@ -503,7 +492,9 @@ static struct file *path_openat(struct nameidata *nd,
 
     // 路径初始化，确定查找的起始目录，初始化结构体 nameidata 的成员 path
     // 调用 path_init() 设置 nameidata 的 path 结构体
-    // 对于常规文件来说，如 / data/test/testfile，设置 path 结构体指向根目录 /，即设置 path.mnt/path.dentry 指向根目录 /，为后续的目录解析做准备
+    // 对于常规文件来说，如 /data/test/testfile，设置 path 结构体指向根目录 /
+	// 即设置 path.mnt/path.dentry 指向根目录 /
+	// 为后续的目录解析做准备
     // path_init() 的返回值即指向 open file 的完整路径名字串开头
 	s = path_init(nd, flags);
 	if (IS_ERR(s)) {
@@ -544,20 +535,24 @@ out2:
 }
 ```
 
-4、`path_init` 方法，`path_init` 方法主要是用来初始化 `struct nameidata` 实例中的 `path`、`root`、`inode` 等字段。当 `path_init` 函数执行成功后，就会在 `nameidata` 结构体的成员 `nd->path.dentry` 中指向搜索路径的起点，接下来就使用 `link_path_walk` 函数顺着路径进行搜索
+####	path_openat->path_init
+`path_init` 方法主要是用来初始化 `struct nameidata` 实例中的 `path`、`root`、`inode` 等字段。当 `path_init` 函数执行成功后，就会在 `nameidata` 结构体的成员 `nd->path.dentry` 中指向搜索路径的起点，接下来就使用 `link_path_walk` 函数顺着路径进行搜索
 
 ```CPP
 static const char *path_init(struct nameidata *nd, unsigned flags)
 {
 	int retval = 0;
 	const char *s = nd->name->name;
-
+	// 如果路径名为空，清除 LOOKUP_RCU 标志
 	if (!*s)
 		flags &= ~LOOKUP_RCU;
 
-	nd->last_type = LAST_ROOT; /* if there are only slashes... */
+	nd->last_type = LAST_ROOT;
 	nd->flags = flags | LOOKUP_JUMPED | LOOKUP_PARENT;
 	nd->depth = 0;
+
+	// 如果设置 `LOOKUP_ROOT`
+	// 表示 nameidata 中的 root 字段是由调用者提供的
 	if (flags & LOOKUP_ROOT) {
 		struct dentry *root = nd->root.dentry;
 		struct inode *inode = root->d_inode;
@@ -570,12 +565,15 @@ static const char *path_init(struct nameidata *nd, unsigned flags)
 		}
 		nd->path = nd->root;
 		nd->inode = inode;
+		// 如果是 RCU 模式，则保存序列锁（处理竞争）
 		if (flags & LOOKUP_RCU) {
 			rcu_read_lock();
 			nd->seq = __read_seqcount_begin(&nd->path.dentry->d_seq);
 			nd->root_seq = nd->seq;
 			nd->m_seq = read_seqbegin(&mount_lock);
 		} else {
+			// 不是RCU模式
+			// 如果是 REF 模式，则获取 path 的计数引用（处理竞争）
 			path_get(&nd->path);
 		}
 		return s;
@@ -585,17 +583,23 @@ static const char *path_init(struct nameidata *nd, unsigned flags)
 	nd->path.mnt = NULL;
 	nd->path.dentry = NULL;
 
+	// mount_lock 是一个全局 seqlock，有点像 rename_lock
+	// 它可以用来检查任何挂载点的任何修改
 	nd->m_seq = read_seqbegin(&mount_lock);
+
+	// CASE1
+	// 如果是以 / 开头，也就是说明是绝对路径
 	if (*s == '/') {
 		if (flags & LOOKUP_RCU)
-			rcu_read_lock();
+			rcu_read_lock();	//RCU模式加锁
 		set_root(nd);
 		if (likely(!nd_jump_root(nd)))
 			return s;
 		nd->root.mnt = NULL;
-		rcu_read_unlock();
+		rcu_read_unlock();	//RCU模式解锁
 		return ERR_PTR(-ECHILD);
 	} else if (nd->dfd == AT_FDCWD) {
+		//如果为相对路径，且未指定相对路径的基准目录
 		if (flags & LOOKUP_RCU) {
 			struct fs_struct *fs = current->fs;
 			unsigned seq;
@@ -614,6 +618,7 @@ static const char *path_init(struct nameidata *nd, unsigned flags)
 		}
 		return s;
 	} else {
+		//如果为相对路径，且已经指定了相对路径的基准目录
 		/* Caller must check execute permissions on the starting path component */
 		struct fd f = fdget_raw(nd->dfd);
 		struct dentry *dentry;
@@ -645,9 +650,10 @@ static const char *path_init(struct nameidata *nd, unsigned flags)
 }
 ```
 
-####	link_path_walk
+####	path_openat->link_path_walk
+[`link_path_walk`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L2042)
 
-5、[`link_path_walk`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L2042)
+TODO
 
 ```CPP
 static int link_path_walk(const char *name, struct nameidata *nd)
@@ -776,18 +782,18 @@ OK:
 }
 ```
 
-`link_path_walk` 函数中会调用 `walk_component` 函数来进行路径搜索（向上或者向下），这个是较为复杂的逻辑，有很多场景，典型的如：
+`link_path_walk` 函数中会调用 `walk_component` [函数](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1763)来进行路径搜索（向上或者向下），这个是较为复杂的逻辑，有很多场景，典型的如：
 
 -   `.` 或 `..`
 -   普通的目录，这里又会检测当前目录是否为其他文件系统的挂载点
 -   符号链接
 
-####	do_last
+##	0x06	do_last的实现
 
-6、`do_last` 方法，先调用 `lookup_fast`，寻找路径中的最后一个 component，如果成功，就会跳到 `finish_lookup` 对应的 label，然后执行 `step_into` 方法，更新 `nd` 中的 `path`、`inode` 等信息，使其指向目标路径。然后调用 `vfs_open` 方法，继续执行 open 操作
+####	path_opena->do_last
+最后看下`do_last` 方法的实现，先调用 `lookup_fast`，寻找路径中的最后一个 component，如果成功，就会跳到 `finish_lookup` 对应的 label，然后执行 `step_into` 方法，更新 `nd` 中的 `path`、`inode` 等信息，使其指向目标路径。然后调用 `vfs_open` 方法，继续执行 open 操作
 
 ```CPP
-// fs/namei.c
 static int do_last(struct nameidata *nd,
                    struct file *file, const struct open_flags *op)
 {
@@ -1002,6 +1008,8 @@ void init_special_inode(struct inode *inode, umode_t mode, dev_t rdev)
 static int ext4_file_open(struct inode * inode, struct file * filp)
 ```
 
+##	0x07	补充
+
 ####	补充：operations成员
 针对ext4系统，相应注册的inode实例化方法[如下](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/namei.c#L3903)
 
@@ -1060,7 +1068,7 @@ static inline void __d_set_inode_and_type(struct dentry *dentry,
 
 
 ####    补充：`walk_component` 的细节
-[`walk_component`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1763) 方法对 `nd`（中间结果）中的目录进行遍历
+[`walk_component`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1763) 方法对 `nd`（中间结果）中的目录进行遍历，当前的子路径一定是一个中间节点（目录OR符号链接）
 
 -   优先使用 `lookup_fast`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1537)：如果当前的目录是一个普通目录，路径行走有两个策略：先在效率高的 rcu-walk 模式 [`__d_lookup_rcu`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1554) 下遍历，如果失败了就在效率较低的 ref-walk 模式 [`__d_lookup`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1600) 下遍历
 -   如果 `lookup_fast` 查找失败，则调用 `lookup_slow` 函数。在 ref-walk 模式下会 **首先在内存缓冲区查找相应的目标（lookup_fast），如果找不到就启动具体文件系统（如 `ext4`）自己的 `lookup` 进行查找（lookup_slow）**
@@ -1074,21 +1082,21 @@ static int walk_component(struct nameidata *nd, int flags)
 	struct inode *inode;
 	unsigned seq;
 	int err;
-	/*
-	 * "." and ".." are special - ".." especially so because it has
-	 * to be able to know about the current root directory and
-	 * parent relationships.
-	 */
+
+	// 如果不是 LAST_NORM 类型，就交由 handle_dots 处理
 	if (unlikely(nd->last_type != LAST_NORM)) {
 		err = handle_dots(nd, nd->last_type);
 		if (!(flags & WALK_MORE) && nd->depth)
 			put_link(nd);
 		return err;
 	}
+
+	// 快速查找
 	err = lookup_fast(nd, &path, &inode, &seq);
 	if (unlikely(err <= 0)) {
 		if (err < 0)
 			return err;
+		// 如果快速查找模式失败，则进行慢速查找模式
 		path.dentry = lookup_slow(&nd->last, nd->path.dentry,
 					  nd->flags);
 		if (IS_ERR(path.dentry))
@@ -1357,3 +1365,4 @@ ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_
 -   [vfs dentry cache 模块实现分析](https://zhuanlan.zhihu.com/p/457005511)
 -	[open 系统调用实现](https://xinqiu.gitbooks.io/linux-insides-cn/content/SysCall/linux-syscall-5.html)
 -	[open(2) — Linux manual page](https://man7.org/linux/man-pages/man2/open.2.html)
+-	[Linux Open系统调用 篇二](https://juejin.cn/post/6844903926735568904)
