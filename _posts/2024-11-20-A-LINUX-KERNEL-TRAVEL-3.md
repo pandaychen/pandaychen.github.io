@@ -70,7 +70,7 @@ build  docker  home  lost+found  test  subdir
 
 -	[`inode`](https://elixir.bootlin.com/linux/v3.4/source/include/linux/fs.h#L761)：与磁盘上真实文件的一对一映射，inode号是唯一的，表示不同的文件，在Linux内部访问文件都是通过inode号来进行的，所谓文件名仅仅是给用户容易使用的。代表一个特定的文件（包括目录）
 -	`super_block`：文件系统的控制块，有整个文件系统信息，一个文件系统所有的`inode`都要连接到超级块上，代表一个已挂载的文件系统
--	[`dentry`](https://elixir.bootlin.com/linux/v3.4/source/include/linux/dcache.h#L88)：**VFS中负责维护目录树的数据结构就是`dentry`，通过把`inode`绑定到`dentry`来实现目录树的访问和管理**。Linux中一个路径字符串，在内核中会被解析为一组路径节点object，`dentry`就是路径中的一个节点。`dentry`被用来索引和访问`inode`，每个`dentry`对应一个`inode`，通过`dentry`可以找到并操作其所对应的`inode`。与`inode`和`super block`不同，`dentry`在磁盘中并没有实体储存，`dentry`链表都是在运行时通过解析`path`字符串构造出来的。此外，多个 `dentry` 可以指向同一个 `inode`（符号链接）
+-	[`dentry`](https://elixir.bootlin.com/linux/v3.4/source/include/linux/dcache.h#L88)：**VFS中负责维护目录树的数据结构就是`dentry`，通过把`inode`绑定到`dentry`来实现目录树的访问和管理**。Linux中一个路径字符串，在内核中会被解析为一组路径节点object，`dentry`就是路径中的一个节点。`dentry`被用来索引和访问`inode`，每个`dentry`对应一个`inode`，通过`dentry`可以找到并操作其所对应的`inode`。与`inode`和`super block`不同，`dentry`在磁盘中并没有实体储存，`dentry`链表都是在运行时通过解析`path`字符串构造出来的。此外，多个 `dentry` 可以指向同一个 `inode`（hard link），而对于symbol link而言，一个`dentry`对应一个`inode`
 
 -	`dentry cache`：通过一个 `path` 查找对应的 `dentry`，如果每次都从磁盘中去获取的话会比较耗资源，所以内核提供了一个 LRU 缓存用于加速查找，比如查找 `/usr/bin/java` 这个文件的目录项的时候，先需要找到 `/` 的目录项，然后 `/bin`，依次类推直到找到 `path` 的结尾，这样中间的查找过程中涉及到的目录项`dentry`就会被缓存起来，方便下次查找
 -	[`file`](https://elixir.bootlin.com/linux/v3.4/source/include/linux/fs.h#L976)：文件除了`dentry`和`inode`描述信息外，还需要有如读写位置等上下文操作信息，每个进程必须各自保存自己的读写上下文，因为同一个文件可以同时被多个进程读写，如果放在`dentry`和`inode`这种公共位置，会暴露给其它进程。所以一个 `file` 结构体代表一个物理文件的上下文，不同的进程，甚至同一个进程可以多次打开一个文件，因此具有多个 `file struct`
@@ -125,7 +125,7 @@ struct super_block {
 	struct block_device	*s_bdev;	/* can go away once we use an accessor for @s_bdev_file */
 }
 ```
--	 `s_type`：标识当前超级快对应的文件系统类型，也就是当前这个文件系统属于哪个类型？（例如 `ext2` 还是 `fat32`）
+-	`s_type`：标识当前超级快对应的文件系统类型，也就是当前这个文件系统属于哪个类型？（例如 `ext2` 还是 `fat32`）
 -	`s_bdev`：指向文件系统被安装的块设备
 -	`s_root`：指向该具体文件系统安装目录的目录项（参考下图）
 
@@ -230,7 +230,7 @@ struct dentry {
 需要关注 `struct file` 的这几个重要成员：
 
 -	`f_inode`：直接指向文件对应的inode（注意到此成员与`file.f_path.dentry->d_inode`的指向是相同的）
--	`f_list`：所有的打开的文件形成的链表！注意一个文件系统所有的打开的文件都通过这个链接到 super_block 中的 s_files 链表中！
+-	`f_list`：所有的打开的文件形成的链表！注意一个文件系统所有的打开的文件都通过这个链接到 super_block 中的 `s_files` 链表中！
 -	`f_path.dentry`：类型为`struct dentry *`，与该文件相关的 `dentry`
 -	`f_path.mnt`：类型为`struct vfsmount *`，该文件在这个文件系统中的挂载点（参考下面的mnt图）
 -	`f_path`：**通过`f_path`可以定位到该`file`在文件系统中的唯一绝对路径**

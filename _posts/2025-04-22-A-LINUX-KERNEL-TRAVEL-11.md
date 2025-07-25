@@ -43,7 +43,7 @@ tags:
 
 ##  0x02    再看文件系统缓存
 
-####    dentry cache
+####    VFS的hash表：dentry cache
 一个 `struct dentry` 结构代表文件系统中的一个目录或文件，VFS dentry 结构的意义，即需要建立文件名 filename 到 inode 的映射关系，目的为了提高系统调用在操作、查找目录/文件操作场景下的效率，且 dentry 是仅存在于内存的数据结构，所以内核使用了 `dentry_hashtable`（dentry 树）来管理整个系统的目录树结构。在 Linux 可通过下面方式查看 dentry cache 的指标：
 
 ```BASH
@@ -51,7 +51,11 @@ tags:
 1212279 1174785 45      0       598756  0
 ```
 
-前文已经描述过 [`dentry_hashtable`]() 数据结构的意义，即为了提高目录，内核使用 `dentry_hashtable` 对 dentry 进行管理，在 `open` 等系统调用进行路径查找时，用于快速定位某个目录 dentry 下面的子 dentry（哈希表的搜索效率显然更好）
+前文已经描述过 [`dentry_hashtable`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L105) 数据结构的意义，即为了提高目录查找效率，内核使用 `dentry_hashtable` 对 dentry 进行管理，在 `open` 等系统调用进行路径查找时，用于快速定位某个目录 dentry 下面的子 dentry（哈希表的搜索效率显然更好）
+
+`dentry_hashtable`用来保存对应一个dentry的`hlist_bl_node`，使用拉链法来解决哈希冲突。它的好处是能根据路径分量（component）名称的hash值，快速定位到对应的`hlist_bl_node`，最后通过`hlist_bl_node`（`container_of`）获得对应的dentry
+
+
 
 
 1、`dentry` 及 `dentry_hashtable` 的结构（搜索 & 回收）
@@ -68,6 +72,23 @@ struct dentry {
 ```
 
 ![dcache-pic]()
+
+`dentry_hashtable`是一个指向`hlist_bl_head`的指针的数组。通过name的hash值，调用[`d_hash()`](1https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L107)即可获取`dentry_hashtable`中对应的`hlist_bl_head`（即拉链的头）
+
+```CPP
+//dentry hashtable定义
+static struct hlist_bl_head *dentry_hashtable __read_mostly;
+
+struct hlist_bl_head {
+	struct hlist_bl_node *first;
+};
+
+static inline struct hlist_bl_head *d_hash(unsigned int hash)
+{
+	return dentry_hashtable + (hash >> (32 - d_hash_shift));
+}
+```
+
 
 2、`dentry_hashtable` 的创建过程
 
