@@ -56,8 +56,6 @@ tags:
 `dentry_hashtable`用来保存对应一个dentry的`hlist_bl_node`，使用拉链法来解决哈希冲突。它的好处是能根据路径分量（component）名称的hash值，快速定位到对应的`hlist_bl_node`，最后通过`hlist_bl_node`（`container_of`）获得对应的dentry
 
 
-
-
 1、`dentry` 及 `dentry_hashtable` 的结构（搜索 & 回收）
 
 对 `dentry` 而言，对于加速搜索关联了两个关键数据结构 `d_hash` 及 `d_lru`，dentry 回收关联的重要成员是 `d_lockref`，`d_lockref` 内嵌一个自旋锁（spinlock_t），用于保护 dentry 结构的并发修改
@@ -79,8 +77,14 @@ struct dentry {
 //dentry hashtable定义
 static struct hlist_bl_head *dentry_hashtable __read_mostly;
 
+// hlist_bl_head的头
 struct hlist_bl_head {
 	struct hlist_bl_node *first;
+};
+
+// 链表的节点（双向链表）
+struct hlist_bl_node {
+	struct hlist_bl_node *next, **pprev;
 };
 
 static inline struct hlist_bl_head *d_hash(unsigned int hash)
@@ -89,6 +93,15 @@ static inline struct hlist_bl_head *d_hash(unsigned int hash)
 }
 ```
 
+如上，结构体`hlist_bl_node`类似一个双向链表，采用的是头插法（`hlist_bl_add_head()`）,前文[]()已经介绍过此类内核链表实现。`pprev`这个二级指针，指向的不是前面节点，而是指向前面节点的next指针的存储地址（如果是头节点，`pprev`会指向`hlist_bl_head`的`first`的存储地址）。这样的好处是从链表中移除自身的时候，只需要将`next->pprev = pprev`即可,关联内核函数为`__hlist_bl_del()`，即对`pprev`解引用操作`(*pprev)`这个值为当前链表节点`hlist_bl_node`的地址，下面介绍关于dentry_hashtable的几类典型操作：
+
+-	判断节点是否在链表中，只需要判断`pprev`是否为`NULL`（`hlist_bl_unhashed()`）
+-	`dentry_hashtable`的初始化：通过`alloc_large_system_hash()`分配一个容量是2的整数次幂的内存块，即一个指针数组
+-	`hlist_bl_node`中并没有dentry相关信息，那么查询`dentry_hashtable`，如何通过`hlist_bl_node`指针获取对应的dentry呢？dentry里有一个对象（非指针成员）`struct hlist_bl_node d_hash`，所以可以用`hlist_bl_node`指针，通过`container_of()`机制获得对应的dentry
+-	链表遍历：`hlist_bl_for_each_entry_rcu()`，链表里面包含了冲突节点
+-	如何区分是否是目标dentry? `dentry_hashtable`是采用拉链法解决冲突的。由于是根据路径分量名称+父parent dentry指针地址来做hash的，所以如何找到需要的节点？
+	-	当hash相同，路径分量名称不同，比较一下路径分量名称的字符串
+	-	当hash相同，路径分量名称相同，通过`hlist_bl_node`获取对应的dentry，判断一下`dentry->d_parent`是否是它的`parent`即可。因为同一目录下不可能有两个同名的文件，所以名称相同的，parent肯定不同
 
 2、`dentry_hashtable` 的创建过程
 
@@ -353,6 +366,11 @@ static void set_nameidata(struct nameidata *p, int dfd, struct filename *name)
 -	`LAST_BIND`：最后一个分量是链接到特殊文件系统的符号链接
 
 ####	VFS中的目录查找
+
+
+####	VFS 的 path walk：知识回顾
+![vfs-path-walk]()
+
 
 ##	0x04	do_sys_open
 `open`系统调用如下：
