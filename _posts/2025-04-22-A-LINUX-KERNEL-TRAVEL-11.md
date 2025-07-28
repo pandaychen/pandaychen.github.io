@@ -58,7 +58,7 @@ tags:
 
 1、`dentry` 及 `dentry_hashtable` 的结构（搜索 & 回收）
 
-对 `dentry` 而言，对于加速搜索关联了两个关键数据结构 `d_hash` 及 `d_lru`，dentry 回收关联的重要成员是 `d_lockref`，`d_lockref` 内嵌一个自旋锁（spinlock_t），用于保护 dentry 结构的并发修改
+对 `dentry` 而言，对于加速搜索关联了两个关键数据结构 `d_hash` 及 `d_lru`，dentry 回收关联的重要成员是 `d_lockref`，`d_lockref` 内嵌一个自旋锁（`spinlock_t`），用于保护 dentry 结构的并发修改
 ```CPP
 struct dentry {
     /* Ref lookup also touches following */
@@ -93,7 +93,7 @@ static inline struct hlist_bl_head *d_hash(unsigned int hash)
 }
 ```
 
-如上，结构体`hlist_bl_node`类似一个双向链表，采用的是头插法（`hlist_bl_add_head()`）,前文[]()已经介绍过此类内核链表实现。`pprev`这个二级指针，指向的不是前面节点，而是指向前面节点的next指针的存储地址（如果是头节点，`pprev`会指向`hlist_bl_head`的`first`的存储地址）。这样的好处是从链表中移除自身的时候，只需要将`next->pprev = pprev`即可,关联内核函数为`__hlist_bl_del()`，即对`pprev`解引用操作`(*pprev)`这个值为当前链表节点`hlist_bl_node`的地址，下面介绍关于dentry_hashtable的几类典型操作：
+如上，结构体`hlist_bl_node`类似一个双向链表，采用的是头插法（`hlist_bl_add_head()`）,前文[]()已经介绍过此类内核链表实现。`pprev`这个二级指针，指向的不是前面节点，而是指向前面节点的next指针的存储地址（如果是头节点，`pprev`会指向`hlist_bl_head`的`first`的存储地址）。这样的好处是从链表中移除自身的时候，只需要将`next->pprev = pprev`即可,关联内核函数为`__hlist_bl_del()`，对`pprev`解引用操作即`(*pprev)`这个值为当前链表节点`hlist_bl_node`的地址，下面介绍关于`dentry_hashtable`的几类典型操作：
 
 -	判断节点是否在链表中，只需要判断`pprev`是否为`NULL`（`hlist_bl_unhashed()`）
 -	`dentry_hashtable`的初始化：通过`alloc_large_system_hash()`分配一个容量是2的整数次幂的内存块，即一个指针数组
@@ -108,7 +108,7 @@ static inline struct hlist_bl_head *d_hash(unsigned int hash)
 在文件系统初始化时，调用 `vfs_caches_init->dcache_init` 为 dcache 进行初始化，先创建一个 dentry 的 slab，用于后续 dentry 对象的分配，同时还初始化了 `dentry_hashtable` 这个用于管理 dentry 的全局 hashtable
 
 ```CPP
-static struct hlist_head *dentry_hashtable __read_mostly;
+static struct hlist_head *C __read_mostly;
 
 static void __init dcache_init(void)
 {
@@ -134,6 +134,45 @@ static void __init dcache_init(void)
     d_hash_shift = 32 - d_hash_shift;
 }
 ```
+
+3、基于`dentry-hashtable`的 RCU-walk 和 REF-walk 查找机制
+
+RCU-walk 和 REF-walk 是路径查找（Path Lookup）中两种核心的并发控制机制，分别针对高频读取和写操作场景优化，简单介绍下此二种机制：
+
+一、RCU-walk：无锁路径查找，设计目标是在无写入干扰的场景下，避免所有内存写操作（无锁、无引用计数增减），通过 RCU（Read-Copy-Update）和序列锁（Seqlock）保证数据一致性，相关实现原理如下：
+
+1.	无锁遍历
+	-	使用 `hlist_bl_for_each_entry_rcu()` 遍历 dentry 哈希链表（bucket），不获取任何锁
+	-	依赖 RCU 宽限期（Grace Period）确保被释放的 dentry 不会被访问
+2.	seqlock验证一致性
+	-	通过 `raw_seqcount_begin()` 读取 dentry 的序列号 `d_seq`
+	-	关键操作后调用 `read_seqcount_retry()` 检测序列号是否变化
+3.	快速回退机制，若遇到以下情况，立即切换到 REF-walk：
+	-	Dentries 不在缓存中（如冷数据）
+	-	检测到并发修改（序列号变化频繁）
+	-	路径包含符号链接或挂载点等
+
+```CPP
+// seqlock 验证模式
+seq = raw_seqcount_begin(&dentry->d_seq); 
+// 读取 dentry 字段
+if (read_seqcount_retry(&dentry->d_seq, seq)) 
+    goto retry; // 序列号变化则重试
+```
+
+
+二、REF-walk：基于引用计数的安全路径查找，设计目标是处理高频写入或复杂路径（如符号链接、权限校验），通过引用计数和锁保证强一致性，相关实现原理如下：
+
+1.	引用计数保护
+	-	对每个 dentry 和 vfsmount 调用 `dget()/mntget()` 增加引用计数，防止并发释放
+	-	退出时通过 `dput()/mntput()` 减少计数
+2.	锁机制同步
+	-	自旋锁：保护 dentry 哈希桶（`dentry->d_lock`）
+	-	读写信号量：处理 inode 数据更新（`inode->i_rwsem`）
+3.	安全处理复杂路径
+	-	解析符号链接时递归调用 `link_path_walk()`
+	-	挂载点检查：通过 `__lookup_mnt()` 验证 vfsmount 有效性
+
 
 ##  0x03   基础知识
 一个进程需要读/写一个文件，必须先通过 filename 建立和文件 inode 之间的通道，方式是通过 `open()` 函数，该函数的参数是文件所在的路径名 `pathname`，如何根据 `pathname` 找到对应的 inode？这就要依靠 dentry 结构了
@@ -291,7 +330,7 @@ static inline int build_open_flags(int flags, umode_t mode, struct open_flags *o
 ```
 
 ####	chroot
-先说结论，`chroot` 改变当前进程所在的内核空间 `current->root` 的全局变量， 之后该进程所有的文件系统操作的路径，都以新的 path 作为根目录。关联`open*`系统调用中的`set_fs_root`函数的处理过程
+`chroot` 改变当前进程所在的内核空间 `current->root` 的全局变量， 之后该进程所有的文件系统操作的路径，都以新的 path 作为根目录。关联`open*`系统调用中的`set_fs_root`函数的处理过程
 
 ####   nameidata/path/vfsmount 结构
 [`nameidata`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L506)，`nameidata` 用来存储遍历路径的中间结果（临时性存放），在路径搜索时常用到
