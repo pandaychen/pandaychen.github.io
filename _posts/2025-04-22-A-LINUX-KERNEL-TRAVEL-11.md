@@ -439,7 +439,7 @@ SYSCALL_DEFINE4(openat, int, dfd,...)
 			  |- lookup_slow() //在lookup_fast()中没有找到dentry，会获取父dentry对应的inode，通过inode->i_op->lookup去查找、创建
 			    |- __lookup_slow()
 				  |- d_alloc_parallel() //创建一个新的dentry，并用in_lookup_hashtable检测、处理并发的创建操作
-				  |- inode->i_op->lookup 通过父dentry的inode去查找对应的dentry：其实就是通过它所在的文件系统，获取对应的信息，创建对应的dentry
+				  |- inode->i_op->lookup // 通过父dentry的inode去查找对应的dentry：通过其文件系统，获取信息及创建对应的dentry
 			  |- step_into() //处理dentry是一个链接或者挂载点的情况
 			    |- handle_mounts() //处理一个挂载点的情况，获取最后一个挂载在挂载点的文件系统信息
 				  |- __follow_mount_rcu() //轮询调用__lookup_mnt()，处理重复挂载（查找标记有LOOKUP_RCU时调用）
