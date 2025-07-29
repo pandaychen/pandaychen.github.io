@@ -446,12 +446,13 @@ SYSCALL_DEFINE4(openat, int, dfd,...)
 				    |- __lookup_mnt()	//寻找挂载点
 				  |- traverse_mounts() //作用与__follow_mount_rcu()类似
 				|- pick_link() //处理是一个链接的情况，获取对应的真实路径
-		  |- do_last() //分析最后的路径分量，有部分代码与link_path_walk()类似
+		  |- do_last() //分析最后的路径分量，部分代码与link_path_walk()类似
 			|- lookup_fast()
 			|- step_into()
 		  |- do_open() //根据最后路径分量的inode，调用binder设备的binder_open()
 			|- vfs_open()
-			|- do_dentry_open() //将最后的路径分量对应的inode，将inode支持的file_operations，保存在file中。最后调用file中的file_operations里的open函数指针，最终会调用binder_open()
+			|- do_dentry_open() //将最后的路径分量对应的inode，将inode支持的file_operations，保存在file中
+								//最后调用file中的file_operations里的open函数指针，最终会调用binder_open()
 				|- binder_open() //打开binder设备，进行相关初始化
 ```
 
