@@ -456,7 +456,7 @@ SYSCALL_DEFINE4(openat, int, dfd,...)
 				|- binder_open() //打开binder设备，进行相关初始化
 ```
 
-####	
+####	系统调用入口
 
 `open`系统调用如下：
 ```CPP
@@ -1022,53 +1022,76 @@ static struct file *path_openat(struct nameidata *nd,
 }
 ```
 
-##	0x06	do_last的实现
+####	path_openat->link_path_walk->walk_component
+[`walk_component`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1763) 方法对 `nd`（中间结果）中的目录进行遍历，当前的子路径一定是一个中间节点（目录OR符号链接）
 
+-   优先使用 `lookup_fast`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1537)：如果当前的目录是一个普通目录，路径行走有两个策略：先在效率高的 rcu-walk 模式 [`__d_lookup_rcu`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1554) 下遍历，如果失败了就在效率较低的 ref-walk 模式 [`__d_lookup`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1600) 下遍历
+-   如果 `lookup_fast` 查找失败，则调用 `lookup_slow` 函数。在 ref-walk 模式下会 **首先在内存缓冲区查找相应的目标（lookup_fast），如果找不到就启动具体文件系统（如 `ext4`）自己的 `lookup` 进行查找（lookup_slow）**
+-   在 dcache 里找到了当前目录对应的 dentry 或者是通过 `lookup_slow` 寻找到当前目录对应的 dentry，这两种场景都会去设置 `path` 结构体里的 `dentry`、`mnt` 成员，并且将当前路径更新到 `path` 结构体（对dcache的分析参考后文）
+-   当 `path` 结构体更新后，最后调用 `step_info->path_to_nameidata` 将 `path` 结构体更新到 `nd.path`，[参考](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1803)，这样 `nd` 里的 `path` 就指向了当前目录了，至此完成一级目录的解析查找，返回 `link_path_walk()` 将基于 `nd.path` 作为父目录解析下一级目录，继续 `link_path_walk` 的循环查找直至退出
 
-####	path_openat->do_last
-最后看下`do_last` 方法的实现，先调用 `lookup_fast`，寻找路径中的最后一个 component，如果成功，就会跳到 `finish_lookup` 对应的 label，然后执行 `step_into` 方法，更新 `nd` 中的 `path`、`inode` 等信息，使其指向目标路径。然后调用 `vfs_open` 方法，继续执行 open 操作
 
 ```CPP
-static int do_last(struct nameidata *nd,
-                   struct file *file, const struct open_flags *op)
+static int walk_component(struct nameidata *nd, int flags)
 {
-        //...
-        if (!(open_flag & O_CREAT)) {
-                //...
-                error = lookup_fast(nd, &path, &inode, &seq);
-                if (likely(error> 0))
-                        goto finish_lookup;
-                //...
-        } else {
-                //...
-        }
-        //...
+	struct path path;
+	struct inode *inode;
+	unsigned seq;
+	int err;
 
-		error = lookup_open(nd, &path, file, op, got_write, opened);
+	// 如果不是 LAST_NORM 类型，就交由 handle_dots 处理
+	if (unlikely(nd->last_type != LAST_NORM)) {
+		err = handle_dots(nd, nd->last_type);
+		if (!(flags & WALK_MORE) && nd->depth)
+			put_link(nd);
+		return err;
+	}
 
-		//...
+	// 快速查找
+	err = lookup_fast(nd, &path, &inode, &seq);
+	if (unlikely(err <= 0)) {
+		if (err < 0)
+			return err;
+		// 如果快速查找模式失败，则进行慢速查找模式
+		path.dentry = lookup_slow(&nd->last, nd->path.dentry,
+					  nd->flags);
+		if (IS_ERR(path.dentry))
+			return PTR_ERR(path.dentry);
 
-finish_lookup:
-        error = step_into(nd, &path, 0, inode, seq);
-        //...
-        error = vfs_open(&nd->path, file);
-        //...
-        return error;
+		path.mnt = nd->path.mnt;
+		err = follow_managed(&path, nd);
+		if (unlikely(err < 0))
+			return err;
+
+		if (unlikely(d_is_negative(path.dentry))) {
+			path_to_nameidata(&path, nd);
+			return -ENOENT;
+		}
+
+		seq = 0;	/* we are already out of RCU mode */
+		inode = d_backing_inode(path.dentry);
+	}
+	//检查是否是链接、挂载点
+    //是链接，则获取到对应的真实路径
+    //是挂载点，则获取最后一个挂载在挂载点的文件系统信息
+	return step_into(nd, &path, flags, inode, seq);
 }
 ```
 
-####	lookup_fast
+加下来看下`walk_component`中最核心的两个函数：`lookup_fast`与`lookup_slow`
+
+####	walk_component->lookup_fast
 `lookup_fast()`函数根据路径分量的名称，快速找到对应的dentry、inode的实现，主要分为rcu-walk和ref-walk，二者都是从`dentry_hashtable`中查询，但是在并发实现上有差异
 
 -	rcu-walk：实现是`__d_lookup_rcu()`
 -	ref-walk：实现是`__d_lookup()`
 
 ```CPP
-lookup_fast()
-	__d_lookup_rcu() //实现了rcu-walk
-		d_hash() 	 //根据hash值，从dentry_hashtable中获取对应的hlist_bl_head
-		hlist_bl_for_each_entry_rcu() //遍历链表hlist_bl_head，寻找对应的dentry
-	__d_lookup() 	 //实现了ref-walk
+|- lookup_fast()
+	|- __d_lookup_rcu() //实现了rcu-walk
+		|- d_hash() 	 //根据hash值，从dentry_hashtable中获取对应的hlist_bl_head
+		|- hlist_bl_for_each_entry_rcu() //遍历链表hlist_bl_head，寻找对应的dentry
+	|- __d_lookup() 	 //实现了ref-walk
 ```
 
 ```CPP
@@ -1186,26 +1209,80 @@ next:
 }
 ```
 
-####	lookup_slow
+####	walk_component->lookup_slow
 与上述方法不同，`lookup_fast`的两种模式，都是查询的`dentry_hashtable`，`lookup_slow`是兜底方案，即当`lookup_fast`失败后，才会调用。`lookup_slow()`是通过当前所在的文件系统，获取对应的信息，创建对应的dentry和inode，将新的dentry添加到`dentry_hashtable`中
 
 ```BASH
-lookup_slow() //在lookup_fast()中没有找到dentry，会获取父dentry对应的inode，通过inode->i_op->lookup去查找、创建
-	__lookup_slow()
-        d_alloc_parallel() //创建一个新的dentry，并用in_lookup_hashtable检测、处理并发的创建操作
-        inode->i_op->lookup 通过父dentry的inode去查找对应的dentry：其实就是通过它所在的文件系统，获取对应的信息，创建对应的dentry
+|- lookup_slow() //在lookup_fast()中没有找到dentry，会获取父dentry对应的inode，通过inode->i_op->lookup去查找、创建
+	|- __lookup_slow()
+        |- d_alloc_parallel() //创建一个新的dentry，并用in_lookup_hashtable检测、处理并发的创建操作
+        |- inode->i_op->lookup 通过父dentry的inode去查找对应的dentry：其实就是通过它所在的文件系统，获取对应的信息，创建对应的dentry
 ```
 
-####	step_into
+[`__lookup_slow`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1625) 实现如下，首先调用 `d_alloc_parallel` 给当前路径分配一个新的 dentry，然后调用 `inode->i_op->lookup()`，注意这里的 inode 是当前路径的父路径 dentry 的 `d_inode` 成员。`inode->i_op` 是具体的文件系统 inode operations 函数集，如对 ext4 文件系统就是 ext4 fs 的 inode operations 函数集 `ext4_dir_inode_operations`，其 lookup 函数是 `ext4_lookup()`
+
+```CPP
+/* Fast lookup failed, do it the slow way */
+static struct dentry *lookup_slow(const struct qstr *name,
+				  struct dentry *dir,
+				  unsigned int flags)
+{
+	struct dentry *dentry = ERR_PTR(-ENOENT), *old;
+	struct inode *inode = dir->d_inode; // 指向当前路径的父路径
+	DECLARE_WAIT_QUEUE_HEAD_ONSTACK(wq);
+
+	inode_lock_shared(inode);
+	/* Don't go there if it's already dead */
+	if (unlikely(IS_DEADDIR(inode)))
+		goto out;
+again:
+    // 新建 dentry 节点，并初始化相关关联
+	dentry = d_alloc_parallel(dir, name, &wq);
+	if (IS_ERR(dentry))
+		goto out;
+	if (unlikely(!d_in_lookup(dentry))) {
+		if (!(flags & LOOKUP_NO_REVAL)) {
+			int error = d_revalidate(dentry, flags);
+			if (unlikely(error <= 0)) {
+				if (!error) {
+					d_invalidate(dentry);
+					dput(dentry);
+					goto again;
+				}
+				dput(dentry);
+				dentry = ERR_PTR(error);
+			}
+		}
+	} else {
+        // 在 ext4 fs 中，会调用 ext4_lookup 寻找，此函数涉及到 IO 操作，性能较 dcache 会低
+		old = inode->i_op->lookup(inode, dentry, flags);
+		d_lookup_done(dentry);
+		if (unlikely(old)) {
+            // 如果 dentry 是一个目录的 dentry，则有可能 old 是有效的；否则如果 dentry 是文件的 dentry 则 old 是 null
+			dput(dentry);
+			dentry = old;
+		}
+	}
+out:
+	inode_unlock_shared(inode);
+	return dentry;
+}
+```
+
+这里简单介绍下 `ext4_lookup()` 的实现，其原型为 `static struct dentry *ext4_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)`，参数 `dir` 为当前目录 dentry 的父目录，参数 `dentry` 为需要查找的当前目录。`ext4_lookup()` 首先调用了 `ext4_lookup_entry()`，此函数根据当前路径的 dentry 的 `d_name` 成员在当前目录的父目录文件（用 inode 表示）里查找，这个会 open 父目录文件会涉及到 IO 读操作（具体可以分析 `ext4_bread` 函数的 [实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/inode.c#L994)）。查找到后，得到当前目录的 `ext4_dir_entry_2`，此结构体里有当前目录的 inode number，然后根据此 inode number 调用 `ext4_iget()` 函数获得这个 inode number 对应的 inode struct，得到这个 inode 后调用 `d_splice_alias()` 将 dentry 和 inode 绑定，即将 inode 赋值给 dentry 的 `d_inode` 成员
+
+当 ext4 文件系统的 lookup 完成后，此时的 dentry 已经有绑定的 inode 了，即已经设置了其 `d_inode` 成员了，然后调用 `d_lookup_done()` 将此 dentry 从 lookup hash 链表上移除（它是在 `d_alloc_parallel` 里被插入 lookup hash 的），这个 lookup hash 链表的作用是避免其它线程也同时来查找当前目录造成重复 alloc dentry 的问题
+
+####	walk_component->step_into
 step_into()主要是处理dentry是一个链接或者挂载点的情况
 
 ```BASH
-step_into()
-	handle_mounts() //处理一个挂载点的情况，获取最后一个挂载在挂载点的文件系统信息
-		__follow_mount_rcu() //轮询调用__lookup_mnt()，处理重复挂载（查找标记有LOOKUP_RCU时调用）
-			__lookup_mnt()
-		traverse_mounts() //作用与__follow_mount_rcu()类似
-	pick_link() //处理是一个链接的情况，获取对应的真实路径
+|- step_into()
+	|- handle_mounts() //处理一个挂载点的情况，获取最后一个挂载在挂载点的文件系统信息
+		|- __follow_mount_rcu() //轮询调用__lookup_mnt()，处理重复挂载（查找标记有LOOKUP_RCU时调用）
+			|- __lookup_mnt()
+		|- traverse_mounts() //作用与__follow_mount_rcu()类似
+	|- pick_link() //处理是一个链接的情况，获取对应的真实路径
 ```
 
 ```CPP
@@ -1365,6 +1442,58 @@ out_dput:
 }
 ```
 
+####	path_openat->trailing_symlink
+
+```CPP
+static const char *trailing_symlink(struct nameidata *nd)
+{
+	const char *s;
+	int error = may_follow_link(nd);
+	if (unlikely(error))
+		return ERR_PTR(error);
+	nd->flags |= LOOKUP_PARENT;
+	nd->stack[0].name = NULL;
+	//https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1019
+	s = get_link(nd);
+	return s ? s : "";
+}
+```
+
+##	0x06	do_last的实现
+
+####	path_openat->do_last
+最后看下`do_last` 方法的实现，先调用 `lookup_fast`，寻找路径中的最后一个 component，如果成功，就会跳到 `finish_lookup` 对应的 label，然后执行 `step_into` 方法，更新 `nd` 中的 `path`、`inode` 等信息，使其指向目标路径。然后调用 `vfs_open` 方法，继续执行 open 操作
+
+```CPP
+static int do_last(struct nameidata *nd,
+                   struct file *file, const struct open_flags *op)
+{
+        //...
+        if (!(open_flag & O_CREAT)) {
+                //...
+                error = lookup_fast(nd, &path, &inode, &seq);
+                if (likely(error> 0))
+                        goto finish_lookup;
+                //...
+        } else {
+                //...
+        }
+        //...
+
+		error = lookup_open(nd, &path, file, op, got_write, opened);
+
+		//...
+
+finish_lookup:
+        error = step_into(nd, &path, 0, inode, seq);
+        //...
+        error = vfs_open(&nd->path, file);
+        //...
+        return error;
+}
+```
+
+
 8、`vfs_open->do_dentry_open` 方法，该方法中看到了熟悉的 `inode->i_fop` 成员，该成员的值是在 [`init_special_inode`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/inode.c#L1973) 中设置的，由于笔者的文件系统是 `ext4`，所以会命中 `S_ISBLK(mode)` 的逻辑
 
 当用户调用 `open()` 系统调用时，VFS 层会初始化一个 `struct file` 对象 `f`，`f->f_op` 被赋值为目标文件所属文件系统的 `file_operations` 结构体，此处为 `ext4_file_operations`，因此，执行 `f->f_op->open` 实际调用的是 `ext4_file_open()`。这里体现了 VFS 的协作流程，即 **VFS 通过路径解析找到文件的 dentry 和 inode，根据 inode 关联的文件系统类型（如 `ext4`），将 file 结构 `f->f_op` 绑定到 `ext4_file_operations`，那么执行 `open` 操作时，路由到具体文件系统的实现函数 `ext4_file_open`**
@@ -1480,117 +1609,8 @@ static inline void __d_set_inode_and_type(struct dentry *dentry,
 }
 ```
 
-##	0x0	
+##	0x0	附录
 
-
-####    补充：`walk_component` 的细节
-[`walk_component`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1763) 方法对 `nd`（中间结果）中的目录进行遍历，当前的子路径一定是一个中间节点（目录OR符号链接）
-
--   优先使用 `lookup_fast`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1537)：如果当前的目录是一个普通目录，路径行走有两个策略：先在效率高的 rcu-walk 模式 [`__d_lookup_rcu`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1554) 下遍历，如果失败了就在效率较低的 ref-walk 模式 [`__d_lookup`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1600) 下遍历
--   如果 `lookup_fast` 查找失败，则调用 `lookup_slow` 函数。在 ref-walk 模式下会 **首先在内存缓冲区查找相应的目标（lookup_fast），如果找不到就启动具体文件系统（如 `ext4`）自己的 `lookup` 进行查找（lookup_slow）**
--   在 dcache 里找到了当前目录对应的 dentry 或者是通过 `lookup_slow` 寻找到当前目录对应的 dentry，这两种场景都会去设置 `path` 结构体里的 `dentry`、`mnt` 成员，并且将当前路径更新到 `path` 结构体
--   当 `path` 结构体更新后，最后调用 `step_info->path_to_nameidata` 将 `path` 结构体更新到 `nd.path`，[参考](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1803)，这样 `nd` 里的 `path` 就指向了当前目录了，至此完成一级目录的解析查找，返回 `link_path_walk()` 将基于 `nd.path` 作为父目录解析下一级目录，继续 `link_path_walk` 的循环查找直至退出
-
-```CPP
-static int walk_component(struct nameidata *nd, int flags)
-{
-	struct path path;
-	struct inode *inode;
-	unsigned seq;
-	int err;
-
-	// 如果不是 LAST_NORM 类型，就交由 handle_dots 处理
-	if (unlikely(nd->last_type != LAST_NORM)) {
-		err = handle_dots(nd, nd->last_type);
-		if (!(flags & WALK_MORE) && nd->depth)
-			put_link(nd);
-		return err;
-	}
-
-	// 快速查找
-	err = lookup_fast(nd, &path, &inode, &seq);
-	if (unlikely(err <= 0)) {
-		if (err < 0)
-			return err;
-		// 如果快速查找模式失败，则进行慢速查找模式
-		path.dentry = lookup_slow(&nd->last, nd->path.dentry,
-					  nd->flags);
-		if (IS_ERR(path.dentry))
-			return PTR_ERR(path.dentry);
-
-		path.mnt = nd->path.mnt;
-		err = follow_managed(&path, nd);
-		if (unlikely(err < 0))
-			return err;
-
-		if (unlikely(d_is_negative(path.dentry))) {
-			path_to_nameidata(&path, nd);
-			return -ENOENT;
-		}
-
-		seq = 0;	/* we are already out of RCU mode */
-		inode = d_backing_inode(path.dentry);
-	}
-	//检查是否是链接、挂载点
-    //是链接，则获取到对应的真实路径
-    //是挂载点，则获取最后一个挂载在挂载点的文件系统信息
-	return step_into(nd, &path, flags, inode, seq);
-}
-```
-
-[`__lookup_slow`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1625) 实现如下，首先调用 `d_alloc_parallel` 给当前路径分配一个新的 dentry，然后调用 `inode->i_op->lookup()`，注意这里的 inode 是当前路径的父路径 dentry 的 `d_inode` 成员。此外，`inode->i_op` 是具体的文件系统 inode operations 函数集。以 ext4 文件系统为例，就是 ext4 fs 的 inode operations 函数集 `ext4_dir_inode_operations`，其 lookup 函数是 `ext4_lookup()`
-
-```CPP
-/* Fast lookup failed, do it the slow way */
-static struct dentry *lookup_slow(const struct qstr *name,
-				  struct dentry *dir,
-				  unsigned int flags)
-{
-	struct dentry *dentry = ERR_PTR(-ENOENT), *old;
-	struct inode *inode = dir->d_inode; // 指向当前路径的父路径
-	DECLARE_WAIT_QUEUE_HEAD_ONSTACK(wq);
-
-	inode_lock_shared(inode);
-	/* Don't go there if it's already dead */
-	if (unlikely(IS_DEADDIR(inode)))
-		goto out;
-again:
-    // 新建 dentry 节点，并初始化相关关联
-	dentry = d_alloc_parallel(dir, name, &wq);
-	if (IS_ERR(dentry))
-		goto out;
-	if (unlikely(!d_in_lookup(dentry))) {
-		if (!(flags & LOOKUP_NO_REVAL)) {
-			int error = d_revalidate(dentry, flags);
-			if (unlikely(error <= 0)) {
-				if (!error) {
-					d_invalidate(dentry);
-					dput(dentry);
-					goto again;
-				}
-				dput(dentry);
-				dentry = ERR_PTR(error);
-			}
-		}
-	} else {
-        // 在 ext4 fs 中，会调用 ext4_lookup 寻找，此函数涉及到 IO 操作，性能较 dcache 会低
-		old = inode->i_op->lookup(inode, dentry, flags);
-		d_lookup_done(dentry);
-		if (unlikely(old)) {
-            // 如果 dentry 是一个目录的 dentry，则有可能 old 是有效的；否则如果 dentry 是文件的 dentry 则 old 是 null
-			dput(dentry);
-			dentry = old;
-		}
-	}
-out:
-	inode_unlock_shared(inode);
-	return dentry;
-}
-```
-
-这里简单介绍下 `ext4_lookup()` 的实现，其原型为 `static struct dentry *ext4_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)`，参数 `dir` 为当前目录 dentry 的父目录，参数 `dentry` 为需要查找的当前目录。`ext4_lookup()` 首先调用了 `ext4_lookup_entry()`，此函数根据当前路径的 dentry 的 `d_name` 成员在当前目录的父目录文件（用 inode 表示）里查找，这个会 open 父目录文件会涉及到 IO 读操作（具体可以分析 `ext4_bread` 函数的 [实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/inode.c#L994)）。查找到后，得到当前目录的 `ext4_dir_entry_2`，此结构体里有当前目录的 inode number，然后根据此 inode number 调用 `ext4_iget()` 函数获得这个 inode number 对应的 inode struct，得到这个 inode 后调用 `d_splice_alias()` 将 dentry 和 inode 绑定，即将 inode 赋值给 dentry 的 `d_inode` 成员
-
-当 ext4 文件系统的 lookup 完成后，此时的 dentry 已经有绑定的 inode 了，即已经设置了其 `d_inode` 成员了，然后调用 `d_lookup_done()` 将此 dentry 从 lookup hash 链表上移除（它是在 `d_alloc_parallel` 里被插入 lookup hash 的），这个 lookup hash 链表的作用是避免其它线程也同时来查找当前目录造成重复 alloc dentry 的问题
 
 ####    对 dcache 的操作
 通过上面可以知道对路径的查找过程，也是对 dcache 树的不断的追加、修改过程（即对于不存在于 dcache 的 dentry 节点，需要先通过 filename 找到其文件系统磁盘的 inode，然后建立内存 inode 及 dentry 结构，然后建立内存 dentry 到 inode 的关系），对于 `lookup_slow` 逻辑会涉及到如下操作 dcache 的逻辑：
@@ -1771,7 +1791,7 @@ ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_
 }
 ```
 
-##  0x05 参考
+##  0x0 参考
 -   [open 系统调用（一）](https://www.kerneltravel.net/blog/2021/open_syscall_szp1/)
 -   [走马观花： Linux 系统调用 open 七日游](http://blog.chinaunix.net/uid-20522771-id-4419678.html)
 -   [Open() 函数的内核追踪](https://blog.csdn.net/blue95wind/article/details/7472350)
