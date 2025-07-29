@@ -1654,10 +1654,14 @@ out:
 
 1、缓存优先：通过 `d_lookup` 在父目录的哈希链中查找目标 dentry，若命中则跳过后续分配
 
-2、若缓存未命中，则通过`d_alloc_parallel`并行分配 dentry，避免重复创建（避免多线程重复分配同一 dentry）
+2、若缓存未命中，则通过[`d_alloc_parallel`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L2405)并行分配 dentry，避免重复创建（避免多线程重复分配同一 dentry）
 
 -	无锁设计：使用 RCU 和等待队列机制同步，仅首个线程执行实际分配，后续线程等待结果
 -	状态标记：通过`d_in_lookup(dentry)` 检测 `DCACHE_PAR_LOOKUP` 标志，表示该 dentry 正在通过具体文件系统的 `->lookup()` 方法初始化（如磁盘 I/O）。通过 `DCACHE_PAR_LOOKUP` 标志协调并发初始化，避免全局锁
+`d_alloc_parallel` 用于高并发环境下并行分配和查找目录项（dentry），其设计目标是减少锁竞争并优化多线程场景下的性能，在父目录下并行查找或分配指定名称的 dentry，避免多线程重复创建同一 dentry，并确保状态同步
+
+-	若 dentry 已存在：返回现有 dentry，避免重复分配；此外，若其他线程正在初始化同一 dentry，当前线程阻塞直至其完成（触发等待队列机制，通过 `d_wait` 队列唤醒），关联`d_alloc_parallel->d_wait_lookup`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L2475)
+-	若不存在：分配新 dentry 并加入**正在查找哈希链（`in_lookup_hash`）**，并将此dentry标记为 `DCACHE_PAR_LOOKUP`，后续线程可等待其初始化完成
 
 3、dentry 验证与重试，需要保证缓存一致性，即通过`d_revalidate` 检查 dentry 是否过期（如被其他进程删除），若失效则调用 `d_invalidate` 将其移出缓存并重试
 
@@ -1697,6 +1701,7 @@ static int lookup_open(struct nameidata *nd, struct path *path,
 	for (;;) {
 		if (!dentry) {
 			// 并行分配 dentry
+			// d_alloc_parallel 见后文分析
 			dentry = d_alloc_parallel(dir, &nd->last, &wq);
 			if (IS_ERR(dentry))
 				return PTR_ERR(dentry);
@@ -2233,6 +2238,33 @@ out_dput:
 
 ##	0x07	附录
 
+####	小结：do_filp_open中的查找模式
+`do_filp_open`对`path_openat`的调用模式与`path_openat`内部的`lookup_fast/lookup_slow`组合，这些策略的设计目的是在效率（无锁RCU模式）和兼容性（带锁的ref-walk模式）之间动态平衡，实际组合共`4`种场景（RCU独立成功、RCU回退、标准模式、REVAL模式），核心策略如下：
+
+1、RCU模式（`LOOKUP_RCU`）
+
+-	触发条件：`do_filp_open`首次调用`path_openat`时设置`LOOKUP_RCU | LOOKUP_FOLLOW`
+-	核心流程：通过`lookup_fast->__d_lookup_rcu`在无锁状态下查询dcache，若dcache命中且通过RCU校验（如`read_seqcount_retry`），直接返回成功
+-	失败场景：dcache未命中或校验失败，返回`-ECHILD`，触发回退至ref-walk模式
+
+2、RCU回退至ref-walk模式
+
+-	触发条件：RCU模式返回`-ECHILD`后，`do_filp_open`重新调用`path_openat`（无`LOOKUP_RCU`标志）
+-	核心流程
+	-	Step 1：`lookup_fast`（ref-walk版），在dcache中带锁查找（`lookup_fast->__d_lookup`），若成功则更新`nameidata`
+	-	Step 2：`lookup_slow`（文件系统级查找），若`lookup_fast`失败，调用具体文件系统的`->lookup`钩子（如`ext4_lookup`）从磁盘加载inode
+
+3、标准ref-walk模式
+
+-	触发条件：RCU模式未启用或已回退后
+-	核心流程：同RCU回退模式（`lookup_fast->lookup_slow`），但无RCU前置尝试
+-	典型场景：非首次查找、或进程已持有锁无法使用RCU
+
+4、 REVAL模式（`LOOKUP_REVAL`）
+
+-	触发条件：标准模式返回`-ESTALE`（inode可能过期），在`lookup_slow`中强制重新验证inode有效性（如NFS场景）
+-	核心流程：与标准ref-walk模式一致，但增加有效性校验逻辑
+
 ####	handle_dots
 TODO
 
@@ -2452,6 +2484,13 @@ static inline void __d_set_inode_and_type(struct dentry *dentry,
 	WRITE_ONCE(dentry->d_flags, flags);
 }
 ```
+
+####	`d_alloc_parallel`的实现
+`d_alloc_parallel` 函设计核心是通过无锁并发机制优化目录项（dentry）的分配与查找，完全在内存中操作，属于快速路径（fast path）的一部分
+
+-	并行查找：通过 RCU（Read-Copy-Update）机制无锁遍历哈希桶，直接检查目标 dentry 是否已存在于父目录的哈希链表中
+-	条件分配：若 dentry 不存在，则分配一个新 dentry 并尝试将其插入哈希链；若已存在，则直接返回现有 dentry（通过 `res` 参数返回）
+-	无磁盘 I/O：整个过程仅操作内存中的 dentry 缓存，不触发文件系统底层的磁盘读取或复杂逻辑（如加载 inode）
 
 ####	小结：path walk的策略
 前文描述了内核实现path walk的策略，首先 Kernel 会在 rcu-walk 模式下进入 lookup_fast 进行尝试，如果失败了那么就尝试就地转入 ref-walk，如果还是不行就回到 do_filp_open 从头开始。Kernel 在 ref-walk 模式下会首先在内存缓冲区查找相应的目标（lookup_fast），如果找不到就启动具体文件系统自己的 lookup 进行查找（lookup_slow）。注意，在 rcu-walk 模式下是不会进入 lookup_slow 的。如果这样都还找不到的话就一定是是出错了，那就报错返回吧，这时屏幕就会出现 No such file or directory
