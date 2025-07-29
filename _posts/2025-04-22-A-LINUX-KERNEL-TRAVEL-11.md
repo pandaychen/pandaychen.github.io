@@ -819,7 +819,7 @@ static int set_root(struct nameidata *nd)
 ```
 
 ####	path_openat->link_path_walk
-[`link_path_walk`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L2042)函数用于实现path walk的核心功能，逐个解析文件路径分量（除了最后一个分量），获取对应的dentry、inode（查找组件对应的dentry/inode通过函数`walk_component`实现）
+[`link_path_walk`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L2042)函数用于实现path walk的核心功能，逐个解析文件路径分量（除了最后一个分量），获取对应的dentry、inode（查找分量对应的dentry/inode通过函数`walk_component`实现）
 
 ```CPP
 // 计算name中除根路径组件外的第一个路径组件的hash值和名字长度
@@ -1460,12 +1460,12 @@ struct file * path_openat(struct nameidata * nd,
 ```
 
 ####	path_openat->do_last
-最后看下`do_last` 方法的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L3259)，先调用 `lookup_fast`，寻找路径中的最后一个 component，如果成功，就会跳到 `finish_lookup` 对应的 label，然后执行 `step_into` 方法，更新 `nd` 中的 `path`、`inode` 等信息，使其指向目标路径。然后调用 `vfs_open` 方法，继续执行 open 操作
+`do_last` 方法[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L3259)中，先调用 `lookup_fast`，寻找路径中的最后一个 component，如果成功，就会跳到 `finish_lookup` 对应的 label，然后执行 `step_into` 方法，更新 `nd` 中的 `path`、`inode` 等信息，使其指向目标路径。然后调用 `vfs_open` 方法，继续执行 open 操作
 
-本文内核版本中，`do_last`还是存在较多与`link_path_walk`相同的逻辑，因为最后一个路径分量可能仍然是一个链接或者挂载点，这里只考虑最后一个分量为正常文件的情况
+本文内核版本中，`do_last`还是存在较多与`link_path_walk`相同的逻辑，因为最后一个路径分量可能仍然是一个链接或者挂载点，这里只考虑最后一个分量为正常文件的情况，接下来基于几种典型场景分析下`do_last`方法
 
 ####	case1：只读打开文件
-如`open(pathname, O_RDONLY)`，使用只读方式打开一个文件，在`do_last`中的运作路径：
+如`open(pathname, O_RDONLY)`，使用只读方式打开（先查找到然后再打开）一个文件，在`do_last`中的运作路径：
 
 ```CPP
 static inline int build_open_flags(int flags, umode_t mode, struct open_flags *op)
@@ -1485,7 +1485,407 @@ static inline int build_open_flags(int flags, umode_t mode, struct open_flags *o
 
 只读打开模式下`do_last`主要实现：
 
-####	case3：文件创建场景
+```CPP
+static int do_last(struct nameidata *nd,
+		   struct file *file, const struct open_flags *op,
+		   int *opened)
+{
+	struct dentry *dir = nd->path.dentry;
+	int open_flag = op->open_flag;
+	bool will_truncate = (open_flag & O_TRUNC) != 0;
+	bool got_write = false;
+	int acc_mode = op->acc_mode;
+	unsigned seq;
+	struct inode *inode;
+	struct path path;
+	int error;
+
+	nd->flags &= ~LOOKUP_PARENT;
+	nd->flags |= op->intent;
+
+	......
+
+	if (!(open_flag & O_CREAT)) {
+		// 当前非创建文件，进入此流程
+		// 判断 last.name 是否以 / 结尾
+		if (nd->last.name[nd->last.len])
+			nd->flags |= LOOKUP_FOLLOW | LOOKUP_DIRECTORY;
+		/* we _can_ be in RCU mode here */
+		/*
+			三种返回值？：
+			-	如果返回 0，则表示成功找到
+			-	返回 1，表示内存中没有，需要 lookup_real
+			-	返回小于 0，则表示需要从当前 rcu-walk 转到 ref-walk
+		*/
+		error = lookup_fast(nd, &path, &inode, &seq);
+		if (likely(error > 0))
+			goto finish_lookup;
+
+		if (error < 0)
+			return error;
+
+		......
+	} else {
+		......
+	}
+
+	......
+	
+	if (open_flag & O_CREAT)
+		inode_lock(dir->d_inode);
+	else
+		inode_lock_shared(dir->d_inode);
+
+	//
+	error = lookup_open(nd, &path, file, op, got_write, opened);
+	if (open_flag & O_CREAT)
+		inode_unlock(dir->d_inode);
+	else
+		inode_unlock_shared(dir->d_inode);
+
+	if (error <= 0) {
+		if (error)
+			goto out;
+
+		if ((*opened & FILE_CREATED) ||
+		    !S_ISREG(file_inode(file)->i_mode))
+			will_truncate = false;
+
+		audit_inode(nd->name, file->f_path.dentry, 0);
+		goto opened;
+	}
+
+	if (*opened & FILE_CREATED) {
+		/* Don't check for write permission, don't truncate */
+		open_flag &= ~O_TRUNC;
+		will_truncate = false;
+		acc_mode = 0;
+		path_to_nameidata(&path, nd);
+		goto finish_open_created;
+	}
+
+	/*
+	 * If atomic_open() acquired write access it is dropped now due to
+	 * possible mount and symlink following (this might be optimized away if
+	 * necessary...)
+	 */
+	if (got_write) {
+		mnt_drop_write(nd->path.mnt);
+		got_write = false;
+	}
+
+	error = follow_managed(&path, nd);
+	if (unlikely(error < 0))
+		return error;
+
+	if (unlikely(d_is_negative(path.dentry))) {
+		path_to_nameidata(&path, nd);
+		return -ENOENT;
+	}
+
+	/*
+	 * create/update audit record if it already exists.
+	 */
+	audit_inode(nd->name, path.dentry, 0);
+
+	if (unlikely((open_flag & (O_EXCL | O_CREAT)) == (O_EXCL | O_CREAT))) {
+		path_to_nameidata(&path, nd);
+		return -EEXIST;
+	}
+
+	seq = 0;	/* out of RCU mode, so the value doesn't matter */
+	inode = d_backing_inode(path.dentry);
+finish_lookup:
+	error = step_into(nd, &path, 0, inode, seq);
+	if (unlikely(error))
+		return error;
+finish_open:
+	/* Why this, you ask?  _Now_ we might have grown LOOKUP_JUMPED... */
+	error = complete_walk(nd);
+	if (error)
+		return error;
+	audit_inode(nd->name, nd->path.dentry, 0);
+	error = -EISDIR;
+	if ((open_flag & O_CREAT) && d_is_dir(nd->path.dentry))
+		goto out;
+	error = -ENOTDIR;
+	if ((nd->flags & LOOKUP_DIRECTORY) && !d_can_lookup(nd->path.dentry))
+		goto out;
+	if (!d_is_reg(nd->path.dentry))
+		will_truncate = false;
+
+	if (will_truncate) {
+		error = mnt_want_write(nd->path.mnt);
+		if (error)
+			goto out;
+		got_write = true;
+	}
+finish_open_created:
+	// 准备好打开文件操作
+	// may_open：权限和标志位的检查
+	error = may_open(&nd->path, acc_mode, open_flag);
+	if (error)
+		goto out;
+	BUG_ON(*opened & FILE_OPENED); /* once it's opened, it's opened */
+	error = vfs_open(&nd->path, file, current_cred());
+	if (error)
+		goto out;
+	*opened |= FILE_OPENED;
+opened:
+	error = open_check_o_direct(file);
+	if (!error)
+		error = ima_file_check(file, op->acc_mode, *opened);
+	if (!error && will_truncate)
+		error = handle_truncate(file);
+out:
+	if (unlikely(error) && (*opened & FILE_OPENED))
+		fput(file);
+	if (unlikely(error > 0)) {
+		WARN_ON(1);
+		error = -EINVAL;
+	}
+	if (got_write)
+		mnt_drop_write(nd->path.mnt);
+	return error;
+}
+```
+
+`lookup_open`负责处理路径查找的最终分量（final component）并协调文件创建与打开操作，`lookup_open`的实现机制类似与`lookup_slow`，先使用 `d_lookup` 在内存中找（快速查找），如果未命中就启动 `d_alloc_parallel->` 在具体文件系统里面去找（慢速查找），当它成功返回时会将 `path` 指向找到的目标，`lookup_open`的实现流程描述如下：
+
+1、缓存优先：通过 `d_lookup` 在父目录的哈希链中查找目标 dentry，若命中则跳过后续分配
+
+2、若缓存未命中，则通过`d_alloc_parallel`并行分配 dentry，避免重复创建（避免多线程重复分配同一 dentry）
+
+-	无锁设计：使用 RCU 和等待队列机制同步，仅首个线程执行实际分配，后续线程等待结果
+-	状态标记：通过`d_in_lookup(dentry)` 检测 `DCACHE_PAR_LOOKUP` 标志，表示该 dentry 正在通过具体文件系统的 `->lookup()` 方法初始化（如磁盘 I/O）。通过 `DCACHE_PAR_LOOKUP` 标志协调并发初始化，避免全局锁
+
+3、dentry 验证与重试，需要保证缓存一致性，即通过`d_revalidate` 检查 dentry 是否过期（如被其他进程删除），若失效则调用 `d_invalidate` 将其移出缓存并重试
+
+4、`O_CREAT` 标志处理与权限校验，`O_CREAT` 需检查文件是否存在，但检查与创建需保证原子性；同时检查权限是否满足，`may_o_create` 验证父目录的写权限及文件系统支持，若进程无写权限（`!got_write`），返回 `-EROFS`（只读）
+
+5、文件系统协作模式，优先高性能路径，如支持 `atomic_open` 的文件系统（如 Ext4）可合并查找与打开操作，减少锁竞争；其次再以传统模式进行兜底。如`O_CREAT + O_EXCL` 模式组合通过文件系统钩子（`create/atomic_open`）确保创建的唯一性
+
+6、结果返回与错误处理
+
+-	成功路径：返回 `1` 通知上层调用 `f_op->open`（如 `ext4_file_open`）可以打开文件
+-	错误处理：释放 dentry 引用并返回错误码（如 `-ENOENT`、`-EACCES`等）
+
+小结下，`lookup_open`函数通过缓存查找`d_lookup`、并行分配`d_alloc_parallel`以及原子操作 `atomic_open`形成三级加速路径
+
+```CPP
+//do_sys_open->do_sys_openat2->do_filp_open->path_openat->do_last->lookup_open
+// 主要功能：查找或创建目标文件的 dentry（目录项）
+// 这里只考虑传统 lookup + create 流程
+static int lookup_open(struct nameidata *nd, struct path *path,
+			struct file *file,
+			const struct open_flags *op,
+			bool got_write, int *opened)
+{
+	struct dentry *dir = nd->path.dentry;	// 父目录的 dentry
+	struct inode *dir_inode = dir->d_inode;
+	int open_flag = op->open_flag;
+	struct dentry *dentry;
+	int error, create_error = 0;
+	umode_t mode = op->mode;
+	DECLARE_WAIT_QUEUE_HEAD_ONSTACK(wq);
+
+	if (unlikely(IS_DEADDIR(dir_inode)))
+		return -ENOENT;
+	*opened &= ~FILE_CREATED;
+	// fast查找，从缓存中查找dentry
+	dentry = d_lookup(dir, &nd->last);
+	for (;;) {
+		if (!dentry) {
+			// 并行分配 dentry
+			dentry = d_alloc_parallel(dir, &nd->last, &wq);
+			if (IS_ERR(dentry))
+				return PTR_ERR(dentry);
+		}
+		/*
+			如果检测到目前是慢速模式
+			即当 d_in_lookup(dentry) 返回 true 时
+			说明此 dentry 正在被其他线程初始化（例如通过文件系统的 ->lookup() 执行磁盘 I/O）
+			此时立即 break 跳出循环，避免重复操作
+		*/
+		if (d_in_lookup(dentry))	
+			break;
+		
+		//如果非慢速查找
+		//验证 dentry 有效性
+		error = d_revalidate(dentry, nd->flags);
+		if (likely(error > 0))
+			break;	//有效则退出循环
+		if (error)
+			goto out_dput;	//错误处理
+		d_invalidate(dentry);	//无效则丢弃并重试
+		dput(dentry);
+		dentry = NULL;
+	}
+	if (dentry->d_inode) {
+		/* Cached positive dentry: will open in f_op->open */
+		goto out_no_open;
+	}
+
+	if (open_flag & O_CREAT) {
+		if (!IS_POSIXACL(dir->d_inode))
+			mode &= ~current_umask();
+		if (unlikely(!got_write)) {
+			create_error = -EROFS;
+			open_flag &= ~O_CREAT;
+			if (open_flag & (O_EXCL | O_TRUNC))
+				goto no_open;
+			/* No side effects, safe to clear O_CREAT */
+		} else {
+			// 检查创建权限
+			create_error = may_o_create(&nd->path, dentry, mode);
+			if (create_error) {
+				// 权限不足时清除 O_CREAT
+				open_flag &= ~O_CREAT;
+				// O_EXCL 依赖 O_CREAT
+				if (open_flag & O_EXCL)
+					goto no_open;
+			}
+		}
+	} else if ((open_flag & (O_TRUNC|O_WRONLY|O_RDWR)) &&
+		   unlikely(!got_write)) {
+		/*
+		 * No O_CREATE -> atomicity not a requirement -> fall
+		 * back to lookup + open
+		 */
+		goto no_open;
+	}
+
+	// 原子打开模式（优先）
+	if (dir_inode->i_op->atomic_open) {
+		error = atomic_open(nd, dentry, path, file, op, open_flag,
+				    mode, opened);
+		if (unlikely(error == -ENOENT) && create_error)
+			error = create_error;
+		return error;
+	}
+
+no_open:
+	// 传统模式（兜底）
+	/*
+	两步操作：
+	1.	先通过 ->lookup 完成磁盘查找，再通过 ->create 创建文件
+	2.	状态同步：d_lookup_done 清除 DCACHE_PAR_LOOKUP 标志，表示慢速查找完成
+	*/
+	if (d_in_lookup(dentry)) {
+		// d_in_lookup的作用是什么？
+		// 如果没有找到，调用文件系统的lookup 方法进行查找
+		struct dentry *res = dir_inode->i_op->lookup(dir_inode, dentry,nd->flags);
+		// 由于->lookup已经完成了
+		// 清除 DCACHE_PAR_LOOKUP 标志
+		d_lookup_done(dentry);
+		if (unlikely(res)) {
+			if (IS_ERR(res)) {
+				error = PTR_ERR(res);
+				goto out_dput;
+			}
+			dput(dentry);
+			dentry = res;
+		}
+	}
+
+	/* Negative dentry, just create the file */
+	if (!dentry->d_inode && (open_flag & O_CREAT)) {
+		*opened |= FILE_CREATED;
+		audit_inode_child(dir_inode, dentry, AUDIT_TYPE_CHILD_CREATE);
+		if (!dir_inode->i_op->create) {
+			error = -EACCES;
+			goto out_dput;
+		}
+		// 如果没有找到且设置了O_CREAT， 调用文件系统的create方法进行创建
+		// 对应ext4文件系统，ext4_create方法
+		// 正常情况下，ext4_create会成功创建inode并且和dentry建立关联关系（前文）
+		error = dir_inode->i_op->create(dir_inode, dentry, mode,
+						open_flag & O_EXCL);
+		if (error)
+			goto out_dput;
+		fsnotify_create(dir_inode, dentry);
+	}
+	if (unlikely(create_error) && !dentry->d_inode) {
+		error = create_error;
+		goto out_dput;
+	}
+out_no_open:
+	// 找到了，设置path的值
+	path->dentry = dentry;	// 返回最终 dentry
+	path->mnt = nd->path.mnt;
+	return 1;	// 表示需执行 f_op->open
+
+out_dput:
+	dput(dentry);	// 错误时释放 dentry
+	return error;
+}
+```
+
+在`do_last`函数的标签`finish_open_created`中通过调用`vfs_open`最终完成了对文件打开操作，简单分析下基于ext4文件系统的运作过程
+
+首先在`vfs_open->do_dentry_open` 方法，该方法中看到了熟悉的 `inode->i_fop` 成员，该成员的值是在 [`init_special_inode`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/inode.c#L1973) 中设置的，由于这里讨论的文件系统是 `ext4`，所以会命中 `S_ISBLK(mode)` 的逻辑
+
+```CPP
+void init_special_inode(struct inode *inode, umode_t mode, dev_t rdev)
+{
+        inode->i_mode = mode;
+        if (S_ISCHR(mode)) {
+                inode->i_fop = &def_chr_fops;
+                inode->i_rdev = rdev;
+        } else if (S_ISBLK(mode)) {
+                //https://elixir.bootlin.com/linux/v4.11.6/source/fs/block_dev.c#L2142
+                inode->i_fop = &def_blk_fops;
+                inode->i_rdev = rdev;
+        }
+        //...
+}
+```
+
+当用户调用 `open()` 系统调用时，VFS 层会初始化一个 `struct file` 对象 `f`，`f->f_op` 被赋值为目标文件所属文件系统的 `file_operations` 结构体，此处为 `ext4_file_operations`，因此，执行 `f->f_op->open` 实际调用的是 `ext4_file_open()`。这里体现了 VFS 的协作流程，即 **VFS 通过路径解析找到文件的 dentry 和 inode，根据 inode 关联的文件系统类型（如 `ext4`），将 file 结构 `f->f_op` 绑定到 `ext4_file_operations`，那么执行 `open` 操作时，路由到具体文件系统的实现函数 `ext4_file_open`**
+
+```CPP
+// fs/open.c
+int vfs_open(const struct path *path, struct file *file)
+{
+        file->f_path = *path;
+        return do_dentry_open(file, d_backing_inode(path->dentry), NULL);
+}
+
+// fs/open.c
+static int do_dentry_open(struct file *f,
+                          struct inode *inode,
+                          int (*open)(struct inode *, struct file *))
+{
+        ...
+        f->f_inode = inode;
+        ...
+        f->f_op = fops_get(inode->i_fop);
+        ...
+        if (!open)
+				//ext4_file_open
+                open = f->f_op->open;
+        if (open) {
+                error = open(inode, f);
+                ...
+        }
+        f->f_mode |= FMODE_OPENED;
+        ...
+        return 0;
+        ...
+}
+```
+
+最终通过[`ext4_file_open`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/file.c#L365) 方法完成了打开文件操作，在 `ext4` 文件系统中，`f->f_op->open` 对应的实际函数是 `ext4_file_open()`，这一关联通过 `ext4` 定义的 [`file_operations`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/file.c#L718) 结构体实现。`ext4_file_open` 最终完成这些工作：
+
+-   初始化文件状态：检查文件是否加密（fscrypt）、是否启用日志（jbd2）等
+-   处理大文件标志：若文件超过 `2GB`，设置 `O_LARGEFILE` 标志
+-   调用通用逻辑：最终通过 `generic_file_open()` 完成 VFS 层的通用文件打开流程
+
+```CPP
+static int ext4_file_open(struct inode * inode, struct file * filp)
+```
+
+####	case2：文件创建场景
 模式如下，创建一个新文件（`O_CREAT`），并赋予该文件用户可读（`S_IRUSR`）和用户可写（`S_IWUSR`）权限，然后以只写（`O_WRONLY`）的方式打开这个文件。`O_EXCL` 在这里保证该文件必须被创建，如果该文件已经存在则失败返回
 
 -	mode：
@@ -1852,7 +2252,6 @@ static inline int handle_dots(struct nameidata *nd, int type)
 	return 0;
 }
 ```
-##	0x07	补充
 
 ####	operations 成员
 针对ext4系统，相应注册的inode实例化方法[如下](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/namei.c#L3903)
