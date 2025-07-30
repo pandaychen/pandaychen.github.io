@@ -169,6 +169,90 @@ tags:
 ##  0x02    内核数据发送：详细分析
 ![send-data](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/how-to-send-data-1.png)
 
+##     0x0    内核数据发送
+本小节基于TCP三次握手完成，通过accept获取到客户端的连接fd，基于这个fd发送数据的场景进行分析
+
+####   1、accept 获取fd完成的布局
+
+
+####   2、send* 系统调用
+不管是`send`、`sendto`、[`sendmsg`](https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L1921)等系统调用，最终都会调用`sock_sendmsg`，主要完成：
+
+1. 通过fd在内核中定位到对应的 socket/sock 结构对象，在这个对象里记录着各种协议栈的函数地址（在生成fd的时候就已经初始化好了）
+2. 构造一个 `struct msghdr` 对象，把用户传入的数据，比如 buffer地址、数据长度等等都设置进去
+3. 调用`sock_sendmsg`，即协议栈对应的函数 `inet_sendmsg` ，其中 `inet_sendmsg` 函数地址是通过 socket 内核对象里的 `ops` 成员找到的
+
+以`sendto`[系统调用](https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L1664)为例：
+
+```CPP
+SYSCALL_DEFINE6(sendto, int, fd, void __user *, buff, size_t, len,
+		unsigned int, flags, struct sockaddr __user *, addr,
+		int, addr_len)
+{
+	struct socket *sock;
+	struct sockaddr_storage address;
+	int err;
+	struct msghdr msg;
+	struct iovec iov;
+	
+       ......
+       // 根据fd定位socket/sock结构
+	sock = sockfd_lookup_light(fd, &err, &fput_needed);
+	if (!sock)
+		goto out;
+
+       // 设置msghdr对象
+	msg.msg_name = NULL;
+	msg.msg_control = NULL;
+	msg.msg_controllen = 0;
+	msg.msg_namelen = 0;
+	if (addr) {
+		err = move_addr_to_kernel(addr, addr_len, &address);
+		if (err < 0)
+			goto out_put;
+		msg.msg_name = (struct sockaddr *)&address;
+		msg.msg_namelen = addr_len;
+	}
+	if (sock->file->f_flags & O_NONBLOCK)
+		flags |= MSG_DONTWAIT;
+	msg.msg_flags = flags;
+	err = sock_sendmsg(sock, &msg);
+
+out_put:
+	fput_light(sock->file, fput_needed);
+out:
+	return err;
+}
+```
+
+继续`sock_sendmsg -> sock_sendmsg_nosec`：
+
+```CPP
+static inline int sock_sendmsg_nosec(struct socket *sock, struct msghdr *msg)
+{
+       // sendmsg对应 inet_sendmsg
+       // 该函数是 AF_INET 协议族提供的通用发送函数
+	int ret = sock->ops->sendmsg(sock, msg, msg_data_left(msg));
+	BUG_ON(ret == -EIOCBQUEUED);
+	return ret;
+}
+```
+
+####   3、传输层处理
+
+####   4、网络层发送处理
+
+####   5、邻居子系统
+
+####   6、网络设备子系统
+
+####   7、软中断调度
+
+####   8、igb 网卡驱动发送
+
+####   9、发送完成硬中断
+
+
 ##  0x0  参考
 -   [Monitoring and Tuning the Linux Networking Stack: Sending Data](https://blog.packagecloud.io/monitoring-tuning-linux-networking-stack-sending-data/)
 -   [Monitoring and Tuning the Linux Networking Stack: Receiving Data](https://blog.packagecloud.io/monitoring-tuning-linux-networking-stack-receiving-data/)
