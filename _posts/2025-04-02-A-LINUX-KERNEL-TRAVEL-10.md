@@ -171,6 +171,8 @@ tags:
 
 ##	0x0	基础知识
 
+####	MTU && MSS
+
 -	MTU：Maximum Transmission Unit
 -	MSS：Max Segment Size
 
@@ -359,7 +361,7 @@ int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 	bool process_backlog = false;
 	bool sg;
 	long timeo;
-
+	/* 加锁，避免与软中断的冲突 */
 	lock_sock(sk);
 
 	flags = msg->msg_flags;
@@ -381,8 +383,11 @@ int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 	 * (passive side) where data is allowed to be sent before a connection
 	 * is fully established.
 	 */
+
+	// 只有ESTABLISHED 和 CLOSE_WAIT才允许发送数据
 	if (((1 << sk->sk_state) & ~(TCPF_ESTABLISHED | TCPF_CLOSE_WAIT)) &&
 	    !tcp_passive_fastopen(sk)) {
+		// 否则，只能等待连接建立
 		err = sk_stream_wait_connect(sk, &timeo);
 		if (err != 0)
 			goto do_error;
@@ -416,13 +421,14 @@ int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 
 restart:
 	// 获取当前有效的 mss
+	// size_goal：数据段的最大长度
 	mss_now = tcp_send_mss(sk, &size_goal, flags);
 	/* 
 	* mtu: max transmission unit
 	* mss: max segment size. (mtu - (ip header size) - (tcp header size))
 	* GSO: Generic Segmentation Offload
 	* size_goal 表示数据报到达网络设备时，数据段的最大长度，该长度用来分割数据，
-	* TCP 发送段时，每个 SKB 的大小不能超过该值
+	* TCP 发送段时，每个 SKB 的大小不能超过 size_goal
 	* 不支持 GSO 情况下， size_goal 就等于 MSS，如果支持 GSO，
 	* 那么 size_goal 是 mss 的整数倍，数据报发送到网络设备后再由网络设备根据 MSS 进行分割
 	*/
@@ -433,24 +439,36 @@ restart:
 
 	sg = !!(sk->sk_route_caps & NETIF_F_SG);
 
+	// msg_data_left：msghdr的count字段
 	while (msg_data_left(msg)) {
 		int copy = 0;
+		// max：size_goal
 		int max = size_goal;
-              // 获取socket（sk）对象对于的发送队列
+        // tcp_write_queue_tail：获取socket/sock（sk）对象对于的发送队列即sk_write_queue
 		skb = tcp_write_queue_tail(sk);
 		if (tcp_send_head(sk)) {
 			if (skb->ip_summed == CHECKSUM_NONE)
 				max = mss_now;
+			/*
+				当 size_goal - skb->len>0，判断 skb 是否已满，大于零说明 skb（sk_buff） 还有剩余空间
+				即还可以继续向 skb 追加填充数据，组成一个 mss 的数据包，发往 ip 层
+			*/
 			copy = max - skb->len;
 		}
 
 		if (copy <= 0 || !tcp_skb_can_collapse_to(skb)) {
+			/*
+				1、copy<=0 说明当前 skb 空间不足，那么要重新创建一个 sk_buff 来装载当前数据
+				2、被设置了 eor 标记不能合并
+			*/
 			bool first_skb;
 
 new_segment:
 			/* Allocate new segment. If the interface is SG,
 			 * allocate skb fitting to single page.
 			 */
+			/* 如果发送队列的总大小（sk_wmem_queued）>= 发送缓存上限（sk_sndbuf）
+             * 或者发送缓冲区中尚未发送的数据量，超过了用户的设置值，那么进入等待状态。*/
 			if (!sk_stream_memory_free(sk))
 				goto wait_for_sndbuf;
 
@@ -459,6 +477,11 @@ new_segment:
 				goto restart;
 			}
 			first_skb = skb_queue_empty(&sk->sk_write_queue);
+
+			/*
+				正常情况：
+				重新分配一个 sk_buff 结构
+			*/
 			skb = sk_stream_alloc_skb(sk,
 						  select_size(sk, sg, first_skb),
 						  sk->sk_allocation,
@@ -468,12 +491,14 @@ new_segment:
 
 			process_backlog = true;
 			/*
-			 * Check whether we can use HW checksum.
+			 * Check whether we can use HW checksum.  
 			 */
 			if (sk_check_csum_caps(sk))
 				skb->ip_summed = CHECKSUM_PARTIAL;
-
+			
+			//skb_entail：将 skb 添加进发送队列sk_write_queue（双链表）尾部
 			skb_entail(sk, skb);
+			//由于申请了一个新的sk_buff，初始化skb 数据缓冲区大小是 size_goal
 			copy = size_goal;
 			max = size_goal;
 
@@ -486,17 +511,21 @@ new_segment:
 		}
 
 		/* Try to append data to the end of skb. */
+		// 重试复制数据，先再次校验长度
 		if (copy > msg_data_left(msg))
 			copy = msg_data_left(msg);
 
 		/* Where to copy to? */
+		// 检查skb 的线性存储区底部是否还有空间？
 		if (skb_availroom(skb) > 0) {
 			/* We have some space in skb head. Superb! */
 			copy = min_t(int, copy, skb_availroom(skb));
+			// 将数据拷贝到连续的数据区域
 			err = skb_add_data_nocache(sk, skb, &msg->msg_iter, copy);
 			if (err)
 				goto do_fault;
 		} else {
+			// skb线性存储区无可用空间
 			bool merge = true;
 			int i = skb_shinfo(skb)->nr_frags;
 			struct page_frag *pfrag = sk_page_frag(sk);
@@ -517,7 +546,9 @@ new_segment:
 
 			if (!sk_wmem_schedule(sk, copy))
 				goto wait_for_memory;
-
+			
+			/* 如果 skb 的线性存储区底部已经没有空间了，
+             * 将数据拷贝到 skb 的 struct skb_shared_info 结构指向的不需要连续的页面区域 */
 			err = skb_copy_to_page_nocache(sk, &msg->msg_iter, skb,
 						       pfrag->page,
 						       pfrag->offset,
@@ -536,47 +567,66 @@ new_segment:
 			pfrag->offset += copy;
 		}
 
+		//如果复制的数据长度为零（或者第一次拷贝），那么取消 PSH 标志
 		if (!copied)
 			TCP_SKB_CB(skb)->tcp_flags &= ~TCPHDR_PSH;
 
+		//更新发送队列的最后一个序号 write_seq
 		tp->write_seq += copy;
+		//更新 skb 的结束序号
 		TCP_SKB_CB(skb)->end_seq += copy;
+		// 初始化 gso 分段数 gso_segs
 		tcp_skb_pcount_set(skb, 0);
 
 		copied += copy;
 		if (!msg_data_left(msg)) {
 			if (unlikely(flags & MSG_EOR))
 				TCP_SKB_CB(skb)->eor = 1;
+			//用户层数据已经拷贝完毕，进行发送
 			goto out;
 		}
 
+		/* 如果当前 skb 还可以填充数据，或者发送的是带外数据，或者使用 tcp repair 选项，
+         * 那么继续拷贝数据，先不发送*/
 		if (skb->len < max || (flags & MSG_OOB) || unlikely(tp->repair))
 			continue;
 
+		// 重要！检查是否必须立即发送
 		if (forced_push(tp)) {
 			tcp_mark_push(tp, skb);
+			// 积累的数据包数量太多了，需要发送出去
 			__tcp_push_pending_frames(sk, mss_now, TCP_NAGLE_PUSH);
 		} else if (skb == tcp_send_head(sk))
+			// 如果是第一个网络包，那么只发送当前段
 			tcp_push_one(sk, mss_now);
+
+		// 不走下面的流程
 		continue;
 
 wait_for_sndbuf:
+		//若发送队列中段数据总长度已经达到了发送缓冲区的长度上限，那么设置 SOCK_NOSPACE
 		set_bit(SOCK_NOSPACE, &sk->sk_socket->flags);
 wait_for_memory:
+		// 在进入睡眠等待前，如果已有数据从用户空间复制过来，那么通过 tcp_push 先发送出去
 		if (copied)
 			tcp_push(sk, flags & ~MSG_MORE, mss_now,
 				 TCP_NAGLE_PUSH, size_goal);
-
+		// 进入睡眠，等待内存空闲信号唤醒
 		err = sk_stream_wait_memory(sk, &timeo);
 		if (err != 0)
 			goto do_error;
-
+		
+		//睡眠后 MSS 和 TSO 段长可能会发生变化，需要重新计算
 		mss_now = tcp_send_mss(sk, &size_goal, flags);
 	}
 
 out:
+	/* 在连接状态下，在发送过程中，如果有正常的退出，或者由于错误退出（参考上面跳转到out的代码）
+     * 但是已经有复制数据了，都会进入发送环节。 */
 	if (copied) {
+		// 如果已经有数据复制到发送队列了，就尝试立即发送
 		tcp_tx_timestamp(sk, sockc.tsflags, tcp_write_queue_tail(sk));
+		// 是否能立即发送数据要看是否启用了 Nagle 算法
 		tcp_push(sk, flags, mss_now, tp->nonagle, size_goal);
 	}
 out_nopush:
@@ -608,8 +658,10 @@ out_err:
 	return err;
 }
 ```
-####   3、传输层处理
 
+这里再强调一下`sk_write_queue`与`sk_send_head`的配合机制
+
+####   3、传输层处理
 
 ####   4、网络层发送处理
 
