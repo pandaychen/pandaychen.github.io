@@ -17,6 +17,16 @@ tags:
 
 ![]()
 
+bpf_tail_call 机制在使用时有若干限制：
+-   尾调用的程序必须已经加载到了 eBPF 程序的同一个 eBPF MAP 类型的数据结构中
+-   bpf_tail_call 的调用深度是有限的（通常是`32`），以防止无限循环
+-   尾调用不会传递任何参数，被调用的程序需要通过共享的 eBPF map 或者上下文数据来访问需要的信息
+
+####    MAP 定义
+
+
+##  0x02    Tail Call 示例
+
 ####  例1：XDP
 先列举一个简单的[例子](https://github.com/spoock1024/ebpf-example/blob/main/bpf_tail_call_case2/ebpf/main.c)：
 
