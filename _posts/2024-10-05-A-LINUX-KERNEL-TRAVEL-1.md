@@ -1129,6 +1129,40 @@ struct task_struct {
 
 ##	0x09	一些有趣的示例
 
+####	fs_struct的cwd/root 与 nsproxy 的关系
+
+![mnt_namespace](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/nsproxy_mntnamespace.png)
+
+从`0`号进程开始，每个`task_struct`都会指向一个`nsproxy`结构，用于提供namespace下的挂载点的所有拓扑信息（默认内核系统中只有一棵 mount 树，为了支持 `mnt_namespace`机制内核把 mount 树扩展成了多棵。每个 `mnt_namespace` 拥有一棵独立的 mount 树），如上图中`mnt_namespace`结构中的`root`成员指向本命名空间mount树的根（挂载）节点，此外，该namespace内所有的独立挂载点都通过 `mnt_namespace.list`链表串接起来
+
+因此，`task_struct`中的`fs_struct`结构的`root`成员（进程的根目录），其`root.vfsmount`结构指向和`task_struct->nsproxy->mnt_namespace->root`就是一致的（不使用`chroot`等场景），总结如下：
+
+1、`fs_struct`与`mnt_namespace`的核心成员
+
+`fs_struct`代表了**进程级文件系统视图**，定义了进程对文件系统的个性化视图（如隔离的根目录或工作路径），管理进程独立的文件系统上下文
+
+-	`struct path root`：进程的根目录（可通过 `chroot` 修改）
+-	`struct path pwd`：进程的当前工作目录（通过 `chdir` 修改）
+
+​而`mnt_namespace`[结构](https://elixir.bootlin.com/linux/v4.11.6/source/fs/mount.h#L7)定义了挂载命名空间全局视图，**管理整个挂载命名空间的全局状态**，维护命名空间内所有挂载点的拓扑结构（如 `mount/umount` 操作的生效范围），如在容器内运行`mount`新的挂载，在宿主机是看不到的（仅在当前的`mnt_namespace`内生效）
+
+-	`struct mount *root`：命名空间的挂载树根节点（描述所有挂载点）
+
+`mnt_namespace` 限定物理资源范围，`fs_struct` 定义进程在范围内的工作起点
+
+2、场景交互关系
+
+-	进程访问文件（如`open`操作）：`fs_struct`提供`root`或者`pwd`作为路径解析起点，而`mnt_namespace`提供本命名空间内的全局挂载树，将路径映射到实际文件系统；此外，若进程通过 `fs_struct->root` 或`pwd` 解析相对路径时，内核需结合 `mnt_namespace->root` 指向的挂载树，找到文件对应的物理存储位置
+-	修改进程根目录 (`chroot`调用)：更新 `fs_struct->root` 为进程新的根路径，这里隐含了新的根路径需在当前挂载命名空间内存在，特别注意`fs_struct->root` 仅改变进程的根目录视图，但无法突破 `mnt_namespace` 的隔离。若新根目录不在当前挂载命名空间内，操作将失败
+-	挂载操作 (`mount`)，涉及到更新挂载树，影响所有共享该命名空间的进程
+
+3、生命周期与共享机制
+
+-	对于`fs_struct`而言，一般通过写时复制（COW）机制，进程修改根目录或工作目录时会复制 `fs_struct`，避免影响其他进程
+-	对于`mnt_namespace`而言，是命名空间内所有进程共享的，即同一挂载命名空间的所有进程共享相同的 `mnt_namespace`，仅当调用 `unshare(CLONE_NEWNS)` 或创建新容器时，才会生成新副本（回忆一下创建进程时内核调用`copy_namespaces`方法来为子进程复制独立的命名空间操作）
+
+![mnt_namespace_vs_fsstruct](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/namespace/mnt/mnt_tree_ns.png)
+
 ####	进程创建的过程
 以系统调用[`fork`](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/fork.c#L2063)为例，其调用链为`fork()->_do_fork()->copy_process()`
 
@@ -1289,13 +1323,15 @@ void wake_up_new_task(struct task_struct *p)
 
 4、补充：**写时复制（Copy-On-Write）技术**
 
-![COW]()
-
-写时复制的本质是共享直到修改，是一种延迟拷贝的资源优化策略，通常用在拷贝复制操作中，如果一个资源只是被拷贝但是没有被修改，那么这个资源并不会真正被创建，而是和原数据共享。因此这个技术可以推迟拷贝操作到首次写入之后进行
+写时复制的本质是共享直到修改，是一种延迟拷贝的资源优化策略，通常用在拷贝复制操作中，如果一个资源只是被拷贝但是没有被修改，那么这个资源并不会真正被创建，而是和原数据共享。COW 将复制操作推迟到第一次写入时进行
 
 当`fork` 函数调用之后（因为Copy-On-Write 机制），存在父子进程实际上是共享物理内存的，内核把会共享的所有的内存页的权限都设为 read-only。当父子进程都只读内存，然后执行 exec 函数时就可以省去大量的数据复制开销。当其中某个进程写内存时，内存管理单元 MMU 检测到内存页是 read-only 的，于是触发缺页异常（page-fault），处理器会从中断描述符表（IDT）中获取到对应的处理程序。在中断程序中，内核就会把触发的异常的页复制一份，于是父子进程各自持有独立的一份，之后进程再修改对应的数据
 
 Copy-On-Write的好处是显而易见的，同时也有相应的缺点，如果父子进程都需要进行大量的写操作，会产生大量的缺页异常（page-fault）。缺页异常不是没有代价的，它会处理器会停止执行当前程序或任务转而去执行专门用于处理中断或异常的程序。处理器会从中断描述符表（IDT）中获取到对应的处理程序，当异常或中断执行完毕之后，会继续回到被中断的程序或任务继续执行
+
+Copy-on-write 实现原理如下图，当`fork()` 之后，内核会把父进程的所有内存页都标记为只读。一旦其中一个进程尝试写入某个内存页，就会触发一个保护故障（缺页异常），此时会陷入内核。内核将拦截写入，并为尝试写入的进程创建这个页面的一个新副本，恢复这个页面的可写权限，然后重新执行这个写操作，这时就可以正常执行了。内核会保留每个内存页面的引用数。每次复制某个页面后，该页面的引用数减少一；如果该页面只有一个引用，就可以跳过分配，直接修改。这种分配过程对于进程来说是透明的，能够确保一个进程的内存更改在另一进程中不可见
+
+![COW](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/cow.jpg)
 
 ####	fork+dup(dup2)
 在前文[主机入侵检测系统 Elkeid：设计与分析（一）](https://pandaychen.github.io/2024/08/19/A-ELKEID-STUDY-1/#0x01----agent)介绍进程通信的例子，父子进程+两组pipe实现全双工通信的模型，如下（one pipe）：
@@ -1333,3 +1369,5 @@ CPU 为了进行指令权限管控，引入了特权级的概念，CPU 工作在
 -   [linuxkerneltravel](https://github.com/linuxkerneltravel)
 -   [基础知识](https://ctf-wiki.org/pwn/linux/kernel-mode/basic-knowledge/)
 -	[Linux Namespace分析——mnt namespace的实现与应用](https://hustcat.github.io/namespace-implement-1/)
+-	[容器技术原理(五)：文件系统的隔离和共享](https://waynerv.com/posts/container-fundamentals-filesystem-isolation-and-sharing/#contents:%E4%BD%BF%E7%94%A8-pivot_root-%E6%88%96-chroot-%E5%88%87%E6%8D%A2%E6%A0%B9%E7%9B%AE%E5%BD%95)
+-	[写时复制 Copy-on-write](https://imageslr.com/2020/copy-on-write.html)
