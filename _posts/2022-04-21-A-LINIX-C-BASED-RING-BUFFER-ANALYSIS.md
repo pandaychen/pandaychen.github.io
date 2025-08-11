@@ -323,3 +323,4 @@ int ShmRingQueue::PutDataUnit(const char *pIn, int nInLen)
 
 ##  0x05  参考
 - [Circular buffer](https://en.wikipedia.org/wiki/Circular_buffer)
+- [图解 | Linux进程通信 - 管道实现](https://mp.weixin.qq.com/s/wSmC4a5ci6WC9qJSrxbSNg)

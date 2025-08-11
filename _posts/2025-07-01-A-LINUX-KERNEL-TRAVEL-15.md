@@ -22,6 +22,8 @@ tags:
 -   zero copy
 -   进程间通信，又分匿名（`pipe`）与有名（`mkfifo`）
 
+![pipe_app1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/15/pipe_app1.png)
+
 linux的pipe和FIFO都是基于pipe文件系统（pipefs）的，pipe和FIFO都是半双工，即数据流向只能是一个方向。pipe机制（匿名管道）只能在pipe的创建进程及其后代进程（后代进程fork/exec时，通过继承父进程的打开文件描述符表）之间使用，来实现通信；有名pipe FIFO，即可以通过名称查找到pipe，所以无上述匿名管道限制，可以通过名称找到pipe文件，创建相应的pipe，可以实现跨进程间的通信
 
 管道在Linux零拷贝中也有应用，零拷贝是一种优化数据传输的技术，它可以减少数据在内核态和用户态之间的拷贝次数，提高数据传输的效率。在传统的数据传输过程中，数据需要从内核缓冲区拷贝至应用程序的缓冲区，然后再从应用程序缓冲区拷贝到网络设备的缓冲区，最后才能发送出去。而零拷贝技术通过直接在应用程序和网络设备之间传输数据，避免了中间的拷贝过程，从而提高了数据传输的效率
@@ -59,19 +61,22 @@ struct pipe_buffer {
 
 2、`pipe_inode_info`：定义为管道描述符，用于表示一个管道，存储管道相应的信息
 
--	wait：读/写/poll等待队列；由于读/写不可能同时出现在等待的情况，所以可以共用等待队列；poll读与读，poll写与写可以共存出现在等待队列中
--	nrbufs：非空的pipe_buffer数量
--	curbuf：数据的起始pipe_buffer
--	tmp_page：页缓存，可以加速页帧的分配过程；当释放页帧时将页帧记入tmp_page，当分配页帧时，先从-	tmp_page中获取，如果tmp_page为空才从伙伴系统中获取
--	readers：当前管道的读者个数；每次以读方式打开时，readers加1；关闭时readers减1
--	writers：当前管道的写者个数；每次以写方式打开时，writers加1；关闭时writers减1
--	waiting_writers：被阻塞的管道写者个数；写进程被阻塞时，waiting_writers加1；被唤醒时，waiting_writers
--	r_counter：管道读者记数器，每次以读方式打开管道时，r_counter加1；关闭是不变
--	w_counter：管道读者计数器；每次以写方式打开时，w_counter加1；关闭是不变
--	fasync_readers：读端异步描述符
--	fasync_writers：写端异步描述符
--	inode：pipe对应的inode
--	bufs：pipe_buffer回环数据
+-	`wait`：读/写/poll等待队列；由于读/写不可能同时出现在等待的情况，所以可以共用等待队列；poll读与读，poll写与写可以共存出现在等待队列中
+-	`nrbufs`：非空的`pipe_buffer`数量
+-	`curbuf`：数据的起始`pipe_buffer`
+-	`buffers`：整个`pipe_inode_info`关联`pipe_buffer`结构的长度
+-	`tmp_page`：页缓存，可以加速页帧的分配过程；当释放页帧时将页帧记入`tmp_page`，当分配页帧时，先从`tmp_page`中获取，如果`tmp_page`为空才从伙伴系统中获取
+-	`readers`：当前管道的读者个数；每次以读方式打开时，`readers`加`1`；关闭时`readers`减`1`
+-	`writers`：当前管道的写者个数；每次以写方式打开时，`writers`加`1`；关闭时`writers`减`1`
+-	`waiting_writers`：被阻塞的管道写者个数；写进程被阻塞时，`waiting_writers`加`1`；被唤醒时，`waiting_writers`减`1`
+-	`r_counter`：管道读者记数器，每次以读方式打开管道时，`r_counter`加`1`；关闭时不变
+-	`w_counter`：管道读者计数器；每次以写方式打开时，`w_counter`加`1`；关闭是不变
+-	`fasync_readers`：读端异步描述符
+-	`fasync_writers`：写端异步描述符
+-	`inode`：pipe对应的inode
+-	`bufs`：`pipe_buffer`回环数据
+
+注意：版本`pipe_inode_info`的定义做了优化，参考
 
 ```CPP
 struct pipe_inode_info {
@@ -94,12 +99,12 @@ struct pipe_inode_info {
 
 3、`pipe_buf_operations`：记录pipe缓存的操作集
 
--	can_merge：合并标识；如果pipe_buffer中有空闲空间，有数据写入时，如果can_merge置位，会先写-	pipe_buffer的空闲空间；否则重新分配一个pipe_buffer来存储写入数据
--	map：由于pipe_buffer的page可能是高内存页帧，由于内核空间页表没有相应的页表项，所以内核不能直接访问page；只有通过map将page映射到内核地址空间后，内核才能访问
--	unmap：map的逆过程；因为内核地址空间有限，所以page访问完后释文地址映射
--	confirm：检验pipe_buffer中的数据
--	release：当pipe_buffer中的数据被读完后，用于释放pipe_buffer
--	get：增加pipe_buffer的引用计数器
+-	`can_merge`：合并标识；如果`pipe_buffer`中有空闲空间，有数据写入时，如果`can_merge`置位，会先写`pipe_buffer`的空闲空间；否则重新分配一个`pipe_buffer`来存储写入数据
+-	`map`：由于`pipe_buffer`的`page`可能是高内存页帧，由于内核空间页表没有相应的页表项，所以内核不能直接访问`page`；只有通过`map`将`page`映射到内核地址空间后，内核才能访问
+-	`unmap`：`map`的逆过程；因为内核地址空间有限，所以`page`访问完后释文地址映射
+-	`confirm`：检验`pipe_buffer`中的数据
+-	`release`：当`pipe_buffer`中的数据被读完后，用于释放`pipe_buffer`
+-	`get`：增加`pipe_buffer`的引用计数器
 
 ```CPP
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/pipe_fs_i.h#L74
@@ -143,7 +148,7 @@ struct pipe_buf_operations {
 };
 ```
 
-![pipe_base_relations]()
+![pipe_base_relations](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/15/pipe_base_relations.jpg)
 
 4、`anon_pipe_buf_ops` && `packet_pipe_buf_ops`
 
@@ -514,15 +519,311 @@ int create_pipe_files(struct file **res, int flag s)
 }
 ```
 
+####	alloc_pipe_info
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/pipe.c#L620
+struct pipe_inode_info *alloc_pipe_info(void)
+{
+	struct pipe_inode_info *pipe;
+	unsigned long pipe_bufs = PIPE_DEF_BUFFERS;	//默认16长度
+	struct user_struct *user = get_current_user();
+	unsigned long user_bufs;
+
+	pipe = kzalloc(sizeof(struct pipe_inode_info), GFP_KERNEL_ACCOUNT);
+	if (pipe == NULL)
+		goto out_free_uid;
+	
+	......
+
+	// 初始化bufs成员
+	pipe->bufs = kcalloc(pipe_bufs, sizeof(struct pipe_buffer),
+			     GFP_KERNEL_ACCOUNT);
+
+	if (pipe->bufs) {
+		init_waitqueue_head(&pipe->wait);
+		pipe->r_counter = pipe->w_counter = 1;
+		pipe->buffers = pipe_bufs;	//16
+		pipe->user = user;
+		mutex_init(&pipe->mutex);
+		return pipe;
+	}
+
+	......
+}
+```
 
 ####	pipe读写的实现原理（数据结构）
+内核管道实现本质上是基于环形缓冲区（RingBuffer）的设计理念，如 `pipe_inode_info` 和 `pipe_buffer` 构成的环形数组）
 
+1、环形存储结构，管道数据存储在内核维护的环形数组中，数组元素为 `pipe_buffer`，每个对应一个物理内存页（默认 `16` 页），通过 `curbuf`（当前读位置索引）和 `nrbufs`（有效缓冲区数量）实现环形遍历
+
+```CPP
+// 计算下一个缓冲区索引
+// 此操作通过位运算（&）替代取模，实现高效的环形索引
+int newbuf = (pipe->curbuf + bufs) & (pipe->buffers - 1);
+```
+
+2、读写指针分离，其中读指针为`pipe->curbuf`，标记当前读取的缓冲区起始位置；写指针通过 `(curbuf + nrbufs) % buffers` 计算得出，指向下一个可写入位置，这与经典环形缓冲区的 head（读）和 tail（写）指针逻辑一致
+
+3、管道的阻塞与唤醒机制，当缓冲区空时，读进程阻塞；缓冲区满时，写进程阻塞。通过等待队列（`pipe->wait`）和信号（`SIGIO`）实现读写协同
+
+4、基于环形缓冲区，管道针对进程通信场景也做了若干优化策略
+
+-	按需分配内存页：管道默认不预分配内存，仅在写入数据时`alloc_page()`动态申请页
+-	小数据合并写入：若最后一个缓冲区（`lastbuf`）有剩余空间，新数据可追加到同一页，减少碎片
+-	原子性保证：当单次写入 `<=PIPE_BUF`（通常 `4KB`）时，保证数据完整写入，避免分片
 
 ####	pipe的读过程
+[pipe_read](https://elixir.bootlin.com/linux/v4.11.6/source/fs/pipe.c#L250)
+
+```CPP
+static ssize_t
+pipe_read(struct kiocb *iocb, struct iov_iter *to)
+{
+	size_t total_len = iov_iter_count(to);
+	struct file *filp = iocb->ki_filp;
+	struct pipe_inode_info *pipe = filp->private_data;
+	int do_wakeup;
+	ssize_t ret;
+
+	/* Null read succeeds. */
+	if (unlikely(total_len == 0))
+		return 0;
+
+	do_wakeup = 0;
+	ret = 0;
+	__pipe_lock(pipe);
+	for (;;) {
+		int bufs = pipe->nrbufs;
+		if (bufs) {
+			int curbuf = pipe->curbuf;
+			struct pipe_buffer *buf = pipe->bufs + curbuf;
+			size_t chars = buf->len;
+			size_t written;
+			int error;
+
+			if (chars > total_len)
+				chars = total_len;
+
+			error = pipe_buf_confirm(pipe, buf);
+			if (error) {
+				if (!ret)
+					ret = error;
+				break;
+			}
+
+			written = copy_page_to_iter(buf->page, buf->offset, chars, to);
+			if (unlikely(written < chars)) {
+				if (!ret)
+					ret = -EFAULT;
+				break;
+			}
+			ret += chars;
+			buf->offset += chars;
+			buf->len -= chars;
+
+			/* Was it a packet buffer? Clean up and exit */
+			if (buf->flags & PIPE_BUF_FLAG_PACKET) {
+				total_len = chars;
+				buf->len = 0;
+			}
+
+			if (!buf->len) {
+				pipe_buf_release(pipe, buf);
+				curbuf = (curbuf + 1) & (pipe->buffers - 1);
+				pipe->curbuf = curbuf;
+				pipe->nrbufs = --bufs;
+				do_wakeup = 1;
+			}
+			total_len -= chars;
+			if (!total_len)
+				break;	/* common path: read succeeded */
+		}
+		if (bufs)	/* More to do? */
+			continue;
+		if (!pipe->writers)
+			break;
+		if (!pipe->waiting_writers) {
+			/* syscall merging: Usually we must not sleep
+			 * if O_NONBLOCK is set, or if we got some data.
+			 * But if a writer sleeps in kernel space, then
+			 * we can wait for that data without violating POSIX.
+			 */
+			if (ret)
+				break;
+			if (filp->f_flags & O_NONBLOCK) {
+				ret = -EAGAIN;
+				break;
+			}
+		}
+		if (signal_pending(current)) {
+			if (!ret)
+				ret = -ERESTARTSYS;
+			break;
+		}
+		if (do_wakeup) {
+			wake_up_interruptible_sync_poll(&pipe->wait, POLLOUT | POLLWRNORM);
+ 			kill_fasync(&pipe->fasync_writers, SIGIO, POLL_OUT);
+		}
+		pipe_wait(pipe);
+	}
+	__pipe_unlock(pipe);
+
+	/* Signal writers asynchronously that there is more room. */
+	if (do_wakeup) {
+		wake_up_interruptible_sync_poll(&pipe->wait, POLLOUT | POLLWRNORM);
+		kill_fasync(&pipe->fasync_writers, SIGIO, POLL_OUT);
+	}
+	if (ret > 0)
+		file_accessed(filp);
+	return ret;
+}
+```
 
 
 ####	pipe的写过程
+[pipe_write](https://elixir.bootlin.com/linux/v4.11.6/source/fs/pipe.c#L357)
+
+```CPP
+static ssize_t
+pipe_write(struct kiocb *iocb, struct iov_iter *from)
+{
+	struct file *filp = iocb->ki_filp;
+	struct pipe_inode_info *pipe = filp->private_data;
+	ssize_t ret = 0;
+	int do_wakeup = 0;
+	size_t total_len = iov_iter_count(from);
+	ssize_t chars;
+
+	/* Null write succeeds. */
+	if (unlikely(total_len == 0))
+		return 0;
+
+	__pipe_lock(pipe);
+
+	if (!pipe->readers) {
+		send_sig(SIGPIPE, current, 0);
+		ret = -EPIPE;
+		goto out;
+	}
+
+	/* We try to merge small writes */
+	chars = total_len & (PAGE_SIZE-1); /* size of the last buffer */
+	if (pipe->nrbufs && chars != 0) {
+		int lastbuf = (pipe->curbuf + pipe->nrbufs - 1) &
+							(pipe->buffers - 1);
+		struct pipe_buffer *buf = pipe->bufs + lastbuf;
+		int offset = buf->offset + buf->len;
+
+		if (buf->ops->can_merge && offset + chars <= PAGE_SIZE) {
+			ret = pipe_buf_confirm(pipe, buf);
+			if (ret)
+				goto out;
+
+			ret = copy_page_from_iter(buf->page, offset, chars, from);
+			if (unlikely(ret < chars)) {
+				ret = -EFAULT;
+				goto out;
+			}
+			do_wakeup = 1;
+			buf->len += ret;
+			if (!iov_iter_count(from))
+				goto out;
+		}
+	}
+
+	for (;;) {
+		int bufs;
+
+		if (!pipe->readers) {
+			send_sig(SIGPIPE, current, 0);
+			if (!ret)
+				ret = -EPIPE;
+			break;
+		}
+		bufs = pipe->nrbufs;
+		if (bufs < pipe->buffers) {
+			int newbuf = (pipe->curbuf + bufs) & (pipe->buffers-1);
+			struct pipe_buffer *buf = pipe->bufs + newbuf;
+			struct page *page = pipe->tmp_page;
+			int copied;
+
+			if (!page) {
+				page = alloc_page(GFP_HIGHUSER | __GFP_ACCOUNT);
+				if (unlikely(!page)) {
+					ret = ret ? : -ENOMEM;
+					break;
+				}
+				pipe->tmp_page = page;
+			}
+			/* Always wake up, even if the copy fails. Otherwise
+			 * we lock up (O_NONBLOCK-)readers that sleep due to
+			 * syscall merging.
+			 * FIXME! Is this really true?
+			 */
+			do_wakeup = 1;
+			copied = copy_page_from_iter(page, 0, PAGE_SIZE, from);
+			if (unlikely(copied < PAGE_SIZE && iov_iter_count(from))) {
+				if (!ret)
+					ret = -EFAULT;
+				break;
+			}
+			ret += copied;
+
+			/* Insert it into the buffer array */
+			buf->page = page;
+			buf->ops = &anon_pipe_buf_ops;
+			buf->offset = 0;
+			buf->len = copied;
+			buf->flags = 0;
+			if (is_packetized(filp)) {
+				buf->ops = &packet_pipe_buf_ops;
+				buf->flags = PIPE_BUF_FLAG_PACKET;
+			}
+			pipe->nrbufs = ++bufs;
+			pipe->tmp_page = NULL;
+
+			if (!iov_iter_count(from))
+				break;
+		}
+		if (bufs < pipe->buffers)
+			continue;
+		if (filp->f_flags & O_NONBLOCK) {
+			if (!ret)
+				ret = -EAGAIN;
+			break;
+		}
+		if (signal_pending(current)) {
+			if (!ret)
+				ret = -ERESTARTSYS;
+			break;
+		}
+		if (do_wakeup) {
+			wake_up_interruptible_sync_poll(&pipe->wait, POLLIN | POLLRDNORM);
+			kill_fasync(&pipe->fasync_readers, SIGIO, POLL_IN);
+			do_wakeup = 0;
+		}
+		pipe->waiting_writers++;
+		pipe_wait(pipe);
+		pipe->waiting_writers--;
+	}
+out:
+	__pipe_unlock(pipe);
+	if (do_wakeup) {
+		wake_up_interruptible_sync_poll(&pipe->wait, POLLIN | POLLRDNORM);
+		kill_fasync(&pipe->fasync_readers, SIGIO, POLL_IN);
+	}
+	if (ret > 0 && sb_start_write_trylock(file_inode(filp)->i_sb)) {
+		int err = file_update_time(filp);
+		if (err)
+			ret = err;
+		sb_end_write(file_inode(filp)->i_sb);
+	}
+	return ret;
+}
+```
 
 
 ##  0x0 参考
 -	[linux pipe文件系统(pipefs)](https://blog.csdn.net/Morphad/article/details/9219843)
+-	[图解 | Linux进程通信 - 管道实现](https://mp.weixin.qq.com/s/wSmC4a5ci6WC9qJSrxbSNg)
