@@ -70,7 +70,7 @@ struct pipe_buffer {
 -	`writers`：当前管道的写者个数；每次以写方式打开时，`writers`加`1`；关闭时`writers`减`1`
 -	`waiting_writers`：被阻塞的管道写者个数；写进程被阻塞时，`waiting_writers`加`1`；被唤醒时，`waiting_writers`减`1`
 -	`r_counter`：管道读者记数器，每次以读方式打开管道时，`r_counter`加`1`；关闭时不变
--	`w_counter`：管道读者计数器；每次以写方式打开时，`w_counter`加`1`；关闭是不变
+-	`w_counter`：管道读者计数器；每次以写方式打开时，`w_counter`加`1`；关闭时不变
 -	`fasync_readers`：读端异步描述符
 -	`fasync_writers`：写端异步描述符
 -	`inode`：pipe对应的inode
@@ -96,6 +96,8 @@ struct pipe_inode_info {
 	struct user_struct *user;
 };
 ```
+
+此外，注意从`pipe_inode_info`和`pipe_buffer`的初始化的过程可以得知，在本文版本 Linux 内核中，使用了 `16` 个内存页（单页是`4k`）作为环形缓冲区，所以环形缓冲区的大小为 `64KB(16*4KB)`
 
 3、`pipe_buf_operations`：记录pipe缓存的操作集
 
@@ -152,10 +154,13 @@ struct pipe_buf_operations {
 
 4、`anon_pipe_buf_ops` && `packet_pipe_buf_ops`
 
+-	`anon_pipe_buf_ops`：匿名管道，默认`can_merge`开启（支持）
+-	`packet_pipe_buf_ops`：
+
 ```CPP
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/pipe.c#L233
 static const struct pipe_buf_operations anon_pipe_buf_ops = {
-	.can_merge = 1,
+	.can_merge = 1,	//匿名管道：默认can_merge为1
 	.confirm = generic_pipe_buf_confirm,
 	.release = anon_pipe_buf_release,
 	.steal = anon_pipe_buf_steal,
@@ -241,7 +246,6 @@ struct inode {
 
 ```
 
-
 4、super_block，超级块对象（Superblock）
 
 ```CPP
@@ -252,8 +256,10 @@ static const struct super_operations pipefs_ops = {
 };
 ```
 
+![pipefs_vfs](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/15/pipefs_vfs_arch.png)
+
 ##	0x02	管道操作分析
-本节仅分析`pipe`匿名管道的实现
+本节仅分析`pipe`匿名管道的在内核的实现机制
 
 ####	管道创建
 系统调用`pipe/pipe2`，用于创建管道，函数调用链为`pipe2->__do_pipe_flags->create_pipe_files`
@@ -569,12 +575,33 @@ int newbuf = (pipe->curbuf + bufs) & (pipe->buffers - 1);
 
 4、基于环形缓冲区，管道针对进程通信场景也做了若干优化策略
 
--	按需分配内存页：管道默认不预分配内存，仅在写入数据时`alloc_page()`动态申请页
+-	按需分配内存页：**管道默认不预分配内存，仅在写入数据时`alloc_page()`动态申请页**
 -	小数据合并写入：若最后一个缓冲区（`lastbuf`）有剩余空间，新数据可追加到同一页，减少碎片
 -	原子性保证：当单次写入 `<=PIPE_BUF`（通常 `4KB`）时，保证数据完整写入，避免分片
 
-####	pipe的读过程
-[pipe_read](https://elixir.bootlin.com/linux/v4.11.6/source/fs/pipe.c#L250)
+##	0x03 	pipe的读实现
+对于普通的ringbuffer，读过程步骤如下：
+
+1.	首先通过读指针head来定位到读取数据的起始地址
+2.	判断环形缓冲区中是否有数据可读
+3.	读取数据，成功读取后移动读指针head
+
+对于内核pipe的ringbuffer，其读指针是由 `pipe_inode_info` 对象的 `curbuf` 字段与 `pipe_buffer` 对象的 `offset` 字段组合而成，类似于页间序号/页内下标
+
+-	`pipe_inode_info` 对象的 `curbuf` 字段表示读操作要从 `bufs` 数组的哪个 `pipe_buffer` 中读取数据（初始化为`0`）
+-	`pipe_buffer` 对象的 `offset` 字段表示读操作要从内存页的哪个位置开始读取数据
+-	可能存在读取长度超过一个page size（`4k`）的情况，需要注意
+-	从缓冲区中读取到 `n` 个字节的数据后，会相应移动读指针 `n` 个字节的位置（即增加 `pipe_buffer` 对象的 `offset` 字段），并且减少 `n` 个字节的可读数据长度（即减少 `pipe_buffer` 对象的 `len` 字段）
+-	当 `pipe_buffer` 对象的 `len` 字段变为 `0` 时，表示当前 `pipe_buffer` 没有可读数据，那么将会对 `pipe_inode_info` 对象的 `curbuf` 字段移动一个位置，并且其 `nrbufs` 字段进行减一操作
+
+[`pipe_read`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/pipe.c#L250)的实现如下，对于管道的ringbuffer，读操作步骤如下：
+
+1.	通过VFS file/inode 对象来获取到管道的 `pipe_inode_info` 对象
+2.  通过 `pipe_inode_info` 对象的 `nrbufs` 成员，获取管道未读数据占有多少个内存页
+3.	通过 `pipe_inode_info` 对象的 `curbuf` 成员，获取读操作应该从ringbuffer的内存页哪个序号处读取数据
+4.	通过 `pipe_buffer` 对象的 `offset` 成员，获取真正的读指针（位置）， 并且从管道中读取数据到用户缓冲区
+5.	如果当前内存页的数据已经被读取完毕，那么移动 `pipe_inode_info` 对象的 `curbuf` 指针，并且减少其 `nrbufs` 字段的值
+6.	如果读取到用户期望的数据长度，退出循环；反之，则移动`curbuf`到下一个ringbuffer位置，继续上面的操作
 
 ```CPP
 static ssize_t
@@ -582,6 +609,7 @@ pipe_read(struct kiocb *iocb, struct iov_iter *to)
 {
 	size_t total_len = iov_iter_count(to);
 	struct file *filp = iocb->ki_filp;
+	// 1、从file结构获取管道对象pipe_inode_info
 	struct pipe_inode_info *pipe = filp->private_data;
 	int do_wakeup;
 	ssize_t ret;
@@ -593,10 +621,15 @@ pipe_read(struct kiocb *iocb, struct iov_iter *to)
 	do_wakeup = 0;
 	ret = 0;
 	__pipe_lock(pipe);
+	// 想想这里为啥是循环
 	for (;;) {
+		// 2、获取管道未读数据占有多少个内存页
 		int bufs = pipe->nrbufs;
 		if (bufs) {
+			// 3、获取读操作应该从环形缓冲区的哪个内存页处读取数据（序号）
 			int curbuf = pipe->curbuf;
+
+			// 4、获取页内偏移
 			struct pipe_buffer *buf = pipe->bufs + curbuf;
 			size_t chars = buf->len;
 			size_t written;
@@ -611,7 +644,8 @@ pipe_read(struct kiocb *iocb, struct iov_iter *to)
 					ret = error;
 				break;
 			}
-
+			// 5、通过 pipe_buffer 的 offset 字段获取真正的读指针,
+            // 并且从管道中读取数据到用户缓冲区
 			written = copy_page_to_iter(buf->page, buf->offset, chars, to);
 			if (unlikely(written < chars)) {
 				if (!ret)
@@ -619,7 +653,9 @@ pipe_read(struct kiocb *iocb, struct iov_iter *to)
 				break;
 			}
 			ret += chars;
+			// 页内：增加 pipe_buffer 对象的 offset 字段的值
 			buf->offset += chars;
+			// 页内：减少 pipe_buffer 对象的 len 字段的值
 			buf->len -= chars;
 
 			/* Was it a packet buffer? Clean up and exit */
@@ -628,14 +664,20 @@ pipe_read(struct kiocb *iocb, struct iov_iter *to)
 				buf->len = 0;
 			}
 
+			// 6、如果当前内存页的数据已经被读取完毕
 			if (!buf->len) {
 				pipe_buf_release(pipe, buf);
+				// 移动页间读指针
 				curbuf = (curbuf + 1) & (pipe->buffers - 1);
+				// 移动 pipe_inode_info 对象的 curbuf 指针
 				pipe->curbuf = curbuf;
+				// 减少 pipe_inode_info 对象的 nrbufs 字段（减1）
 				pipe->nrbufs = --bufs;
 				do_wakeup = 1;
 			}
 			total_len -= chars;
+
+			// 7、如果读取到用户期望的数据长度, 退出循环
 			if (!total_len)
 				break;	/* common path: read succeeded */
 		}
@@ -681,8 +723,23 @@ pipe_read(struct kiocb *iocb, struct iov_iter *to)
 ```
 
 
-####	pipe的写过程
-[pipe_write](https://elixir.bootlin.com/linux/v4.11.6/source/fs/pipe.c#L357)
+##	0x04	pipe的写实现
+内核pipe的ringbuffer结构没有写指针这个成员，实际上是通过读指针计算出来的：写指针 = 读指针 + 未读数据长度，实际上只需要理解**未读取内容的开始位置约等于已写入数据的开始位置**这个概念就清楚了
+
+-	首先通过 `pipe_inode_info` 的 `curbuf` 字段和 `nrbufs` 字段来定位到，应该向哪个 `pipe_buffer` 写入数据
+-	然后再通过 `pipe_buffer` 对象的 `offset` 字段和 `len` 字段来定位到，应该写入到内存页的哪个位置（通常情况下`offset+len`即是写入的开始位置）
+
+[pipe_write](https://elixir.bootlin.com/linux/v4.11.6/source/fs/pipe.c#L357)的实现如下，主要步骤是：
+
+1.	如果上次写操作写入的 `pipe_buffer` 还有空闲的空间，那么就将数据写入到此 `pipe_buffer` 中，并且增加其 `len` 字段的值
+2.	如果上次写操作写入的 `pipe_buffer` 没有足够的空闲空间，那么就新申请一个内存页，并且把数据保存到新的内存页中，并且增加 `pipe_inode_info` 的 `nrbufs` 字段的值
+3.	如果写入的数据已经全部写入成功，那么就退出写操作
+
+当然，这里还涉及到一些细节问题，如：
+
+-	什么情况下`pipe_buffer` page是不能够被`can_merge`的？
+-	`4k`情况下，大于或者小于的数据量写入管道，原子性是如何保证的？为什么说数据小于`4k`才能保证其原子性？
+-	`pipe_inode_info`的`tmp_page`的作用是什么？
 
 ```CPP
 static ssize_t
@@ -692,6 +749,8 @@ pipe_write(struct kiocb *iocb, struct iov_iter *from)
 	struct pipe_inode_info *pipe = filp->private_data;
 	ssize_t ret = 0;
 	int do_wakeup = 0;
+
+	// from：用户空间的待写入数据
 	size_t total_len = iov_iter_count(from);
 	ssize_t chars;
 
@@ -708,13 +767,22 @@ pipe_write(struct kiocb *iocb, struct iov_iter *from)
 	}
 
 	/* We try to merge small writes */
+
+	// chars：保存用户空间待写入数据的长度
+	// < 4k：返回实际长度
+	// >=4k：返回0
 	chars = total_len & (PAGE_SIZE-1); /* size of the last buffer */
+
+	// 1、如果最后写入的 pipe_buffer 还有空闲的空间
 	if (pipe->nrbufs && chars != 0) {
+		 // 获取写入数据的位置
 		int lastbuf = (pipe->curbuf + pipe->nrbufs - 1) &
 							(pipe->buffers - 1);
 		struct pipe_buffer *buf = pipe->bufs + lastbuf;
 		int offset = buf->offset + buf->len;
 
+		// anon_pipe_buf_ops
+		// buf->ops->can_merge：管道类型（参考下文）
 		if (buf->ops->can_merge && offset + chars <= PAGE_SIZE) {
 			ret = pipe_buf_confirm(pipe, buf);
 			if (ret)
@@ -727,11 +795,14 @@ pipe_write(struct kiocb *iocb, struct iov_iter *from)
 			}
 			do_wakeup = 1;
 			buf->len += ret;
+
+			// 2、如果要写入的数据已经全部写入成功
 			if (!iov_iter_count(from))
 				goto out;
 		}
 	}
 
+	// 3、如果最后写入的 pipe_buffer 空闲空间不足, 那么申请一个新的内存页来存储数据
 	for (;;) {
 		int bufs;
 
@@ -749,6 +820,7 @@ pipe_write(struct kiocb *iocb, struct iov_iter *from)
 			int copied;
 
 			if (!page) {
+				// 申请一个新的内存页
 				page = alloc_page(GFP_HIGHUSER | __GFP_ACCOUNT);
 				if (unlikely(!page)) {
 					ret = ret ? : -ENOMEM;
@@ -783,6 +855,7 @@ pipe_write(struct kiocb *iocb, struct iov_iter *from)
 			pipe->nrbufs = ++bufs;
 			pipe->tmp_page = NULL;
 
+			// 如果要写入的数据已经全部写入成功, 退出循环
 			if (!iov_iter_count(from))
 				break;
 		}
@@ -804,8 +877,11 @@ pipe_write(struct kiocb *iocb, struct iov_iter *from)
 			do_wakeup = 0;
 		}
 		pipe->waiting_writers++;
+		// 注意这里！
 		pipe_wait(pipe);
 		pipe->waiting_writers--;
+
+		//end of for1
 	}
 out:
 	__pipe_unlock(pipe);
@@ -823,7 +899,33 @@ out:
 }
 ```
 
+##	0x05	附录
+
+####	`can_merge`的作用及场景
+[`page_cache_pipe_buf_ops`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/splice.c#L140)
+
+```CPP
+const struct pipe_buf_operations page_cache_pipe_buf_ops = {
+	.can_merge = 0,
+	.confirm = page_cache_pipe_buf_confirm,
+	.release = page_cache_pipe_buf_release,
+	.steal = page_cache_pipe_buf_steal,
+	.get = generic_pipe_buf_get,
+};
+```
+
+####	管道操作的原子性
+在APUE中遇到这么一句话：小于 `PIPE_BUF` 的写操作必须是原子的，要写的数据应被连续地写到管道；大于 `PIPE_BUF` 的写操作可能是非原子的，内核可能会将数据与其它进程写入的数据交织在一起。POSIX 规定 `PIPE_BUF` 至少为`512`字节（Linux 中为`4096`），语义如下：（`n`为要写的字节数）
+-	`n <= PIPE_BUF`且`O_NONBLOCK`为 disable：写入具有原子性。如果没有足够的空间供 `n` 个字节全部立即写入，则阻塞直到有足够空间将`n`个字节全部写入管道
+-	`n <= PIPE_BUF`且`O_NONBLOCK`为 enable： 写入具有原子性。如果有足够的空间写入 `n` 个字节，则 `write` 立即成功返回，并写入所有 `n` 个字节；否则一个都不写入，`write` 返回错误，并将 `errno` 设置为 `EAGAIN`
+-	`n > PIPE_BUF`且`O_NONBLOCK`为 disable：写入不具有原子性。可能会和其它的写进程交替写，直到将 `n` 个字节全部写入才返回，否则阻塞等待写入
+-	`n > PIPE_BUF`且 `O_NONBLOCK`为 enable：写入不具有原子性。如果管道已满，则写入失败，`write` 返回错误，并将 `errno` 设置为 `EAGAIN`；否则，可以写入 `1--n` 个字节，即部分写入，此时 `write` 返回实际写入的字节数，并且写入这些字节时可能与其他进程交错写入
+
+所以，从管道的内核视角容易理解上述原子性及非原子性
+
+####	CVE-2022-0847：Linux DirtyPipe内核提权漏洞
 
 ##  0x0 参考
 -	[linux pipe文件系统(pipefs)](https://blog.csdn.net/Morphad/article/details/9219843)
--	[图解 | Linux进程通信 - 管道实现](https://mp.weixin.qq.com/s/wSmC4a5ci6WC9qJSrxbSNg)
+-	[Linux进程通信 - 管道实现](https://mp.weixin.qq.com/s/wSmC4a5ci6WC9qJSrxbSNg)
+-	[CVE-2022-0847 Linux DirtyPipe内核提权漏洞](https://segmentfault.com/a/1190000042055646)
