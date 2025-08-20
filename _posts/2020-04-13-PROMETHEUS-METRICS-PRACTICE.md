@@ -218,7 +218,7 @@ Summary 通常用来在客户端直接计算出某个值（通常是请求持续
 
 例如，测量在 `host1.domain.com` 上运行的 `add_product` API 端点实例的响应时间的 Summary 指标可以表示为：
 
-```PYTHON
+```TEXT
 # HELP http_request_duration_seconds Api requests response time in seconds
 # TYPE http_request_duration_seconds summary
 http_request_duration_seconds_sum{api="add_product" instance="host1.domain.com"} 8953.332 #所有值的总和
@@ -274,7 +274,7 @@ Range Vector 返回的是一个 range 的数据。Range 的表示方法是 `[1m]
 
 `http_requests_total` 记录了 HTTP 请求的总数，两个标签：`status_code`（HTTP 响应状态码）和 service（服务名称），样本数据如下：
 
-```PYTHON
+```TEXT
 http_requests_total{status_code="200", service="serviceA"} 1000
 http_requests_total{status_code="200", service="serviceB"} 1200
 http_requests_total{status_code="404", service="serviceA"} 50
@@ -285,7 +285,7 @@ http_requests_total{status_code="500", service="serviceB"} 5
 
 那么，`sum by (service) (http_requests_total)` 这个公式是计算每个服务 service 的 HTTP 请求总数，不考虑状态码（`sum` 函数，按照 service 标签进行分组），会返回下面结果：
 
-```python
+```TEXT
 {service="serviceA"} 1060	#serviceA 有 1060 个 HTTP 请求
 {service="serviceB"} 1235	#serviceB 有 1235 个 HTTP 请求
 
@@ -302,7 +302,7 @@ sum(http_requests_total) #将对所有的 http_requests_total 指标进行求和
 
 这几个函数常用于 guage，不太适合 counter 指标，`http_request_duration_seconds` 为 Gauge 类型的指标，表示 HTTP 请求的持续时间
 
-```python
+```TEXT
 http_request_duration_seconds{service="serviceA", request_id="1"} 0.1
 http_request_duration_seconds{service="serviceA", request_id="2"} 0.2
 http_request_duration_seconds{service="serviceA", request_id="3"} 0.3
@@ -313,14 +313,14 @@ http_request_duration_seconds{service="serviceB", request_id="6"} 0.4
 
 `min by (service) (http_request_duration_seconds)`：计算每个服务（按服务分组）的最小 HTTP 请求持续时间
 
-```PYTHON
+```TEXT
 {service="serviceA"} 0.1
 {service="serviceB"} 0.2
 ```
 
 `avg by (service) (http_request_duration_seconds)`：计算每个服务的平均 HTTP 请求持续时间
 
-```PYTHON
+```TEXT
 serviceA：(0.1 + 0.2 + 0.3) / 3 = 0.2
 serviceB：(0.2 + 0.3 + 0.4) / 3 = 0.3
 {service="serviceA"} 0.2
@@ -329,14 +329,14 @@ serviceB：(0.2 + 0.3 + 0.4) / 3 = 0.3
 
 `quantile by (service) (0.5, http_request_duration_seconds)`： 计算每个服务的中位数（`50%` 分位数）HTTP 请求持续时间
 
-```PYTHON
+```TEXT
 {service="serviceA"} 0.2
 {service="serviceB"} 0.3
 ```
 
 `count by (service) (http_request_duration_seconds)`： 计算每个服务的 HTTP 请求持续时间数据点数量
 
-```PYTHON
+```TEXT
 {service="serviceA"} 3
 {service="serviceB"} 3
 ```
@@ -344,7 +344,7 @@ serviceB：(0.2 + 0.3 + 0.4) / 3 = 0.3
 ####	Range Vector 的函数
 下面的 PromQL 函数只可用于 range vectors，即入参为 range vectors，返回为 instant vector：
 
-```PYTHON
+```TEXT
 changes(range-vector)
 absent_over_time(range-vector)
 delta(range-vector)
@@ -378,7 +378,6 @@ range vectors 与 couter 的结合相当重要，单调递增 counter 的值永�
 4            140                 240
 ```
 
-
 1、`avg_over_time`：`avg_over_time(http_requests_total[5m])` 计算过去 `5` 分钟内 `http_requests_total` 指标的平均值（聚合所有 label 的指标）
 
 2、`rate(http_requests_total{service="serviceA"}[4m])`: 计算过去 `4` 分钟内 serviceA 的 HTTP 请求总数的平均速率，这里描述下具体计算过程
@@ -404,12 +403,14 @@ range vectors 与 couter 的结合相当重要，单调递增 counter 的值永�
 
 首先需要计算每个服务在过去 `1` 分钟内的增量：
 
+```TEXT
 serviceA：140（第 4 分钟） - 130（第 3 分钟） = 10
 serviceB：240（第 4 分钟） - 230（第 3 分钟） = 10
+```
 
 接下来，将按 `service` 标签对这些增量进行求和。由于只有两个服务，所以求和操作实际上就是将每个服务的增量作为结果。结果是：
 
-```PYTHON
+```TEXT
 {service="serviceA"} 10
 {service="serviceB"} 10
 ```
@@ -436,7 +437,7 @@ serviceB：rate(http_requests_total{service="serviceB"}[1m]) #在过去 60 秒�
 ```
 
 结果是：
-```python
+```TEXT
 {service="serviceA"} 0.2
 {service="serviceB"} 0.4
 #在过去 1 分钟内，serviceA 的 HTTP 请求速率为 0.2 次 / 秒，serviceB 的 HTTP 请求速率为 0.4 次 / 秒
