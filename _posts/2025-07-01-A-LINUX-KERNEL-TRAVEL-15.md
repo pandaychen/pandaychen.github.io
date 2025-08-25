@@ -969,7 +969,7 @@ for (;;) {
 | :-----| :---- | :---- |
 | 写入合并 | 支持合并写入 (`can_merge=true`)，若当前缓冲区有剩余空间时，新数据会追加到现有页面末尾（需满足 `offset + 数据长度 <= PAGE_SIZE`）| 禁止合并写入 (`can_merge=false`)，每次写入均分配独立新页，即使当前页有剩余空间也不追加 |
 | 数据分页 | 可跨页（空间不足时分配新页） | 每PACKET一页，独立存储；有明确的数据包边界的概念，每个写入操作对应一个完整数据包，读端需按包（边界）读取（如 `recvmsg`） |
-| 原子性（<= `PIPE_BUF`时）  | 1、阻塞模式下，缓冲区不足时阻塞，直到空间足够后原子写入全部数据<br> 2、非阻塞模式下，空间不足时返回 `EAGAIN`，不写入任何数据 | 2、与`anon_pipe_buf_ops`类型一致	|
+| 原子性（<= `PIPE_BUF`时）  | 1、阻塞模式下，缓冲区不足时阻塞，直到空间足够后原子写入全部数据<br> 2、非阻塞模式下，空间不足时返回 `EAGAIN`，不写入任何数据 | 与`anon_pipe_buf_ops`类型一致	|
 | 原子性（> `PIPE_BUF`时）  | 	非原子写入，数据可能被拆分到多个页，且可能与其他进程写入交错	|	|
 | 阻塞与唤醒 | 1、当缓冲区满时，阻塞模式下，写进程休眠，直到读进程消费数据后唤醒<br> 2、缓冲区满时，非阻塞模式下，立即返回 `EAGAIN` | 非原子写入，但每个数据包独立存储，读端按包消费 	|
 | 读端关闭处理  | 当读端关闭时，触发 `SIGPIPE` 信号或 `EPIPE` 错误| 与`anon_pipe_buf_ops`类型一致	|
@@ -1019,6 +1019,144 @@ const struct pipe_buf_operations page_cache_pipe_buf_ops = {
 -	`n > PIPE_BUF`且 `O_NONBLOCK`为 enable：写入不具有原子性。如果管道已满，则写入失败，`write` 返回错误，并将 `errno` 设置为 `EAGAIN`；否则，可以写入 `1~n` 个字节，即部分写入，此时 `write` 返回实际写入的字节数，并且写入这些字节时可能与其他进程交错写入
 
 所以，从管道的内核视角容易理解上述原子性及非原子性
+
+1、为什么小于 `PIPE_BUF`的写操作是原子的？从源码易知，内核通过管道锁`__pipe_lock/__pipe_unlock`保证单次 `write()` 操作的原子性（如互斥访问缓冲区），包括合并写入one page以及写入 one page的操作
+
+2、为什么大于`PIPE_BUF`的写操作是非原子的？由于超过`PIPE_BUF`，数据必然要写到多个page里面
+
+```CPP
+static ssize_t
+pipe_write(struct kiocb *iocb, struct iov_iter *from)
+{
+	struct file *filp = iocb->ki_filp;
+	struct pipe_inode_info *pipe = filp->private_data;
+	ssize_t ret = 0;
+	int do_wakeup = 0;
+	......
+	__pipe_lock(pipe);
+
+	// 检查是否支持（可以）合并写入
+	......
+
+	for (;;) {
+		int bufs;
+
+		bufs = pipe->nrbufs;
+		if (bufs < pipe->buffers) {
+			int newbuf = (pipe->curbuf + bufs) & (pipe->buffers-1);
+			struct pipe_buffer *buf = pipe->bufs + newbuf;
+			struct page *page = pipe->tmp_page;
+			int copied;
+			......
+
+			do_wakeup = 1;
+			copied = copy_page_from_iter(page, 0, PAGE_SIZE, from);
+			if (unlikely(copied < PAGE_SIZE && iov_iter_count(from))) {
+				if (!ret)
+					ret = -EFAULT;
+				break;
+			}
+			ret += copied;
+			buf->page = page;
+			buf->ops = &anon_pipe_buf_ops;
+			buf->offset = 0;
+			buf->len = copied;
+			buf->flags = 0;
+			if (is_packetized(filp)) {
+				buf->ops = &packet_pipe_buf_ops;
+				buf->flags = PIPE_BUF_FLAG_PACKET;
+			}
+
+			// 当前页已经被占用，累加一
+			pipe->nrbufs = ++bufs;
+			pipe->tmp_page = NULL;
+
+			if (!iov_iter_count(from))
+				break;
+		}
+
+		// 走到这里，说明两件事情：
+		// 1、说明数据还没写完
+		// 2、说明还有可用页
+		// 那么继续写就行了呗
+		if (bufs < pipe->buffers)
+			continue;
+
+		// 说明bufs== pipe->buffers，即没有可用页了（缓冲区满了，需要按照不同模式的等待处理）
+		if (filp->f_flags & O_NONBLOCK) {
+			// 非阻塞模式
+			if (!ret)
+				ret = -EAGAIN;
+			break;
+		}
+		if (signal_pending(current)) {
+			if (!ret)
+				ret = -ERESTARTSYS;
+			break;
+		}
+		if (do_wakeup) {
+			// 因为上面的步骤确保了已经向缓冲区成功写入了数据，所以唤醒读进程去读
+			wake_up_interruptible_sync_poll(&pipe->wait, POLLIN | POLLRDNORM);
+			kill_fasync(&pipe->fasync_readers, SIGIO, POLL_IN);
+			do_wakeup = 0;
+		}
+		pipe->waiting_writers++;
+		// 内部释放锁并休眠
+		// 阻塞模式下，写进程把自己睡眠，释放CPU
+		pipe_wait(pipe);
+		pipe->waiting_writers--;
+	}
+out:
+	__pipe_unlock(pipe);
+	
+	......
+}
+```
+
+所以，从这里的实现就可以知道为何跨页的写操作不是原子的：**当锁释放期间，若其他进程可获取锁并写入数据，导致本次写入的数据被拆分，并可能与其他进程写入交错（原子性被破坏）**
+
+`pipe_wait`的实现如下，可以看到被阻塞的进程通过`schedule`让出CPU，这里锁与阻塞唤醒的协同机制为：
+
+1、阻塞时的锁释放，当缓冲区满且为阻塞模式时，`pipe_wait()` 会执行下面的操作：
+
+-	将当前进程加入等待队列（`prepare_to_wait`），休眠直至读进程消费数据后唤醒
+-	释放 `__pipe_lock`（`pipe_unlock`），允许其他进程操作管道
+-	让出CPU（`schedule`）
+
+2、唤醒后的锁重获，当本进程被唤醒后（说明缓冲区非满、可写了），在 `pipe_wait()` 返回前会重新获取 `__pipe_lock`，继续执行循环写入剩余数据
+
+```CPP
+void pipe_wait(struct pipe_inode_info *pipe)
+{
+	DEFINE_WAIT(wait);
+
+	/*
+	 * Pipes are system-local resources, so sleeping on them
+	 * is considered a noninteractive wait:
+	 */
+	prepare_to_wait(&pipe->wait, &wait, TASK_INTERRUPTIBLE);
+	pipe_unlock(pipe);
+	// 让出CPU
+	schedule();
+	// 当缓冲区非满，又可写的时候，会执行到这里
+	finish_wait(&pipe->wait, &wait);
+	pipe_lock(pipe);
+}
+```
+
+这里额外再提一下，写操作与读操作的锁竞争（协同）：
+
+1、读写互斥，由于`__pipe_lock` 是全局互斥锁，同一时间仅允许一个进程读或写管道：
+
+-	若写进程持有锁，读进程（`pipe_read`）会在 `__pipe_lock` 处阻塞，直至写操作完成或进入休眠
+-	反之亦然，读操作持锁时写进程阻塞
+
+2、性能影响，因锁粒度较大（覆盖整个 `write()` 调用），频繁小数据写入可能导致读进程饥饿，需依赖唤醒机制平衡：
+
+-	写操作释放缓冲区后，通过 `wake_up_interruptible_sync_poll()` 唤醒读进程
+-	读操作消费数据后，唤醒阻塞的写进程
+
+所以，程序中通常使用一对pipe来实现双向通信，避免pipe的这种竞争问题
 
 ####	CVE-2022-0847：Linux DirtyPipe内核提权漏洞
 
