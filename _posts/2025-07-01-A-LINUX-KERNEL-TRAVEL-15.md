@@ -155,7 +155,7 @@ struct pipe_buf_operations {
 4、`anon_pipe_buf_ops` && `packet_pipe_buf_ops`
 
 -	`anon_pipe_buf_ops`：匿名管道，默认`can_merge`开启（支持）
--	`packet_pipe_buf_ops`：
+-	`packet_pipe_buf_ops`：分组化管道，默认`can_merge`关闭
 
 ```CPP
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/pipe.c#L233
@@ -784,6 +784,10 @@ pipe_write(struct kiocb *iocb, struct iov_iter *from)
 		// anon_pipe_buf_ops
 		// buf->ops->can_merge：管道类型（参考下文）
 		if (buf->ops->can_merge && offset + chars <= PAGE_SIZE) {
+			// 注意：在内核4.11.6版本中，必须满足两者才出发合并写入
+			// 1、管道类型支持数据合并：buf->ops->can_merge为真
+			// 2、offset+chars<=PAGE_SIZE：当前页剩下的空间（offset）可以容纳待写入的数据长度（chars）
+			// 否则不满足，就直接分配新内存页进行写入
 			ret = pipe_buf_confirm(pipe, buf);
 			if (ret)
 				goto out;
@@ -899,7 +903,100 @@ out:
 }
 ```
 
-##	0x05	附录
+####	关于写的一些细节
+在刚开始分析时，错误的认为管道在写入时必须写满一整页page然后再开始写下一页，实际上并不是，这个行为受到`can_merge`参数控制。那么什么情况下会出现上述case呢？还是以本文内核版本（`anon_pipe_buf_ops` 和 `packet_pipe_buf_ops`）为例，回到内核`pipe_write`函数的实现：
+
+1、合并写入的条件检查，触发追加写入的条件为：
+
+-	`buf->ops->can_merge == true`（匿名管道默认支持）
+-	`offset + chars <= PAGE_SIZE`（当前缓冲区剩余空间足够容纳本次写入）
+
+而不满足条件的行为，若任一条件不满足（如 `can_merge=false` 或空间不足），跳过追加逻辑，直接进入 `for(;;)` 循环分配新页写入，不会拆分写入数据
+
+```CPP
+......
+if (pipe->nrbufs && chars != 0) {
+    int lastbuf = (pipe->curbuf + pipe->nrbufs - 1) & (pipe->buffers - 1);
+    struct pipe_buffer *buf = pipe->bufs + lastbuf;
+    int offset = buf->offset + buf->len;
+
+    // 条件：必须同时满足 (1) 支持合并 且 (2) 剩余空间足够
+    if (buf->ops->can_merge && offset + chars <= PAGE_SIZE) { 
+        // 执行追加写入操作
+		......
+    }else{
+		//当 offset + chars > PAGE_SIZE（当前缓冲区剩余空间不足）时，
+		//内核会跳过追加写入逻辑，直接进入分配新页的流程
+	}
+}
+......
+```
+
+2、分配新页写入的流程，新页写入特点
+
+-	新分配的页（page）偏移量 `buf->offset` 固定为 `0`，与追加写入（`offset = buf->offset + buf->len`）完全不同
+-	数据从新页的起始位置写入，而非追加到旧页末尾
+
+```CPP
+......
+for (;;) {
+    if (bufs < pipe->buffers) { // 检查环形缓冲区是否有空闲槽位
+        int newbuf = (pipe->curbuf + bufs) & (pipe->buffers-1);
+        struct pipe_buffer *buf = pipe->bufs + newbuf;
+        struct page *page = pipe->tmp_page;
+
+        // 分配新页（若 pipe->tmp_page 为空）
+        if (!page) {
+            page = alloc_page(GFP_HIGHUSER | __GFP_ACCOUNT);
+            pipe->tmp_page = page;
+        }
+
+        // 将数据写入新页（从偏移 0 开始）
+        copied = copy_page_from_iter(page, 0, PAGE_SIZE, from);
+        buf->page = page;
+        buf->offset = 0;  // 新页偏移从 0 开始
+        buf->len = copied;
+        pipe->nrbufs++;  // 增加有效缓冲区计数
+    }
+}
+......
+```
+
+####	小结
+基于本文 Linux 内核版本中管道缓冲区的典型操作结构体 `anon_pipe_buf_ops` 和 `packet_pipe_buf_ops` 的设计，结合管道写入的原子性规则和缓冲区管理机制，小结下
+
+| 分类 | anon_pipe_buf_ops（匿名管道、标准模式） | packet_pipe_buf_ops（数据包模式） |
+| :-----| :---- | :---- |
+| 写入合并 | 支持合并写入 (`can_merge=true`)，若当前缓冲区有剩余空间时，新数据会追加到现有页面末尾（需满足 `offset + 数据长度 <= PAGE_SIZE`）| 禁止合并写入 (`can_merge=false`)，每次写入均分配独立新页，即使当前页有剩余空间也不追加 |
+| 数据分页 | 可跨页（空间不足时分配新页） | 每PACKET一页，独立存储；有明确的数据包边界的概念，每个写入操作对应一个完整数据包，读端需按包（边界）读取（如 `recvmsg`） |
+| 原子性（<= `PIPE_BUF`时）  | 1、阻塞模式下，缓冲区不足时阻塞，直到空间足够后原子写入全部数据<br> 2、非阻塞模式下，空间不足时返回 `EAGAIN`，不写入任何数据 | 2、与`anon_pipe_buf_ops`类型一致	|
+| 原子性（> `PIPE_BUF`时）  | 	非原子写入，数据可能被拆分到多个页，且可能与其他进程写入交错	|	|
+| 阻塞与唤醒 | 1、当缓冲区满时，阻塞模式下，写进程休眠，直到读进程消费数据后唤醒<br> 2、缓冲区满时，非阻塞模式下，立即返回 `EAGAIN` | 非原子写入，但每个数据包独立存储，读端按包消费 	|
+| 读端关闭处理  | 当读端关闭时，触发 `SIGPIPE` 信号或 `EPIPE` 错误| 与`anon_pipe_buf_ops`类型一致	|
+| 适用场景	| 流式数据（如 shell 管道），优化流式写入性能，支持空间足够时的数据合并，但需注意原子性限制	| 消息传输（如 `AF_UNIX` 数据包），牺牲合并能力换取消息边界隔离，适用于数据包通信|
+
+##	0x05	zero copy with pipe：splice
+考虑一个场景，服务端要向客户端连接发送文件，一般过程（如下），在发送文件的过程中，首先需要将文件页缓存（Page Cache）从内核态复制到用户态缓存中，然后再从用户态缓存复制到客户端的 Socket 缓冲区中
+
+-	服务端首先调用 `read()` 读取文件内容
+-	服务端通过调用 `write()/send()` 将文件内容发送给客户端连接
+
+![splice_eg1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/15/splice_eg1.jpg)
+
+所以，如何优化？在上面的过程中，复制文件数据到用户态缓存这个操作是多余的，可以**直接把文件页缓存的数据复制到 socket 缓冲区**，这样就可以减少一次拷贝数据的操作，内核提供 `splice()` 系统调用来完成这个过程，使用 `splice()` 系统调用可以避免从内核态拷贝数据到用户态，也是零拷贝技术的一种实现
+
+使用 `splice` 拷贝数据时，需要通过管道作为中转，`splice` 首先将页缓存（page cache）绑定到管道的写端，然后通过管道的读端读取到页缓存的数据，并且拷贝到 socket 缓冲区中，整个过程如下图：
+
+![splice_eg2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/15/splice_eg2.jpg)
+
+那么，根据上文对pipe内核读写机制的分析，不难猜到，由于管道的本质是内核将其结构中的环形缓冲区绑定到物理内存页上实现读写，而 `splice` 亦是将管道pipe的环形缓冲区绑定到文件的页缓存page cache，通过将文件页缓存绑定到管道的环形缓冲区后，就可以通过管道的读端读取文件页缓存的数据
+
+![splice_eg3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/15/splice_eg3.jpg)
+
+##	0x06	splice的内核实现
+
+
+##	0x07	附录
 
 ####	`can_merge`的作用及场景
 [`page_cache_pipe_buf_ops`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/splice.c#L140)
@@ -919,13 +1016,15 @@ const struct pipe_buf_operations page_cache_pipe_buf_ops = {
 -	`n <= PIPE_BUF`且`O_NONBLOCK`为 disable：写入具有原子性。如果没有足够的空间供 `n` 个字节全部立即写入，则阻塞直到有足够空间将`n`个字节全部写入管道
 -	`n <= PIPE_BUF`且`O_NONBLOCK`为 enable： 写入具有原子性。如果有足够的空间写入 `n` 个字节，则 `write` 立即成功返回，并写入所有 `n` 个字节；否则一个都不写入，`write` 返回错误，并将 `errno` 设置为 `EAGAIN`
 -	`n > PIPE_BUF`且`O_NONBLOCK`为 disable：写入不具有原子性。可能会和其它的写进程交替写，直到将 `n` 个字节全部写入才返回，否则阻塞等待写入
--	`n > PIPE_BUF`且 `O_NONBLOCK`为 enable：写入不具有原子性。如果管道已满，则写入失败，`write` 返回错误，并将 `errno` 设置为 `EAGAIN`；否则，可以写入 `1--n` 个字节，即部分写入，此时 `write` 返回实际写入的字节数，并且写入这些字节时可能与其他进程交错写入
+-	`n > PIPE_BUF`且 `O_NONBLOCK`为 enable：写入不具有原子性。如果管道已满，则写入失败，`write` 返回错误，并将 `errno` 设置为 `EAGAIN`；否则，可以写入 `1~n` 个字节，即部分写入，此时 `write` 返回实际写入的字节数，并且写入这些字节时可能与其他进程交错写入
 
 所以，从管道的内核视角容易理解上述原子性及非原子性
 
 ####	CVE-2022-0847：Linux DirtyPipe内核提权漏洞
 
-##  0x0 参考
+##  0x08 参考
 -	[linux pipe文件系统(pipefs)](https://blog.csdn.net/Morphad/article/details/9219843)
 -	[Linux进程通信 - 管道实现](https://mp.weixin.qq.com/s/wSmC4a5ci6WC9qJSrxbSNg)
 -	[CVE-2022-0847 Linux DirtyPipe内核提权漏洞](https://segmentfault.com/a/1190000042055646)
+-	[一文读懂零拷贝技术：splice使用](https://mp.weixin.qq.com/s?__biz=MzA3NzYzODg1OA==&mid=2648466923&idx=1&sn=acf2fb71a960f3831f9b98657b39d4ce&scene=21&poc_token=HBrVq2ij3vFrdFf9wyaZbEAFXn3pBxBvM2OpQ6nb)
+-	[一文读懂零拷贝技术：splice原理与实现](https://mp.weixin.qq.com/s/ANBQzhq0RDzd1sLmwKtv5w)
