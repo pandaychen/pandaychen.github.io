@@ -994,7 +994,48 @@ for (;;) {
 ![splice_eg3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/15/splice_eg3.jpg)
 
 ####	splice的示例
+发送文件给客户端的示例代码如下，使用 `splice()` 发送文件时，并不需要将文件内容读取到用户态缓存中，需要借助于管道作为中转，从而避免用户态与内核态的数据拷贝
 
+```CPP
+ssize_t splice(int fd_in, loff_t *off_in, int fd_out,
+                      loff_t *off_out, size_t len, unsigned int flags);
+```
+
+```CPP
+int send_file_to_client(int client_fd, char *file)
+{
+    int fd;
+    struct stat fstat;
+    int blocks, remain;
+    int pipefd[2];
+
+    fd = open(file, O_RDONLY);
+    if (fd == -1) {
+        return -1;
+    }
+
+    stat(file, &fstat);
+
+    blocks = fstat.st_size / 4096;
+    remain = fstat.st_size % 4096;
+
+    pipe(pipefd);  // 创建管道作为中转
+
+    for (i = 0; i < blocks; i++) {
+        // 1. 将文件内容读取并写入到管道 pipefd[1]
+        splice(fd, NULL, pipefd[1], NULL, 4096, SPLICE_F_MOVE|SPLICE_F_MORE);
+        // 2. 将管道的数据（读端）读取（pipefd[0]）并发送给客户端连接
+        splice(pipefd[0], NULL, client_fd, NULL, 4096, SPLICE_F_MOVE|SPLICE_F_MORE);
+    }
+
+    if (remain > 0) {
+        splice(fd, NULL, pipefd[1], NULL, remain, SPLICE_F_MOVE|SPLICE_F_MORE);
+        splice(pipefd[0], NULL, client_fd, NULL, remain, SPLICE_F_MOVE|SPLICE_F_MORE);
+    }
+
+    return 0;
+}
+```
 
 ##	0x06	splice的内核实现
 `splice()` 系统调用的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/splice.c#L1402)，代码如下：
@@ -1016,7 +1057,7 @@ SYSCALL_DEFINE6(splice, int, fd_in, loff_t __user *, off_in,
 			out = fdget(fd_out);
 			if (out.file) {
 				if (out.file->f_mode & FMODE_WRITE)
-					//
+					// do_splice
 					error = do_splice(in.file, off_in,
 							  out.file, off_out,
 							  len, flags);
@@ -1028,6 +1069,12 @@ SYSCALL_DEFINE6(splice, int, fd_in, loff_t __user *, off_in,
 	return error;
 }
 ```
+
+继续分析一下 `do_splice()` 函数的实现，分为三种case：
+
+1.	若输入端是一个管道，关联`do_splice_from`
+2.	若输出端是一个管道，关联`do_splice_to`
+3.	若输入/输出端都是管道，关联`splice_pipe_to_pipe`
 
 ```CPP
 struct pipe_inode_info *get_pipe_info(struct file *file)
@@ -1048,22 +1095,15 @@ static long do_splice(struct file *in, loff_t __user *off_in,
 	ipipe = get_pipe_info(in);
 	opipe = get_pipe_info(out);
 
-	if (ipipe && opipe) {
-		if (off_in || off_out)
-			return -ESPIPE;
+	......
+	//省略的代码，如果输入/输出都是一个pipe类型
 
-		if (!(in->f_mode & FMODE_READ))
-			return -EBADF;
-
-		if (!(out->f_mode & FMODE_WRITE))
-			return -EBADF;
-
-		/* Splicing to self would be fun, but... */
-		if (ipipe == opipe)
-			return -EINVAL;
-
-		return splice_pipe_to_pipe(ipipe, opipe, len, flags);
-	}
+	
+	// CASE1：如果in（ipipe）一个管道
+	// 对应例子中的第二部分
+	// 此时in是一个读端
+	// 2. 将管道的数据（读端）读取（pipefd[0]）并发送给客户端连接
+	// splice(pipefd[0], NULL, client_fd, NULL, 4096, SPLICE_F_MOVE|SPLICE_F_MORE);
 
 	if (ipipe) {
 		if (off_in)
@@ -1077,6 +1117,7 @@ static long do_splice(struct file *in, loff_t __user *off_in,
 			offset = out->f_pos;
 		}
 
+		// 读端，必不可能写
 		if (unlikely(!(out->f_mode & FMODE_WRITE)))
 			return -EBADF;
 
@@ -1088,6 +1129,9 @@ static long do_splice(struct file *in, loff_t __user *off_in,
 			return ret;
 
 		file_start_write(out);
+		// 核心工作：调用 do_splice_from() 函数管道数据拷贝到目标文件句柄
+		// 参数 ipipe 输入（读）
+		// 参数 out  输出（写）
 		ret = do_splice_from(ipipe, out, &offset, len, flags);
 		file_end_write(out);
 
@@ -1099,6 +1143,11 @@ static long do_splice(struct file *in, loff_t __user *off_in,
 		return ret;
 	}
 
+	//CASE2：如果输出端是一个pipe类型
+	// 对应示例中的第一部分，从文件读数据->关联到管道的写端
+	// 1. 将文件内容读取并写入到管道 pipefd[1]
+    // splice(fd, NULL, pipefd[1], NULL, 4096, SPLICE_F_MOVE|SPLICE_F_MORE);
+	// 该case中，opipe是一个管道类型
 	if (opipe) {
 		if (off_out)
 			return -ESPIPE;
@@ -1113,8 +1162,12 @@ static long do_splice(struct file *in, loff_t __user *off_in,
 
 		pipe_lock(opipe);
 		ret = wait_for_space(opipe, flags);
-		if (!ret)
+		if (!ret){
+			//调用 do_splice_to() 函数将文件内容与管道绑定
+			// in不是管道类型
+			// opipe是管道类型
 			ret = do_splice_to(in, &offset, opipe, len, flags);
+		}
 		pipe_unlock(opipe);
 		if (ret > 0)
 			wakeup_pipe_readers(opipe);
@@ -1130,6 +1183,250 @@ static long do_splice(struct file *in, loff_t __user *off_in,
 }
 ```
 
+这里仅仅讨论下输入、输出仅一方为管道的场景
+
+####	输出端为管道：do_splice_to（splice_read）
+上文描述的示例，关联数据流从文件缓存读并写入（关联）至管道写端`pipefd[1]`，注意这里的写入不是真写入，是将参数`in`指向的物理内存页（比如在ext4文件系统就是page cache）通过管道的写端与pipe管道的内核的ringbuffer、物理内存页关联（绑定）上，这样对管道的读操作就可以直接操作`in`指向的物理内存页，避免多余的内存拷贝
+
+```CPP
+static long do_splice_to(struct file *in, loff_t *ppos,
+			 struct pipe_inode_info *pipe, size_t len/*len是操作长度*/,
+			 unsigned int flags)
+{
+	ssize_t (*splice_read)(struct file *, loff_t *,
+			       struct pipe_inode_info *, size_t, unsigned int);
+	int ret;
+
+	......
+	if (in->f_op->splice_read)
+		splice_read = in->f_op->splice_read;
+	else
+		splice_read = default_file_splice_read;
+
+	return splice_read(in/*假设为ext4*/, ppos, pipe/*pipe for write*/, len, flags);
+}
+```
+
+注意对`out->f_op->splice_read`，不同文件系统有不同的实现，典型的如（还有更多）
+
+-	ext4[文件系统](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/file.c#L731)：`generic_file_splice_read`
+-	socket/[sockfs](https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L155)：`sock_splice_read`，最终调用的是`tcp_splice_read`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/af_inet.c#L945)
+
+
+默认的`default_file_splice_read`[实现]（https://elixir.bootlin.com/linux/v4.11.6/source/fs/splice.c#L388）是内核中用于实现通用管道数据读取的函数，当文件系统未提供自定义的 `splice_read`方法时被调用。其核心逻辑是通过临时内核缓冲区将文件数据拷贝至管道缓冲区，虽然实现了基本功能，但牺牲了零拷贝性能；其他文件系统如ext4则实现了`splice`方法，其提供的[`generic_file_splice_read`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/file.c#L731)用于实现从文件到管道零拷贝传输的核心函数，其设计目标是复用文件的页缓存（Page Cache），避免数据在用户空间与内核空间之间的冗余拷贝
+
+这里以ext4文件系统为例，分析下其`generic_file_splice_read`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/splice.c#L388)：
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/file.c#L731
+const struct file_operations ext4_file_operations = {
+	.read_iter	= ext4_file_read_iter,			//进一步调用
+	.splice_read	= generic_file_splice_read,	//ext4文件系统的实现
+};
+```
+
+`generic_file_splice_read`的核心代码如下：
+
+```CPP
+static inline ssize_t call_read_iter(struct file *file, struct kiocb *kio,
+				     struct iov_iter *iter)
+{
+	//调用ext4的ext4_file_read_iter方法
+	return file->f_op->read_iter(kio, iter);
+}
+
+ssize_t generic_file_splice_read(struct file *in, loff_t *ppos,
+				 struct pipe_inode_info *pipe, size_t len,
+				 unsigned int flags)
+{
+	struct iov_iter to;
+	struct kiocb kiocb;
+	int idx, ret;
+
+	// iov_iter_pipe：
+	iov_iter_pipe(&to, ITER_PIPE | READ, pipe, len);
+	idx = to.idx;
+	init_sync_kiocb(&kiocb, in);
+	kiocb.ki_pos = *ppos;
+	// call_read_iter：
+	ret = call_read_iter(in, &kiocb, &to);
+	......
+
+	return ret;
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/file.c#L58
+static ssize_t ext4_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
+{
+	......
+	return generic_file_read_iter(iocb/*in*/, to/*pipe*/);
+}
+```
+
+所以，`do_splice_to`最核心的实现就是`generic_file_read_iter`函数：
+
+```CPP
+ssize_t
+generic_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
+{
+	struct file *file = iocb->ki_filp;
+	ssize_t retval = 0;
+	size_t count = iov_iter_count(iter);
+
+	......
+	// do_generic_file_read
+	retval = do_generic_file_read(file, &iocb->ki_pos, iter, retval);
+}
+```
+
+####	输入端为管道：do_splice_from
+当输入端是一个管道（也就是说从管道拷贝数据到输出端句柄），对应示例中的第二部分即参数`pipe`对应管道的读端，参数`out`对应客户端socket fd。`do_splice_from()` 函数的实现如下：
+
+```CPP
+static long do_splice_from(struct pipe_inode_info *pipe, struct file *out,
+			   loff_t *ppos, size_t len, unsigned int flags)
+{
+	ssize_t (*splice_write)(struct pipe_inode_info *, struct file *,
+				loff_t *, size_t, unsigned int);
+
+	if (out->f_op->splice_write){
+		// 不同文件系统有不同的实现
+		splice_write = out->f_op->splice_write;
+	}
+	else{
+		splice_write = default_file_splice_write;
+	}
+
+	// 调用splice_write
+	return splice_write(pipe, out, ppos, len, flags);
+}
+```
+
+注意对`out->f_op->splice_write`，不同文件系统有不同的实现，典型的如（还有更多）
+
+-	ext4[文件系统](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/file.c#L732)：`iter_file_splice_write`
+-	socket/[sockfs](https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L155)：`generic_splice_sendpage`
+-	默认的实现：[`default_file_splice_write`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/splice.c#L825)：不具备零拷贝特性
+
+这里以ext4文件系统的`iter_file_splice_write`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/splice.c#L825)为例，写操作相对直观一些（其实和`pipe_write`过程有点类似），主要步骤如下：
+
+-	获取管道pipe环形缓冲区的读指针
+-	调用 pipe_to_file() 函数把管道环形缓冲区的数据拷贝到输出端的文件中
+
+```CPP
+ssize_t
+iter_file_splice_write(struct pipe_inode_info *pipe, struct file *out,
+			  loff_t *ppos, size_t len, unsigned int flags)
+{
+	struct splice_desc sd = {
+		.total_len = len,
+		.flags = flags,
+		.pos = *ppos,
+		.u.file = out,
+	};
+	int nbufs = pipe->buffers;
+	struct bio_vec *array = kcalloc(nbufs, sizeof(struct bio_vec),
+					GFP_KERNEL);
+	ssize_t ret;
+
+	......
+
+	pipe_lock(pipe);
+
+	splice_from_pipe_begin(&sd);
+	while (sd.total_len) {
+		struct iov_iter from;
+		size_t left;
+		int n, idx;
+
+		ret = splice_from_pipe_next(pipe, &sd);
+		if (ret <= 0)
+			break;
+
+		if (unlikely(nbufs < pipe->buffers)) {
+			kfree(array);
+			nbufs = pipe->buffers;
+			array = kcalloc(nbufs, sizeof(struct bio_vec),
+					GFP_KERNEL);
+			if (!array) {
+				ret = -ENOMEM;
+				break;
+			}
+		}
+
+		/* build the vector */
+		left = sd.total_len;
+		for (n = 0, idx = pipe->curbuf; left && n < pipe->nrbufs; n++, idx++) {
+			// 1、获取管道环形缓冲区
+			struct pipe_buffer *buf = pipe->bufs + idx;
+			size_t this_len = buf->len;
+
+			if (this_len > left)
+				this_len = left;
+
+			if (idx == pipe->buffers - 1)
+				idx = -1;
+
+			ret = pipe_buf_confirm(pipe, buf);
+			if (unlikely(ret)) {
+				if (ret == -ENODATA)
+					ret = 0;
+				goto done;
+			}
+
+			// 先缓存要从读端读出来的数据
+			array[n].bv_page = buf->page;
+			array[n].bv_len = this_len;
+			array[n].bv_offset = buf->offset;
+
+			// left更新为还剩余待取出的数据长度
+			left -= this_len;
+		}
+
+		// 2、通过iov_iter_bvec+vfs_iter_write，将bio_vec中的数据发送给out（在例子中是客户端的fd）
+		iov_iter_bvec(&from, ITER_BVEC | WRITE, array, n,
+			      sd.total_len - left);
+		
+		// ret：成功读出的数据长度
+		ret = vfs_iter_write(out, &from, &sd.pos);
+		if (ret <= 0)
+			break;
+
+		sd.num_spliced += ret;
+		sd.total_len -= ret;
+		*ppos = sd.pos;
+
+		//3、根据ret，更新pipe_buffer中的相关成员
+		/* dismiss the fully eaten buffers, adjust the partial one */
+		while (ret) {
+			struct pipe_buffer *buf = pipe->bufs + pipe->curbuf;
+			if (ret >= buf->len) {
+				ret -= buf->len;
+				buf->len = 0;
+				pipe_buf_release(pipe, buf);
+				pipe->curbuf = (pipe->curbuf + 1) & (pipe->buffers - 1);
+				pipe->nrbufs--;
+				if (pipe->files)
+					sd.need_wakeup = true;
+			} else {
+				buf->offset += ret;
+				buf->len -= ret;
+				ret = 0;
+			}
+		}
+	}
+done:
+	kfree(array);
+	splice_from_pipe_end(pipe, &sd);
+
+	pipe_unlock(pipe);
+
+	if (sd.num_spliced)
+		ret = sd.num_spliced;
+
+	return ret;
+}
+```
 
 ##	0x07	附录
 
