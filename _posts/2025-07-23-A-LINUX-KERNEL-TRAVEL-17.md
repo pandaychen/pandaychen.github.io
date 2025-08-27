@@ -13,14 +13,15 @@ tags:
 
 
 ##  0x00    前言
-命名空间用来实现内核对资源进行隔离，本文基于4.11.6的源码分析下Mnt Namespace的若干细节
+命名空间用来实现内核对资源进行隔离，本文基于[v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include)的源码分析下Mnt Namespace的若干细节
 
 ##  0x01    一个容器的case
-两个问题：
+几个问题：
 1.	容器内的进程pid的分配过程
-2.	容器内挂载树（mount tree）的生成过程
+2.	容器（容器内进程）创建的过程，`pivot_root`/`chroot`的区别
+3.	容器内挂载树（mount tree）的生成过程
 
-##	0x01	pidnamespace：容器内进程pid的创建
+##	0x02	pidnamespace：容器内进程pid的创建
 [前文](https://pandaychen.github.io/2024/10/02/A-LINUX-KERNEL-TRAVEL-1/#%E6%A0%B8%E5%BF%83%E9%80%BB%E8%BE%91%E5%88%86%E9%85%8Dpid)已经学习过pidnamespace场景中pid的分配，这里先回顾下几个问题：
 
 1.	容器进程中的 pid 是如何申请？
@@ -738,14 +739,15 @@ pid_t pid_nr_ns(struct pid *pid, struct pid_namespace *ns)
 }
 ```
 
+##  0x03 Mnt namespace
+
 ####	独立挂载
-如下命令，这样在容器启动后，容器内会自动创建/soft的目录。通过这种方式，我们可以明确一点，即-v参数中，冒号":"前面的目录是宿主机目录，后面的目录是容器内目录
+先思考下这个问题，按下述命令在容器启动后，容器内会自动创建`/soft`的目录，这里对VFS、mnt namespace节点关系的影响是什么？
 
 ```BASH
+#冒号:前面的目录是宿主机目录，后面的目录是容器内目录
 docker run -it -v /test:/soft centos /bin/bash
 ```
-
-##  0x01 Mnt namespace   
 
 ####    数据结构
 
@@ -768,6 +770,14 @@ struct mnt_namespace {
 
 ![mnt_namespace](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/17/taskstruct_with_nsproxy_mntspace.png)
 
-##  0x0 参考
+多命名空间下的mount树，如容器化场景，内核为了支持 mnt_namespace，把 mount 树扩展成了多棵。每个 mnt_namespace 拥有一棵独立的 mount 树。从下图可以看到
+
+![multiple_mnt_namespace](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/mnt-ns/mnt_tree_ns.png)
+
+-	每个namespace的mount树都是独立的（mnt_namespace1与mnt_namespace2），对应于不同容器的不同的挂载根目录节点（容器创建时一般通过`pivot_root`切换根目录）
+-	红色的线可能表示容器中的宿主机独立挂载，比如将宿主机上某个路径以独立挂载的方式挂载到容器中（对容器内的进程可见），这些独立挂载需要以链表节点形式link到本`mnt_namespace`的`struct list_head list`成员
+-	宿主机可以看到容器内部分路径，如通过挂载点（绑定挂载）访问、Docker的数据卷（Volumes）
+
+##  0x04 参考
 -   [Linux 容器底层工作机制：从 500 行 C 代码到生产级容器运行时（2023）](https://arthurchiao.art/blog/linux-container-and-runtime-zh/)
 -	[Docker容器里进程的 pid 是如何申请出来的](https://cloud.tencent.com/developer/news/975868)
