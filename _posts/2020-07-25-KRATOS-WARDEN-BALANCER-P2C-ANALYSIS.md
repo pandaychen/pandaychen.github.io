@@ -458,6 +458,7 @@ func (p *p2cPicker) pick(ctx context.Context, opts balancer.PickInfo) (balancer.
 		// 计算牛顿冷却定理使用的因子
 		w := math.Exp(float64(-td) / float64(tau))
 
+		// 实际耗时
 		lag := now - start
 		if lag < 0 {
 			lag = 0
@@ -527,6 +528,8 @@ return pc.conn, func(di balancer.DoneInfo) {
 	// 实时计算β值，利用衰减函数计算，公式为：β = e^(-t/k)
 	// 与原文衰减公式不同
 	// 这里是按照k值的反比计算的，即k值和β值成正比
+	// 与前文描述略有差异，这里的牛顿冷却因子计算是采用了td值（即公式中的t），即该节点（长连接）上次被选中的时间
+	// 即td的值越大（节点越久没被选中），w的值越小
 	w := math.Exp(float64(-td) / float64(tau))
 
 	// 获得本次延迟数据 1（注意 start 是在 pick 开始计时的）
@@ -582,6 +585,28 @@ return pc.conn, func(di balancer.DoneInfo) {
 }, nil
 ```
 
+在上面的代码中，与算法描述不同，这里的`w`计算是采用了两次节点被选中的时间差来计算牛顿冷却因子，这样理解就清晰了：如果被选中的这个节点在此之前一直未被选中，那么存在两种可能：
+
+1.	该节点因随机算法一直未被选中
+2.	当P2C选中了包含这个节点（和其他另外一个节点），此节点打分处于劣势，未被选中
+
+那么此次选中了该节点，那么上面的时间差`td`越大（`td = now - stamp`），`w`的值就越小，套入EWMA公式可知，该节点的旧数据的比重应该降低（因为本节点太久没有被选中了，所以历史数据不可信），本地RPC调用的延迟数据的比重应该提高
+
+```GOLANG
+{
+	now := time.Now().UnixNano()
+	......
+	stamp := atomic.SwapInt64(&pc.stamp, now)
+	td := now - stamp
+	if td < 0 {
+		td = 0
+	}
+	w := math.Exp(float64(-td) / float64(tau))
+	......
+	lag = int64(float64(oldLag)*w + float64(lag)*(1.0-w))
+}
+```
+
 ####	统计节点
 
 ```text
@@ -632,6 +657,7 @@ func (p *p2cPicker) printStats() {
 ##	0x05	测试
 给关键路径加上日志，看下这里具体参数和值的变化过程，这样对算法能够有更为直观的理解，以 etcd 为注册服务，启动三个后端（单个单个启动），观察下数据的变化
 
+TODO
 
 ##  0x06	参考
 -	[指数加权移动平均法（EWMA）](https://www.cnblogs.com/jiangxinyang/p/9705198.html)
