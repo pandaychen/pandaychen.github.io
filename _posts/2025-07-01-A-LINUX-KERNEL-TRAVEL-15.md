@@ -76,7 +76,7 @@ struct pipe_buffer {
 -	`inode`：pipe对应的inode
 -	`bufs`：`pipe_buffer`回环数据
 
-注意：版本`pipe_inode_info`的定义做了优化，参考
+注意：在高版本中（如`v5.10.240`）对pipe机制进行了改动，因此引发了有名的Dirty Pipe内核Bug：参考[`CVE-2022-0847`](https://dirtypipe.cm4all.com/)
 
 ```CPP
 struct pipe_inode_info {
@@ -97,7 +97,10 @@ struct pipe_inode_info {
 };
 ```
 
-此外，注意从`pipe_inode_info`和`pipe_buffer`的初始化的过程可以得知，在本文版本 Linux 内核中，使用了 `16` 个内存页（单页是`4k`）作为环形缓冲区，所以环形缓冲区的大小为 `64KB(16*4KB)`
+此外，注意从`pipe_inode_info`和`pipe_buffer`的初始化的过程可以得知，在本文版本 Linux 内核中，使用了 `16` 个内存页（单页是`4k`）作为环形缓冲区（见初始化[代码](https://elixir.bootlin.com/linux/v4.11.6/source/fs/pipe.c#L644)），所以环形缓冲区的大小为 `64KB(16*4KB)`
+
+![pipe_inode_info_and_pipe_buffer](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/15/pipe_inode_info_and_pipe_buffer.jpg)
+
 
 3、`pipe_buf_operations`：记录pipe缓存的操作集
 
@@ -722,6 +725,7 @@ pipe_read(struct kiocb *iocb, struct iov_iter *to)
 }
 ```
 
+![pipe_read](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/15/pipe_read.png)
 
 ##	0x04	pipe的写实现
 内核pipe的ringbuffer结构没有写指针这个成员，实际上是通过读指针计算出来的：写指针 = 读指针 + 未读数据长度，实际上只需要理解**未读取内容的开始位置约等于已写入数据的开始位置**这个概念就清楚了
@@ -824,7 +828,7 @@ pipe_write(struct kiocb *iocb, struct iov_iter *from)
 			int copied;
 
 			if (!page) {
-				// 申请一个新的内存页
+				// 申请一个新的内存页（物理内存页）
 				page = alloc_page(GFP_HIGHUSER | __GFP_ACCOUNT);
 				if (unlikely(!page)) {
 					ret = ret ? : -ENOMEM;
@@ -857,6 +861,7 @@ pipe_write(struct kiocb *iocb, struct iov_iter *from)
 				buf->flags = PIPE_BUF_FLAG_PACKET;
 			}
 			pipe->nrbufs = ++bufs;
+			// page已经被使用了，这里tmp_page需要置为NULL
 			pipe->tmp_page = NULL;
 
 			// 如果要写入的数据已经全部写入成功, 退出循环
@@ -902,6 +907,271 @@ out:
 	return ret;
 }
 ```
+
+![pipe_write](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/15/pipe_write.png)
+
+####	pipe_write的物理内存分配
+在上面的`pipe_write`实现中，注意这段代码：
+
+```CPP
+static ssize_t
+pipe_write(struct kiocb *iocb, struct iov_iter *from)
+	......
+			if (!page) {
+				// 申请一个新的内存页（物理内存页）
+				// alloc_page返回的是物理内存地址
+				page = alloc_page(GFP_HIGHUSER | __GFP_ACCOUNT);
+				if (unlikely(!page)) {
+					ret = ret ? : -ENOMEM;
+					break;
+				}
+				pipe->tmp_page = page;
+			}
+			......
+			copied = copy_page_from_iter(page, 0, PAGE_SIZE, from);
+
+	......
+}
+```
+
+内核提供了 `alloc_page` 宏用于这种单内存页分配的场景，当系统中空闲的物理内存无法满足内存分配时，就会导致内存分配失败，会返回 `NULL`，在物理内存分配成功的情况下， `alloc_page` 返回的都是指向其申请的物理内存块第一个物理内存页 `struct page` 指针（**特别强调是物理内存页，而不是虚拟内存页**），直观理解为返回的是一块物理内存，但是 CPU 可以直接访问的却是虚拟内存，那么地址转换在哪里呢？所以看下`copy_page_from_iter`的实现就清楚了，在此函数中会通过`kmap_atomic`进程地址转换
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/lib/iov_iter.c#L657
+size_t copy_page_from_iter(struct page *page, size_t offset, size_t bytes,
+			 struct iov_iter *i)
+{
+	if (unlikely(i->type & ITER_PIPE)) {
+		WARN_ON(1);
+		return 0;
+	}
+	if (i->type & (ITER_BVEC|ITER_KVEC)) {
+		// 通过kmap_atomic将page物理内存地址转为CPU可以访问的虚拟内存地址
+		void *kaddr = kmap_atomic(page);
+		size_t wanted = copy_from_iter(kaddr + offset, bytes, i);
+		kunmap_atomic(kaddr);
+		return wanted;
+	} else
+		return copy_page_from_iter_iovec(page, offset, bytes, i);
+}
+```
+
+####	pipe_read/pipe_write的调用方及入参（1）
+以`write/read`系统调用操作管道为例，调用链为`write->vfs_write->__vfs_write`，数据流向是用户空间 `->` 内核
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/read_write.c#L597
+SYSCALL_DEFINE3(write, unsigned int, fd, const char __user *, buf,
+		size_t, count)
+{
+	struct fd f = fdget_pos(fd);
+	......
+	if (f.file) {
+		loff_t pos = file_pos_read(f.file);
+		ret = vfs_write(f.file, buf, count, &pos);
+		if (ret >= 0)
+			file_pos_write(f.file, pos);
+		fdput_pos(f);
+	}
+
+	return ret;
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/read_write.c#L542
+ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_t *pos)
+{
+	ssize_t ret;
+	......
+
+	ret = rw_verify_area(WRITE, file, pos, count);
+	if (!ret) {
+		......
+		ret = __vfs_write(file, buf, count, pos);
+		......
+	}
+
+	return ret;
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/read_write.c#L504
+ssize_t __vfs_write(struct file *file, const char __user *p, size_t count,
+		    loff_t *pos)
+{
+	if (file->f_op->write)
+		return file->f_op->write(file, p, count, pos);
+	else if (file->f_op->write_iter)
+		return new_sync_write(file, p, count, pos);
+	else
+		return -EINVAL;
+}
+```
+
+最后调用到`__vfs_write`，因为对于pipefs文件系统的file[定义](https://elixir.bootlin.com/linux/v4.11.6/source/fs/pipe.c#L1008)`struct file_operations pipefifo_fops`而言，只实现了`write_iter/read_iter`方法，所以最终调用到`new_sync_write`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/fs/read_write.c#L486)：
+
+```CPP
+static ssize_t new_sync_write(struct file *filp, const char __user *buf, size_t len, loff_t *ppos)
+{
+	//将用户空间传递的缓冲区（`buf`）和长度（`len`）封装到 `struct iovec`
+	struct iovec iov = { .iov_base = (void __user *)buf, .iov_len = len };
+	struct kiocb kiocb;
+	struct iov_iter iter;
+	ssize_t ret;
+
+	init_sync_kiocb(&kiocb, filp);
+	kiocb.ki_pos = *ppos;
+	iov_iter_init(&iter, WRITE, &iov, 1, len);
+
+	//call_write_iter
+	ret = call_write_iter(filp, &kiocb, &iter);
+	BUG_ON(ret == -EIOCBQUEUED);
+	if (ret > 0)
+		*ppos = kiocb.ki_pos;
+	return ret;
+}
+
+static inline ssize_t call_write_iter(struct file *file, struct kiocb *kio,
+				      struct iov_iter *iter)
+{
+	// 这里调用pipefifo_fops的write_iter方法：即pipe_write方法
+	//1.检查管道是否有足够空间容纳数据
+    //2.将数据复制到管道的环形缓冲区中。
+    //3.唤醒等待读取该管道的进程（如果有）
+    //4.返回实际写入的字节数（如果管道已满且非阻塞，可能部分写入或返回 EAGAIN）
+	return file->f_op->write_iter(kio, iter);
+}
+```
+
+简单分析下`new_sync_write`的实现，`new_sync_write`函数主要用于处理同步写入操作，是 VFS中实现同步写逻辑的核心函数。强调是同步阻塞操作，即该函数会阻塞直到写入操作完成（或失败），适用于同步 I/O。主要流程如下：
+
+1、封装用户数据到内核结构
+
+-	将用户空间传递的缓冲区（`buf`）和长度（`len`）封装到 `struct iovec`
+-	通过 `iov_iter_init`初始化一个迭代器（`struct iov_iter`），表示需要写入的数据段（支持多段数据，但这里只有一段）
+
+2、初始化同步 I/O 控制块
+
+-	通过 `init_sync_kiocb`初始化 `struct kiocb`（I/O 控制块），并标记这是一个同步操作（非异步）
+-	设置写入的起始位置（`kiocb.ki_pos = *ppos`），通常对应文件的当前偏移量
+
+3、调用文件操作的具体实现
+
+-	通过 `call_write_iter`调用文件操作函数指针 `file->f_op->write_iter`，这是 VFS 层到具体文件系统（或设备）的接口
+-	对于管道（pipe）类型，`file->f_op->write_iter`实际指向 `pipe_write`函数，负责将数据写入管道的缓冲区
+
+4、处理结果并更新位置，检查返回值 `ret`（实际写入的字节数），若写入成功（`ret > 0`），更新文件位置指针（`*ppos = kiocb.ki_pos`）
+
+所以，内核中处处可以看到这种通用性的设计，十分优雅，通过 VFS 抽象接口（`write_iter`）支持多种文件系统（如 ext4、pipe、socket 等），另外通过迭代器支持，即使用 `iov_iter`处理分散/聚集 I/O操作（本例中只有一个连续的缓冲区）
+
+####	pipe_read/pipe_write的调用方及入参（2）
+从入口`sys_read`开始，数据流向是内核 `->` 用户空间
+
+```CPP
+SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+{
+	struct fd f = fdget_pos(fd);
+	ssize_t ret = -EBADF;
+
+	if (f.file) {
+		// 1、从struct file结构获取f_pos成员，作为本次read的起点
+		loff_t pos = file_pos_read(f.file);
+		// 2、调用vfs_read-->pipe_read函数，从管道内核缓冲区读取数据（成功时ret为读取长度）
+		// pos会被同步修改
+		ret = vfs_read(f.file, buf, count, &pos);
+		if (ret >= 0){
+			// 3、更新file_pos_write（f_ops）的值
+			file_pos_write(f.file, pos);
+		}
+		fdput_pos(f);
+	}
+	return ret;
+}
+```
+
+同样，对管道的读操作，最终也会走到`new_sync_read->call_read_iter->pipe_read`函数：
+
+```CPP
+static inline ssize_t call_read_iter(struct file *file, struct kiocb *kio,
+				     struct iov_iter *iter)
+{
+	// 关联pipe_read方法
+	return file->f_op->read_iter(kio, iter);
+}
+
+static ssize_t new_sync_read(struct file *filp, char __user *buf, size_t len, loff_t *ppos)
+{
+	//封装用户缓冲区
+	struct iovec iov = { .iov_base = buf, .iov_len = len };
+	struct kiocb kiocb;
+	struct iov_iter iter;
+	ssize_t ret;
+
+	//初始化一个 kiocb(Kernel I/O Control Block) 结构，该结构代表了一个具体的I/O操作
+	init_sync_kiocb(&kiocb, filp);
+
+	//设置本次读取操作的起始偏移量。通常，这个值来自文件结构中的当前位置指针（filp->f_pos），调用者通过 ppos参数传入
+	// ppos的值来自于进入read函数从struct file中读取的f_pos成员的值
+	kiocb.ki_pos = *ppos;
+
+	//初始化迭代器
+	
+	/*
+	参数作用如下：
+	- READ：指定了迭代器的方向（从内核到用户空间）
+    - &iov：指向之前创建的 iovec数组
+    - 1：表示 iovec数组的数量。这里是1，表示这是一个连续的缓冲区（集中读）。如果数量大于1，则支持分散读（scatter-read）
+    - len：期望读取的总字节数
+	*/
+	iov_iter_init(&iter, READ, &iov, 1, len);
+
+	/*
+	call_read_iter实际指向pipe_read，主要完成：
+	1. 检查管道缓冲区中是否有数据
+    2. 如果没有数据且管道写端未关闭，则可能进入睡眠等待（阻塞模式）
+    3. 将数据从管道的环形缓冲区拷贝到 iter所描述的用户空间内存中
+    4. 唤醒可能正在等待写入该管道的进程
+    5. 返回实际拷贝的字节数
+	*/
+	ret = call_read_iter(filp, &kiocb, &iter);
+	//安全断言。因为 init_sync_kiocb初始化的是同步I/O，所以绝对不应该返回 -EIOCBQUEUED（这个值表示I/O请求已被异步提交并排队）。如果返回此值，说明内核逻辑有严重错误，触发BUG
+	BUG_ON(ret == -EIOCBQUEUED);
+	//处理结果并更新位置（即上面说的f_pos的指针变量）
+	*ppos = kiocb.ki_pos;
+
+	//将实际读取的字节数（或遇到的错误码）返回给上层调用者（如 vfs_read）
+	return ret;
+}
+
+static ssize_t
+pipe_read(struct kiocb *iocb, struct iov_iter *to)
+{
+	size_t total_len = iov_iter_count(to);
+	// struct kiocb的作用是存储struct file指针filp
+	// 从而定位到管道的管理结构 pipe
+	// 最终的读还是依靠pipe完成
+	struct file *filp = iocb->ki_filp;
+	struct pipe_inode_info *pipe = filp->private_data;
+
+	......
+}
+```
+
+这里简单分析下`new_sync_read`函数的实现，`new_sync_read`是 VFS中同步读操作的核心实现。主要作用是准备一个同步读取操作的上下文，并通过VFS接口调用具体文件系统或设备驱动提供的读取方法，将数据从内核空间（如页缓存、设备、管道等）拷贝到用户空间提供的缓冲区中
+
+1、封装用户缓冲区，主要将用户空间传递的参数（缓冲区地址 `buf`和期望读取的长度 `len`）封装成一个 `iovec`结构，其中`struct iovec`是描述一个内存区域的通用结构，其成员`iov_base`指向内存起始地址，`iov_len`指定长度，这里它封装了用户希望数据被写入的目标地址
+
+2、调用`init_sync_kiocb`初始化同步I/O控制块 (`kiocb`)并设置本次读取操作的起始偏移量。`init_sync_kiocb`会将 kiocb->ki_flags设置为 IOCB_DIRECT（如果是直接IO）或 0，并确保其不是异步的（-EIOCBQUEUED不会被返回）。这标记了这是一个同步操作，函数会等待I/O完成才返回
+
+
+3、初始化迭代器 (`iov_iter`)，根据之前创建的 `iovec`，初始化一个迭代器 `iov_iter`，参数已说明。`iov_iter`提供了一个统一的接口来处理可能分散的多段数据，极大地增强了函数的通用性
+
+4、调用具体文件系统的读取方法`call_read_iter`，通过VFS的抽象接口，跳转到具体文件系统、设备或管道（如本例）的读取函数。本函数内部直接调用 `filp->f_op->read_iter(&kiocb, &iter)`，`filp->f_op`对于pipe而言，其 `read_iter`方法指向 `pipe_read`函数
+
+5、结果处理并更新位置，其中在 `pipe_read` 执行过程中，它会更新 `kiocb->ki_pos`。这里将这个新位置写回到 `ppos`所指向的变量（通常是 `filp->f_pos`）。这样，下一次读取操作就会从正确的位置开始
+  
+最后，请注意这里有个小细节，关于更新位置指针的时机，`new_sync_write`与`new_sync_read`稍微不同：
+
+-	在 `new_sync_write`中，只有在 `ret > 0`（成功写入）时才更新 `*ppos`
+-	而在 `new_sync_read`中，无论返回值 `ret`是正数（成功读取）还是负数（出错），都会更新 `*ppos`。这是因为即使读取失败（如部分读取后遇到错误），文件位置也可能已经发生了改变，需要反映这个变化，以确保后续操作的正确性
 
 ####	关于写的一些细节
 在刚开始分析时，错误的认为管道在写入时必须写满一整页page然后再开始写下一页，实际上并不是，这个行为受到`can_merge`参数控制。那么什么情况下会出现上述case呢？还是以本文内核版本（`anon_pipe_buf_ops` 和 `packet_pipe_buf_ops`）为例，回到内核`pipe_write`函数的实现：
@@ -1591,6 +1861,7 @@ void pipe_wait(struct pipe_inode_info *pipe)
 所以，程序中通常使用一对pipe来实现双向通信，避免pipe的这种竞争问题
 
 ####	CVE-2022-0847：Linux DirtyPipe内核提权漏洞
+TODO（新文章）
 
 ##  0x08 参考
 -	[linux pipe文件系统(pipefs)](https://blog.csdn.net/Morphad/article/details/9219843)
@@ -1598,3 +1869,4 @@ void pipe_wait(struct pipe_inode_info *pipe)
 -	[CVE-2022-0847 Linux DirtyPipe内核提权漏洞](https://segmentfault.com/a/1190000042055646)
 -	[一文读懂零拷贝技术：splice使用](https://mp.weixin.qq.com/s?__biz=MzA3NzYzODg1OA==&mid=2648466923&idx=1&sn=acf2fb71a960f3831f9b98657b39d4ce&scene=21&poc_token=HBrVq2ij3vFrdFf9wyaZbEAFXn3pBxBvM2OpQ6nb)
 -	[一文读懂零拷贝技术：splice原理与实现](https://mp.weixin.qq.com/s/ANBQzhq0RDzd1sLmwKtv5w)
+-	[Linux进程通信 - 管道实现](https://mp.weixin.qq.com/s?__biz=MzA3NzYzODg1OA==&mid=2648465715&idx=1&sn=3eaa62f290c02876b412326a5ebb30a6&scene=21&poc_token=HOi_rWij0oHZNgaRVrbhZoXwDKk40jOAmMMP1JvO)
