@@ -18,6 +18,20 @@ tags:
 
 ![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/queue/Circular_Buffer_Animation.gif)
 
+在内核中，管道pipe使用了ringbuffer来存储数据。ringbuffer的原理是：把一个缓冲区当成是首尾相连的环，其中通过读指针和写指针来记录读操作和写操作位置
+
+![pipe_rb](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/15/pipe_rb.png)
+
+####	写操作
+向ringbuffer中写入数据时，首先通过写指针进行定位要写入的内存地址，然后判断ringbuffer的空间是否足够，足够就把数据写入到ringbuffer中，同时移动写指针
+
+![rb_write](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/15/rb_write.png)
+
+####	读操作
+从ringbuffer中读取数据时，首先通过读指针来定位到读取数据的起始地址，然后判断ringbuffer中是否有数据可读，如果有就从ringbuffer中读取数据到用户空间的缓冲区中，然后移动读指针
+
+![rb_read](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/15/rb_read.png)
+
 ## 0x01 实现
 ringbuffer 的实现主要依赖于读写指针的移动（head-ReadIndex/tail-WriteIndex）：
 - 初始化一块定长的内存（或共享内存）作为存储空间，长度即为 `m_size`
@@ -323,4 +337,4 @@ int ShmRingQueue::PutDataUnit(const char *pIn, int nInLen)
 
 ##  0x05  参考
 - [Circular buffer](https://en.wikipedia.org/wiki/Circular_buffer)
-- [图解 | Linux进程通信 - 管道实现](https://mp.weixin.qq.com/s/wSmC4a5ci6WC9qJSrxbSNg)
+- [Linux进程通信 - 管道实现](https://mp.weixin.qq.com/s/wSmC4a5ci6WC9qJSrxbSNg)
