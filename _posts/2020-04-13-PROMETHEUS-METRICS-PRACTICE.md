@@ -218,7 +218,7 @@ Summary 通常用来在客户端直接计算出某个值（通常是请求持续
 
 例如，测量在 `host1.domain.com` 上运行的 `add_product` API 端点实例的响应时间的 Summary 指标可以表示为：
 
-```TEXT
+```PYTHON
 # HELP http_request_duration_seconds Api requests response time in seconds
 # TYPE http_request_duration_seconds summary
 http_request_duration_seconds_sum{api="add_product" instance="host1.domain.com"} 8953.332 #所有值的总和
@@ -528,7 +528,7 @@ http_request_duration_seconds_bucket{le="+Inf", handler="handlerB"} 130
 
 
 ####	核心：rate 计算的本质
-通常 counter 都会与 `rate` 函数结合计算增量，如下面的计算 `node_network_receive_packets_total` 在 `1m` 的时间跨度增量，即查询每秒收到的 packet 数量：
+通常 counter 都会与 `rate` 函数结合计算增量，如下面的计算 `node_network_receive_packets_total` 在 `1m` 的时间跨度增量，即查询每秒收到的 packet 数量（同理，`increase`函数的计算也是类似的）：
 
 ```python
 rate(node_network_receive_packets_total{device=~"en.*"}[1m])	#注意这里的结果是一个instant，只是一个点

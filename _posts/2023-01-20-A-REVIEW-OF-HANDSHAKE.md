@@ -80,7 +80,7 @@ AuthorizedKey: AuthorizedKey 是用户的公钥，存储在服务器上，用于
 -   `H` 和 `HS` 的签名 / 验证循环允许客户端验证服务器拥有主机私钥的所有权，因此客户端连接到正确的服务器
 -   通过对 `H` 进行签名，而不是对交换哈希的所有计算因子进行签名，效率更好
 
-``Exchange Hash HS` 的计算因子（5 个部分）来自于如下字段：
+`Exchange Hash HS` 的计算因子（5 个部分）来自于如下字段：
 1.  `M`，The client version, server version, clients `SSH_MSG_KEXINIT` message, servers `SSH_MSG_KEXINIT` message
 2.  服务器主机公钥（或证书）HPub。该值（及其相应的私钥 HPiv）通常在进程初始化期间生成，而不是在每次握手时生成
 3.  客户端公钥 `A`
