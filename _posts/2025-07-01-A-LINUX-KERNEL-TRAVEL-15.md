@@ -1159,8 +1159,7 @@ pipe_read(struct kiocb *iocb, struct iov_iter *to)
 
 1、封装用户缓冲区，主要将用户空间传递的参数（缓冲区地址 `buf`和期望读取的长度 `len`）封装成一个 `iovec`结构，其中`struct iovec`是描述一个内存区域的通用结构，其成员`iov_base`指向内存起始地址，`iov_len`指定长度，这里它封装了用户希望数据被写入的目标地址
 
-2、调用`init_sync_kiocb`初始化同步I/O控制块 (`kiocb`)并设置本次读取操作的起始偏移量。`init_sync_kiocb`会将 kiocb->ki_flags设置为 IOCB_DIRECT（如果是直接IO）或 0，并确保其不是异步的（-EIOCBQUEUED不会被返回）。这标记了这是一个同步操作，函数会等待I/O完成才返回
-
+2、调用`init_sync_kiocb`初始化同步I/O控制块 (`kiocb`)并设置本次读取操作的起始偏移量。`init_sync_kiocb`会将 `kiocb->ki_flags`设置为 `IOCB_DIRECT`（如果是直接IO）或 `0`，并确保其不是异步的。这标记了这是一个同步操作，函数会等待I/O完成才返回
 
 3、初始化迭代器 (`iov_iter`)，根据之前创建的 `iovec`，初始化一个迭代器 `iov_iter`，参数已说明。`iov_iter`提供了一个统一的接口来处理可能分散的多段数据，极大地增强了函数的通用性
 

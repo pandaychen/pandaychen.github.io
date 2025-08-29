@@ -398,6 +398,28 @@ int main(void)
 }
 ```
 
+####    elfexec
+[elfexec](https://github.com/abbat/elfexec/blob/master/elfexec.c)也是一个直接通过标准输入执行 ELF 二进制文件的工具，其核心原理基于系统调用 `memfd_create` 和 `fexecve`，典型用法如下：
+
+```BASH
+echo '
+#include <unistd.h>
+
+int main(int argc, char* argv[])
+{
+    write(STDOUT_FILENO, "Hello!\n", 7);
+    return 0;
+}
+' | cc -xc - -o /dev/stdout | elfexec
+#   cc -o 指定编译结果到stdout
+
+echo 'IyEvYmluL3NoCmVjaG8gIkhlbGxvISIK' | base64 -d| ./elfexec
+Hello!
+$ echo 'IyEvYmluL3NoCmVjaG8gIkhlbGxvISIK' | base64 -d
+#!/bin/sh
+echo "Hello!"
+```
+
 ##  0x09    漏洞利用
 
 ####    Redis漏洞利用
