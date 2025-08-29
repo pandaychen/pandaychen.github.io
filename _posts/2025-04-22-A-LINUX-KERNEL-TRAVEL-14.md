@@ -771,6 +771,57 @@ static int do_anonymous_page(struct vm_fault *vmf){
 }
 ```
 
+最后，再多提一点，关于`find_vma`的实现，该函数的作用是**返回第一个`addr` 小于`vm_end`的vma**，具体有这么几种情况：
+
+-	`mm_struct`里面不存在`vma`的时候， 返回`NULL`
+-	`mm_struct`存在的`vma`的`vm_end`都小于`addr`的时候，返回`NULL`
+-	`mm_struct`存在的`vma`的`vm_end`大于`addr`的`vma`时候，通过红黑树，找到`vm_end`最接近`addr`的`vma`, 并返回，所以称之为`first vma`
+
+所以`find_vma`在没有找到起所属的区间的`vma`时候，会根据`vm_end`是否大于`addr`, 来找到一个最接近的`vma`, 这样做的目的其实是针对`vma`出现重叠的情况，便于后面做expand处理等操作
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/mmap.c#L2097
+struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)
+{
+	struct rb_node *rb_node;
+	struct vm_area_struct *vma;
+
+	/* Check the cache first. */
+	//首先检查 VMA 缓存（vmacache），这是一个基于最近访问的缓存机制
+	// 如果 addr在缓存中找到对应的 VMA，直接返回该 VMA（快速路径）
+	vma = vmacache_find(mm, addr);
+	if (likely(vma))
+		return vma;
+
+	rb_node = mm->mm_rb.rb_node;
+
+	//若缓存未命中，从红黑树根节点开始遍历
+	//1. 优先检查左子树（更小地址），但始终记录第一个 vm_end > addr的 VMA
+	//2. 若找到包含 addr的 VMA（vm_start <= addr < vm_end），立即返回
+	//3. 若未命中，返回 addr之后最近的 VMA（vm_end > addr）
+	while (rb_node) {
+		struct vm_area_struct *tmp;
+
+		tmp = rb_entry(rb_node, struct vm_area_struct, vm_rb);
+
+		if (tmp->vm_end > addr) {
+			// 若tmp->vm_end > addr时，会把tmp赋值给vma
+			vma = tmp;
+			if (tmp->vm_start <= addr){
+				//至于完全处于vma区间，才会中断查找
+				break;
+			}
+			rb_node = rb_node->rb_left;
+		} else
+			rb_node = rb_node->rb_right;
+	}
+
+	if (vma)
+		vmacache_update(addr, vma);
+	return vma;
+}
+```
+
 ##  0x08  总结
 
 ####    虚拟内存地址拆解：内核态
