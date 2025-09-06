@@ -839,8 +839,11 @@ struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)
 
 | 字段 | 位范围 | 长度 | 作用 | 示例 |
 | :-----| :---- | :---- |:----|:----|
-|  |  |  | |  |
-|  |  |  | |  |
+| PGD索引  `47-39` | 9位 | 定位页全局目录项（Page Global Directory） | `0x1`（高位`1`）  |
+| PUD索引 | `38-30`  | 9位  | 定位页上层目录项（Page Upper Directory） | `0x0` |
+| PMD索引 | `29-21`  | 9位  | 定位页中间目录项（Page Middle Directory） | `0x01` |
+| PTE索引 | `20-12`  | 9位  | 定位页表项（Page Table Entry） | `0xBD(189)` |
+| 页内偏移 | `11-0`  | 12位  | 定位物理页内具体位置（4KB页内） | `0x340(832)` |
 
 针对本例，页表各层级索引解析如下：
 
@@ -877,11 +880,13 @@ struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)
 
 二、地址层级分解（`4KB`页），将`48`位有效地址（`0x7fffa9b07c14`）拆分为四级页表索引和页内偏移：
 
-| 字段 | 位范围 | 长度 | 作用 | 示例 |
+| 字段 | 位范围 | 计算方式 | 作用 | 值（十六进制 |
 | :-----| :---- | :---- |:----|:----|
-|  |  |  | |  |
-|  |  |  | |  |
-
+| PGD索引 `47-39`  | `(0x7fffa9b07c14 >> 39) & 0x1FF` |  | `0x0FF` |
+| PUD索引 `38–30` | `(0x7fffa9b07c14 >> 30) & 0x1FF` |  | `0x1A9`   |
+| PMD索引  `29–21`| `(0x7fffa9b07c14 >> 21) & 0x1FF` |  | `0x0B0`   |
+| PTE索引 `20–12` | `(0x7fffa9b07c14 >> 12) & 0x1FF` |  | `0x107`   |
+| 页内偏移|  `11–0` | `0x7fffa9b07c14 & 0xFFF` |  | `0xC14`   |
 
 三、地址转换流程，同内核态虚拟地址计算过程
 
