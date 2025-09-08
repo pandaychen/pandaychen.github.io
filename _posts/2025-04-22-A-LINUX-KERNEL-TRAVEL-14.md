@@ -168,7 +168,7 @@ CPU 提供 MMU（内存管理单元），MMU 使用一个地址转换表，但�
 -   MMU 采用的多级页表，**其中只会对应物理页地址，不会储存虚拟地址，而是将虚拟地址作为页表索引，这进一步缩小了页表的大小**
 -   虚拟内存页和物理内存页是同等大小的，都为 `4KB`，各级页表占用的空间也是一个页，即为 `4KB`。MMU 把虚拟地址分为 `5` 个位段，各位段的位数根据实际情况有所不同，按照这些位段的数据来索引各级页表中的项，一级一级往下查找，直到页表项，最后用页表项中的地址加页内偏移，就得到了物理地址
 
-[linux_page_table2.jpg](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/memory/pagetable/linux_page_table2.jpg)
+![linux_page_table2.jpg](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/memory/pagetable/linux_page_table2.jpg)
 
 ####   页表起始地址（CR3寄存器）
 cr3 是 CPU 的一个寄存器，它会指向当前进程的顶级 pgd。如果 CPU 的指令要访问进程的虚拟内存，它就会自动从cr3 里面得到 pgd 在物理内存的地址，然后根据里面的页表解析虚拟内存的地址为物理内存，从而访问真正的物理内存上的数据。需要注意如下：
@@ -880,13 +880,13 @@ struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)
 
 二、地址层级分解（`4KB`页），将`48`位有效地址（`0x7fffa9b07c14`）拆分为四级页表索引和页内偏移：
 
-| 字段 | 位范围 | 计算方式 | 作用 | 值（十六进制） |
-| :-----| :---- | :---- |:----|:----|
-| PGD索引 | `47-39`  | `(0x7fffa9b07c14 >> 39) & 0x1FF` |  | `0x0FF` |
-| PUD索引 | `38–30` | `(0x7fffa9b07c14 >> 30) & 0x1FF` |  | `0x1A9`   |
-| PMD索引 | `29–21`| `(0x7fffa9b07c14 >> 21) & 0x1FF` |  | `0x0B0`   |
-| PTE索引 | `20–12` | `(0x7fffa9b07c14 >> 12) & 0x1FF` |  | `0x107`   |
-| 页内偏移|  `11–0` | `0x7fffa9b07c14 & 0xFFF` |  | `0xC14`   |
+| 字段 | 位范围 | 计算方式 | 值（十六进制） |
+| :-----| :---- | :---- |:----|
+| PGD索引 | `47-39`  | `(0x7fffa9b07c14 >> 39) & 0x1FF` |   `0x0FF` |
+| PUD索引 | `38–30` | `(0x7fffa9b07c14 >> 30) & 0x1FF` |   `0x1A9`   |
+| PMD索引 | `29–21`| `(0x7fffa9b07c14 >> 21) & 0x1FF` |   `0x0B0`   |
+| PTE索引 | `20–12` | `(0x7fffa9b07c14 >> 12) & 0x1FF` |   `0x107`   |
+| 页内偏移|  `11–0` | `0x7fffa9b07c14 & 0xFFF` |  `0xC14`   |
 
 三、地址转换流程，同内核态虚拟地址计算过程
 
