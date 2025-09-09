@@ -160,7 +160,6 @@ if (read_seqcount_retry(&dentry->d_seq, seq))
     goto retry; // 序列号变化则重试
 ```
 
-
 二、REF-walk：基于引用计数的安全路径查找，设计目标是处理高频写入或复杂路径（如符号链接、权限校验），通过引用计数和锁保证强一致性，相关实现原理如下：
 
 1.	引用计数保护
@@ -333,8 +332,7 @@ static inline int build_open_flags(int flags, umode_t mode, struct open_flags *o
 `chroot` 改变当前进程所在的内核空间 `current->root` 的全局变量， 之后该进程所有的文件系统操作的路径，都以新的 path 作为根目录。关联`open*`系统调用中的`set_fs_root`函数的处理过程
 
 ####   nameidata/path/vfsmount 结构
-[`nameidata`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L506)，`nameidata` 用来存储遍历路径的中间结果（临时性存放），在路径搜索时常用到
-这个结构体在路径查找中非常重要，它记录了查找信息、保存了查找起始路径。在路径 `/a/b/c/d` 的每一个分量的查找中，它会保存当前的结果。对于一般路径名查找，在查找结束时，它会包含查询结果的信息；对于父路径名查找，在查找结束时，它会包含最后一个分量所在目录的信息。最重要的成员是 `nameidata.path`（记住在 VFS 中只有 `path` 才能唯一标识一个路径）
+[`nameidata`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L506)，`nameidata` **用来存储遍历路径的中间结果**（临时性存放），在路径搜索时常用到。这个结构体在路径查找中非常重要，它记录了查找信息、保存了查找起始路径。在路径 `/a/b/c/d` 的每一个分量的查找中，它会保存当前的结果。对于一般路径名查找，在查找结束时，它会包含查询结果的信息；对于父路径名查找，在查找结束时，它会包含最后一个分量所在目录的信息。最重要的成员是 `nameidata.path`（记住在 VFS 中只有 `path` 才能唯一标识一个路径）
 
 如`open()`、`mkdir()`、`rename()`等系统调用，可以使用文件的路径名作为参数，VFS将解析路径名并把它拆分成一个文件序列（分量），除了最后一个文件之外，所有的文件都必须是目录。为了识别目录文件，VFS将沿着路径逐层查找，并且使用`nameidata`边查找边缓存
 
@@ -343,6 +341,7 @@ static inline int build_open_flags(int flags, umode_t mode, struct open_flags *o
 -	`inode`：存储目录项对应的索引节点（`path.dentry.d_inode`）
 
 1、`path` 会保存已经成功解析到的信息，`last` 用来存放当前需要解析的信息，如果 `last` 解析成功那么就会更新 `path`
+
 2、如果文件路径的分量是一个符号链接，那么接下来需要解析符号链接的目标，那么`stack`用来保存文件路径还未被解析的部分，`depth` 表示深度。假设目录`b`是符号链接（目标是 `e/f`），解析文件路径 `a/b/c/d`，那么解析到 `b`，发现 `b` 是符号链接，接下来要解析符号链接 `b` 的目标 `e/f`，需要把文件路径中没有解析的部分 `c/d` 保存到`stack`中，等解析完符号链接后继续解析
 
 3、`nameidata`中`inode`与`link_inode`成员的作用是什么？
@@ -405,15 +404,19 @@ static void set_nameidata(struct nameidata *p, int dfd, struct filename *name)
 -	`struct path`是一个`<vfsmount,dentry>`二元组，`path`中的`vfsmount`记录的是当前所在文件系统的根目录信息，而`dentry`是当前路径行走所在的分量
 
 
-####	VFS 的 path walk：知识回顾
-VFS的path walk是`open()`的内核调用的核心设计，这里以访问`/dev/binderfs/binder`为例，`/`是根文件系统`rootfs`的根目录，`dev`是根文件系统的根目录下的一个普通目录，非挂载点，`binderfs`根文件系统下的位于`/dev`里的目录，同时也是binder文件系统的挂载点，`binder`是binder文件系统的挂载点下的一个代表binder设备的文件，下面是vfs的path walk过程：
+VFS mount机制中的hashtable
+
+TODO
+
+####	VFS 的 path walk：简单介绍
+VFS的path walk是`open()`的内核调用的核心设计，这里以访问`/dev/binderfs/binder`为例，`/`是根文件系统`rootfs`的根目录，`dev`是根文件系统的根目录下的一个普通目录，非挂载点，`binderfs`根文件系统下的位于`/dev`里的目录，同时也是[Binder文件系统](https://source.android.com/docs/core/architecture/ipc/binder-overview?hl=zh-cn)的挂载点，`binder`是Binder文件系统的挂载点下的一个代表binder设备的文件，下面是vfs的path walk过程：
 
 1.	walk path起点是在根文件系统`rootfs`的根目录。所以一开始，`path1`记录的是根文件系统的`vfsmount1`和代表根文件系统根目录`/`的`dentry1`
 2.	进入到`dev`分量时，`path2`记录的dentry将是代表路径分量`dev`的dentry，由于此时分量仍属于根文件系统，所以记录的`vfsmount`仍是`vfsmount1`
 3.	当进入到`binderfs`时，`path3`记录的dentry将是代表分量`binderfs`的dentry，由于还是在根文件系统，所以记录的`vfsmount`仍是`vfsmount1`。但是检查dentry时，发现其`DCACHE_MOUNTED`的flag，即表示它是一个挂载点。这时就要利用`path`里的信息，即父`mount1`的`vfsmount1`和挂载点的dentry，从`mount_hashtable`获得Binder文件系统的`mount2`（关联内核函数是`__lookup_mnt()`），最终获得`vfsmount2`里的`dentry4`，成功切换到Binder文件系统的根目录（Binder文件系统的根目录在访问的路径上是看不出来的，因为VFS屏蔽了用户的感知）
 4.	在整个VFS的路径行走中，需要先进入根文件系统，最后再进入Binder文件系统，注意 `dentry3`和`dentry4`是有区别的，`dentry3`是由根文件系统创建，而`dentry4`是由Binder文件系统，在挂载的时候创建的
 
-![vfs-path-walk]()
+![binder_vfs_open_flow_short()
 
 ####	RCU lock
 RCU（Read-copy_update）是一种数据同步机制，允许读写同时进行。读操作不存在睡眠、阻塞、轮询，不会形成死锁，相比读写锁效率更高。写操作时先拷贝一个副本，在副本上进行修改、发布，并在合适时间释放原来的旧数据
@@ -534,6 +537,8 @@ void fd_install(unsigned int fd, struct file *file)
 
 `__getname` 用于在内核缓冲区专用队列里申请一块内存用来放置路径名，作用如下：
 
+TODO
+
 ##	0x05	do_filp_open->path_openat实现
 [`do_filp_open`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L3515)，主要流程如下：
 
@@ -564,13 +569,13 @@ struct file *do_filp_open(int dfd, struct filename *pathname,
 	set_nameidata(&nd, dfd, pathname);
     // 调用 path_openat，此时是 flags 是带了 LOOKUP_RCU flag
 
-	//RCU 模式
+	//RCU 模式（首先尝试RCU快速路径）
 	filp = path_openat(&nd, op, flags | LOOKUP_RCU);
 	if (unlikely(filp == ERR_PTR(-ECHILD)))
-		//正常模式
+		//正常模式（回退到慢速路径）
 		filp = path_openat(&nd, op, flags);
 	if (unlikely(filp == ERR_PTR(-ESTALE)))	
-		//NFS模式
+		//NFS模式，这里不讨论
 		filp = path_openat(&nd, op, flags | LOOKUP_REVAL);
 	restore_nameidata();
 	return filp;
@@ -589,6 +594,8 @@ struct file *do_filp_open(int dfd, struct filename *pathname,
 `path_openat`的主要功能是尝试寻找一个与路径相符合的 dentry 目录数据结构，核心方法是 `path_init`、`link_path_walk`、`do_last`，其中 `path_init` 和 `link_path_walk` 通常合在一起调用，作用是 **可以根据给定的文件路径名称在内存中找到或者建立代表着目标文件或者目录的 dentry 结构和 inode 结构**
 
 注意`while (!(error = link_path_walk(s, nd)) && (error = do_last(nd, file, op, &opened)) > 0)` 这里的循环的作用是什么？通过后续的`trailing_symlink`字面意思不难看出，是为了递归处理路径解析过程中可能存在的末尾符号链接（trailing symlink）
+
+此外，这里阅读代码要区别`flags`带不带`LOOKUP_RCU`，即快速/慢速查找模式
 
 ```CPP
 static struct file *path_openat(struct nameidata *nd,
@@ -659,6 +666,17 @@ out2:
 }
 ```
 
+这里稍微整理一下`while(....)`中的实现过程和部分关键代码，对于路径 `/a/b/c/d/e`的处理，在进入 `do_last`之前，路径中除最后一个分量外的所有目录分量（`a`、`b`、`c`、`d`）都已经成功解析，并且它们的 dentry 通常已经存在于 dcache 中，最后一个分量（`e`）的处理在 `do_last`中完成
+
+1、目录分量缓存机制，在路径解析过程中遵循如下规则：
+
+-	缓存优先：每个目录分量首先通过 `lookup_fast`尝试从 dcache 获取
+-	缓存未命中：如果未命中缓存dcache，通过 `lookup_slow`和文件系统查找
+-	缓存填充：新找到的目录分量通过 `d_add`加入 `dcache`（`d_alloc_parallel`）
+-	路径更新：`path_to_nameidata`更新当前路径
+
+TODO
+
 ####	path_openat->path_init
 `path_init` 方法主要是用来初始化 `struct nameidata` 实例中的 `path`、`root`、`inode` 等字段。当 `path_init` 函数执行成功后，就会在 `nameidata` 结构体的成员 `nd->path.dentry` 中指向搜索路径的起点，接下来就使用 `link_path_walk` 函数顺着路径进行搜索
 
@@ -672,6 +690,8 @@ static const char *path_init(struct nameidata *nd, unsigned flags)
 		flags &= ~LOOKUP_RCU;
 
 	nd->last_type = LAST_ROOT;
+
+	// 重要：path_openat的参数flags保存在nameidata的flags成员中
 	nd->flags = flags | LOOKUP_JUMPED | LOOKUP_PARENT;
 	nd->depth = 0;
 
@@ -689,7 +709,7 @@ static const char *path_init(struct nameidata *nd, unsigned flags)
 		}
 		nd->path = nd->root;
 		nd->inode = inode;
-		// 如果是 RCU 模式，则保存序列锁（处理竞争）
+		// 如果是 RCU 快速模式，则保存序列锁（处理竞争）
 		if (flags & LOOKUP_RCU) {
 			rcu_read_lock();
 			nd->seq = __read_seqcount_begin(&nd->path.dentry->d_seq);
@@ -731,7 +751,7 @@ static const char *path_init(struct nameidata *nd, unsigned flags)
 			unsigned seq;
 
 			rcu_read_lock();
-
+			//在RCU 快速模式下，通过RCU锁初始化nameidata的成员（from：当前进程的目录信息）
 			do {
 				seq = read_seqcount_begin(&fs->seq);
 				nd->path = fs->pwd;
@@ -739,6 +759,8 @@ static const char *path_init(struct nameidata *nd, unsigned flags)
 				nd->seq = __read_seqcount_begin(&nd->path.dentry->d_seq);
 			} while (read_seqcount_retry(&fs->seq, seq));
 		} else {
+			// 非RCU模式（REF模式），使用自旋锁保证并发安全
+			// 见下
 			get_fs_pwd(current->fs, &nd->path);
 			nd->inode = nd->path.dentry->d_inode;
 		}
@@ -774,6 +796,14 @@ static const char *path_init(struct nameidata *nd, unsigned flags)
 		return s;
 	}
 }
+
+static inline void get_fs_pwd(struct fs_struct *fs, struct path *pwd)
+{
+	spin_lock(&fs->lock);
+	*pwd = fs->pwd;
+	path_get(pwd);
+	spin_unlock(&fs->lock);
+}
 ```
 
 ```CPP
@@ -804,7 +834,7 @@ static int set_root(struct nameidata *nd)
 {
     //获取当前进程的fs_struct
 	struct fs_struct *fs = current->fs;
-        
+
 	if (nd->flags & LOOKUP_RCU) {
 		unsigned seq;
 		do {
@@ -839,14 +869,16 @@ static inline u64 hash_name(const void *salt, const char *name)
 	return hashlen_create(end_name_hash(hash), len);
 }
 
+// link_path_walk：循环查找最后一个分量之前的所有分量
 static int link_path_walk(const char *name, struct nameidata *nd)
 {
 	int err;
  	int depth = 0; // depth <- nd->depth
     // 跳过开始的 / 字符（根目录）
 	// 指针移动，/dev/binder变成 dev/binder
-	while (*name=='/')
+	while (*name=='/'){
 		name++;
+	}
 
     // 如果路径只包含 /，搜索完成，返回
 	if (!*name)
@@ -998,6 +1030,7 @@ OK:
 -   符号链接
 
 对于本文前面提到的vfs path walk的例子，对于Binder文件系统挂载而言，`/dev/binder`是`/binderfs/binder`的symlink，不过由于`binder`是路径`/dev/binder`的最后一个分量，所以它在第一次执行`link_path_walk()`，不会对其用`walk_component()`进行查找。整体的处理逻辑，得看调用link_path_walk()的地方path_openat()
+TODO
 
 ```CPP
 static struct file *path_openat(struct nameidata *nd,
@@ -1030,6 +1063,12 @@ static struct file *path_openat(struct nameidata *nd,
 -   在 dcache 里找到了当前目录对应的 dentry 或者是通过 `lookup_slow` 寻找到当前目录对应的 dentry，这两种场景都会去设置 `path` 结构体里的 `dentry`、`mnt` 成员，并且将当前路径更新到 `path` 结构体（对dcache的分析参考后文）
 -   当 `path` 结构体更新后，最后调用 `step_info->path_to_nameidata` 将 `path` 结构体更新到 `nd.path`，[参考](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1803)，这样 `nd` 里的 `path` 就指向了当前目录了，至此完成一级目录的解析查找，返回 `link_path_walk()` 将基于 `nd.path` 作为父目录解析下一级目录，继续 `link_path_walk` 的循环查找直至退出
 
+TODO：快速模式慢速模式下的调用顺序，从`walk_component`中`lookup_fast`的返回值`err`可知：
+
+-	`err>0`：
+-	`err == 0`：
+-	`err<0`：直接返回错误（如经典的`-ECHILD`）
+
 
 ```CPP
 static int walk_component(struct nameidata *nd, int flags)
@@ -1049,9 +1088,11 @@ static int walk_component(struct nameidata *nd, int flags)
 
 	// 快速查找
 	err = lookup_fast(nd, &path, &inode, &seq);
+	// 重点：当lookup_fast返回1时，说明快速路径查找成功
 	if (unlikely(err <= 0)) {
-		if (err < 0)
+		if (err < 0){
 			return err;
+		}
 		// 如果快速查找模式失败，则进行慢速查找模式
 		path.dentry = lookup_slow(&nd->last, nd->path.dentry,
 					  nd->flags);
@@ -1080,11 +1121,13 @@ static int walk_component(struct nameidata *nd, int flags)
 
 接下来看下`walk_component`中最核心的两个函数：`lookup_fast`与`lookup_slow`
 
-####	walk_component->lookup_fast
+####	路径查找的核心：walk_component->lookup_fast
 `lookup_fast()`函数根据路径分量的名称，快速找到对应的dentry、inode的实现，主要分为rcu-walk和ref-walk，二者都是从`dentry_hashtable`中查询，但是在并发实现上有差异
 
 -	rcu-walk：实现是`__d_lookup_rcu()`
 -	ref-walk：实现是`__d_lookup()`
+
+**即在快速模式，慢速模式都会调用`lookup_fast`，快速模式中的`lookup_fast`对应的实现是`__d_lookup_rcu`，而慢速模式下的`lookup_fast`对应的是`__d_lookup`**
 
 ```CPP
 |- lookup_fast()
@@ -1095,34 +1138,125 @@ static int walk_component(struct nameidata *nd, int flags)
 ```
 
 ```CPP
-static struct dentry *lookup_fast(struct nameidata *nd,
-				  struct inode **inode,
-			          unsigned *seqp)
+static int lookup_fast(struct nameidata *nd,
+		       struct path *path, struct inode **inode,
+		       unsigned *seqp)
 {
+	struct vfsmount *mnt = nd->path.mnt;
 	struct dentry *dentry, *parent = nd->path.dentry;
-        //flags里有LOOKUP_RCU标记，则执行rcu-walk，否则执行ref-walk
-        if (nd->flags & LOOKUP_RCU) {
-            //rcu-walk
-			dentry = __d_lookup_rcu(parent, &nd->last, &seq);
-			if (unlikely(!dentry)) {
-				// 移除flags里的LOOKUP_RCU标记，尝试切换到ref-walk
-				// 成功则在下一个分量的lookup中，会采用ref-walk
-				// 当前的分量，看流程，不会换到ref-walk，而是用lookup_slow进行查找
-				if (!try_to_unlazy(nd))
-					return ERR_PTR(-ECHILD);
-				return NULL;
+	int status = 1;
+	int err;
+
+	//flags里有LOOKUP_RCU标记，则执行rcu-walk，否则执行ref-walk
+	if (nd->flags & LOOKUP_RCU) {
+		unsigned seq;
+		bool negative;
+		// rcu-walk
+		dentry = __d_lookup_rcu(parent, &nd->last, &seq);
+		if (unlikely(!dentry)) {
+			// 移除flags里的LOOKUP_RCU标记，尝试切换到ref-walk
+			// 成功则在下一个分量的lookup中，会采用ref-walk
+			// 当前的分量，看流程，不会换到ref-walk，而是用lookup_slow进行查找
+			if (unlazy_walk(nd))
+				return -ECHILD;
+			return 0;
+		}
+
+		*inode = d_backing_inode(dentry);
+		negative = d_is_negative(dentry);
+		if (unlikely(read_seqcount_retry(&dentry->d_seq, seq)))
+			return -ECHILD;
+
+		if (unlikely(__read_seqcount_retry(&parent->d_seq, nd->seq)))
+			return -ECHILD;
+
+		*seqp = seq;
+		status = d_revalidate(dentry, nd->flags);
+		if (likely(status > 0)) {
+			/*
+			 * Note: do negative dentry check after revalidation in
+			 * case that drops it.
+			 */
+			if (unlikely(negative))
+				return -ENOENT;
+			path->mnt = mnt;
+			path->dentry = dentry;
+			if (likely(__follow_mount_rcu(nd, path, inode, seqp))){
+				// 快速模式下查找成功
+				return 1;
 			}
-			......
-        } else  {
-			//ref-walk
-			dentry = __d_lookup(parent, &nd->last);
-			......
-        }
-        return dentry;
+		}
+		if (unlazy_child(nd, dentry, seq))
+			return -ECHILD;
+		if (unlikely(status == -ECHILD))
+			/* we'd been told to redo it in non-rcu mode */
+			status = d_revalidate(dentry, nd->flags);
+	} else {
+		//ref-walk
+		dentry = __d_lookup(parent, &nd->last);
+		if (unlikely(!dentry))
+			return 0;
+		status = d_revalidate(dentry, nd->flags);
+	}
+	if (unlikely(status <= 0)) {
+		if (!status)
+			d_invalidate(dentry);
+		dput(dentry);
+		return status;
+	}
+	if (unlikely(d_is_negative(dentry))) {
+		dput(dentry);
+		return -ENOENT;
+	}
+
+	path->mnt = mnt;
+	path->dentry = dentry;
+	err = follow_managed(path, nd);
+	if (likely(err > 0))
+		*inode = d_backing_inode(path->dentry);
+	return err;
 }
 ```
 
-这里看下rcu-walk即`__d_lookup_rcu()`的实现细节， `__d_lookup_rcu()`遍历查找目标dentry的时候，使用了顺序锁`seqlock`，读操作不会被写操作阻塞，写操作也不会被读操作阻塞。但读操作可能会反复读取相同的数据：当它发现sequence发生了变化，即它执行期间，有写操作更改了数据。此外`seqlock`要求进入临界区的写操作只有一个，多个写操作之间仍然是互斥的
+注意`lookup_fast`中的`unlazy_walk`函数：
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L683
+static int unlazy_walk(struct nameidata *nd)
+{
+	struct dentry *parent = nd->path.dentry;
+
+	BUG_ON(!(nd->flags & LOOKUP_RCU));
+
+	// 清除nd->flags中的LOOKUP_RCU标志
+	nd->flags &= ~LOOKUP_RCU;
+	if (unlikely(!legitimize_links(nd)))
+		goto out2;
+	if (unlikely(!legitimize_path(nd, &nd->path, nd->seq)))
+		goto out1;
+	if (nd->root.mnt && !(nd->flags & LOOKUP_ROOT)) {
+		if (unlikely(!legitimize_path(nd, &nd->root, nd->root_seq)))
+			goto out;
+	}
+	rcu_read_unlock();
+	BUG_ON(nd->inode != parent->d_inode);
+	return 0;
+
+out2:
+	nd->path.mnt = NULL;
+	nd->path.dentry = NULL;
+out1:
+	if (!(nd->flags & LOOKUP_ROOT))
+		nd->root.mnt = NULL;
+out:
+	rcu_read_unlock();
+	return -ECHILD;
+}
+```
+
+继续，这里看下rcu-walk即`__d_lookup_rcu()`的实现细节， `__d_lookup_rcu()`遍历查找目标dentry的时候，使用了顺序锁`seqlock`，读操作不会被写操作阻塞，写操作也不会被读操作阻塞。但读操作可能会反复读取相同的数据：当它发现sequence发生了变化，即它执行期间，有写操作更改了数据。此外`seqlock`要求进入临界区的写操作只有一个，多个写操作之间仍然是互斥的
+
+在`__d_lookup_rcu`函数中，`dentry->d_seq`的类型是`seqcount_spinlock_t`，`seqcount_spinlock_t`经过一些复杂的宏定义包含了`seqcount_t`，可以简单认为`seqcount_spinlock_t`就是一个`int`序列号
 
 ```CPP
 struct dentry *__d_lookup_rcu(const struct dentry *parent,
@@ -1172,10 +1306,9 @@ seqretry:
 	return NULL;
 }
 ```
-    dentry->d_seq的类型是seqcount_spinlock_t。seqcount_spinlock_t经过一些复杂的宏定义包含了seqcount_t，可以简单认为seqcount_spinlock_t就是一个int序列号。
-    seqlock的设计可以参考文档。
 
-接着看下`__d_lookup()`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L2203)，`__d_lookup`遍历查找目标dentry的时候，使用了自旋锁`spin_lock`，多个读操作会发生锁竞争。它还会更新查找到的dentry的引用计数（因此叫做ref-walk）。RCU仍然用于ref-walk中的dentry哈希查找，但不是在整个ref-walk过程中都使用，频繁地加减reference count可能造成cacheline的刷新，这也是ref-walk开销更大的原因之一
+
+接着看下慢速模式即`__d_lookup()`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L2203)，`__d_lookup`遍历查找目标dentry的时候，使用了自旋锁`spin_lock`，多个读操作会发生锁竞争。它还会更新查找到的dentry的引用计数（因此叫做ref-walk）。RCU仍然用于ref-walk中的dentry哈希查找，但不是在整个ref-walk过程中都使用，频繁地加减reference count可能造成cacheline的刷新，这也是ref-walk开销更大的原因之一
 
 ```CPP
 struct dentry *__d_lookup(const struct dentry *parent, const struct qstr *name)
@@ -1184,19 +1317,22 @@ struct dentry *__d_lookup(const struct dentry *parent, const struct qstr *name)
 	rcu_read_lock();
     //遍历链表b里的dentry，查找目标dentry
     hlist_bl_for_each_entry_rcu(dentry, node, b, d_hash) {
+		
+		if (dentry->d_name.hash != hash)
+			continue;	//name_hash不对，不是要找的
         //spin_lock加锁
         spin_lock(&dentry->d_lock);
 		if (dentry->d_parent != parent)
-			goto next;
+			goto next;	//parent 不对，不是要找的
 		if (d_unhashed(dentry))
 			goto next;
 
 		if (!d_same_name(dentry, parent, name))
-			goto next;
+			goto next;	//full name 比对，不是要找的
         ......
         //查找到目标dentry，增加引用计数
         dentry->d_lockref.count++;
-		found = dentry;
+		found = dentry;	// 找到了，可以返回了
 		//解锁
 		spin_unlock(&dentry->d_lock);
 		break;
@@ -1209,7 +1345,7 @@ next:
 }
 ```
 
-####	walk_component->lookup_slow
+####	路径查找：walk_component->lookup_slow
 与上述方法不同，`lookup_fast`的两种模式，都是查询的`dentry_hashtable`，`lookup_slow`是兜底方案，即当`lookup_fast`失败后，才会调用。`lookup_slow()`是通过当前所在的文件系统，获取对应的信息，创建对应的dentry和inode，将新的dentry添加到`dentry_hashtable`中
 
 ```BASH
@@ -1223,6 +1359,7 @@ next:
 
 ```CPP
 /* Fast lookup failed, do it the slow way */
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1625
 static struct dentry *lookup_slow(const struct qstr *name,
 				  struct dentry *dir,
 				  unsigned int flags)
@@ -1436,7 +1573,11 @@ const char *get_link(struct nameidata *nd)
 ```
 
 ##	0x06	do_last的实现
-至此基本走读完 `link_path_walk` 函数的实现，这时已经处于路径中的最后一个分量（只是沿着路径走到最终分量所在的目录），该分量有可能是个常规的目录 OR 符号链接 OR 根本不存在，接下来调用 `do_last`函数解析最后一个分量，厘清`do_last`的逻辑需要关注：
+至此基本走读完 `link_path_walk` 函数的实现，这时已经处于路径中的最后一个分量（只是沿着路径走到最终分量所在的目录），该分量可能是：
+
+
+
+有可能是个常规的目录 OR 符号链接 OR 根本不存在，接下来调用 `do_last`函数解析最后一个分量，厘清`do_last`的逻辑需要关注：
 
 -	各类标志位flag的检查（打开模式、属性等、部分flag还存在互斥关系）
 -	对`..`、挂载点、链接的处理
@@ -1627,6 +1768,8 @@ finish_open_created:
 	if (error)
 		goto out;
 	BUG_ON(*opened & FILE_OPENED); /* once it's opened, it's opened */
+
+	// 核心：终于可以做打开文件的操作了
 	error = vfs_open(&nd->path, file, current_cred());
 	if (error)
 		goto out;
@@ -1650,7 +1793,7 @@ out:
 }
 ```
 
-`lookup_open`负责处理路径查找的最终分量（final component）并协调文件创建与打开操作，`lookup_open`的实现机制类似与`lookup_slow`，先使用 `d_lookup` 在内存中找（快速查找），如果未命中就启动 `d_alloc_parallel->` 在具体文件系统里面去找（慢速查找），当它成功返回时会将 `path` 指向找到的目标，`lookup_open`的实现流程描述如下：
+`lookup_open`负责处理路径查找的最终分量（final component）并协调文件创建与打开操作，`lookup_open`的实现机制类似于`lookup_slow`，先使用 `d_lookup` 在内存中找（快速查找），如果未命中就启动 `d_alloc_parallel->` 在具体文件系统里面去找（慢速查找），当它成功返回时会将 `path` 指向找到的目标，`lookup_open`的实现流程描述如下：
 
 1、缓存优先：通过 `d_lookup` 在父目录的哈希链中查找目标 dentry，若命中则跳过后续分配
 
@@ -1849,11 +1992,17 @@ void init_special_inode(struct inode *inode, umode_t mode, dev_t rdev)
 当用户调用 `open()` 系统调用时，VFS 层会初始化一个 `struct file` 对象 `f`，`f->f_op` 被赋值为目标文件所属文件系统的 `file_operations` 结构体，此处为 `ext4_file_operations`，因此，执行 `f->f_op->open` 实际调用的是 `ext4_file_open()`。这里体现了 VFS 的协作流程，即 **VFS 通过路径解析找到文件的 dentry 和 inode，根据 inode 关联的文件系统类型（如 `ext4`），将 file 结构 `f->f_op` 绑定到 `ext4_file_operations`，那么执行 `open` 操作时，路由到具体文件系统的实现函数 `ext4_file_open`**
 
 ```CPP
-// fs/open.c
-int vfs_open(const struct path *path, struct file *file)
+// https://elixir.bootlin.com/linux/v4.11.6/source/fs/open.c#L855
+int vfs_open(const struct path *path, struct file *file,
+	     const struct cred *cred)
 {
-        file->f_path = *path;
-        return do_dentry_open(file, d_backing_inode(path->dentry), NULL);
+	struct dentry *dentry = d_real(path->dentry, NULL, file->f_flags);
+
+	if (IS_ERR(dentry))
+		return PTR_ERR(dentry);
+
+	file->f_path = *path;
+	return do_dentry_open(file, d_backing_inode(dentry), NULL, cred);
 }
 
 // fs/open.c
@@ -2510,3 +2659,4 @@ static inline void __d_set_inode_and_type(struct dentry *dentry,
 -	[Linux Open系统调用 篇二](https://juejin.cn/post/6844903926735568904)
 -	[Linux Open系统调用 篇三](https://juejin.cn/post/6844903937032585230)
 -	[Linux Open系统调用 篇四](https://juejin.cn/post/6844903937036779533)
+-	[
