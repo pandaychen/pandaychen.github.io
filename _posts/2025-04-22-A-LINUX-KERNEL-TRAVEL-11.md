@@ -41,9 +41,9 @@ tags:
 
 完整的函数调用链 [可见]()
 
-##  0x02    再看文件系统缓存
+##  0x02    VFS的若干细节（文件系统缓存、挂载等）
 
-####    VFS的hash表：dentry cache
+####    VFS的hash表：dentry cache（dcache）
 一个 `struct dentry` 结构代表文件系统中的一个目录或文件，VFS dentry 结构的意义，即需要建立文件名 filename 到 inode 的映射关系，目的为了提高系统调用在操作、查找目录/文件操作场景下的效率，且 dentry 是仅存在于内存的数据结构，所以内核使用了 `dentry_hashtable`（dentry 树）来管理整个系统的目录树结构。在 Linux 可通过下面方式查看 dentry cache 的指标：
 
 ```BASH
@@ -139,7 +139,7 @@ static void __init dcache_init(void)
 
 RCU-walk 和 REF-walk 是路径查找（Path Lookup）中两种核心的并发控制机制，分别针对高频读取和写操作场景优化，简单介绍下此二种机制：
 
-一、RCU-walk：无锁路径查找，设计目标是在无写入干扰的场景下，避免所有内存写操作（无锁、无引用计数增减），通过 RCU（Read-Copy-Update）和序列锁（Seqlock）保证数据一致性，相关实现原理如下：
+一、**RCU-walk**：无锁路径查找，设计目标是在无写入干扰的场景下，避免所有内存写操作（无锁、无引用计数增减），通过 RCU（Read-Copy-Update）和序列锁（Seqlock）保证数据一致性，相关实现原理如下：
 
 1.	无锁遍历
 	-	使用 `hlist_bl_for_each_entry_rcu()` 遍历 dentry 哈希链表（bucket），不获取任何锁
@@ -160,7 +160,7 @@ if (read_seqcount_retry(&dentry->d_seq, seq))
     goto retry; // 序列号变化则重试
 ```
 
-二、REF-walk：基于引用计数的安全路径查找，设计目标是处理高频写入或复杂路径（如符号链接、权限校验），通过引用计数和锁保证强一致性，相关实现原理如下：
+二、**REF-walk**：基于引用计数的安全路径查找，设计目标是处理高频写入或复杂路径（如符号链接、权限校验），通过引用计数和锁保证强一致性，相关实现原理如下：
 
 1.	引用计数保护
 	-	对每个 dentry 和 vfsmount 调用 `dget()/mntget()` 增加引用计数，防止并发释放
@@ -172,6 +172,116 @@ if (read_seqcount_retry(&dentry->d_seq, seq))
 	-	解析符号链接时递归调用 `link_path_walk()`
 	-	挂载点检查：通过 `__lookup_mnt()` 验证 vfsmount 有效性
 
+
+####	VFS的挂载
+open系统调用的路径分量解析中也会涉及到对挂载的处理，这里简单回顾下。挂载是指将一个文件系统，挂载到全局文件系统树上。除根文件系统外，挂载点要求是一个已存在的文件系统的目录。根文件系统rootfs，会在系统启动的时候创建，挂载到"/"，也是全局文件系统树的根节点。当一个目录被文件系统挂载时，原来目录中包含的其他子目录或文件会被隐藏。以后进入该目录时，将会通过VFS切换到新挂载的文件系统所在的根目录，看到的是该文件系统的根目录下的内容
+
+VFS挂载有三大对象：
+
+-	mount：对应一次文件系统的挂载。记录了挂载点的dentry、vfsmount以及文件系统在文件系统树上的父节点mount。也记录了代表它自身的hlist_node，与dentry类似，也是可以用hlist_node的指针，通过container_of()获取到对应的mountpoint()
+-	vfsmount：记录了一个文件系统的super_block和根目录的dentry
+-	mountpoint：记录一个挂载点的dentry和代表它自身的hlist_node，可以用hlist_node的指针，通过container_of()获取到对应的mountpoint()
+
+![vfsmount]()
+
+对象之间的关系如下：
+
+-	mount持有指向mountpoint的指针。它的mnt_mountpoint和mountpoint的m_dentry是指向同一个dentry。该dentry对应的是挂载目录
+-	mount持有的是vfsmount的对象，不是指针。当持有指向该vfsmount的指针时，就可以通过container_of()获得该mount了，详见real_mount()
+
+此外，VFS挂载有两张（hashtable）表，两张表的结构设计和dentry_hashtable是一样的
+
+-	mount_hashtable：通过父mount的vfsmount和挂载点的dentry，生成hash值，通过该表获得mount。详见__lookup_mnt()
+-	mountpoint_hashtable：通过挂载点的dentry，生成hash值，通过该表获得mountpoint。详见lookup_mountpoint()
+
+2、**VFS的重复挂载**
+
+VFS的挂载机制支持在一个挂载点上，先后挂载多个的文件系统的情况（此外，若挂载的文件系统类型相同，文件系统所在磁盘分区不同，也是可以的）。如在"binderfs"上，先挂载ext2文件系统，再挂载ext4系统，最后再挂载Binder文件系统。这时候，只有最后挂载的Binder文件系统是生效的。它们的挂载关联如下：
+
+![vfs_mount_hiden]()
+
+因为重复挂载的缘故，为了找到最后挂载的Binder文件系统的mount，我们需要轮询调用__lookup_mnt()。边轮询调用__lookup_mnt()，边更新path，直到__lookup_mnt()返回的mount*为NULL：
+
+在下文可以看到，路径查找过程中，在`follow_mount*`函数中，当遇到当前路径分量是一个挂载点时，会调用[`__lookup_mnt`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1307)函数来查询挂载节点`struct moun`结构
+
+```CPP
+static inline struct hlist_head *m_hash(struct vfsmount *mnt, struct dentry *dentry)
+{
+	unsigned long tmp = ((unsigned long)mnt / L1_CACHE_BYTES);
+	tmp += ((unsigned long)dentry / L1_CACHE_BYTES);
+	tmp = tmp + (tmp >> m_hash_shift);
+	return &mount_hashtable[tmp & m_hash_mask];
+}
+
+struct mount *__lookup_mnt(struct vfsmount *mnt, struct dentry *dentry)
+{
+	//通过父mount的vfsmount和在父文件系统的挂载点的dentry，获得hlist_head
+	struct hlist_head *head = m_hash(mnt, dentry);
+	struct mount *p;
+
+	//遍历hlist_node链表，找到对应的mount
+	hlist_for_each_entry_rcu(p, head, mnt_hash)
+		if (&p->mnt_parent->mnt == mnt && p->mnt_mountpoint == dentry)
+			return p;
+	return NULL;
+}
+```
+
+因为重复挂载的缘故，为了找到最后挂载的Binder文件系统的mount，我们需要轮询调用__lookup_mnt()。边轮询调用__lookup_mnt()，边更新path，直到__lookup_mnt()返回的mount*为NULL：
+
+  
+
+//循环调用的示例代码
+void sample_lookup(struct path *path) {
+    struct vfsmount *mnt = path->mnt;
+    struct dentry *dentry = path->dentry;
+    for (;;) {
+        if (flags & DCACHE_MOUNTED) {
+                //通过父mount的vfsmount和挂载点的dentry，获取对应的mount
+                struct mount *mounted = __lookup_mnt(path->mnt, dentry);
+                //mounted不为NULL，表示不是最后一个挂载在该挂载点的文件系统
+		if (mounted) {
+                        //更新path
+			path->mnt = &mounted->mnt;
+                        //更新path里的dentry
+			dentry = path->dentry = mounted->mnt.mnt_root;
+			flags = dentry->d_flags;
+			continue;
+		}
+                //return的时候，path里记录的就是最后一个挂载在该挂载点的文件系统的vfsmount
+                //和文件系统根目录"/"的dentry。这也意味着我们切换到了该文件系统。
+                return;
+        }
+        return;
+    }
+}
+
+
+//__lookup_mnt实现
+struct mount *__lookup_mnt(struct vfsmount *mnt, struct dentry *dentry)
+{
+        //通过父mount的vfsmount和在父文件系统的挂载点的dentry，获得hlist_head
+	struct hlist_head *head = m_hash(mnt, dentry);
+	struct mount *p;
+
+        //遍历hlist_node链表，找到对应的mount
+	hlist_for_each_entry_rcu(p, head, mnt_hash)
+		if (&p->mnt_parent->mnt == mnt && p->mnt_mountpoint == dentry)
+			return p;
+	return NULL;
+}
+
+当我们取消挂载Binder文件系统时，之前挂载的ext4系统文件又会重新生效。同样，取消挂载ext4时，ext2又会重新生效。
+
+作者：满嘴跑火车的小土匪
+链接：https://juejin.cn/post/7204751926515449911
+来源：稀土掘金
+著作权归作者所有。商业转载请联系作者获得授权，非商业转载请注明出处。
+
+-	`struct path`是一个`<vfsmount,dentry>`二元组，`path`中的`vfsmount`记录的是当前所在文件系统的根目录信息，而`dentry`是当前路径行走所在的分量
+
+
+VFS mount机制中的hashtable
 
 ##  0x03   基础知识
 一个进程需要读/写一个文件，必须先通过 filename 建立和文件 inode 之间的通道，方式是通过 `open()` 函数，该函数的参数是文件所在的路径名 `pathname`，如何根据 `pathname` 找到对应的 inode？这就要依靠 dentry 结构了
@@ -632,7 +742,7 @@ static struct file *path_openat(struct nameidata *nd,
 		put_filp(file);
 		return ERR_CAST(s);
 	}
-    // 核心方法
+    // 核心方法 link_path_walk && do_last
     // 调用函数 link_path_walk 解析文件路径的每个分量，最后一个分量除外
   	// 调用函数 do_last，解析文件路径的最后一个分量，并且打开文件
 	while (!(error = link_path_walk(s, nd)) &&
@@ -647,6 +757,7 @@ static struct file *path_openat(struct nameidata *nd,
 			break;
 		}
 	}
+	// 结束查找，释放解析文件路径的过程中保存的目录项和挂载描述符
 	terminate_walk(nd);
 out2:
 	if (!(opened & FILE_OPENED)) {
@@ -851,8 +962,10 @@ static int set_root(struct nameidata *nd)
 ####	path_openat->link_path_walk
 [`link_path_walk`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L2042)函数用于实现path walk的核心功能，逐个解析文件路径分量（除了最后一个分量），获取对应的dentry、inode（查找分量对应的dentry/inode通过函数`walk_component`实现）
 
+TODO
+
 ```CPP
-// 计算name中除根路径组件外的第一个路径组件的hash值和名字长度
+// 计算name中除根路径分量外的第一个路径分量的hash值和名字长度
 // 返回值hash_len是64位的无符号整数
 // 高32位记录name的长度len，低32位记录name的hash值
 static inline u64 hash_name(const void *salt, const char *name)
@@ -976,7 +1089,7 @@ OK:
             // symlink case
 			// symlink即软链接
 			// 只有嵌套在文件路径中的symlink才可能走这里
-            // 如果是位于文件路径末尾的symlink，都会先视为最后一个组件，不会走这里
+            // 如果是位于文件路径末尾的symlink，都会先视为最后一个分量，不会走这里
 			err = walk_component(nd, WALK_FOLLOW);
 		} else {
 			/* not the last component */
@@ -1000,7 +1113,7 @@ OK:
 				put_link(nd);
 			} else {
 				//只有嵌套在文件路径中的symlink，才会走到这里
-                //如"/a/b/c"，检查组件a时，发现它其实是个嵌套symlink，代表文件路径"e/f"
+                //如"/a/b/c"，检查分量a时，发现它其实是个嵌套symlink，代表文件路径"e/f"
                 //在执行walk_component->get_link后，返回的link就是"e/f"
                 //这时候，name就是"b/c"，将它保存在nd->stack中，并自增depth
                 //walk_component完symlink对应的真实路径后，才会取出来"b/c"
@@ -1039,13 +1152,13 @@ static struct file *path_openat(struct nameidata *nd,
         
         //s即"/dev/binder"
         const char *s = path_init(nd, flags);
-        //在第一次循环时，s是"/dev/binder"，执行link_path_walk()，"binder"是最后一个组件，
+        //在第一次循环时，s是"/dev/binder"，执行link_path_walk()，"binder"是最后一个分量，
         //跳出link_path_walk()的循环处理，调用open_last_lookups()处理，但发现"binder"是一个symlink。
         //open_last_lookups()会返回"binder"对应的"binderfs/binder"（又或者是"dev/binderfs/binder"?）。
         
-        //第二次循环时，s已经是"binderfs/binder", 再次执行link_path_walk()，"binder"是最后一个组件，
-        //不过这个"binder"不同于上次循环那个，不是symlink，而是一个真实存在的路径组件
-        //最后调用open_last_lookups()即可获得最后一个组件"binder"对应的dentry、inode等信息
+        //第二次循环时，s已经是"binderfs/binder", 再次执行link_path_walk()，"binder"是最后一个分量，
+        //不过这个"binder"不同于上次循环那个，不是symlink，而是一个真实存在的路径分量
+        //最后调用open_last_lookups()即可获得最后一个分量"binder"对应的dentry、inode等信息
         while (!(error = link_path_walk(s, nd)) &&
 		(error = do_last(nd, file, op, &opened)) > 0) {
 			......
@@ -1055,11 +1168,12 @@ static struct file *path_openat(struct nameidata *nd,
 }
 ```
 
-####	path_openat->link_path_walk->walk_component
-[`walk_component`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1763) 方法对 `nd`（中间结果）中的目录进行遍历，当前的子路径一定是一个中间节点（目录OR符号链接）
+####	path_openat->link_path_walk->walk_component（走过中间节点）
+[`walk_component`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1763) 方法对 `nd`（中间结果）中的目录进行遍历，当前的子路径一定是一个中间节点（目录OR符号链接），主要流程如下：
 
+-	`handle_dots`：处理当前中间节点（分量）为`.`或者`..`的场景
 -   优先使用 `lookup_fast`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1537)：如果当前的目录是一个普通目录，路径行走有两个策略：先在效率高的 rcu-walk 模式 [`__d_lookup_rcu`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1554) 下遍历，如果失败了就在效率较低的 ref-walk 模式 [`__d_lookup`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1600) 下遍历
--   如果 `lookup_fast` 查找失败，则调用 `lookup_slow` 函数。在 ref-walk 模式下会 **首先在内存缓冲区查找相应的目标（lookup_fast），如果找不到就启动具体文件系统（如 `ext4`）自己的 `lookup` 进行查找（lookup_slow）**
+-   如果 `lookup_fast` 查找失败，则调用 `lookup_slow` 函数（有条件限制）。在 ref-walk 模式下会 **首先在内存缓冲区查找相应的目标（lookup_fast），如果找不到就启动具体文件系统（如 `ext4`）自己的 `lookup` 进行查找（lookup_slow）**
 -   在 dcache 里找到了当前目录对应的 dentry 或者是通过 `lookup_slow` 寻找到当前目录对应的 dentry，这两种场景都会去设置 `path` 结构体里的 `dentry`、`mnt` 成员，并且将当前路径更新到 `path` 结构体（对dcache的分析参考后文）
 -   当 `path` 结构体更新后，最后调用 `step_info->path_to_nameidata` 将 `path` 结构体更新到 `nd.path`，[参考](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1803)，这样 `nd` 里的 `path` 就指向了当前目录了，至此完成一级目录的解析查找，返回 `link_path_walk()` 将基于 `nd.path` 作为父目录解析下一级目录，继续 `link_path_walk` 的循环查找直至退出
 
@@ -1094,12 +1208,14 @@ static int walk_component(struct nameidata *nd, int flags)
 			return err;
 		}
 		// 如果快速查找模式失败，则进行慢速查找模式
+		// lookup_fast失败，至少说明被查找的目录分量不在dcache中
 		path.dentry = lookup_slow(&nd->last, nd->path.dentry,
 					  nd->flags);
 		if (IS_ERR(path.dentry))
 			return PTR_ERR(path.dentry);
 
 		path.mnt = nd->path.mnt;
+		// TODO：follow_managed
 		err = follow_managed(&path, nd);
 		if (unlikely(err < 0))
 			return err;
@@ -1119,7 +1235,140 @@ static int walk_component(struct nameidata *nd, int flags)
 }
 ```
 
-接下来看下`walk_component`中最核心的两个函数：`lookup_fast`与`lookup_slow`
+先看下`handle_dots`的实现逻辑，这里也区分了快速（`follow_dotdot_rcu`）/慢速（`follow_dotdot`）的逻辑，前面提到`do_filp_open` 会首先使用 RCU 策略进行操作，如果不行再用普通策略。这里就可以看出只有 RCU 失败才会返回 -ECHILD 以启动普通策略。但是大家有没有发现，这里并没有对 follow_dotdot(rcu) 的返回值进行检查，为什么？这是因为 “..” 出现在路径里就表示要向“上”走一层，也就是要走到父目录里面去，而父目录一定是存在内存中而且对于当前的进程来说一定也是合法的，否则在读取父目录的时候就已经出错了。
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1679
+static inline int handle_dots(struct nameidata *nd, int type)
+{
+	if (type == LAST_DOTDOT) {
+		if (!nd->root.mnt)
+			set_root(nd);
+		if (nd->flags & LOOKUP_RCU) {
+			return follow_dotdot_rcu(nd);
+		} else
+			return follow_dotdot(nd);
+	}
+	return 0;
+}
+```
+
+这里只是针对 “..” 做处理；如果是 “.” 的话那就就代表的是当前路径，直接返回就好了。前面说过 do_filp_open 会首先使用 RCU 策略进行操作，如果不行再用普通策略。这里就可以看出只有 RCU 失败才会返回 -ECHILD 以启动普通策略。但是大家有没有发现，这里并没有对 follow_dotdot(rcu) 的返回值进行检查，为什么？这是因为 “..” 出现在路径里就表示要向“上”走一层，也就是要走到父目录里面去，而父目录一定是存在内存中而且对于当前的进程来说一定也是合法的，否则在读取父目录的时候就已经出错了。接着我们就来 “跟随 ..”。
+
+作者：Landroid
+链接：https://juejin.cn/post/6844903937032585230
+来源：稀土掘金
+著作权归作者所有。商业转载请联系作者获得授权，非商业转载请注明出处。
+
+先简单分析下`follow_dotdot_rcu`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1325)：
+
+set_root_rcu(nd); 首先设置 nd 的根目录（nd.root），还记得我们在哪里设置过这个成员么？没错，在 path_init 函数里，如果是绝对路径的话就会把这个 nd.root 设置成当前进程的根目录（其实还可以在 do_file_open_root 里预设这个值，所以为了和系统根目录区分，我们称 nd.root 为预设根目录），但如果是相对路径的话，就没有对 nd.root 进行初始化。为啥要分两步走呢？还是因为效率问题，任何一个目录都是一种资源，根目录也不例外，要获取某种资源必定会有一定的系统开销（在这里就是顺序锁），况且很有可能辛辛苦苦获得了这个根目录资源却根本就用不上，造成无端的浪费，所以 Kernel 本着能不用就不用的原则不到万不得已绝不轻易占用系统资源。现在的情况是路径中出现了“..”，就说明需要向上走一层，也就有可能会访问根目录，所以现在正是获取根目录的时候。
+接下来是一个 while 循环，这时就分了三种情况：
+
+当前目录就是前面获取的预设根目录，那么什么都不做，退出。
+当前目录不是预设根目录，但也不是当前文件系统的根目录，那么直接获取当前目录的父目录即可。
+当前目录不是预设根目录，但它是当前文件系统的根目录，那么往上走就会跑到别的文件系统。
+6
+作者：Landroid
+链接：https://juejin.cn/post/6844903937032585230
+来源：稀土掘金
+著作权归作者所有。商业转载请联系作者获得授权，非商业转载请注明出处。
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1325
+static int follow_dotdot_rcu(struct nameidata *nd)
+{
+	//设置 nd 的根目录（nd.root）
+	struct inode *inode = nd->inode;
+
+	while (1) {
+		//如果当前路径就是预设根目录的话，就什么也不做直接跳出循环
+		//在/目录中，运行cd ../../后仍然是/
+		if (path_equal(&nd->path, &nd->root))
+			break;
+		// 当前路径不是预设根目录，但也不是当前文件系统的根目录，
+        // 那么向上走一层也是很简单的事，直接将父目录项拿过来就是了
+		if (nd->path.dentry != nd->path.mnt->mnt_root) {
+			struct dentry *old = nd->path.dentry;
+			// 获得父目录
+			struct dentry *parent = old->d_parent;
+			unsigned seq;
+
+			inode = parent->d_inode;
+			seq = read_seqcount_begin(&parent->d_seq);
+            // 如果当前的 dentry 发生了改变（其他进程修改或者删除），就返回错误
+			if (unlikely(read_seqcount_retry(&old->d_seq, nd->seq)))
+				return -ECHILD;
+
+			// 设置nameidata当前路径为它的父目录
+			nd->path.dentry = parent;
+			nd->seq = seq;
+			//path_connected - Verify that a path->dentry is below path->mnt.mnt_root
+			if (unlikely(!path_connected(&nd->path)))
+				return -ENOENT;
+
+			// 还在当前的文件系统里面，可以退出循环1
+			break;
+		} else {
+			// 当 nd->path.dentry == nd->path.mnt->mnt_root时
+			// 这里隐含了 .. 刚好是该文件系统的/目录（不一定是rootfs）
+			//到最后，当前路径一定是某个文件系统的根目录，往上走有可能就会走到另一个文件系统里去了
+
+			struct mount *mnt = real_mount(nd->path.mnt);
+			// 获取父挂载描述符（mount）
+			struct mount *mparent = mnt->mnt_parent;
+            // 获取挂载点
+			struct dentry *mountpoint = mnt->mnt_mountpoint;
+			// 获取挂载点的索引节点
+			struct inode *inode2 = mountpoint->d_inode;
+			// 获取 mountpoint->d_seq 序列锁的初始 count，用于多线程竞争
+			unsigned seq = read_seqcount_begin(&mountpoint->d_seq);
+            // 使用全局序列锁 mount_lock 检查当前路径分量有没有发生改变。如果有，返回 -ECHILD
+			if (unlikely(read_seqretry(&mount_lock, nd->m_seq)))
+				return -ECHILD;
+			// 当前的文件系统是不是根文件系统，也就是 rootfs 文件系统。如果是则跳出while(1)
+			if (&mparent->mnt == nd->path.mnt)
+				break;
+			/* we know that mountpoint was pinned */
+			// 现在知道当前路径分量处于挂载点
+			nd->path.dentry = mountpoint;
+			// 设置为父挂载描述符
+			nd->path.mnt = &mparent->mnt;
+			inode = inode2;
+			nd->seq = seq;
+		}
+	}
+	// d_mountpoint 函数检查 dentry 的 d_flags 有没有设置 DCACHE_MOUNTED，即检查该目录是否是挂载点
+	while (unlikely(d_mountpoint(nd->path.dentry))) {
+		// 如果是挂载点
+		struct mount *mounted;
+		// 在散列表中通过{父挂载描述符，名称}方式查找对应的挂载描述符
+		mounted = __lookup_mnt(nd->path.mnt, nd->path.dentry);
+
+		// 检查期间挂载点是否有改变（随时检查）
+		if (unlikely(read_seqretry(&mount_lock, nd->m_seq)))
+			return -ECHILD;
+		// 如果没有在散列表中找到，退出循环
+		if (!mounted)
+			break;
+
+		// 现在更新为找到的文件系统的挂载描述符
+		nd->path.mnt = &mounted->mnt;
+
+		// 现在更新为找到的文件系统的根目录，接着继续循环，如果根目录也为挂载点
+        // 那么继续找，直到找到一个根目录不为挂载点的文件系统
+		nd->path.dentry = mounted->mnt.mnt_root;
+		inode = nd->path.dentry->d_inode;
+		nd->seq = read_seqcount_begin(&nd->path.dentry->d_seq);
+	}
+	nd->inode = inode;
+	return 0;
+}
+```
+
+TODO：
+
+接下来看下`walk_component`中最核心的涉及到**Dentry查找**的两个函数：`lookup_fast`与`lookup_slow`
 
 ####	路径查找的核心：walk_component->lookup_fast
 `lookup_fast()`函数根据路径分量的名称，快速找到对应的dentry、inode的实现，主要分为rcu-walk和ref-walk，二者都是从`dentry_hashtable`中查询，但是在并发实现上有差异
@@ -1307,7 +1556,6 @@ seqretry:
 }
 ```
 
-
 接着看下慢速模式即`__d_lookup()`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L2203)，`__d_lookup`遍历查找目标dentry的时候，使用了自旋锁`spin_lock`，多个读操作会发生锁竞争。它还会更新查找到的dentry的引用计数（因此叫做ref-walk）。RCU仍然用于ref-walk中的dentry哈希查找，但不是在整个ref-walk过程中都使用，频繁地加减reference count可能造成cacheline的刷新，这也是ref-walk开销更大的原因之一
 
 ```CPP
@@ -1355,7 +1603,7 @@ next:
         |- inode->i_op->lookup 通过父dentry的inode去查找对应的dentry：其实就是通过它所在的文件系统，获取对应的信息，创建对应的dentry
 ```
 
-[`__lookup_slow`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1625) 实现如下，首先调用 `d_alloc_parallel` 给当前路径分配一个新的 dentry，然后调用 `inode->i_op->lookup()`，注意这里的 inode 是当前路径的父路径 dentry 的 `d_inode` 成员。`inode->i_op` 是具体的文件系统 inode operations 函数集，如对 ext4 文件系统就是 ext4 fs 的 inode operations 函数集 `ext4_dir_inode_operations`，其 lookup 函数是 `ext4_lookup()`
+[`lookup_slow`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1625) 的实现如下，首先调用 `d_alloc_parallel` 给当前路径分配一个新的 dentry，然后调用 `inode->i_op->lookup()`，注意这里的 inode 是当前路径的父路径 dentry 的 `d_inode` 成员。`inode->i_op` 是具体的文件系统 inode operations 函数集，如对 ext4 文件系统就是 ext4 fs 的 inode operations 函数集 `ext4_dir_inode_operations`，其 lookup 函数是 `ext4_lookup()`
 
 ```CPP
 /* Fast lookup failed, do it the slow way */
@@ -1392,6 +1640,7 @@ again:
 		}
 	} else {
         // 在 ext4 fs 中，会调用 ext4_lookup 寻找，此函数涉及到 IO 操作，性能较 dcache 会低
+		// 定义：https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/namei.c#L3905
 		old = inode->i_op->lookup(inode, dentry, flags);
 		d_lookup_done(dentry);
 		if (unlikely(old)) {
@@ -1406,12 +1655,24 @@ out:
 }
 ```
 
-这里简单介绍下 `ext4_lookup()` 的实现，其原型为 `static struct dentry *ext4_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)`，参数 `dir` 为当前目录 dentry 的父目录，参数 `dentry` 为需要查找的当前目录。`ext4_lookup()` 首先调用了 `ext4_lookup_entry()`，此函数根据当前路径的 dentry 的 `d_name` 成员在当前目录的父目录文件（用 inode 表示）里查找，这个会 open 父目录文件会涉及到 IO 读操作（具体可以分析 `ext4_bread` 函数的 [实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/inode.c#L994)）。查找到后，得到当前目录的 `ext4_dir_entry_2`，此结构体里有当前目录的 inode number，然后根据此 inode number 调用 `ext4_iget()` 函数获得这个 inode number 对应的 inode struct，得到这个 inode 后调用 `d_splice_alias()` 将 dentry 和 inode 绑定，即将 inode 赋值给 dentry 的 `d_inode` 成员
+`lookup_slow`的实现逻辑梳理如下（有些绕）：
+
+TODO
+
+在上面`lookup_slow`的实现中，什么情况下会进入文件系统的 `inode->i_op->lookup`函数？
+
+TODO
+
+这里简单介绍下 `ext4_lookup()` 的实现，其原型为 `static struct dentry *ext4_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)`，参数 `dir` 为当前目录 dentry 的父目录，参数 `dentry` 为需要查找的当前目录。`ext4_lookup()` 首先调用了 `ext4_lookup_entry()`，此函数根据当前路径的 dentry 的 `d_name` 成员在当前目录的父目录文件（用 inode 表示）里查找，这个会 `open` 父目录文件会涉及到 IO 读操作（具体可以分析 `ext4_bread` 函数的 [实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/inode.c#L994)）。查找到后，得到当前目录的 `ext4_dir_entry_2`，此结构体里有当前目录的 inode number，然后根据此 inode number 调用 `ext4_iget()` 函数获得这个 inode number 对应的 inode struct，得到这个 inode 后调用 `d_splice_alias()` 将 dentry 和 inode 绑定，即将 inode 赋值给 dentry 的 `d_inode` 成员
 
 当 ext4 文件系统的 lookup 完成后，此时的 dentry 已经有绑定的 inode 了，即已经设置了其 `d_inode` 成员了，然后调用 `d_lookup_done()` 将此 dentry 从 lookup hash 链表上移除（它是在 `d_alloc_parallel` 里被插入 lookup hash 的），这个 lookup hash 链表的作用是避免其它线程也同时来查找当前目录造成重复 alloc dentry 的问题
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/namei.c#L1569
+TODO
+```
 
 ####	walk_component->step_into
-step_into()主要是处理dentry是一个链接或者挂载点的情况
+通过`walk_component`函数前面的`lookup_fast/lookup_slow`逻辑已经确保当前查询的路径分量已经位于dcache里面了，接着会调用`step_into()`检查并处理dentry是一个link类型或挂载点的情况
 
 ```BASH
 |- step_into()
@@ -1419,7 +1680,7 @@ step_into()主要是处理dentry是一个链接或者挂载点的情况
 		|- __follow_mount_rcu() //轮询调用__lookup_mnt()，处理重复挂载（查找标记有LOOKUP_RCU时调用）
 			|- __lookup_mnt()
 		|- traverse_mounts() //作用与__follow_mount_rcu()类似
-	|- pick_link() //处理是一个链接的情况，获取对应的真实路径
+	|- pick_link() //处理是一个分量是link的情况，获取对应的真实路径
 ```
 
 ```CPP
@@ -1427,7 +1688,7 @@ static const char *step_into(struct nameidata *nd, int flags,
 		     struct dentry *dentry, struct inode *inode, unsigned seq)
 {
 	struct path path;
-    //处理组件是挂载点的情况
+    //处理路径分量是挂载点的情况
 	int err = handle_mounts(nd, dentry, &path, &inode, &seq);
     //检查是否是链接
 	if (likely(!d_is_symlink(path.dentry)) ||
@@ -1445,12 +1706,12 @@ static const char *step_into(struct nameidata *nd, int flags,
 		nd->seq = seq;
 		return NULL;
 	}
-    //处理组件是链接的情况
+    //处理路径分量是链接的情况
 	return pick_link(nd, &path, inode, seq, flags);
 }
 ```
 
-`pick_link`：
+`pick_link`
 
 ```CPP
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1692
@@ -1459,10 +1720,14 @@ static int pick_link(struct nameidata *nd, struct path *link,
 {
 	int error;
 	struct saved *last;
+	 // 如果当前路径中已包含的符号链接数量（嵌套层次）超过了 MAXSYMLINKS = 40
 	if (unlikely(nd->total_link_count++ >= MAXSYMLINKS)) {
 		path_to_nameidata(link, nd);
+		// 返回错误
 		return -ELOOP;
 	}
+
+	 // 当前为 ref-walk 模式
 	if (!(nd->flags & LOOKUP_RCU)) {
 		if (link->mnt == nd->path.mnt)
 			mntget(link->mnt);
