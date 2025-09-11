@@ -26,7 +26,7 @@ tags:
 2、网络包发送流程中的性能损失
 
 -   应用程序系统调用`write/send`的时候会从用户态转为内核态以及发送完数据后，系统调用返回时从内核态转为用户态的开销
--   用户线程内核态CPU quota用尽时触发NET_TX_SOFTIRQ类型软中断，内核响应软中断的开销
+-   用户线程内核态CPU quota用尽时触发`NET_TX_SOFTIRQ`类型软中断，内核响应软中断的开销
 -   网卡发送完数据，向CPU发送硬中断，CPU响应硬中断的开销；在硬中断中发送NET_RX_SOFTIRQ软中断执行具体的内存清理动作以及内核响应软中断的开销
 -   内存copy的开销，具体为
     -   在内核协议栈的传输层中，TCP协议对应的发送函数`tcp_sendmsg`会申请`sk_buffer`，将用户要发送的数据拷贝到sk_buffer中
@@ -391,3 +391,4 @@ ssize_t writev(int fd, const struct iovec *iov, int iovcnt);
 -   [深入理解 Linux 物理内存分配全链路实现](https://www.cnblogs.com/binlovetech/p/17019710.html)
 -   [从 Linux 内核角度探秘 JDK NIO 文件读写本质](https://www.cnblogs.com/binlovetech/p/16661323.html)
 -   [The iov_iter interface](https://lwn.net/Articles/625077/)
+-   [文件IO系统调用内幕](https://lrita.github.io/2019/03/13/the-internal-of-file-syscall/#msync)

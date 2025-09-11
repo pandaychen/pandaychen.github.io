@@ -141,7 +141,7 @@ struct file_system_type {
 
 2、`struct inode`：代表文件的 **元数据**，包含文件的属性，如文件的大小、权限、所有者、文件类型、设备标识符，用户标识符，用户组标识符，文件模式，扩展属性，文件读取 `/` 修改的时间戳，链接数量，指向存储该内容的磁盘区块的指针，文件分类等。VFS 通过 inode 来定位文件，并执行相应的文件操作。每个文件系统都会定义一个自己的 inode 结构，都会通过 VFS 接口来进行交互
 
-inode 有两种：一种是 VFS 的 inode，一种是具体文件系统的 inode。前者在内存中，后者在磁盘中。所以每次其实是将磁盘中的 inode 调进填充内存中的 inode，这样才算使用了磁盘文件 inode。inode 号是唯一的，表示不同的文件。Linux 内核定位文件都是依靠 inode 号进行，当 `open` 一个文件时，首先系统找到这个文件名 `filename` 对应的 inode 号，然后通过 inode 号获取 inode 信息，最后由 inode 定位到文件数据所在的 block 后，就可以处理文件数据
+inode 有两种：一种是 VFS 的 inode，一种是具体文件系统的 inode。前者在内存中，后者在磁盘中。所以每次其实是将磁盘中的 inode 加载并填充内存中的 inode，这样才算使用了磁盘文件 inode。inode 号是唯一的，表示不同的文件。Linux 内核定位文件都是依靠 inode 号进行，当 `open` 一个文件时，首先系统找到这个文件名 `filename` 对应的 inode 号，然后通过 inode 号获取 inode 信息，最后由 inode 定位到文件数据所在的 block 后，就可以处理文件数据
 
 inode 和文件的关系是当创建一个文件的时候，就给文件分配了一个 inode。一个 inode 只对应一个实际文件，一个文件也会只有一个 inode，inodes 最大数量就是文件的最大数量，Linux可通过`df -i`查询inode使用情况。此外，一个inode可以代表一个普通的文件，也可以代表管道或者设备文件等这样的特殊文件
 
@@ -169,7 +169,7 @@ struct inode {
 
 -	`i_sb`：inode 所属文件系统的超级块指针
 -	`i_ino`：索引节点号，每个 inode 都是唯一的
--	`i_dentry`：指向目录项链表指针，注意一个 `inodes` 可以对应多个 `dentry`，因为一个实际的文件可能被链接到其他的文件（硬链接hard link），那么就会有另一个 `dentry`，这个链表就是将所有的与本 `inode` 有关的 `dentry` 都link到一起（对一个inode每增加一个hard link，该inode的路径指向就增加一个）。**因此一个inode会对应多个dentry，通过`i_dentry`链表组织，而一个dentry只会对应一个inode，且这种关系仅存在于内存中（在磁盘中是不直接存在）**
+-	`i_dentry`：指向目录项链表指针，注意一个 `inode` 可以对应多个 `dentry`，因为一个实际的文件可能被链接到其他的文件（硬链接hard link），那么就会有另一个 `dentry`，这个链表就是将所有的与本 `inode` 有关的 `dentry` 都link到一起（对一个inode每增加一个hard link，该inode的路径指向就增加一个）。**因此一个inode会对应多个dentry，通过`i_dentry`链表组织，而一个dentry只会对应一个inode，且这种关系仅存在于内存中（在磁盘中是不直接存在）**
 
 3、`struct dentry`：目录项是描述文件的逻辑属性，只存在于内存中，并没有实际对应的磁盘上的描述，更确切的说是**存在于内存的目录项缓存，为了提高查找性能而设计**。文件或目录（本质也是文件）都对应于`dentry`，即属于目录项，所有的目录项在一起构成一颗目录树（dentry tree）。例如`open` 一个文件 `/home/xxx/yyy`，那么`/`、`home`、`xxx`、`yyy` 都是一个`dentry`，VFS 在查找的时候，根据一层一层的`dentry`定位到对应的每个目录项的 inode，那么沿着目录项进行操作就可以找到最终的文件
 
@@ -213,9 +213,8 @@ struct dentry {
 -	`d_iname`：存放短的文件名（和 `d_name` 的区别），为了节省内存用
 -	`d_sb`：该目录项所属的文件系统的超级块（注意：与`dentry->d_sb`与`dentry->d_inode->i_sb`都是指向同一个`super_block`）
 -	`d_parent`：指向父目录的`dentry`结构，对`..`表示的上级目录将借助`dentry->d_parent`进行遍历
--	`d_child`：
--	`d_subdirs`：
--	`d_alias`：
+-	`d_child`/`d_subdirs`：下一级dentry的`d_child`会加入到其父dentry的`d_subdirs`链表中
+-	`d_alias`：hard link场景下，会把 `d_alias` 加入到 inode 的链表 `i_dentry` 里，这样通过 `/home/user1/file1`或 `/home/user2/file2`，访问的都是同一个文件
 
 先描述下dentry与inode的关系，即`dentry->d_alias`/`inode->i_dentry`/`dentry->d_inode`（再强调一下这种对应关系在磁盘中是不直接存在的，dentry只存在内存中，它缓存了磁盘文件查找的结果）
 
@@ -239,6 +238,8 @@ struct dentry {
 -	`f_op`：涉及到所有的文件的操作结构，例如用户使用 `read`函数，最终都会调用 `file_operations` 中的读操作，而 `file_operations` 结构体是区分不同的文件系统的
 
 记住`file->f_path->mnt`这个成员，它指向的是mount树中节点`struct mount`的`struct vfsmount`成员，可以通过内核特殊的`container_of`宏获取到外层mount树节点的指针地址
+
+![file-path-vfsmount-mount]()
 
 开发场景：
 -	如何获取当前进程对应的运行二进制的绝对路径？
@@ -390,7 +391,7 @@ struct vfsmount {
 
 举个例子，运行`mount /dev/sdb1 /media/dir1`后，挂载点为`/media/dir1`，对于`dir1`这个目录，其产生新的`vfsmount`，独立于根文件系统挂载点`/`所在的`vfsmount`，对于挂载点`/media/dir1`而言，其`vfsmount->mnt_root->f_dentry->d_name.name = '/'`，而`vfsmount->mnt_mountpoint->f_dentry->d_name.name = 'dir1'`，这对于`/media/dir1`下的所有目录和文件而言，都是如此（为了方便举例，这里就借用`mount`结构了），所以，在`/media/dir1`下的所有目录和文件而言，通过dentry树进行向上遍历，只能看到`vfsmount->mnt_root->f_dentry->d_name.name = '/'`这里，如果要获取完整的绝对路径，就需要继续沿着`vfsmount->mnt_mountpoint->f_dentry`向上遍历，这样才能获取绝对路径
 
-![]()
+![vfs-mount-vfsmount]()
 
 -	所有的`vfsmount`挂载点通过`mnt_list`双链表挂载于`mnt_namespace->list`链表中，该`mnt`命名空间可以通过任意进程获得
 -	子`vfsmount`挂载点结构通过`mnt_mounts`挂载于父`vfsmount`的`mnt_child`链表中，并且`mnt_parent`直接指向父亲fs的`vfsmount`结构，从而形成树层次结构
@@ -446,13 +447,13 @@ struct files_struct {
 
 6、`nameidata`结构用于在`open/mkdir`等系统调用中，逐级向下，一层层地解析目录项，保存中间的查询信息。最核心的成员为`path`，`path`包含了路径dentry本身的信息，还包含了其所在文件系统的挂载点vfsmount的信息。**由于文件系统本身的挂载点也是一个路径，描述挂载点的数据结构vfsmount是将表示路径关系的dentry和表示文件系统实体的super_block结合了**
 
-这里`path`的意义在于，`nameidata->path->dentry`暂存的是路径中当前解析的最后一个dentry，如果某一个目录节点是另一个文件系统的mount point，那么将借助`nameidata->path->mnt`跳转到新的文件系统继续查找
+这里`path`的意义在于，`nameidata->path->dentry`**暂存的是路径中当前解析的最后一个dentry（component分量），如果某一个目录节点是另一个文件系统的mount point，那么将借助`nameidata->path->mnt`跳转到新的文件系统继续查找**
 
 
 ```CPP
 struct nameidata {
-    struct path path;
-    ...
+    struct path path;		// 核心字段
+    ......
 }
 
 struct path {
@@ -463,11 +464,11 @@ struct path {
 struct vfsmount {
     struct dentry *mnt_root;	/* root of the mounted tree */
     struct super_block *mnt_sb;	/* pointer to superblock */
-    ...
+    ......
 }
 ```
 
-####	vfs 相关 API
+####	vfs 相关 API（operations）
 文件系统相关的一些对象，和对应的数据结构：
 
 -	文件对象：`file`
@@ -484,7 +485,15 @@ struct vfsmount {
 
 ![vfs-relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/vfs-core-struct-relation.png)
 
-从上图可以看出
+从上图可以看出各类`*_operations`之间的关联关系
+
+TODO
+
+以ext4文件系统为例，对应的operations实现如下：
+
+```CPP
+
+```
 
 ####	设计dentry的意义
 dentry是目录项缓存，是一个存放在内存里的缩略版的磁盘文件系统目录树结构，思考几个问题：
@@ -588,6 +597,8 @@ Linux 使用父子树的形式来构造，父设备树中的一个文件夹 `str
 ![3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/mnt-ns/mnt_tree.png)
 
 -	`mnt_parent`：指向其父节点（表示当前挂载点的父挂载点），通过跟踪每个挂载点的父挂载点，内核可以确保文件系统按照正确的顺序进行挂载和卸载，从而避免出现不一致的状态。在 unmount 一个文件系统之前，内核需要检查是否有其他挂载点依赖于它，确保只有在没有子挂载点的情况下才能卸载该文件系统，防止数据丢失或不一致
+-	`mnt_root`：指向局部树的根dentry节点，此节点的name为`/`
+-	`mnt_mountpoint`：指向当前局部树挂载上一级的dentry节点（当前这棵树挂载哪个目录上？）
 
 ```BASH
 / (rootfs)
@@ -596,8 +607,6 @@ Linux 使用父子树的形式来构造，父设备树中的一个文件夹 `str
 |   └── /mnt/sub1/file1 # 继承 ext4 文件结构
 └── /proc (procfs)
 ```
-
-1、上图的挂载点
 
 如上图，可以看到通过一个 `struct mount` 结构负责引用一颗 **子设备树**，把这颗子设备树挂载到父设备树的其中一个 `dentry` 节点上；如果 `dentry` 成为了挂载点 `mountpoint`，会给其标识成 `DCACHE_MOUNTED`。**在查找路径的时候同样会判断 `dentry` 的 `DCACHE_MOUNTED` 标志，一旦置位就变成了 `mountpoint`，挂载点目录下原有的内容就不能访问了，转而访问子设备树根节点下的内容**
 
@@ -634,13 +643,49 @@ mount 的过程就是把设备的文件系统加入到 vfs 框架中，以 `moun
 
 ![RULES2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/mnt-ns/mnt_tree_mdev.png)
 
+TODO
 
 ####	多名空间的层次化（mnt_namespace）
 为了支持 `mnt_namespace`，内核把 mount 树扩展成了多棵（之前是单棵），每个 `mnt_namespace` 拥有一棵独立的 mount 树，如下图：
 
 ![mnt-namespace](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/mnt-ns/mnt_tree_ns.png)
 
-##	0x02	部分核心源码摘要
+##	0x02	VFS mount
+
+####	重复挂载：`struct mountpoint`
+`struct mountpoint`[结构](https://elixir.bootlin.com/linux/v4.11.6/source/fs/mount.h#L26)用于管理挂载点目录项（dentry）与挂载在其上的文件系统实例（`struct mount`）之间的关系。在路径名查找（path lookup）及挂载操作都会涉及到，`struct mountpoint`结构体用来表示某个特定的 dentry 当前是一个挂载点，它充当了这个 dentry 与其上挂载的文件系统之间的桥梁
+
+```CPP
+struct mountpoint {
+	struct hlist_node m_hash;
+	struct dentry *m_dentry;
+	struct hlist_head m_list;
+	int m_count;
+};
+```
+
+1、成员定义
+
+-	标识挂载点目录，当一个目录dentry被用作挂载点时（如执行 `mount /dev/sdb1 /mnt/data`），这个目录项本身需要被标记为一个挂载点
+-	成员`m_list`，链表头用来链接所有挂载在这个特定挂载点目录上的 `struct mount`实例，通过遍历这个链表，内核可以知道有哪些文件系统实例当前挂载在这个目录上
+-	成员`m_hash`，用于将其链接到`mountpoint_hashtable`全局哈希表中
+-	成员`m_count`，引用计数器
+
+2、`struct mountpoint`管理
+
+-	内核维护一个全局哈希表（`mountpoint_hashtable`），使用挂载点目录项（dentry）的地址或其哈希值作为键
+-	`struct mountpoint`包含`struct hlist_node m_hash`成员，用于将本节点链接到这个全局哈希表中
+-	内核能够高效地查找一个给定的 dentry 是否是一个挂载点（即是否存在对应的 `struct mountpoint`），以及获取这个 `struct mountpoint`以便访问挂载在其上的文件系统列表
+
+3、路径名查找时的处理
+
+-	当遍历路径时遇到一个目录项（dentry），内核需要判断这个 dentry 是否是一个挂载点
+-	如果该 dentry 关联了一个 `struct mountpoint`（通过 `dentry->d_flags`中的 `DCACHE_MOUNTED`标志和 `dentry->d_mounted`指针间接关联），那么查找就需要跨越此挂载点。这意味着后续的路径组件将在挂载在该点上的文件系统（struct mount指向的根 dentry）中继续查找，而不是在原来的父文件系统中
+
+4、引用计数管理：
+
+-	每当一个新的 `struct mount`实例挂载到这个挂载点上时，`m_count`会增加
+-	每当一个挂载在这个点上的 `struct mount`实例被卸载时，`m_count`会减少
 
 ####	mount 调用路径
 `mount()` 系统调用是理解文件系统层次化的核心，它主要包含 `3` 个关键步骤：
@@ -662,6 +707,10 @@ SYSCALL_DEFINE5(mount) -> do_mount() -> do_new_mount() -> vfs_kern_mount() -> mo
 ```BASH
 SYSCALL_DEFINE5(mount) -> do_mount() -> do_new_mount() -> do_add_mount() -> graft_tree() -> attach_recursive_mnt() -> commit_tree()
 ```
+
+####	mount tree构造原则
+
+TODO
 
 ##	0x03	用户态视角
 
