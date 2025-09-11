@@ -183,7 +183,7 @@ if (read_seqcount_retry(&dentry->d_seq, seq))
 -	[`mountpoint`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/mount.h#L26)：记录一个挂载点的dentry和代表它自身的hlist_node，可以用hlist_node的指针，通过`container_of`获取到对应的`mountpoint()`
 -	[`mnt_namespace`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/mount.h#L7)：记录了某个独立的挂载空间
 
-![vfs-mount-relation]()
+![vfs-mount-relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/open/vfs-mount-relation.png)
 
 对象之间的关系如下：
 
@@ -199,7 +199,7 @@ if (read_seqcount_retry(&dentry->d_seq, seq))
 
 VFS的挂载机制支持在一个挂载点上，先后挂载多个的文件系统的情况（此外，若挂载的文件系统类型相同，文件系统所在磁盘分区不同，也是可以的）。如在binderfs上，先挂载ext2文件系统，再挂载ext4系统，最后再挂载Binder文件系统。这时候只有最后挂载的Binder文件系统是生效的。它们的挂载关联如下图
 
-![vfs_mount_hiden]()
+![vfs_mount_hiden](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/open/vfs_mount_hiden.png)
 
 因为重复挂载的缘故，为了找到最后挂载的Binder文件系统的mount，需要轮询调用`__lookup_mnt()`，即一边轮询调用`__lookup_mnt()`，一边更新path，直到`__lookup_mnt()`返回的`mount*`为`NULL`时，说明此时是该dentry上生效的文件系统类型
 
