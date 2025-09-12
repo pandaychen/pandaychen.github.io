@@ -449,3 +449,4 @@ echo "Hello!"
 -   [零系统调用的暗度陈仓：深度解构io_uring新型rootkit的攻击防护](https://mp.weixin.qq.com/s?__biz=MzU3ODAyMjg4OQ==&mid=2247496377&idx=1&sn=27cbb8a50866b909bd9a1cb441df1a6f&subscene=0)
 -   [Polkit pkexec 权限提升漏洞（CVE-2021-4034）](https://github.com/vulhub/vulhub/blob/master/polkit/CVE-2021-4034/README.zh-cn.md)
 -   [【云原生攻防研究】容器逃逸技术概览](https://mp.weixin.qq.com/s?__biz=MzIyODYzNTU2OA==&mid=2247487393&idx=1&sn=6cec3da009d25cb1c766bb9dae809a86&scene=21#wechat_redirect)
+-   [Tools and Techniques for Red Team / Penetration Testing](https://github.com/A-poc/RedTeam-Tools)

@@ -1129,7 +1129,7 @@ struct task_struct {
 
 ##	0x09	一些有趣的示例
 
-####	fs_struct的cwd/root 与 nsproxy 的关系
+####	思考1：fs_struct的cwd/root 与 nsproxy 的关系
 
 ![mnt_namespace](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/nsproxy_mntnamespace.png)
 
@@ -1163,7 +1163,7 @@ struct task_struct {
 
 ![mnt_namespace_vs_fsstruct](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/namespace/mnt/mnt_tree_ns.png)
 
-####	进程创建的过程
+####	思考2：进程创建的过程
 以系统调用[`fork`](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/fork.c#L2063)为例，其调用链为`fork()->_do_fork()->copy_process()`
 
 ![copy_process](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/scheduler/task_fork_flow.jpeg)
@@ -1333,7 +1333,7 @@ Copy-on-write 实现原理如下图，当`fork()` 之后，内核会把父进程
 
 ![COW](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/cow.jpg)
 
-####	fork+dup(dup2)
+####	思考3：fork+dup(dup2)
 在前文[主机入侵检测系统 Elkeid：设计与分析（一）](https://pandaychen.github.io/2024/08/19/A-ELKEID-STUDY-1/#0x01----agent)介绍进程通信的例子，父子进程+两组pipe实现全双工通信的模型，如下（one pipe）：
 
 ![pipe](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/system-pro/fork-pipe-dup.png)
