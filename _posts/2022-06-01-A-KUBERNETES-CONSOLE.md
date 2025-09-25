@@ -18,8 +18,6 @@ tags:
 
 ![kubernetes-exec](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kubernetes/kubectl-principle3.png)
 
-
-
 ##  0x01    实现思路
 
 1、remotecommand 暴露的 `Executor` 方法 <br>

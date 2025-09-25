@@ -1869,3 +1869,4 @@ TODO（新文章）
 -	[一文读懂零拷贝技术：splice使用](https://mp.weixin.qq.com/s?__biz=MzA3NzYzODg1OA==&mid=2648466923&idx=1&sn=acf2fb71a960f3831f9b98657b39d4ce&scene=21&poc_token=HBrVq2ij3vFrdFf9wyaZbEAFXn3pBxBvM2OpQ6nb)
 -	[一文读懂零拷贝技术：splice原理与实现](https://mp.weixin.qq.com/s/ANBQzhq0RDzd1sLmwKtv5w)
 -	[Linux进程通信 - 管道实现](https://mp.weixin.qq.com/s?__biz=MzA3NzYzODg1OA==&mid=2648465715&idx=1&sn=3eaa62f290c02876b412326a5ebb30a6&scene=21&poc_token=HOi_rWij0oHZNgaRVrbhZoXwDKk40jOAmMMP1JvO)
+-	[Linux内核权限提升漏洞DirtyPipe（CVE-2022-0847）分析](https://mp.weixin.qq.com/s?__biz=Mzk1NzE0ODUyOA==&mid=2247491840&idx=1&sn=9f0034872d9e0bfed46b2ff7a27cba60&source=41&poc_token=HPpesmijxdUHD9uW-7duHqNM-bQMQxIAFZ6k2ax9)

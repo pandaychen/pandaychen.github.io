@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      Kubernetes 应用改造（二）：健康检查
+title:      Kubernetes 之旅（二）：健康检查
 subtitle:   健康检查与探针的应用
 date:       2019-12-08
 author:     pandaychen
