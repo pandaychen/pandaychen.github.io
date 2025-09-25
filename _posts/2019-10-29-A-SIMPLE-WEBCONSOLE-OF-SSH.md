@@ -11,7 +11,7 @@ tags:
 ---
 
 ##  0x00    基础
-本文将描述如何实现一个具备安全认证的 WebConsole，基于 [Golang-SSH 库](https://godoc.org/golang.org/x/crypto/ssh) 实现。WebConsole 的核心实现是打通了 WebSocket`+`SSH 的输入输出流，使得用户直接使用浏览器就可以运行 SSH 终端，非常适合于轻便运维的场景。WebSocket 基于 TCP 传输协议，并复用 HTTP 的握手通道，关于 WebSocket 和 Golang 的开发可以参见：[How to Use Websockets in Golang: Best Tools and Step-by-Step Guide](https://yalantis.com/blog/how-to-build-websockets-in-go/)。
+本文将描述如何实现一个具备安全认证的 WebConsole，基于 [Golang-SSH 库](https://godoc.org/golang.org/x/crypto/ssh) 实现。WebConsole 的核心实现是打通了 WebSocket与SSH 的输入输出流，使得用户直接使用浏览器就可以运行 SSH 终端，非常适合于轻便运维的场景。WebSocket 基于 TCP 传输协议，并复用 HTTP 的握手通道，关于 WebSocket 和 Golang 的开发可以参见：[How to Use Websockets in Golang: Best Tools and Step-by-Step Guide](https://yalantis.com/blog/how-to-build-websockets-in-go/)。
 
 ##  0x01    WebConsole 数据流
 一个具备远程登陆的功能的 Web-Console，其数据流向大概如下：<br>

@@ -21,9 +21,9 @@ tags:
 网上有很多关于 `Kubernetes` 的高质量文章，以及阿里的公开课，可以帮助读者构建 `Kubernetes` 的生态认知。`Kubernetes` 的几个核心概念中，只要理解了分层的概念，穿透各个组件都是围绕此来设计和实现的。下层为上层提供服务，上层不要知道下层的具体实现细节，只需使用下层提供的服务。而层与层之间联系的桥梁就是接口 (`Interface`)
 
 ##	0x02  开发需要掌握的 Kubernetes
-就我个人而言，作为一名合格的云开发者，我认为需要理清楚下面的知识概念：
+作为一名开发者，需要理清楚下面的知识概念：
 
-1.	`POD`	--> `Deployment`--> `Service` ---> `Ingress` 服务应用如何对照入座，在 K8S 中部署的应用无法脱离这几种应用形态 (去掉 POD)
+1.	`POD`	--> `Deployment`--> `Service` ---> `Ingress` 服务应用如何对照入座，在 K8S 中部署的应用无法脱离这几种应用形态
 2.	`Statefulset` 和 `Damonset` 的应用场景
 3.	`JOB/crontabJOB` 的应用场景
 4.	`PV` 和 `PVC` 的实践
@@ -34,7 +34,7 @@ tags:
 9.	`POD` 之间的互相访问和服务发现方式
 10.	`Kubernetes` 上的负载均衡如何做
 11. `Kubernetes` 中的认证与授权、`RBAC`
-12. `RBAC` 的应用之，如何使用 `ServiceAccount`+`Token`+ 证书来调用 `ApiServer` 的相关操作（当然了，必须对 SA 授权）
+12. `RBAC` 的应用，如何使用 `ServiceAccount`+`Token`+ 证书来调用 `ApiServer` 的相关操作（当然了，必须对 SA 授权）
 13.	如何通过 `Kubernetes` 的 `API` 来获取 `POD` 列表的实时变化（实现 `gRPC`+`Kubernetes` 的自定义负载均衡的算法）
 14. 如何理解 `Kubernetes` 的资源限制，如何应用 `HPA（Horizontal Pod Autoscaler）`
 
