@@ -13,6 +13,55 @@ tags:
 ##  0x00    前言
 本文主要收集下主机入侵事件及原理
 
+相关参考：
+
+-   [Linux 应急响应手册](https://books.noptrace.com/linux/0.%E5%B0%81%E9%9D%A2/)
+
+####    入侵过程小结
+
+![ids-attack-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/hids/ids-attack-flow.png)
+
+1、外部侦查
+
+-   外部侦查即未获得目标任何权限的情况下，通过网络对目标进行信息/情报收集
+-   常见手法为主机扫描，以及应用层扫描
+
+2、外部攻击
+
+-   外部攻击即在收集到对应信息后，通过特定应用，特定漏洞或者主机漏洞来对目标进行攻击，并获取上传/执行等能力的过程
+-   外部这里并不仅仅是从外网进入内网，攻击者在内网对健康主机的横向移动对于目标主机也是属于外部的漏洞利用
+-   常见手法为RCE，暴力破解，网络劫持等方式
+
+3、内部侦查
+
+-   内部侦查即在攻击者获取对机器本身的攻击能力后，针对受害主机进行信息收集的过程
+-   常见手法为利用linux命令对主机信息/进程信息/账号信息/操作记录等敏感信息进行收集，以及对特定业务数据/文件进行收集的过程
+
+4、权限提升
+
+-   权限提升即攻击者在外部攻击或者内部侦查后，在受害主机上获取更高权限（root权限）的行为
+-   常见手法为针对进程/应用的权限漏洞进行利用、针对系统权限进行利用、针对运维漏洞（如高权限cronjob）进行利用、容器逃逸等方式
+
+5、持久化
+
+-   持久化即攻击者在主机上通过驻留后门等手法获取更长期留存的行为
+-   常见手法为上传后门程序，对进程进行动态注入，在系统上增加rootkit，增加定时/开机任务项等
+
+6、C2通讯
+
+-   C2通讯即受害主机和攻击者的主机进行信息/命令的传输行为，含有一定隐蔽性
+-   常见手法为DNS/ICMP/Socks隧道，应用层协议通道（ssh），文件传输协议通道（ftp）等
+
+7、逃逸/绕过/自保护
+
+-   逃逸行为即攻击者试图绕过安全防护以及调查取证的行为，可能发生在Kill-Chain的任何位置
+-   常见手法为：清除行为历史，更换文件特征，降低攻击频率，传输/文件加密等行为
+
+8、攻击目的
+
+-   攻击目的涵盖破坏，名誉，利益三个方面，攻击者不同的目的会引发不同的行为
+-   常见手法为：DDOS，数据/系统破坏，挖矿，内部信息收集，GetShell，网页篡改等手法
+
 ##  0x01    反弹 Shell
 反弹shell，通常是攻击机监听在某个TCP/UDP端口（AS 服务端），目标机（受害机 AS 客户端）主动发起请求到攻击机监听的端口，并将其命令行的输入输出转到攻击机，本质是把 `bash` OR `sh` 进程的输入输出重定向到 socket，在 socket 中获取 `stdin[0]`，`stdout[1]` 和 `stderr[2]` 输出到 socket（因为进程通信有较高的复杂性，所以 bash 的输入输出可能是一个 pipe）
 
@@ -450,3 +499,5 @@ echo "Hello!"
 -   [Polkit pkexec 权限提升漏洞（CVE-2021-4034）](https://github.com/vulhub/vulhub/blob/master/polkit/CVE-2021-4034/README.zh-cn.md)
 -   [【云原生攻防研究】容器逃逸技术概览](https://mp.weixin.qq.com/s?__biz=MzIyODYzNTU2OA==&mid=2247487393&idx=1&sn=6cec3da009d25cb1c766bb9dae809a86&scene=21#wechat_redirect)
 -   [Tools and Techniques for Red Team / Penetration Testing](https://github.com/A-poc/RedTeam-Tools)
+-   [网络安全应急排查手册](https://books.noptrace.com/linux/0.%E5%B0%81%E9%9D%A2/)
+-   [如何利用Elkeid发现生产网内恶意行为](https://www.anquanke.com/post/id/250881)
