@@ -443,7 +443,7 @@ TODO
 
 ####	job controller的工作流
 
-![job_controller_flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kubernetes/job-cronjob/syncjob-flow.png)
+![job_controller_flow]()
 
 
 ####	workqueue的生产者：ResourceEventHandler
@@ -532,7 +532,7 @@ func (jm *Controller) deletePod(logger klog.Logger, obj interface{}, final bool)
 
 ####	workqueue的消费者：syncJob
 
-![syncjob-flow.png]()
+![syncjob-flow.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kubernetes/job-cronjob/syncjob-flow.png)
 
 `syncJob` 是 jobController 的核心方法，主要对workqueue pop出的object进行处理，其主要逻辑为：
 
