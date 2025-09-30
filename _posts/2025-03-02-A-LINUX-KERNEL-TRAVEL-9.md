@@ -1,7 +1,7 @@
 ---
 layout:     post
-title:  Linux 内核之旅（九）：OverlayFS
-subtitle:   
+title:  Linux 内核之旅（九）：OverlayFS[2]
+subtitle:   理解docker存储驱动overlay2
 date:       2025-03-02
 author:     pandaychen
 header-img:
@@ -67,12 +67,15 @@ Docker 使用 OverlayFS 作为其联合文件系统，通过分层结构和写�
 -   隔离性：每个容器的修改独立保存在 upperdir，互不影响
 
 
+##  0x01    存储驱动overlay2
+
+
 ##  0x01    Docker与OverlayFS
 
 ####    docker commit
-
 
 ##  0x0  参考
 -   [Overlay 文件系统介绍](https://flyflypeng.tech/%E4%BA%91%E5%8E%9F%E7%94%9F/2023/03/29/Overlay-%E6%96%87%E4%BB%B6%E7%B3%BB%E7%BB%9F.html)
 -   [docker容器技术基础之联合文件系统OverlayFS](https://zhuanlan.zhihu.com/p/392508816)
 -   [理解docker [三] - git与overlayfs](https://zhuanlan.zhihu.com/p/144616121)
+-   [理解存储驱动overlay2](https://slions.github.io/2021/07/12/%E7%90%86%E8%A7%A3%E5%AD%98%E5%82%A8%E9%A9%B1%E5%8A%A8overlay2/)

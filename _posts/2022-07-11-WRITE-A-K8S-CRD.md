@@ -290,7 +290,7 @@ step2：对比与决策（状态机驱动），也是分为多个场景
 
 - 非阻塞：`Reconcile`函数本身执行得非常快，只是协调状态和发起检查，不执行实际耗时操作
 - 异步驱动：实际工作由其他组件（Job Pod）完成
-- 事件驱动与定时驱动结合：调和循环既会被资源对象（DatabaseBackup）的更新事件触发，也会被后台任务（Job）的状态变化事件触发。控制器还会设置一个定时重新调和（Requeue）的机制，即使没有事件，也会定期（例如每30秒）检查一次进行中的任务状态，防止事件丢失
+- 事件驱动与定时驱动结合：调和循环既会被资源对象（DatabaseBackup）的更新事件触发，也会被后台任务（Job）的状态变化事件触发。控制器还会设置一个定时重新调和（Requeue）的机制，即使没有事件，也会定期（例如每`30s`）检查一次进行中的任务状态，防止事件丢失
 
 ####  kubebuilder 核心代码解读
 1、Manager通过`map[GroupVersionKind]informer`启动所有controller：
@@ -307,6 +307,7 @@ func (ip *specificInformersMap) Start(stop <-chan struct{}) {
 ```
 
 2、[`controller`](https://github.com/kubernetes-sigs/controller-runtime/blob/master/pkg/internal/controller/controller.go)实现了前面提到的`workqueue`的大部分关于Controller的核心逻辑实现，也包含了处理event的逻辑
+
 
 ##  0x06  总结
 
