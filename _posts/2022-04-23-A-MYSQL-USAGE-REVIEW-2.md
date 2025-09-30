@@ -290,11 +290,40 @@ MySQL 评估走索引比全表扫描更慢，则不走索引。现在的评估�
 
 4、`OR` 连接的条件，只要有一列没有索引，则全部索引列都不生效 <br>
 ```sql
-// AND 连接，都有索引就走索引
+# AND 连接，都有索引就走索引
 SELECT * FROM test WHERE key_col_1=val_1 AND key_col_2=val_2;
-// OR 连接，一列没索引就都不走索引
+# OR 连接，一列没索引就都不走索引
 SELECT * FROM test WHERE key_col_1=val_1 OR not_key_col_2=val_2;
 ```
+
+举个例子，下面SQL如何优化？
+
+```SQL
+SELECT  count(id) as var_a FROM xxxxx_table 
+where DATE_FORMAT(statistic_time, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m') AND status != "termination" AND operator_center IN (26046,44158,44159,44160,44161,44162,44163,53604)
+```
+
+根据本小节描述的规范，优化后的查询语句如下：
+
+```SQL
+# 创建索引
+CREATE INDEX idx_operator_center_statistic_time_status 
+ON xxxxx_table(operator_center, statistic_time, status);
+
+SELECT COUNT(id) AS var_a 
+FROM xxxxx_table 
+WHERE operator_center IN (26046,44158,44159,44160,44161,44162,44163,53604)
+  AND statistic_time >= DATE_FORMAT(NOW(), '%Y-%m-01') 
+  AND statistic_time < DATE_FORMAT(NOW() + INTERVAL 1 MONTH, '%Y-%m-01')
+  AND status != 'termination';
+```
+
+优化思路如下：
+
+1.  将 `operator_center`放在索引最左侧，因为 `IN` 条件能有效利用索引的范围扫描，接着是 `statistic_time`，避免全表扫描并通过范围查询快速定位本月数据，最后一列索引失效
+2.  查询条件优化：将 `DATE_FORMAT(statistic_time, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')`
+替换为明确的日期范围查询，避免对字段使用函数导致索引失效
+3.  使用 `statistic_time >= 本月第一天和 statistic_time < 下个月第一天的方式`，既保证准确包含本月所有数据，又允许索引有效使用
 
 ####  业务中常用索引技巧
 通常在项目中，遇到的常见问题都是索引相关的问题，这里列举几个典型的：
