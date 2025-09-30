@@ -1,6 +1,6 @@
 ---
 layout: post
-title: Kubernetes CRONJOB && kubebuilder CRONJOB 实现分析
+title: Kubernetes JOB && CRONJOB 实现分析
 subtitle:  
 date: 2025-04-30
 author: pandaychen
@@ -67,33 +67,33 @@ Informer 的核心目标是为客户端（通常是控制器）提供一种高�
 -	解耦：将事件获取与事件处理分离
 
 ####	核心模块
-1、Reflector，驱动整个 Informer 的发动机，它通过 List-Watch 机制与 API Server 建立连接
+1、**Reflector**，驱动整个 Informer 的发动机，它通过 List-Watch 机制与 API Server 建立连接
 
 -	List机制：在启动时，首先调用 List API 获取该类型资源的全量列表，用于初始化
 -	Watch机制：在 List 完成后，立即建立一个长连接（HTTP Chunked Response）来监听该资源的所有后续变化（ADD/MODIFIED/DELETED）。如果连接中断，Reflector 会尝试重新建立连接，并从上次中断的资源版本（Resource Version）开始继续监听，避免事件丢失
 -	输出：Reflector 将从 API Server 监听到的事件（不是完整的对象，而是事件类型和关联对象）写入下一个模块DeltaFIFO
 
-2、DeltaFIFO是一个生产-消费队列，但存储的是**变化（Delta）**而不是完整对象
+2、**DeltaFIFO**是一个生产-消费队列，但存储的是**变化（Delta）**而不是完整对象
 
 -	Delta结构体包含操作类型（Type）和操作对象（Object），如 `{Type: Added, Object: Pod{...}}`
 -	FIFO特性：保证了事件的处理顺序
 -	去重：对于同一个对象，如果多个事件（如多次更新）到达时尚未被处理，DeltaFIFO 会将这些相同对象的 Delta 合并，只保留最新的状态，避免控制器处理不必要的中间状态
 -	作为队列而言，Reflector 是生产者，将事件放入 DeltaFIFO；Informer 是消费者，从 DeltaFIFO 中弹出（Pop）事件进行处理
 
-3、Indexer & Local Store，本质是本地缓存，是 Informer 的内存数据库，它包含了两大功能：缓存&&索引
+3、**Indexer & Local Store**，本质是本地缓存，是 Informer 的内存数据库，它包含了两大功能：缓存&&索引
 
 -	存储：Indexer 是 DeltaFIFO 的消费端之一。当 Informer 从 DeltaFIFO 中取出一个事件后，它会根据事件类型（Add/Update/Delete）更新其内部的本地缓存（Store）。此缓存是一个线程安全的键值存储，Key 默认为 `<namespace>/<name>`的格式，Value 是完整的资源对象
 -	索引（Index）：除了通过 Key 查找，Indexer 还支持创建自定义索引（基于标签、注解或其他字段），实现快速数据检索
 -	作用：控制器所有的查询操作都直接访问本地缓存，减轻了 apiServer 的压力，并加快了控制器的响应速度
 
-4、Informer (Controller)是协调中心，其内嵌了 Reflector 并管理着 DeltaFIFO 的消费过程，	流程控制如下
+4、**Informer** (Controller)是协调中心，其内嵌了 Reflector 并管理着 DeltaFIFO 的消费过程，	流程控制如下
 
 -	启动 Reflector
 -	从 DeltaFIFO 中弹出（pop）事件
 -	对于每一个弹出的事件，它首先更新 Indexer 中的本地缓存
 -	然后，它将这个事件分发给注册的回调函数（ResourceEventHandler）
 
-5、ResourceEventHandler (回调函数)，提供开发者定义的、用于响应特定事件的业务逻辑钩子。这是控制器实现自身业务逻辑的入口。通常需要实现三个方法：
+5、**ResourceEventHandler** (回调函数)，提供开发者定义的、用于响应特定事件的业务逻辑钩子。这是控制器实现自身业务逻辑的入口。通常需要实现三个方法：
 
 -	`OnAdd(obj interface{})`：当有新增对象时调用
 -	`OnUpdate(oldObj, newObj interface{})`：当对象更新时调用
@@ -101,7 +101,7 @@ Informer 的核心目标是为客户端（通常是控制器）提供一种高�
 
 注意：如之前讨论所述，这些回调函数里通常不包含复杂的处理逻辑，识别出关心的对象，然后将其 Key（或一个轻量级结构）扔进 Workqueue
 
-6、Workqueue，主要用于解耦事件接收和事件处理。它是控制器自定义的队列，不同于 DeltaFIFO
+6、**Workqueue**，主要用于解耦事件接收和事件处理。它是控制器自定义的队列，不同于 DeltaFIFO
 
 -	去重：同一个对象的多个事件可能被合并，避免重复处理
 -	重试：如果处理失败，可以将项目重新放回队列（putqueue）等待后续重试
@@ -214,9 +214,41 @@ Job Controller 其实还是主要去创建相对应的 pod，然后 Job Controll
 
 1、Expectations 机制
 
+Expectations 机制是**Job Controller 在内存中维护的一个期望清单，用来记录它刚刚发出的创建或删除 Pod 的指令。其核心作用是确保控制器在真正采取行动前，必须等待并确认上一次的指令已经生效，从而防止重复操作，确保协调过程的最终一致性**，Expectations 机制被用来解决分布式下的操作延迟与感知的场景：
+
+最终一致性延迟，即当 Controller 通过 API Server 发出创建 Pod A的请求后，这个变化需要时间才能被集群感知：
+
+-	Pod 需要被调度到某个节点上
+-	Kubelet 需要拉取镜像并启动容器
+-	Pod 的状态从 Pending变为 Running
+-	这个状态变化需要通过 API Server 写回 etcd
+
+事件驱动与重入，Controller 通过 Informer 监听 Pod 的变化。但事件到达的顺序和时机是不确定的，很可能出现如下case：
+
+-	Controller 刚创建完 `3` 个 Pod，在它收到任何一个 Pod 的 Created事件之前，下一次同步循环（syncJob） 就因为其他原因（比如定时同步）又被触发了
+-	如果没有记录，Controller 会再次检查当前状态，发现并没有pod生成（事件通知滞后了），于是它又会创建 `3` 个新的 Pod。这就导致了重复创建
+
+Expectations 机制就是为了解决上述这种看不到自己的操作结果而导致的重入问题。它的工作原理是一个典型的记账-销账过程，Expectations为每个 Job 对象（通过其 Key 标识）维护一个类似如下结构的计数器
+
+```GO
+type ControlleeExpectations struct {
+    add  int64 // 期望看到的 Pod 创建成功次数
+    del  int64 // 期望看到的 Pod 删除成功次数
+    key  string // 对应的 Job key
+}
+```
+
+Expectations机制的作用如下：
+
+-	防止重复操作：通过记账机制，控制器能清晰地知道**已经发出指令了，正在等结果**，从而避免在结果返回前再次发出相同指令
+-	确保状态收敛的可靠性：它强制控制器必须等待上一次操作的结果被确认后，才能进行下一次可能依赖该结果的协调。这使得复杂的协调逻辑（例如，Job 需要替换失败的 Pod）能够安全地进行
+-	应对事件丢失：该机制内建了超时逻辑（默认 `5` 分钟）。如果一条期望迟迟没有被满足（比如一个 Pod 的创建事件永远丢失了），超时后控制器会强制认为该期望已满足，继续后续操作，防止控制器被永远卡住
+
 2、Sync机制
 
 3、Queue
+
+4、orphanQueue VS queue
 
 ![informer_queue]()
 
@@ -411,9 +443,97 @@ TODO
 
 ####	job controller的工作流
 
-![job_controller_flow]()
+![job_controller_flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kubernetes/job-cronjob/syncjob-flow.png)
+
+
+####	workqueue的生产者：ResourceEventHandler
+
+1、AddFunc：`enqueueSyncJobImmediately`
+
+2、UpdateFunc：`updateJob`
+
+3、DeleteFunc：`deleteJob`
+
+4、PodFunc：`addPod/updatePod/deletePod`
+
+`deletePod`的主要流程：发现 Pod 被删除 -> 确认其所属的 Job -> 记录已观测到删除事件 -> 触发所属 Job 的同步循环，`deletePod`这个事件处理函数负责进行逻辑判断和任务分发，它将需要处理的工作推入不同的队列workqueue。然后，这些队列的消费者（Worker）会从队列中取出任务，并调用 KubeClient 等组件去执行最终的、具体的操作
+
+```GO
+// When a pod is deleted, enqueue the job that manages the pod and update its expectations.
+// obj could be an *v1.Pod, or a DeleteFinalStateUnknown marker item.
+func (jm *Controller) deletePod(logger klog.Logger, obj interface{}, final bool) {
+	pod, ok := obj.(*v1.Pod)
+	if final {
+		recordFinishedPodWithTrackingFinalizer(pod, nil)
+	}
+
+	// When a delete is dropped, the relist will notice a pod in the store not
+	// in the list, leading to the insertion of a tombstone object which contains
+	// the deleted key/value. Note that this value might be stale. If the pod
+	// changed labels the new job will not be woken up till the periodic resync.
+	if !ok {
+		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+		if !ok {
+			utilruntime.HandleError(fmt.Errorf("couldn't get object from tombstone %+v", obj))
+			return
+		}
+		pod, ok = tombstone.Obj.(*v1.Pod)
+		if !ok {
+			utilruntime.HandleError(fmt.Errorf("tombstone contained object that is not a pod %+v", obj))
+			return
+		}
+	}
+
+	controllerRef := metav1.GetControllerOf(pod)
+	hasFinalizer := hasJobTrackingFinalizer(pod)
+	if controllerRef == nil {
+		// No controller should care about orphans being deleted.
+		// But this pod might have belonged to a Job and the GC removed the reference.
+		if hasFinalizer {
+			jm.enqueueOrphanPod(pod)
+		}
+		return
+	}
+	job := jm.resolveControllerRef(pod.Namespace, controllerRef)
+	if job == nil || IsJobFinished(job) {
+		// syncJob will not remove this finalizer.
+		if hasFinalizer {
+			jm.enqueueOrphanPod(pod)
+		}
+		return
+	}
+	jobKey, err := controller.KeyFunc(job)
+	if err != nil {
+		return
+	}
+	jm.expectations.DeletionObserved(logger, jobKey)
+
+	// Consider the finalizer removed if this is the final delete. Otherwise,
+	// it's an update for the deletion timestamp, then check finalizer.
+	if final || !hasFinalizer {
+		jm.finalizerExpectations.finalizerRemovalObserved(logger, jobKey, string(pod.UID))
+	}
+
+	jm.enqueueSyncJobBatched(logger, job)
+}
+```
+
+小结下，`ResourceEventHandler`的实现体现了kubernetes informer的正确的交互模式，即声明式 API，就是告诉系统你期望的状态（如希望这个 Pod 不存在），而不是发出命令式的指令（删除这个 Pod 的缓存记录），因此控制器的工作流程是：
+
+-	观察： 通过 Indexer（缓存）观察系统的当前状态
+-	比较： 将当前状态与期望状态（Spec）进行比较
+-	驱动： 如果存在差异，则通过 Kubernetes API 发起操作，驱动系统向期望状态收敛
+
+所以在 `deleteJob`方法实现中的正确逻辑是，它发现了一个需要清理的 Pod（带有 `Finalizer` 的孤儿 Pod），它没有直接去操作 Indexer，而是调用了 `jm.enqueueOrphanPod(pod)`，该操作最终会导致 Pod 的 Key 被放入Orphan pod的工作队列。队列的消费者（Worker）会调用相应的处理函数，该函数会通过 kubeClient向 apiServer 发起一个 `PATCH` 或 `UPDATE` 请求，目的是移除该 Pod 上的 Finalizer
+
+当apiServer 接收到这个请求后，验证请求并更新 etcd 中该 Pod 的资源记录（移除 Finalizer），由于 Pod 的 Finalizer 被移除，且其所有者（Job）已不存在，Pod 会被真正删除。apiServer 会向所有监听 Pod 资源的 Watcher（包括这里的 Job Controller 的 Informer）广播一个 `DELETED`事件
+
+最后，这里的 Informer 接收到 `DELETED`事件后，内部逻辑会自动安全地从 Indexer 中移除该 Pod 的条目
 
 ####	workqueue的消费者：syncJob
+
+![syncjob-flow.png]()
+
 `syncJob` 是 jobController 的核心方法，主要对workqueue pop出的object进行处理，其主要逻辑为：
 
 1、从 lister（indexer的实例化） 中获取 job 对象
@@ -805,6 +925,13 @@ func (jm *JobController) manageJob(activePods []*v1.Pod, succeeded int32, job *b
     return active, nil
 }
 ```
+
+####	几个细节问题
+1、indexer的意义
+
+2、在workqueue的生产端（回调函数），如`deletePod`方法中，为何不直接删除indexer中的数据？
+
+因为 Indexer 只是一个只读的本地缓存镜像，直接删除它里面的数据没有任何意义，它无法影响 Kubernetes 集群的真实状态。**对于job controller的实现来说，Indexer 的角色仅仅是只读缓存（Read-Only Cache）**，在informer机制中，只有基于watch-list机制的informer模块才能修改indexer，对于controller而言，只读不可修改
 
 ####	小结
 最后基于informer的主要机制来梳理下job controller的实现思路：
