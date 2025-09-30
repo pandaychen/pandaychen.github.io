@@ -26,7 +26,7 @@ Helm 中有三个主要概念：
 ![arch](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kubernetes/helm-2.jpg)
 
 ####    工作原理
-helm 是作为 Helm Repository 的客户端工具，默认工作时，会从本地 home 目录中去获取 chart，只有本地没有 chart 时，它才会到远端的 Helm Repository 上去获取 Chart，当然你也可以自己在本地做一个 Chart，当需要应用 chart 到 K8s 上时，就需要 helm 去联系 K8s Cluster 上部署的 Tiller Server，当 helm 将应用 Chart 的请求给 Tiller Server 时，Tiller Server 接受完 helm 发来的 charts(可以是多个 chart) 和 chart 对应的 Config 后，它会自动联系 API Server，去请求应用 chart 中的配置清单文件，最终这些清单文件会被实例化为 Pod 或其它定义的资源，而这些通过 chart 创建的资源，统称为 release，一个 chart 可被实例化多次，其中的某些参数是会根据 Config 规则自动更改，例如 Pod 的名字等。
+helm 是作为 Helm Repository 的客户端工具，默认工作时，会从本地 home 目录中去获取 chart，只有本地没有 chart 时，它才会到远端的 Helm Repository 上去获取 Chart，当然你也可以自己在本地做一个 Chart，当需要应用 chart 到 K8s 上时，就需要 helm 去联系 K8s Cluster 上部署的 Tiller Server，当 helm 将应用 Chart 的请求给 Tiller Server 时，Tiller Server 接受完 helm 发来的 charts(可以是多个 chart) 和 chart 对应的 Config 后，它会自动联系 APIServer，去请求应用 chart 中的配置清单文件，最终这些清单文件会被实例化为 Pod 或其它定义的资源，而这些通过 chart 创建的资源，统称为 release，一个 chart 可被实例化多次，其中的某些参数是会根据 Config 规则自动更改，例如 Pod 的名字等。
 
 ##  0x01    基本用法
 
