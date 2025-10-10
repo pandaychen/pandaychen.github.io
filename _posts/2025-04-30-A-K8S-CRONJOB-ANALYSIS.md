@@ -250,7 +250,7 @@ Expectations机制的作用如下：
 
 4、orphanQueue VS queue
 
-![informer_queue]()
+![informer_queue](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kubernetes/job-cronjob/informer_queue.png)
 
 ####	Job controller 实现分析
 [`job_controller`](https://github.com/kubernetes/kubernetes/blob/release-1.28/pkg/controller/job/job_controller.go)实现在此，开发者主要只做了以下几件事：
