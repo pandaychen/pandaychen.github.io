@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      BCC
+title:      BCC with python3
 subtitle:   BCC all in one
 date:       2025-06-22
 author:     pandaychen
@@ -231,3 +231,4 @@ RAW_TRACEPOINT_PROBE(sched_switch)
 ##  0x07 参考
 -   [bpftrace一行教程](https://eunomia.dev/zh/tutorials/bpftrace-tutorial/)
 -   [Linux探测工具BCC(可观测性)](https://www.cnblogs.com/charlieroro/p/13265252.html)
+-   [BCC-文件系统组件分析](https://share.note.youdao.com/ynoteshare/index.html?id=18c1e114f98401ca3b2ececc67980726&type=note&_time=1760355931322)
