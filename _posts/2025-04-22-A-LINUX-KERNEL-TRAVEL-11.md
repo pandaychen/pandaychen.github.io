@@ -51,14 +51,27 @@ tags:
 1212279 1174785 45      0       598756  0
 ```
 
+在内核中，`dentry-state`记录在`dentry_stat_t`结构体中，在使用内核提供的inotify机制监控时，特别要注意`nr_negative`对调用inotify性能的影响（某个指定的目录下面存在海量的negative dentry时），参考[Negative dentries, 20 years later](https://lwn.net/Articles/890025/)
+
+```CPP
+struct dentry_stat_t {
+	long nr_dentry;
+	long nr_unused;
+	long age_limit;		/* age in seconds */
+	long want_pages;	/* pages requested by system */
+	long nr_negative;	/* # of unused negative dentries */
+	long dummy;		/* Reserved for future use */
+};
+```
+
 前文已经描述过 [`dentry_hashtable`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L105) 数据结构的意义，即为了提高目录查找效率，内核使用 `dentry_hashtable` 对 dentry 进行管理，在 `open` 等系统调用进行路径查找时，用于快速定位某个目录 dentry 下面的子 dentry（哈希表的搜索效率显然更好）
 
 `dentry_hashtable`用来保存对应一个dentry的`hlist_bl_node`，使用拉链法来解决哈希冲突。它的好处是能根据路径分量（component）名称的hash值，快速定位到对应的`hlist_bl_node`，最后通过`hlist_bl_node`（`container_of`）获得对应的dentry
 
-
-1、`dentry` 及 `dentry_hashtable` 的结构（搜索 & 回收）
+1、`dentry` 及 `dentry_hashtable` 的结构（搜索 && 回收）
 
 对 `dentry` 而言，对于加速搜索关联了两个关键数据结构 `d_hash` 及 `d_lru`，dentry 回收关联的重要成员是 `d_lockref`，`d_lockref` 内嵌一个自旋锁（`spinlock_t`），用于保护 dentry 结构的并发修改
+
 ```CPP
 struct dentry {
     /* Ref lookup also touches following */
@@ -71,7 +84,9 @@ struct dentry {
 
 ![dcache-pic](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/review/dentry-hashtable.png)
 
-`dentry_hashtable`是一个指向`hlist_bl_head`的指针的数组。通过name的hash值，调用[`d_hash()`](1https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L107)即可获取`dentry_hashtable`中对应的`hlist_bl_head`（即拉链的头）
+`dentry_hashtable`是一个指向`hlist_bl_head`的指针的数组。通过name的hash值，调用[`d_hash()`](1https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L107)即可获取`dentry_hashtable`中对应的`hlist_bl_head`（即拉链的头），由于dentry cache中每一项的内容是一个路径到inode的映射关系（海量），通过hashtable来管理是非常高效的，在dentry cache这个hashtable中，是通过类型为`qstr`的name来充当key值，进而计算出hash表的索引（value），即value 是 `struct dentry`本身
+
+dentry cache 使用拉链法来解决hash碰撞问题，若某两个`qstr`name相同的，其对应的parent dentry肯定不同（同一目录下不可能有两个同名的文件），所以具有唯一性
 
 ```CPP
 //dentry hashtable定义
@@ -87,6 +102,8 @@ struct hlist_bl_node {
 	struct hlist_bl_node *next, **pprev;
 };
 
+// 调用d_hash
+// d_hash(dentry->d_name.hash);
 static inline struct hlist_bl_head *d_hash(unsigned int hash)
 {
 	return dentry_hashtable + (hash >> (32 - d_hash_shift));
@@ -102,6 +119,64 @@ static inline struct hlist_bl_head *d_hash(unsigned int hash)
 -	如何区分是否是目标dentry? `dentry_hashtable`是采用拉链法解决冲突的。由于是根据路径分量名称+父parent dentry指针地址来做hash的，所以如何找到需要的节点？
 	-	当hash相同，路径分量名称不同，比较一下路径分量名称的字符串
 	-	当hash相同，路径分量名称相同，通过`hlist_bl_node`获取对应的dentry，判断一下`dentry->d_parent`是否是它的`parent`即可。因为同一目录下不可能有两个同名的文件，所以名称相同的，parent肯定不同
+
+回顾下`struct dentry`结构的`d_lockref.count`成员，该字段表示此dentry的引用计数，若其值不为`0`，说明还有进程在引用它（如通过`open`），此时dentry处于in use状态；而当其引用计数变为`0`，表明不再被使用（如文件被`close`了），则将切换到unused的状态，但此时其指向的内存inode依然有效，因为这些inode对应的文件之后还可能被用到。当内存紧张时，被标记为unused dentry所占据的内存是可以被回收的（参考`dentry-state`），根据局部性原理，应选择最近未被使用的dentry作为回收的对象。同page cache类似，通过slab cache分配得到的dentry在进入unused状态后，会通过LRU链表的形式被管理，最新加入的unused dentry被放在链表的头部，启动内存shrink的操作时，链表尾部的dentry将被率先回收，过程如下图：
+
+in-use状态：
+
+![in-use](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/11/in-use.png)
+
+unused状态：
+
+![unused](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/11/unused.png)
+
+negative-dentry：
+
+![nr](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/11/negative-dentry.png)
+
+
+```cpp
+static void d_lru_add(struct dentry *dentry)
+{
+    dentry->d_flags |= DCACHE_LRU_LIST;
+    this_cpu_inc(nr_dentry_unused);
+    if (d_is_negative(dentry))
+        this_cpu_inc(nr_dentry_negative);
+    WARN_ON_ONCE(!list_lru_add(&dentry->d_sb->s_dentry_lru, &dentry->d_lru));
+}
+```
+
+此外，如果尝试访问（如`open`）一个磁盘路径，但最后发现此路径对应的文件在磁盘上是不存在的，此时该路径对应的dentry会以negative entry的形式记录在dcache里，这样下次在试图访问这个不存在的路径时，可以立即返回错误（失败的案例同样有价值），如上面描述的dentry-state中的`nr_negative`字段
+
+```CPP
+struct dentry {
+	......
+	struct lockref d_lockref;	/* per-dentry lock and refcount
+					 * keep separate from RCU lookup area if
+					 * possible!
+					 */
+	......
+}
+
+//https://elixir.bootlin.com/linux/v6.12.6/source/include/linux/lockref.h#L25
+struct lockref {
+	union {
+#if USE_CMPXCHG_LOCKREF
+		aligned_u64 lock_count;
+#endif
+		struct {
+			spinlock_t lock;
+			int count;
+		};
+	};
+};
+```
+
+假设现在一个目录树的结构如下，挂载了`2`个文件系统，挂载点分别是`r1`和`r2`（后者对应目录`b`）。其中目录`a`下的文件`g`未被使用到，所以不存在于dcache中。经过hash运算后，其在dcache中的组织结构可能是这样的：
+
+![fs-eg](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/11/fs-example.png)
+
+![dcache-example](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/11/dcache-example.jpg)
 
 2、`dentry_hashtable` 的创建过程
 
@@ -156,7 +231,7 @@ RCU-walk 和 REF-walk 是路径查找（Path Lookup）中两种核心的并发�
 // seqlock 验证模式
 seq = raw_seqcount_begin(&dentry->d_seq); 
 // 读取 dentry 字段
-if (read_seqcount_retry(&dentry->d_seq, seq)) 
+if (read_seqcount_retry(&dentry->d_seq, seq))
     goto retry; // 序列号变化则重试
 ```
 
@@ -172,6 +247,121 @@ if (read_seqcount_retry(&dentry->d_seq, seq))
 	-	解析符号链接时递归调用 `link_path_walk()`
 	-	挂载点检查：通过 `__lookup_mnt()` 验证 vfsmount 有效性
 
+4、dentry cache的操作（TODO）
+
+当创建一个新的dentry时，`d_alloc()`会为其申请内存空间，而后通过`d_add`函数将这个新的dentry和对应的inode关联起来，并插入dcache的hash表中；对dentry的使用以`dget`和`[dput](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L751)`来实现引用计数`dentry->d_lockref.count`的加减，当引用计数变为`0`时，加入LRU链表，再次被使用后，从LRU链表移除。最后[`d_drop`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L463)函数直接将一个dentry从hashtable中移除（如dentry失效时），而`d_delete`的目标则是归还inode，并将一个dentry置于negative状态，在内核4.11.6版本中，在`vfs_unlink`、`vfs_rmdir`等操作成功前的最后都会调用`d_delete`
+
+![dcache-state-change](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/11/dcache-ops-all.jpg)
+
+4、dentry cache查找算法的rcu VS ref的设计思路（有趣）
+
+前面简单描述了rcu-walk与ref-walk的场景，关于dcache的查找中，查找dcache的核心函数是`link_path_walk`，在路径的遍历中，每一层目录/文件都被视为一个`component`（分量/组件），**由于component的查询和判定主要依靠hash表的比对，不需要修改dentry的内容，本质上这是一个读的过程，但考虑到并行的需要，需要对途径的dentry的引用计数加1，而后再减1，由于涉及到reference count值的更新，所以这种方式被称为ref-walk**
+
+![walk-component](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/11/walk-component.png)
+
+`link_path_walk`这个核心路径查找的函数（`link_path_walk`的 `for`自顶而下循环 + `walk_component`逐级分量处理）遵循如下原则：
+
+1.	分层处理：路径分量逐级解析
+2.	缓存优先：每级优先查询 dcache
+3.	动态扩展：未命中时触发文件系统的 lookup 操作
+4.	树形构建：新 dentry 加入 dcache 形成dentry树结构
+
+这里以路径`/a/b/c`中的分量 `b`为例，假设路径分量`b`在dentry cache中不存在，但是目录（分量）存在，在`walk_component`函数的主要工作流程如下：
+
+```CPP
+/*step 1：RCU-walk 模式优先尝试
+目标：无锁快速查找
+操作：在父目录（a/）的 dcache 中 RCU 查找 b，检查 dentry 有效性（d_seq验证）
+结果：命中->返回 dentry（继续下一分量）；未命中/无效 -> 返回 -ECHILD
+*/
+dentry = lookup_fast(nd, flags | LOOKUP_RCU);
+
+/*step 2：回退到 ref-walk 模式
+目标：带锁的可靠查找
+操作：获取父 inode 锁（inode->i_rwsem）；重试 dcache 查找（__d_lookup）
+结果：命中 -> 返回 dentry；未命中 -> 进入慢速路径
+*/
+// RCU失败后回退
+dentry = lookup_fast(nd, flags); // 去掉LOOKUP_RCU
+
+/* step3：触发文件系统 lookup
+目标：访问存储设备
+操作：分配新 dentry：d_alloc(parent, name)
+调用文件系统方法：ext4_lookup(dir, dentry, flags)
+
+文件系统从磁盘读取目录项：
+1.	存在->关联 inode：d_add(dentry, inode)
+2.	不存在 → 返回 NULL
+
+结果：成功 ->新 dentry 加入 dcache；失败->返回错误（如 ENOENT）
+*/
+dentry = lookup_slow(nd); 
+// → __lookup_slow()
+// → dir->i_op->lookup()
+
+/*
+step 4：继续下一分量
+
+// walk_component() 成功后
+*/
+nd->path.dentry = dentry; // 更新当前路径
+return next_component;   // 处理下一分量（如 c）
+```
+
+| 步骤 | component | 模式 | 关键操作 | 结果 | 核心代码 |
+| :-----| :---- | :---- | :-----| :---- | :---- |
+| 1 | `a` | RCU-walk | 在dcache中，使用根目录`/` + `a` 查询 `/a`是否存在| 命中dcache（缓存），进入下一分量 |  |
+| 2 | `b` | RCU-walk | 在dcache中，使用 `a/`+`b` 查询 `a/b` 是否存在（RCU） | 未命中 -> 回退 ref-walk |  |
+| 3 | `b` | ref-walk | 在dcache中，使用 `a/`+`b` 查询 `a/b` 是否存在（ref）| 仍然未命中 |  |
+| 4 | `b` | ref-walk | 调用 `ext4_lookup()` 函数读磁盘 | 找到 inode，创建 dentry | |
+| 5 | `c` |  ...... |  ...... | ...... |...... |
+
+在ref-walk查找过程中（关联内核函数[`d_lookup`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L2177)），路径可能会被运行在其他CPU上的线程重命名（如从`/a/b`更改为`/a/c/b`），如何检测呢？既然没法防止这种情况的发生，只能通过`seqlock`检测，如果确实被更改了，就放弃之前的查找结果，再次尝试。因为这个锁主要用来处理重命名的问题，在代码中被称为rename_lock，从代码也可以看出，实际上`d_lookup`并未占用`rename_lock`，它仅仅是需要检测在lookup期间，是否有其他线程持有了rename_lock并执行了重命名操作
+
+```CPP
+// d_lookup的循环中，会存在无尽循环的可能吗？
+struct dentry *d_lookup(const struct dentry *parent, const struct qstr *name)
+{
+    do {
+        seq = read_seqbegin(&rename_lock);
+        dentry = __d_lookup(parent, name);
+        if (dentry)
+            break;
+    } while (read_seqretry(&rename_lock, seq));
+    ...
+}
+```
+
+而真正对`rename_lock`锁的获取，即这个seqlock的writer，在调用`d_move`函数的过程中，会试图持有该锁
+
+```CPP
+//在 d_lookup执行期间，d_move可以获取 rename_lock
+void d_move(struct dentry *dentry, struct dentry *target)
+{
+	write_seqlock(&rename_lock);
+	__d_move(dentry, target, false);
+	write_sequnlock(&rename_lock);
+}
+```
+
+由于dentry（dcache）查找是个高频操作（`open/stat`等），而ref-walk机制需要持有所操作dentry的spinlock（`d_lock`），开销偏大，频繁地加减reference count可能造成cacheline的刷新。内核实现了更快的rcu-walk查找模式，在代码上二者有何种差异呢？
+
+-	rcu-walk：`__d_lookup_rcu()`[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L2093)，内核优先调用，仅在dcache中进行查找，不涉及到文件系统层面，凸显一个快速
+-	ref-walk：`__d_lookup()`[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L2188)，回退到ref-walk
+
+关于dentry hash比对的环节，两者的逻辑是比较相似的，但rcu-walk没有使用dentry的spinlock，也没有更改dentry的引用计数，而是以一个seqcount（[`d_seq`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/dcache.h#L87)）来替代（只进行sequence的判断），其所要对抗的，也是`__d_move()`一类的操作
+
+不过rcu-walk同样会在并发修改的场景下失败，当然失败的后果是可接受的，可以通过 `unlazy_walk()` 去除`LOOKUP_RCU`标志位，fall back到ref-walk的方式继续查找。那么如果ref-walk模式也失败的话，说明要找的dentry不在dcache中，这时就只能调用inode的`lookup`，老老实实地从磁盘文件系统中查找，后文介绍`open`系统调用实现时会详细介绍上述过程
+
+![dache-lookup-mode](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/11/dcache-lookup-mode.png)
+
+####	inode cache
+只要在内存中建立了一个dentry，那么其指向的inode也会在内存中缓存，这就构成了inode cache（icache），icache的每一项内容都是一个已挂载的文件系统中的文件inode，在系统查看如下：
+
+```BASH
+[root@VM-x-x-tencentos /]# cat /proc/sys/fs/inode-state 
+79177   5809    0       0       0       0       0
+```
 
 ####	VFS的挂载
 `open`系统调用的路径分量解析中也会涉及到对挂载的处理，这里简单回顾下。挂载是指将一个文件系统，挂载到全局文件系统树上。除根文件系统外，挂载点要求是一个已存在的文件系统的目录。根文件系统rootfs，会在系统启动的时候创建，挂载到`/`，也是全局文件系统树的根节点。当一个目录被文件系统挂载时，原来目录中包含的其他子目录或文件会被隐藏。以后进入该目录时，将会通过VFS切换到新挂载的文件系统所在的根目录，看到的是该文件系统的根目录下的内容
@@ -497,7 +687,12 @@ static void set_nameidata(struct nameidata *p, int dfd, struct filename *name)
 -	`LAST_BIND`：最后一个分量是链接到特殊文件系统的符号链接
 
 ####	VFS中的目录查找
+在路径名查找时，要考虑如下场景：
 
+1.	当遍历路径时遇到一个目录项（dentry），内核需要判断这个 dentry 是否是一个挂载点
+2.	
+
+TODO
 
 ####	VFS 的 path walk：简单介绍
 VFS的path walk是`open()`的内核调用的核心设计，这里以访问`/dev/binderfs/binder`为例，`/`是根文件系统`rootfs`的根目录，`dev`是根文件系统的根目录下的一个普通目录，非挂载点，`binderfs`根文件系统下的位于`/dev`里的目录，同时也是[Binder文件系统](https://source.android.com/docs/core/architecture/ipc/binder-overview?hl=zh-cn)的挂载点，`binder`是Binder文件系统的挂载点下的一个代表binder设备的文件，下面是vfs的path walk过程：
@@ -2957,3 +3152,5 @@ static inline void __d_set_inode_and_type(struct dentry *dentry,
 -	[Linux Open系统调用 篇三](https://juejin.cn/post/6844903937032585230)
 -	[Linux Open系统调用 篇四](https://juejin.cn/post/6844903937036779533)
 -	[图解 Binder：系统调用 open](https://juejin.cn/post/7204751926515449911)
+-	[linux kernel 路径查询](https://dingjingmaster.github.io/2022/05/0003-%E8%B7%AF%E5%BE%84%E6%9F%A5%E8%AF%A2/)
+-	[Parallel pathname lookups and the importance of testing](https://lwn.net/Articles/692546/)
