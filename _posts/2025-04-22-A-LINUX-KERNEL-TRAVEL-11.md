@@ -118,7 +118,7 @@ static inline struct hlist_bl_head *d_hash(unsigned int hash)
 -	链表遍历：`hlist_bl_for_each_entry_rcu()`，链表里面包含了冲突节点
 -	如何区分是否是目标dentry? `dentry_hashtable`是采用拉链法解决冲突的。由于是根据路径分量名称+父parent dentry指针地址来做hash的，所以如何找到需要的节点？
 	-	当hash相同，路径分量名称不同，比较一下路径分量名称的字符串
-	-	当hash相同，路径分量名称相同，通过`hlist_bl_node`获取对应的dentry，判断一下`dentry->d_parent`是否是它的`parent`即可。因为同一目录下不可能有两个同名的文件，所以名称相同的，parent肯定不同
+	-	当hash相同，路径分量名称相同，通过`hlist_bl_node`获取对应的dentry，判断一下`dentry->d_parent`是否是它的parent即可。因为同一目录下不可能有两个同名的文件，所以名称相同的，parent肯定不同
 
 回顾下`struct dentry`结构的`d_lockref.count`成员，该字段表示此dentry的引用计数，若其值不为`0`，说明还有进程在引用它（如通过`open`），此时dentry处于in use状态；而当其引用计数变为`0`，表明不再被使用（如文件被`close`了），则将切换到unused的状态，但此时其指向的内存inode依然有效，因为这些inode对应的文件之后还可能被用到。当内存紧张时，被标记为unused dentry所占据的内存是可以被回收的（参考`dentry-state`），根据局部性原理，应选择最近未被使用的dentry作为回收的对象。同page cache类似，通过slab cache分配得到的dentry在进入unused状态后，会通过LRU链表的形式被管理，最新加入的unused dentry被放在链表的头部，启动内存shrink的操作时，链表尾部的dentry将被率先回收，过程如下图：
 
@@ -354,6 +354,8 @@ void d_move(struct dentry *dentry, struct dentry *target)
 不过rcu-walk同样会在并发修改的场景下失败，当然失败的后果是可接受的，可以通过 `unlazy_walk()` 去除`LOOKUP_RCU`标志位，fall back到ref-walk的方式继续查找。那么如果ref-walk模式也失败的话，说明要找的dentry不在dcache中，这时就只能调用inode的`lookup`，老老实实地从磁盘文件系统中查找，后文介绍`open`系统调用实现时会详细介绍上述过程
 
 ![dache-lookup-mode](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/11/dcache-lookup-mode.png)
+
+后文将会从代码角度分析下RCU-walk与ref-walk实现的细节区别，以及ref-walk对路径查找的意义
 
 ####	inode cache
 只要在内存中建立了一个dentry，那么其指向的inode也会在内存中缓存，这就构成了inode cache（icache），icache的每一项内容都是一个已挂载的文件系统中的文件inode，在系统查看如下：
