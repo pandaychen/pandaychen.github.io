@@ -53,7 +53,7 @@ bpftrace亦可使用ebpf支持的probe：`hardware/iter/kfunc/kprobe/software/tr
 2、全局变量`@name`
 
 bpftrace中，全局变量对所有的probe actions可见，bpftrace生命周期内可见，bpftrace支持两种变量形式：
--   简单变量`@name = value`：简单变量就是单纯的变量名和值
+-   简单变量`@name = value`：单纯的变量名和值
 -   map：`@name[key] = value`
 
 ```TEXT
@@ -133,34 +133,23 @@ Attaching 1 probe...
 @[nscd]: 12
 @[TsysProxy]: 15
 @[tagentV1.0]: 26
-@[sap1003]: 30
 @[bpftrace]: 34
 @[agent]: 44
-@[sap1001]: 45
 @[nslcdagent]: 60
-@[sap1007]: 61
 @[bkmonitorbeat]: 74
 @[containerd]: 80
 @[os_monitor]: 95
 @[sap1015]: 149
 @[tmanager-servic]: 150
-@[sap1006]: 150
 @[tdsp-filescan]: 157
 @[bkhostc]: 183
 @[secu-tcs-agent]: 193
-@[sap1010]: 199
 @[in:imjournal]: 204
-@[sap1013]: 273
 @[tdsp-taskchanne]: 298
-@[sap1005]: 301
 @[gse_agent]: 627
-@[sap1004]: 827
 @[sshlogd]: 1036
 @[barad_agent]: 1358
 @[tokio-runtime-w]: 1459
-@[sap1009]: 2904
-@[sap1002]: 3066
-@[sap1008]: 14687
 @[sh]: 18838
 @[rm]: 51944
 ```
@@ -627,7 +616,7 @@ Attaching 1 probe...
 
 为什么要采用`hz:99`呢？这里涉及到一类采样应用的技巧，profile是 bpftrace 提供的一种定时采样探针类型。它会在所有 CPU 核心上以固定的时间间隔触发，类似于性能分析工具（如 perf）的采样机制，`hz`表示采样频率的单位是 Hertz（赫兹），即每秒采样的次数，而`99`表示采样频率为 `99` 次/秒。`hz:99`的含义是以每秒 `99` 次的频率在所有 CPU 核心上进行定时采样
 
-​为什么是 `99` 而不是 `100`呢？使用非整数频率（如 `99Hz`）是一种常见技巧，目的是避免采样周期与系统定时器或其他周期性事件同步。如果使用 `100Hz`（或其他整数频率等），采样点可能与某些固定周期事件（如系统定时器中断）对齐，导致采样结果偏向某些特定代码路径，产生观测偏差。选择 `99Hz` 这种略低于标准值的频率，可以使采样点随机化，获得更均匀的统计分布
+为什么是 `99` 而不是 `100`呢？使用非整数频率（如 `99Hz`）是一种常见技巧，目的是避免采样周期与系统定时器或其他周期性事件同步。如果使用 `100Hz`（或其他整数频率等），采样点可能与某些固定周期事件（如系统定时器中断）对齐，导致采样结果偏向某些特定代码路径，产生观测偏差。选择 `99Hz` 这种略低于标准值的频率，可以使采样点随机化，获得更均匀的统计分布
 
 如上面引入的示例`bpftrace -e 'profile:hz:99 { @[ustack] = count(); }'`，该命令会每秒 `99` 次捕获所有 CPU 上正在执行的用户空间程序的调用栈（ustack），通过统计不同调用栈的出现次数（`count()`），可以分析出哪些代码路径消耗的 CPU 时间最多，用于可视化分析性能热点
 
