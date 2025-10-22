@@ -2,7 +2,7 @@
 layout:     post
 title:      BCC with python3
 subtitle:   BCC all in one
-date:       2025-06-22
+date:       2025-02-22
 author:     pandaychen
 header-img:
 catalog: true
@@ -28,11 +28,11 @@ tags:
 5.  把BPF program（就是BPF程序中的函数）attach到events（例如kprobe）
 6.  从BPF map storage读取BPF的输出
 
-![BPF-Compiler-Collection]()
+![BPF-Compiler-Collection](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/ebpf/BCC/BPF-Compiler-Collection.png)
 
 以`biolatency.py`的实现为例：
 
-![BCC-implement-details.png]()
+![BCC-implement-details.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/ebpf/BCC/BCC-implement-details.png)
 
 ##  0x02    细节
 BCC 如何解决内核兼容性问题？这里列举几个要点
@@ -364,67 +364,102 @@ RAW_TRACEPOINT_PROBE(sched_switch)
 
 ##  0x05   代码：网络类
 
+TODO
 
 ##  0x06   代码：文件I/O类
 
 ####    basic：hook && 数据结构
-hock位置
-kprobe
-security_inode_create
 
-open/openat新建文件时不一定通过vfs_crete可能直接调用文件系统的create方法，但一定会在security_inode_create处检查创建文件权限。
+常见的hook位置如下图：
 
-linux-5.10.202/fs/namei.c: 3078
+![VFS-HOOK-BCC]()
 
-static struct dentry *lookup_open(struct nameidata *nd, struct file *file,      // 当前在namei层，根据建立文件的路径找到应该插入的位置
-				  const struct open_flags *op,
-				  bool got_write)
+一些要点：
+
+1、`kprobe/security_inode_create`：对于系统调用如`open/openat`，新建文件时不一定通过`vfs_crete`，可能直接调用文件系统的`inode->create`方法，但一定会在`security_inode_create`处检查创建文件权限
+
+2、对于`inode_operations`和`file_operations`中的接口并不是会被vfs层直接调用，如果内核处理文件时已经获取到inode或其他表示文件的结构体信息可以直接调用文件系统层的接口操作文件（比如`open`带`O_CREAT`选项时，直接在`lookup_open`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L3168)中就调用`inode->create`创建文件）
+
+3、系统调用`open`时，如果需要创建文件并不通过`vfs_create`，`vfs_create`通常用于创建其他特殊类型文件（如设备文件、命名管道、套接字），创建普通文件会在namei层直接调用文件系统的`create`接口
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L3168
+// 当前在namei层，根据建立文件的路径找到应该插入的位置
+static int lookup_open(struct nameidata *nd, struct path *path,
+			struct file *file,
+			const struct open_flags *op,
+			bool got_write, int *opened)
 {
-    /** open 查找文件位置 */
+	struct dentry *dir = nd->path.dentry;     //dir指向父dir的dentry
+	struct inode *dir_inode = dir->d_inode;
+	int open_flag = op->open_flag;
 
-    /** 往下则未找到文件位置 */
+    ......
+    if (d_in_lookup(dentry)) {
+        // 调用inode->lookup查找文件
+		struct dentry *res = dir_inode->i_op->lookup(dir_inode, dentry,
+							     nd->flags);
+		d_lookup_done(dentry);
+		if (unlikely(res)) {
+			if (IS_ERR(res)) {
+				error = PTR_ERR(res);
+				goto out_dput;
+			}
+			dput(dentry);
+			dentry = res;
+		}
+	}
 
-    if (open_flag & O_CREAT) {                                                  // 可新建
-        if (likely(got_write))
-			create_error = may_o_create(&nd->path, dentry, mode);               // 在这里执行 security_inode_create
+    // open 查找文件位置，往下则未找到文件位置
 
-	error = dir_inode->i_op->create(dir_inode, dentry, mode,                    // 直接跨越vfs层调用文件系统的接口创建文件
+    if (open_flag & O_CREAT) {  // O_CRATE 新建文件
+            ......
+            //在这里执行 security_inode_create
+			create_error = may_o_create(&nd->path, dentry, mode);
+			if (create_error) {
+				open_flag &= ~O_CREAT;
+				if (open_flag & O_EXCL)
+					goto no_open;
+			}
+	}
+    ......
+    /* Negative dentry, just create the file */
+	if (!dentry->d_inode && (open_flag & O_CREAT)) {
+		*opened |= FILE_CREATED;
+		audit_inode_child(dir_inode, dentry, AUDIT_TYPE_CHILD_CREATE);
+		if (!dir_inode->i_op->create) {
+			error = -EACCES;
+			goto out_dput;
+		}
+        // 直接跨越vfs层调用文件系统的接口创建文件
+		error = dir_inode->i_op->create(dir_inode, dentry, mode,
 						open_flag & O_EXCL);
+		if (error)
+			goto out_dput;
+		fsnotify_create(dir_inode, dentry);
+	}
 
-    1
-    2
-    3
-    4
-    5
-    6
-    7
-    8
-    9
-    10
-    11
-    12
-    13
-    14
-    15
-    16
+    .......
+}
+```
 
-vfs_*
 
-用于对文件系统层的接口提供更上层的接口，通常由用户层程序发起的系统调用会通过vfs层的函数调用具体文件系统的方法。
-但少部分时也有可能对文件的操作会跨过vfs层直接使用文件系统的接口，如果需要更精准的追踪需要追踪文件系统提供的接口。
+4、对于`vfs_*`系列的内核函数，常用于对文件系统层的接口提供更上层的接口，通常由用户层程序发起的系统调用会通过vfs层的函数调用具体文件系统（如ext4）的方法，但少部分时也有可能对文件的操作会跨过vfs层直接使用文件系统的接口，如果需要更精准的追踪需要追踪文件系统提供的接口，列举如下：
 
-    vfs_unlink 删除文件
-    vfs_getattr 获取文件拓展属性，如文件的selinux标签、权能属性
+-   `vfs_unlink`：删除文件
+-   `vfs_getattr`：获取文件拓展属性，如文件的selinux标签、权能属性等
+-   `vfs_mkdir`：
 
-lookup_fast
 
-内核在处理字符串的文件路径，如"/home/kira/a"时，每一层级都会用一个struct dentry对象表示，如：层级"a"有一个对应的struct dentry对象，层级"a"的对象成员struct dentry *d_parent指向上一层"kira"的struct dentry对象的，“kira"的d_parent指向"home”，“home"的d_parent指向”/"根目录对象。这些对象在内核中会通过多种缓存机制减少频繁的申请释放以提升性能。文件位置查找时内核会通过一些函数先在缓存中查找。
+5、[`lookup_fast`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1537)
 
-lookup_fast函数仅在内核namei相关的地方使用到。namei的含义是从name转换到inode，也就是从路径字符串转换到内核中描述文件位置的结构体。lookup_fast函数的作用是将字符串表示路径的结构nd查找对应为inode结构。
-具体查找的函数是__d_lookup_rcu和__d_lookup，两者的区别是__d_lookup_rcu性能开销更小。在内核VFS层的设计中，使用过的目录项对象有对应的hash表缓存，hash表中按照hash一致的为一个hash桶，在__d_loopup查找过程中，计算name的hash值，找到对应的hash桶，在这个hash桶内查找是否有缓存的struct dentry目录项对象。
+内核在处理字符串的文件路径如`/home/a/b`时，每一层级都会用一个`struct dentry`对象表示，如层级`b`有一个对应的`struct dentry`对象，层级`b`的对象成员`struct dentry *d_parent`指向上一层`a`的`struct dentry`对象，`a`的`d_parent`指向`home`，`home`的`d_parent`指向`/`根目录对象。这些对象在内核中会通过多种缓存机制减少频繁的申请释放以提升性能。文件位置查找时内核会通过一些函数先在缓存中查找
 
-linux-5.10.202/fs/namei.c: 1465
+`lookup_fast`函数仅在内核namei相关的地方使用到（namei的含义是从name转换到inode），也就是从路径字符串转换到内核中描述文件位置的结构体。`lookup_fast`函数的作用是将字符串表示路径的结构`nd`查找对应为inode结构
+`lookup_fast`函数中，具体查找的函数是`__d_lookup_rcu`和`__d_lookup`，两者的区别是`__d_lookup_rcu`性能开销更小。在内核VFS层的设计中，使用过的目录项对象有对应的hashtable缓存，hashtable中按照hash一致的为一个hash桶，在`__d_lookup*`查找过程中，计算name的hash值，找到对应的hash桶，在这个hash桶内查找是否有缓存的`struct dentry`目录项对象
 
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1537
 static struct dentry *lookup_fast(struct nameidata *nd,
 				  struct inode **inode,
 			          unsigned *seqp)
@@ -433,170 +468,102 @@ static struct dentry *lookup_fast(struct nameidata *nd,
         dentry = __d_lookup_rcu(parent, &nd->last, &seq);
     } else {
         dentry = __d_lookup(parent, &nd->last);
+    }
+    ......
+}
 
-linux-5.10.202/fs/dcache.c: 2343
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L2064
+struct dentry *__d_lookup_rcu(const struct dentry *parent,
+				const struct qstr *name,
+				unsigned *seqp)
+{
+	u64 hashlen = name->hash_len;
+	const unsigned char *str = name->name;
+	struct hlist_bl_head *b = d_hash(hashlen_hash(hashlen));
+    ......
+}
 
-/**
- * __d_lookup - search for a dentry (racy)
- * @parent: parent dentry
- * @name: qstr of name we wish to find
- * Returns: dentry, or NULL
- *
- * __d_lookup is like d_lookup, however it may (rarely) return a
- * false-negative result due to unrelated rename activity.
- *
- * __d_lookup is slightly faster by avoiding rename_lock read seqlock,
- * however it must be used carefully, eg. with a following d_lookup in
- * the case of failure.
- *
- * __d_lookup callers must be commented.
- */
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L2203
 struct dentry *__d_lookup(const struct dentry *parent, const struct qstr *name)
 {
 	unsigned int hash = name->hash;
-	struct hlist_bl_head *b = d_hash(hash);     // 在此hash桶中查找是否有对应的目录项对象
+    //在此hash桶中查找是否有对应的目录项对象
+	struct hlist_bl_head *b = d_hash(hash);
+    ......
+}
+```
 
-    1
-    2
-    3
-    4
-    5
-    6
-    7
-    8
-    9
-    10
-    11
-    12
-    13
-    14
-    15
-    16
-    17
-    18
-    19
-    20
-    21
-    22
-    23
-    24
-    25
-    26
-    27
-    28
-    29
-    30
-    31
-    32
+6、[`d_lookup`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L2188)
 
-d_lookup
+`d_lookup`函数的作用是在目录`parent`中查找文件名为`name`的文件。`d_lookup`只会调用`__d_lookup`，有一定的锁（spinlock）开销，对应`dcstat`工具统计结果中对应`SLOW`状态的条目（见下面）
 
-d_lookup函数的作用是在目录parent中查找文件名为name的文件。d_lookup只会调用__d_lookup，有一定的锁开销，对应dcstat结果中对应SLOW条目
-
-linux-5.10.202/fs/dcache.c: 2317
-
-/**
- * d_lookup - search for a dentry
- * @parent: parent dentry
- * @name: qstr of name we wish to find
- * Returns: dentry, or NULL
- *
- * d_lookup searches the children of the parent dentry for the name in
- * question. If the dentry is found its reference count is incremented and the
- * dentry is returned. The caller must use dput to free the entry when it has
- * finished using it. %NULL is returned if the dentry does not exist.
- */
-struct dentry *d_lookup(const struct dentry *parent, const struct qstr *name) {
-    dentry = __d_lookup(parent, name);
-
-    1
-    2
-    3
-    4
-    5
-    6
-    7
-    8
-    9
-    10
-    11
-    12
-    13
-    14
-    15
-
-namei层在查找路径位置时通常会先尝试使用RCU小开锁的形式查找缓存，找不到则使用普通锁方式查找缓存，两个缓存再找不到就需要读取硬盘设备查找了。
-
-linux-5.10.202/fs/namei.c: 2364
-
-int filename_lookup(int dfd, struct filename *name, unsigned flags,
-		    struct path *path, struct path *root)
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L2188
+struct dentry *d_lookup(const struct dentry *parent, const struct qstr *name)
 {
-    retval = path_lookupat(&nd, flags | LOOKUP_RCU, path);
-	if (unlikely(retval == -ECHILD))
-		retval = path_lookupat(&nd, flags, path);
-	if (unlikely(retval == -ESTALE))
-		retval = path_lookupat(&nd, flags | LOOKUP_REVAL, path);
+	struct dentry *dentry;
+	unsigned seq;
 
-    1
-    2
-    3
-    4
-    5
-    6
-    7
-    8
-    9
-    10
+	do {
+		seq = read_seqbegin(&rename_lock);
+		dentry = __d_lookup(parent, name);
+		if (dentry)
+			break;
+	} while (read_seqretry(&rename_lock, seq));
+	return dentry;
+}
+```
 
-有两种锁和文件可能同时存在读和写等其他状态有关。
-数据结构
-inode
+在内核实现中，namei层在查找路径位置时通常会先尝试使用RCU快速模式在dcache中查找缓存，找不到则使用ref即普通锁方式查找缓存，如果上面两种查找模式下在dcache缓存中再找不到就需要读取硬盘设备查找了，查找顺序对应[`do_filp_open`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L3515)
 
-inode代表文件的元数据、属性。如文件的创建时间、修改时间、大小，但linux内核中也会在此数据结构中添加对inode指向文件操作的接口，接口由文件系统层提供。
+```CPP
+struct file *do_filp_open(int dfd, struct filename *pathname,
+		const struct open_flags *op)
+{
+	struct nameidata nd;
+	int flags = op->lookup_flags;
+	struct file *filp;
 
-linux-5.10.202/include/linux/fs.h：610
+	set_nameidata(&nd, dfd, pathname);
+	filp = path_openat(&nd, op, flags | LOOKUP_RCU);
+	if (unlikely(filp == ERR_PTR(-ECHILD)))
+		filp = path_openat(&nd, op, flags);
+	if (unlikely(filp == ERR_PTR(-ESTALE)))
+		filp = path_openat(&nd, op, flags | LOOKUP_REVAL);
+	restore_nameidata();
+	return filp;
+}
+```
 
+7、VFS相关的数据结构（本文代码涉及）
+
+inode：inode代表文件的元数据、属性。如文件的创建时间、修改时间、大小等，内核中也会在此数据结构中添加对inode指向文件操作的接口，接口由文件系统层提供
+
+```CPP
 struct inode {
-    /** 属性 */
 	kuid_t			i_uid;
 	kgid_t			i_gid;
 	
-	/** 文件系统提供的操作接口 */
+	// 文件系统提供的操作接口
 	const struct inode_operations	*i_op;
+    ......
+}
+```
 
-    1
-    2
-    3
-    4
-    5
-    6
-    7
-    8
-    9
+dentry：用于追溯文件路径的结构体，在eBPF程序中通常使用该结构体解析文件路径，不过需要注意仅使用dentry不能完整取出文件的绝对路径，文件路径中可能存在挂载点，需要挂载点结构体共同配合才能解析此类文件的绝对路径
 
-dentry
-
-用于追溯文件路径的结构体，在eBPF程序中通常使用该结构体解析文件路径。
-
-linux-5.10.202/include/linux/dcache.h: 89
+```CPP
 struct dentry {
-    struct dentry *d_parent;	/* parent directory 指向父层级 父层级的d_name是父层级文件夹的名称 */
+    struct dentry *d_parent;	// parent directory 指向父层级 父层级的d_name是父层目录的名称
     struct qstr d_name;         // 文件名，当前层级
+    ......
+}
+```
 
-    1
-    2
-    3
-    4
-
-ps: 仅仅使用dentry不能完整取出文件的绝对路径，文件路径中可能存在挂载点，需要挂载点结构体共同配合才能解析此类文件完整绝对路径。
-————————————————
-版权声明：本文为CSDN博主「Kira Skyler」的原创文章，遵循CC 4.0 BY-SA版权协议，转载请附上原文出处链接及本声明。
-原文链接：https://blog.csdn.net/weixin_42544902/article/details/146496222
 
 
 ####    vfsstat：操作计数
-统计一段时间时间内 VFS 调用的次数，与前文`vfscount`不同，该工具不会输出`comm`，包括如下状态：
+统计一段时间时间内 VFS 调用的次数（使用kprobe形式插桩所有`vfs_*`函数并计数执行次数），与前文`vfscount`不同，该工具不会输出`comm`，包括如下状态：
 
 -   `READ`
 -   `WRITE`
@@ -916,7 +883,11 @@ TIME(s)  COMM           TID    D BYTES   LAT(ms) FILENAME
 26.720   bash           1432366 W 4         22.76 tracee-x86_64.v0.21.0.tar.gz
 ```
 
-相关内核态代码如下，关联hook为`__vfs_read[vfs_read]/__vfs_write[vfs_write]`，注意其中的这么一句话`skip non-sync I/O; see kernel code for __vfs_read()`（写同样）
+fileslower计算的写延迟不代表写入到硬盘的延迟，仅仅是内核返回写成功的延迟。实现逻辑是追踪`kprobe/vfs_read`和`kprobe/vfs_write`的调用，记录操作大小、调用者pid和comm，调用时间戳，并在`kretprobe/vfs_read`和`kretprobe/vfs_write`返回时记录读写大小、类型（`R/W`），计算时间差。相关内核态代码如下，关联hook为`__vfs_read[vfs_read]/__vfs_write[vfs_write]`，注意其中的这么一句话`skip non-sync I/O; see kernel code for __vfs_read()`（写同样）。这句的话意思是什么？
+
+TODO
+
+TODO
 
 ```PYTHON
 # define BPF program
@@ -1329,7 +1300,7 @@ TIME     PID     COMM             ACTION FILE
 -   `R_Kb/W_Kb`：读写数据量
 -   `T`：文件类型，R（常规文件），S（Socket），O（other）
 
-采样输出如下：
+采样输出如下，仅记录文件读写类型，读写失败时也将被记录
 
 ```BASH
 16:15:30 loadavg: 0.16 0.10 0.06 1/379 1579177
@@ -1342,7 +1313,7 @@ TID     COMM             READS  WRITES R_Kb    W_Kb    T FILE
 1579177 python3          10     0      90      0       R cmdline
 ```
 
-内核态代码如下，关注下面这几个成员的获取及判断：
+内核态代码如下，关注下面这几个成员的获取及判断。实现原理是通过追踪`kprobe/vfs_read`和`kprobe/vfs_write`的调用，记录文件操作类型、读写大小、文件名（denty name）等信息
 
 -   inode：`file->f_inode->i_ino`
 -   dev：`file->f_inode->i_sb->s_dev`
@@ -1479,6 +1450,736 @@ else:
 
 ####    biosnoop
 [`biosnoop`](https://github.com/iovisor/bcc/blob/v0.35.0/tools/biosnoop.py)跟踪每个块设备的I/O，并打印每个I/O的延迟，使用时可以结合`biolatency`工具，首先使用`python3 biolatency.py -D`找出延迟（分布）大的磁盘，然后使用`biosnoop`找出导致延迟的进程
+
+####    statsnoop
+使用`statfs/newstat/statx/newfstatat/newlstat`等相关的kprobe/kretprobe的hook点，比如PATH命令位置定位场景，在终端输入`vi[TAB]`，当触发补全时，就会触发`stat`系统调用。
+
+说明：终端bash经常会使用`stat`判断命令在哪个地方，如bash中使用Tab键自动补全命令，bash会根据环境变量`PATH`中的路径检索`ls`在哪个位置，检索便是通过`stat`获取文件信息，如`stat("/usr/bin/ls")`，如成功则找到`ls`命令位置
+
+```bash
+PID     COMM               FD ERR PATH
+1665296 bash               -1   2 vi
+1665296 bash               -1   2 view
+1665296 bash               -1   2 vigr
+1665296 bash               -1   2 vim
+1665296 bash               -1   2 vimdiff
+1665296 bash               -1   2 vimdot
+1665296 bash               -1   2 vimtutor
+1665296 bash               -1   2 vipw
+1665296 bash               -1   2 virt-what
+1665296 bash               -1   2 visudo
+```
+
+```PYTHON
+# define BPF program
+bpf_text = """
+......
+
+enum sys_type {
+    SYS_STAT = 1,
+    SYS_STATX,
+    SYS_STATFS,
+    SYS_NEWSTAT,
+    SYS_NEWLSTAT,
+    SYS_FSTATAT64,
+    SYS_NEWFSTATAT,
+};
+
+struct val_t {
+    const char *fname;
+    enum sys_type type;
+};
+
+struct data_t {
+    u32 pid;
+    u64 ts_ns;
+    int ret;
+    char comm[TASK_COMM_LEN];
+    char fname[NAME_MAX];
+    u32 type; /* enum sys_type */
+};
+
+BPF_HASH(infotmp, u32, struct val_t);
+BPF_PERF_OUTPUT(events);
+
+static int trace_entry(struct pt_regs *ctx, enum sys_type type,
+                       const char __user *filename)
+{
+    struct val_t val = {};
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = pid_tgid >> 32;
+    u32 tid = (u32)pid_tgid;
+
+    FILTER
+    val.fname = filename;
+    val.type = type;
+    infotmp.update(&tid, &val);
+
+    return 0;
+};
+
+int syscall__stat_entry(struct pt_regs *ctx, const char __user *filename)
+{
+    return trace_entry(ctx, SYS_STAT, filename);
+}
+
+int syscall__statfs_entry(struct pt_regs *ctx, const char __user *filename)
+{
+    return trace_entry(ctx, SYS_STATFS, filename);
+}
+
+int syscall__newstat_entry(struct pt_regs *ctx, const char __user *filename)
+{
+    return trace_entry(ctx, SYS_NEWSTAT, filename);
+}
+
+int syscall__newlstat_entry(struct pt_regs *ctx, const char __user *filename)
+{
+    return trace_entry(ctx, SYS_NEWLSTAT, filename);
+}
+
+int syscall__statx_entry(struct pt_regs *ctx, int dfd, const char __user *filename)
+{
+    return trace_entry(ctx, SYS_STATX, filename);
+}
+
+int syscall__fstatat64_entry(struct pt_regs *ctx, int dfd, const char __user *filename)
+{
+    return trace_entry(ctx, SYS_FSTATAT64, filename);
+}
+
+int syscall__newfstatat_entry(struct pt_regs *ctx, int dfd, const char __user *filename)
+{
+    return trace_entry(ctx, SYS_NEWFSTATAT, filename);
+}
+
+int trace_return(struct pt_regs *ctx)
+{
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 tid = (u32)pid_tgid;
+    struct val_t *valp;
+
+    valp = infotmp.lookup(&tid);
+    if (valp == 0) {
+        // missed entry
+        return 0;
+    }
+
+    struct data_t data = {.pid = pid_tgid >> 32};
+    bpf_probe_read_user(&data.fname, sizeof(data.fname), (void *)valp->fname);
+    data.type = valp->type;
+    bpf_get_current_comm(&data.comm, sizeof(data.comm));
+    data.ts_ns = bpf_ktime_get_ns();
+    data.ret = PT_REGS_RC(ctx);
+
+    events.perf_submit(ctx, &data, sizeof(data));
+    infotmp.delete(&tid);
+
+    return 0;
+}
+"""
+......
+
+# initialize BPF
+b = BPF(text=bpf_text)
+
+# for POSIX compliance, all architectures implement these
+# system calls but the name of the actual entry point may
+# be different for which we must check if the entry points
+# actually exist before attaching the probes
+def try_attach_syscall_probes(syscall):
+    # src/python/bcc/__init__.py 
+    syscall_fnname = b.get_syscall_fnname(syscall)
+    if BPF.ksymname(syscall_fnname) != -1:
+        b.attach_kprobe(event=syscall_fnname, fn_name="syscall__%s_entry" % syscall)
+        b.attach_kretprobe(event=syscall_fnname, fn_name="trace_return")
+
+try_attach_syscall_probes("stat")
+try_attach_syscall_probes("statx")
+try_attach_syscall_probes("statfs")
+try_attach_syscall_probes("newstat")
+try_attach_syscall_probes("newlstat")
+try_attach_syscall_probes("fstatat64")
+try_attach_syscall_probes("newfstatat")
+```
+
+```PYTHON
+# Given a syscall's name, return the full Kernel function name with current
+# system's syscall prefix. For example, given "clone" the helper would
+# return "sys_clone" or "__x64_sys_clone".
+def get_syscall_fnname(self, name):
+    name = _assert_is_bytes(name)
+    return self.get_syscall_prefix() + name
+```
+
+####    dcstat：dentry cache 状态
+`dcstat`工具关联的hook调用如下：
+
+```PYTHON
+b.attach_kprobe(event_re=r'^lookup_fast$|^lookup_fast.constprop.*.\d$', fn_name="count_fast")
+b.attach_kretprobe(event="d_lookup", fn_name="count_lookup")
+```
+
+理解dcstat的工作流程需要对查找dentry cache机制特别熟悉，`count_fast`方法记录所有通过缓存查找路径的调用，不论是RCU还是普通锁，其中`d_lookup`是慢速的普通锁。统计这些函数的调用次数以及根据返回值判断查找缓存是否成功
+
+```BASH
+#page cache命中率降低会增加硬盘IO
+[root@VM-218-158-centos tools]# python3 dcstat.py 
+TIME         REFS/s   SLOW/s   MISS/s     HIT%
+22:09:11:       454        7        7    98.46
+22:09:12:       443        7        6    98.65
+22:09:13:      8367     1277       17    99.80
+22:09:14:      4007      260       35    99.13
+22:09:15:       498       10        6    98.80
+22:09:16:     15420     1693      205    98.67
+```
+
+内核态代码如下：
+
+```python
+# define BPF program
+bpf_text = """
+#include <uapi/linux/ptrace.h>
+
+enum stats {
+    S_REFS = 1,
+    S_SLOW,
+    S_MISS,
+    S_MAXSTAT
+};
+
+BPF_ARRAY(stats, u64, S_MAXSTAT);
+
+/*
+ * How this is instrumented, and how to interpret the statistics, is very much
+ * tied to the current kernel implementation (this was written on Linux 4.4).
+ * This will need maintenance to keep working as the implementation changes. To
+ * aid future adventurers, this is is what the current code does, and why.
+ *
+ * First problem: the current implementation takes a path and then does a
+ * lookup of each component. So how do we count a reference? Once for the path
+ * lookup, or once for every component lookup? I've chosen the latter
+ * since it seems to map more closely to actual dcache lookups (via
+ * __d_lookup_rcu()). It's counted via calls to lookup_fast().
+ *
+ * The implementation tries different, progressively slower, approaches to
+ * lookup a file. At what point do we call it a dcache miss? I've chosen when
+ * a d_lookup() (which is called during lookup_slow()) returns zero.
+ *
+ * I've also included a "SLOW" statistic to show how often the fast lookup
+ * failed. Whether this exists or is interesting is an implementation detail,
+ * and the "SLOW" statistic may be removed in future versions.
+ */
+void count_fast(struct pt_regs *ctx) {
+    int key = S_REFS;
+    stats.atomic_increment(key);
+}
+
+void count_lookup(struct pt_regs *ctx) {
+    int key = S_SLOW;
+    stats.atomic_increment(key);
+    if (PT_REGS_RC(ctx) == 0) {
+        key = S_MISS;
+        stats.atomic_increment(key);
+    }
+}
+"""
+
+# load BPF program
+b = BPF(text=bpf_text)
+b.attach_kprobe(event_re=r'^lookup_fast$|^lookup_fast.constprop.*.\d$', fn_name="count_fast")
+b.attach_kretprobe(event="d_lookup", fn_name="count_lookup")
+
+# stat column labels and indexes
+stats = {
+    "REFS": 1,
+    "SLOW": 2,
+    "MISS": 3
+}
+```
+
+注意，本实现未必会严谨，TODO
+
+####    dcsnoop
+按文件名显示dentry cache缓存命中情况，`M`代表缓冲未命中，`R`代表缓存命中，和dcstat工具原理一致，仅显示方式不同
+
+```BASH
+[root@VM-X-X-centos tools]# python3 dcsnoop.py 
+TIME(s)     PID     COMM             T FILE
+0.015185    764728  sap1002          M sockstat
+0.099943    544     systemd-journal  M log-extra-fields:nscd.service
+0.164748    764728  sap1002          M sockstat   
+0.222522    764728  sap1002          M cgroup
+0.222598    764728  sap1002          M environ
+0.222633    764728  sap1002          M 2
+0.264027    764728  sap1002          M cgroup
+0.264119    764728  sap1002          M status
+0.264156    764728  sap1002          M cmdline
+0.264186    764728  sap1002          M environ
+```
+
+```PYTHON
+# define BPF program
+bpf_text = """
+#include <uapi/linux/ptrace.h>
+#include <linux/fs.h>
+#include <linux/sched.h>
+
+#define MAX_FILE_LEN  64
+
+enum lookup_type {
+    LOOKUP_MISS,
+    LOOKUP_REFERENCE,
+};
+
+struct entry_t {
+    char name[MAX_FILE_LEN];
+};
+
+BPF_HASH(entrybypid, u32, struct entry_t);
+
+struct data_t {
+    u32 pid;
+    enum lookup_type type;
+    char comm[TASK_COMM_LEN];
+    char filename[MAX_FILE_LEN];
+};
+
+BPF_PERF_OUTPUT(events);
+
+/* from fs/namei.c: */
+struct nameidata {
+        struct path     path;
+        struct qstr     last;
+};
+
+static inline
+void submit_event(struct pt_regs *ctx, void *name, int type, u32 pid)
+{
+    struct data_t data = {
+        .pid = pid,
+        .type = type,
+    };
+    bpf_get_current_comm(&data.comm, sizeof(data.comm));
+    bpf_probe_read_kernel(&data.filename, sizeof(data.filename), name);
+    events.perf_submit(ctx, &data, sizeof(data));
+}
+
+int trace_fast(struct pt_regs *ctx, struct nameidata *nd, struct path *path)
+{
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    submit_event(ctx, (void *)nd->last.name, LOOKUP_REFERENCE, pid);
+    return 1;
+}
+
+int kprobe__d_lookup(struct pt_regs *ctx, const struct dentry *parent,
+    const struct qstr *name)
+{
+    u32 tid = bpf_get_current_pid_tgid();
+    struct entry_t entry = {};
+    const char *fname = name->name;
+    if (fname) {
+        bpf_probe_read_kernel(&entry.name, sizeof(entry.name), (void *)fname);
+    }
+    entrybypid.update(&tid, &entry);
+    return 0;
+}
+
+int kretprobe__d_lookup(struct pt_regs *ctx)
+{
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = pid_tgid >> 32;
+    u32 tid = (u32)pid_tgid;
+    struct entry_t *ep;
+
+    ep = entrybypid.lookup(&tid);
+    if (ep == 0) {
+        return 0;   // missed entry
+    }
+    if (PT_REGS_RC(ctx) != 0) {
+        entrybypid.delete(&tid);
+        return 0;   // lookup didn't fail
+    }
+
+    submit_event(ctx, (void *)ep->name, LOOKUP_MISS, pid);
+    entrybypid.delete(&tid);
+    return 0;
+}
+"""
+......
+
+# initialize BPF
+b = BPF(text=bpf_text)
+if args.all:
+    b.attach_kprobe(event_re=r'^lookup_fast$|^lookup_fast.constprop.*.\d$', fn_name="trace_fast")
+
+mode_s = {
+    0: 'M',
+    1: 'R',
+}
+```
+
+####    fsdist[ext4dist]：文件系统操作时间直方图
+以`ext4dist`为例，该工具用于统计文件系统操作时间直方图
+
+```BASH
+[root@VM-X-X-centos tools]# python3 ext4dist.py 
+Tracing ext4 operation latency... Hit Ctrl-C to end.
+^C
+
+operation = read
+     usecs               : count     distribution
+         0 -> 1          : 5706     |****************************************|
+         2 -> 3          : 206      |*                                       |
+         4 -> 7          : 33       |                                        |
+         8 -> 15         : 15       |                                        |
+        16 -> 31         : 2        |                                        |
+        32 -> 63         : 0        |                                        |
+        64 -> 127        : 2        |                                        |
+       128 -> 255        : 2        |                                        |
+       256 -> 511        : 1        |                                        |
+       512 -> 1023       : 0        |                                        |
+      1024 -> 2047       : 1        |                                        |
+
+operation = open
+     usecs               : count     distribution
+         0 -> 1          : 5155     |****************************************|
+         2 -> 3          : 176      |*                                       |
+         4 -> 7          : 12       |                                        |
+         8 -> 15         : 9        |                                        |
+        16 -> 31         : 4        |                                        |
+        32 -> 63         : 0        |                                        |
+        64 -> 127        : 4        |                                        |
+       128 -> 255        : 1        |                                        |
+       256 -> 511        : 4        |                                        |
+       512 -> 1023       : 0        |                                        |
+      1024 -> 2047       : 0        |                                        |
+      2048 -> 4095       : 1        |                                        |
+
+operation = write
+     usecs               : count     distribution
+         0 -> 1          : 1        |*                                       |
+         2 -> 3          : 11       |************                            |
+         4 -> 7          : 11       |************                            |
+         8 -> 15         : 14       |***************                         |
+        16 -> 31         : 36       |****************************************|
+        32 -> 63         : 4        |****                                    |
+        64 -> 127        : 4        |****                                    |
+       128 -> 255        : 0        |                                        |
+       256 -> 511        : 0        |                                        |
+       512 -> 1023       : 3        |***                                     |
+      1024 -> 2047       : 3        |***                                     |
+
+operation = fsync
+     usecs               : count     distribution
+         0 -> 1          : 0        |                                        |
+         2 -> 3          : 0        |                                        |
+         4 -> 7          : 0        |                                        |
+         8 -> 15         : 0        |                                        |
+        16 -> 31         : 0        |                                        |
+        32 -> 63         : 0        |                                        |
+        64 -> 127        : 0        |                                        |
+       128 -> 255        : 0        |                                        |
+       256 -> 511        : 0        |                                        |
+       512 -> 1023       : 0        |                                        |
+      1024 -> 2047       : 0        |                                        |
+      2048 -> 4095       : 0        |                                        |
+      4096 -> 8191       : 0        |                                        |
+      8192 -> 16383      : 0        |                                        |
+     16384 -> 32767      : 1        |****************************************|
+```
+
+该工具主要用于统计文件系统中具体实现如`read/write/sync/open`时间消耗，延迟的增加可能是硬盘缓存命中率低/硬盘速度慢，也可能是CPU负载较高导致。工具的内核态实现逻辑也比较直观，利用`ext4*`相关的操作函数，通过kprobe入口使用map保存起始时间，通过kretprobe入口使用map计算耗时，然后加入直方图统计。此外，在用户态定时输出直方图与清空即可
+
+```PYTHON
+while (1):
+    ......
+    dist.print_log2_hist(label, "operation", section_print_fn=bytes.decode)
+    dist.clear()
+    ......
+```
+
+以ext4文件系统为例，介绍下这里涉及到VFS的原理，`struct file_operations`成员中的函数指针指向文件系统具体如何实现对应的操作，如`read_iter`函数指针指向的`ext4_file_read_iter`是ext4文件系统实现读取文件的具体实现，对于写操作而言，ext4文件系统等普遍使用`write_iter`，`write_iter`具有更强的功能性能
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/file.c#L720
+const struct file_operations ext4_file_operations = {
+	.read_iter	= ext4_file_read_iter,      //for READ
+	.write_iter	= ext4_file_write_iter,     //for WRITE
+	.open		= ext4_file_open,           //for OPEN
+	.fsync		= ext4_sync_file,           //for FSYNC
+};
+```
+
+内核态代码如下：
+```PYTHON
+# define BPF program
+bpf_text = """
+#include <uapi/linux/ptrace.h>
+#include <linux/fs.h>
+#include <linux/sched.h>
+
+#define OP_NAME_LEN 8
+typedef struct dist_key {
+    char op[OP_NAME_LEN];
+    u64 slot;
+} dist_key_t;
+BPF_HASH(start, u32);
+BPF_HISTOGRAM(dist, dist_key_t);
+
+// time operation
+int trace_entry(struct pt_regs *ctx)
+{
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = pid_tgid >> 32;
+    u32 tid = (u32)pid_tgid;
+
+    if (FILTER_PID)
+        return 0;
+    u64 ts = bpf_ktime_get_ns();
+    start.update(&tid, &ts);
+    return 0;
+}
+
+EXT4_TRACE_READ_CODE
+
+static int trace_return(struct pt_regs *ctx, const char *op)
+{
+    u64 *tsp;
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = pid_tgid >> 32;
+    u32 tid = (u32)pid_tgid;
+
+    // fetch timestamp and calculate delta
+    tsp = start.lookup(&tid);
+    if (tsp == 0) {
+        return 0;   // missed start or filtered
+    }
+    u64 delta = bpf_ktime_get_ns() - *tsp;
+    start.delete(&tid);
+
+    // Skip entries with backwards time: temp workaround for 728
+    if ((s64) delta < 0)
+        return 0;
+
+    delta /= FACTOR;
+
+    // store as histogram
+    dist_key_t key = {.slot = bpf_log2l(delta)};
+    __builtin_memcpy(&key.op, op, sizeof(key.op));
+    dist.atomic_increment(key);
+
+    return 0;
+}
+
+int trace_read_return(struct pt_regs *ctx)
+{
+    char *op = "read";
+    return trace_return(ctx, op);
+}
+
+int trace_write_return(struct pt_regs *ctx)
+{
+    char *op = "write";
+    return trace_return(ctx, op);
+}
+
+int trace_open_return(struct pt_regs *ctx)
+{
+    char *op = "open";
+    return trace_return(ctx, op);
+}
+
+int trace_fsync_return(struct pt_regs *ctx)
+{
+    char *op = "fsync";
+    return trace_return(ctx, op);
+}
+"""
+
+# Starting from Linux 4.10 ext4_file_operations.read_iter has been changed from
+# using generic_file_read_iter() to its own ext4_file_read_iter().
+#
+# To detect the proper function to trace check if ext4_file_read_iter() is
+# defined in /proc/kallsyms, if it's defined attach to that function, otherwise
+# use generic_file_read_iter() and inside the trace hook filter on ext4 read
+# events (checking if file->f_op == ext4_file_operations).
+if BPF.get_kprobe_functions(b'ext4_file_read_iter'):
+    ext4_read_fn = 'ext4_file_read_iter'
+    ext4_trace_read_fn = 'trace_entry'
+    ext4_trace_read_code = ''
+else:
+    ext4_read_fn = 'generic_file_read_iter'
+    ext4_trace_read_fn = 'trace_read_entry'
+    ext4_file_ops_addr = ''
+    with open(kallsyms) as syms:
+        for line in syms:
+            (addr, size, name) = line.rstrip().split(" ", 2)
+            name = name.split("\t")[0]
+            if name == "ext4_file_operations":
+                ext4_file_ops_addr = "0x" + addr
+                break
+        if ext4_file_ops_addr == '':
+            print("ERROR: no ext4_file_operations in /proc/kallsyms. Exiting.")
+            print("HINT: the kernel should be built with CONFIG_KALLSYMS_ALL.")
+            exit(1)
+    ext4_trace_read_code = """
+int trace_read_entry(struct pt_regs *ctx, struct kiocb *iocb)
+{
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = pid_tgid >> 32;
+    u32 tid = (u32)pid_tgid;
+
+    if (FILTER_PID)
+        return 0;
+
+    // ext4 filter on file->f_op == ext4_file_operations
+    struct file *fp = iocb->ki_filp;
+    if ((u64)fp->f_op != %s)
+        return 0;
+
+    u64 ts = bpf_ktime_get_ns();
+    start.update(&tid, &ts);
+    return 0;
+}""" % ext4_file_ops_addr
+
+# code replacements
+bpf_text = bpf_text.replace('EXT4_TRACE_READ_CODE', ext4_trace_read_code)
+bpf_text = bpf_text.replace('FACTOR', str(factor))
+if args.pid:
+    bpf_text = bpf_text.replace('FILTER_PID', 'pid != %s' % pid)
+else:
+    bpf_text = bpf_text.replace('FILTER_PID', '0')
+if debug or args.ebpf:
+    print(bpf_text)
+    if args.ebpf:
+        exit()
+
+# load BPF program
+b = BPF(text=bpf_text)
+
+b.attach_kprobe(event=ext4_read_fn, fn_name=ext4_trace_read_fn)
+b.attach_kprobe(event="ext4_file_write_iter", fn_name="trace_entry")
+b.attach_kprobe(event="ext4_file_open", fn_name="trace_entry")
+b.attach_kprobe(event="ext4_sync_file", fn_name="trace_entry")
+b.attach_kretprobe(event=ext4_read_fn, fn_name='trace_read_return')
+b.attach_kretprobe(event="ext4_file_write_iter", fn_name="trace_write_return")
+b.attach_kretprobe(event="ext4_file_open", fn_name="trace_open_return")
+b.attach_kretprobe(event="ext4_sync_file", fn_name="trace_fsync_return")
+```
+
+####    dirtop：追踪目录内文件的读写操作
+仅能追踪目录内（**包括目录下的递归子目录**）已存在文件的读写追踪，新建文件不能追踪。其工作逻辑是，在启动前收集目录内文件的inode值，在`kprobe/vfs_read`和`kprobe/vfs_write`时根据参数`struct file *file`中的`f_path.dentry->d_inode->i_ino`获取此时读写文件的inode，判断是否是需要追踪的文件，则收集文件的读写次数、读写大小
+
+```BASH
+#python3 dirtop.py -d /tmp/ -s all 10
+READS  WRITES R_Kb     W_Kb     PATH
+0      1      0        0        /tmp/
+```
+
+内核态实现：
+
+```PYTHON
+# define BPF program
+bpf_text = """
+# include <uapi/linux/ptrace.h>
+# include <linux/blkdev.h>
+
+// the key for the output summary
+struct info_t {
+    unsigned long inode_id;
+};
+
+// the value of the output summary
+struct val_t {
+    u64 reads;
+    u64 writes;
+    u64 rbytes;
+    u64 wbytes;
+};
+
+BPF_HASH(counts, struct info_t, struct val_t);
+
+static int do_entry(struct pt_regs *ctx, struct file *file,
+    char __user *buf, size_t count, int is_read)
+{
+    u32 tgid = bpf_get_current_pid_tgid() >> 32;
+    if (TGID_FILTER)
+        return 0;
+
+    // The directory inodes we look at
+    u32 dir_ids[INODES_NUMBER] =  DIRECTORY_INODES;
+    struct info_t info = {.inode_id = 0};
+    struct dentry *pde = file->f_path.dentry;
+
+    // 遍历dentry树，最大50次
+    for (int i=0; i<50; i++) {
+        // If we don't have any parent, we reached the root
+        if (!pde->d_parent) {
+            break;
+        }
+        pde = pde->d_parent;
+        // Does the files is part of the directory we look for
+        for(int dir_id=0; dir_id<INODES_NUMBER; dir_id++) {
+            if (pde->d_inode->i_ino == dir_ids[dir_id]) {
+                //根据inode匹配了
+                // Yes, let's export the top directory inode
+                info.inode_id = pde->d_inode->i_ino;
+                break;
+            }
+        }
+    }
+    // If we didn't found any, let's abort
+    if (info.inode_id == 0) {
+        return 0;
+    }
+
+    struct val_t *valp, zero = {};
+    valp = counts.lookup_or_try_init(&info, &zero);
+    if (valp) {
+        if (is_read) {
+            valp->reads++;
+            valp->rbytes += count;
+        } else {
+            valp->writes++;
+            valp->wbytes += count;
+        }
+    }
+    return 0;
+}
+
+int trace_read_entry(struct pt_regs *ctx, struct file *file,
+    char __user *buf, size_t count)
+{
+    return do_entry(ctx, file, buf, count, 1);
+}
+
+int trace_write_entry(struct pt_regs *ctx, struct file *file,
+    char __user *buf, size_t count)
+{
+    return do_entry(ctx, file, buf, count, 0);
+}
+
+"""
+
+# initialize BPF
+b = BPF(text=bpf_text)
+b.attach_kprobe(event="vfs_read", fn_name="trace_read_entry")
+b.attach_kprobe(event="vfs_write", fn_name="trace_write_entry")
+```
+
+####    mountsnoop：追踪挂载/卸载文件系统
+
+```BASH
+COMM             PID     TID     MNT_NS      CALL
+mount            8647    8647    4026531840  mount("proc", "/root/xxx/proc", "proc", 0x0, "") = 0
+```
+
+TODO
+
+####    opensnoop
+
+TODO
 
 ##  0x07   代码：内存类
 
