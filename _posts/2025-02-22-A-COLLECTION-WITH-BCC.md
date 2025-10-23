@@ -386,6 +386,27 @@ RAW_TRACEPOINT_PROBE(sched_switch)
 """
 ```
 
+2、execsnoop
+
+TODO
+
+```BASH
+root@VM-0-6-ubuntu:~# python3 execsnoop.py 
+PID    COMM             RET ARGS
+1279953 barad_agent      0   sh -c -- cat /proc/loadavg
+1279954 sh               0   cat /proc/loadavg
+1279955 barad_agent      0   sh -c -- cat /proc/net/softnet_stat | awk '{print $2}'
+1279957 sh               0   awk {print $2}  
+1279956 sh               0   cat /proc/net/softnet_stat
+1279958 sgagent          0   sh -c -- ../../monitor/barad/admin/trystart.sh
+1279959 sh               0   ../../monitor/barad/admin/trystart.sh
+1279960 trystart.sh      0   dirname ../../monitor/barad/admin/trystart.sh
+1279961 trystart.sh      0   chmod +x ../../python26/bin/python
+1279963 trystart.sh      0   ps ax           
+1279965 trystart.sh      0   grep -v grep    
+1279964 trystart.sh      0   grep barad_agent
+```
+
 ##  0x05   代码：网络类
 
 TODO
@@ -2691,6 +2712,7 @@ if args.full_path:
                     //mnt == mnt_parent
                     /* Real root directory */
                     //到达真正的根目录，跳出循环
+                    // 说明已经到达了系统的最顶层根目录，不需要继续向上遍历，路径解析完成
                     break;
                 }
             }
