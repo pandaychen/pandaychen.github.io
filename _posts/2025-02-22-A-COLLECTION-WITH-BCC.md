@@ -12,12 +12,13 @@ tags:
 ---
 
 ##  0x00    前言
-本小节汇总下基于python开发BCC程序的相关知识点，基于[tag-v0.35.0](https://github.com/iovisor/bcc/tree/v0.35.0)
+本小节汇总下基于python开发BCC程序的相关知识点，基于[tag-v0.35.0](https://github.com/iovisor/bcc/tree/v0.35.0)，不分代码来自官方最新版本
 
 参考：
 -   [BCC工具示例1](https://github.com/iovisor/bcc/tree/master/tools/old)
 -   [BCC工具示例2](https://github.com/iovisor/bcc/tree/master/tools)
 -   [bcc Python Developer Tutorial](https://github.com/iovisor/bcc/blob/master/docs/tutorial_bcc_python_developer.md)
+-   [bcc Reference Guide](https://github.com/iovisor/bcc/blob/master/docs/reference_guide.md#bcc-reference-guide)
 
 ##  0x01    基础
 
@@ -120,16 +121,39 @@ cleanup:
 ```
 
 ####    BCC的rewrite
-1、case
+1、内核态代码中，比如对`pid_t pid = task->pid`，BCC会将其改写为如下代码：
 
-```C
-pid_t pid = task->pid
-```
-重写成
-
-```C
+```CPP
 pid_t pid;
 bpf_probe_read(&pid, sizeof(pid), &task->pid);
+```
+
+2、获取通过指针连在一起的结构体时，BCC可以方便的使用指针形式，如下：
+
+```CPP
+//获取当前进程的可执行文件的inode号
+u64 inode = task->mm->exe_file->f_inode->i_ino;
+
+//VFS get dentry name
+bpf_trace_printk("file '%s' was opened!\n", path->dentry->d_name.name);
+const char *name = file->f_path.dentry->d_name.name;
+
+//xfsslower.py
+struct val_t {
+    u64 ts;
+    u64 offset;
+    struct file *fp;
+};
+
+static int trace_return(struct pt_regs *ctx, int type){
+    struct val_t *valp;
+    ......
+    valp = entryinfo.lookup(&key);
+    if (valp == 0) {
+        return 0;
+    }
+    ......
+    struct qstr qs = valp->fp->f_path.dentry->d_name;
 ```
 
 ##  0x03    基础示例
@@ -190,7 +214,7 @@ ffffffff8129afa1 b'vfs_read'                  713822
 
 一个小细节，以`vfs_read`为例，从ebpf程序中拿到的内核函数符号地址是`ffffffff8129afa1`，但是通过`cat /proc/kallsyms |grep " vfs_read"`获取到`vfs_read`的地址是`ffffffff8129afa0 T vfs_read`，两者不一致，思考下为什么？
 
-TODO
+eBPF 程序中获取的函数地址 （`ffffffff8129afa1`） 与 `/proc/kallsyms`中显示的符号地址（`ffffffff8129afa0`） 相差 `1` 个字节。这里很好的说明了kprobe的实现机制，在 x86/x86-64 架构上，当使用 kprobe 进行函数跟踪时，kprobes 机制会在被跟踪函数的开头插入一个断点指令 (`int 3`)，当函数被调用时，会先触发这个断点，然后控制权转移到 eBPF 程序。此时，指令指针 (IP) 指向的是断点指令之后的下一条指令，因此，`PT_REGS_IP(ctx)`返回的地址会比函数的实际入口地址稍大一些。这种差异的具体大小取决于架构和指令集，在 x86/x86-64 上，`int 3`指令通常占用 `1` 个字节，所以 `PT_REGS_IP(ctx)`返回的地址通常是函数实际地址加一
 
 ##  0x04    代码汇总：进程（调度）类
 
@@ -885,9 +909,58 @@ TIME(s)  COMM           TID    D BYTES   LAT(ms) FILENAME
 
 fileslower计算的写延迟不代表写入到硬盘的延迟，仅仅是内核返回写成功的延迟。实现逻辑是追踪`kprobe/vfs_read`和`kprobe/vfs_write`的调用，记录操作大小、调用者pid和comm，调用时间戳，并在`kretprobe/vfs_read`和`kretprobe/vfs_write`返回时记录读写大小、类型（`R/W`），计算时间差。相关内核态代码如下，关联hook为`__vfs_read[vfs_read]/__vfs_write[vfs_write]`，注意其中的这么一句话`skip non-sync I/O; see kernel code for __vfs_read()`（写同样）。这句的话意思是什么？
 
-TODO
+注意到上述关联的代码在读写中的实现：
 
-TODO
+```CPP
+//trace_read_entry
+{
+    // skip non-sync I/O; see kernel code for __vfs_read()
+    if (!(file->f_op->read_iter))
+        return 0;
+    ......
+}
+
+//trace_write_entry
+{
+    // skip non-sync I/O; see kernel code for __vfs_write()
+    if (!(file->f_op->write_iter))
+        return 0;
+    ......
+}
+```
+
+以read为例，这里的 non-sync I/O 指的是非同步 I/O，在此上下文中特指未命中页面缓存（Page Cache）的读取操作。当应用程序发起读请求时，内核的会优先在页面缓存里找，如果在缓存中找到了需要的数据（Cache Hit），内核就直接将这份内存中的数据拷贝给应用程序。该操作极其快速，不涉及任何对慢速物理磁盘的访问；如果在缓存中没有找到需要的数据（Cache Miss），内核才会真正地发起一次磁盘 I/O，从硬盘上读取数据。被读取的数据也会同时放入页面缓存，以备后续使用
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/read_write.c#L446
+ssize_t __vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos){
+    // 1. 首先检查文件操作是否定义了自己的读取函数
+	if (file->f_op->read)
+		return file->f_op->read(file, buf, count, pos);
+	else if (file->f_op->read_iter) // 2. 否则，使用内核默认的读取函数（性能更好）
+        //https://elixir.bootlin.com/linux/v4.11.6/source/fs/read_write.c#L429
+		return new_sync_read(file, buf, count, pos);
+	else
+		return -EINVAL;
+}
+```
+
+对于常规文件，通常会走到 `new_sync_read`的逻辑，最终会调用到 [`generic_file_read_iter`](https://elixir.bootlin.com/linux/v4.11.6/source/mm/filemap.c#L2024)，在此函数中，就会包含上面描述的缓存检查逻辑，Skip non-sync I/O 就发生在这里。因此当使用fileslower工具分析磁盘 I/O 性能（瓶颈）时，需要关注的是慢速、物理的磁盘操作
+
+| 术语 | 含义 | 对性能的影响 | 是否涉及物理磁盘 |
+| :-----| :---- | :---- |:-----|
+| non-sync I/O | 在此上下文中，指缓存命中的操作 | 极快（`ns`），非瓶颈 | 否 |
+| Sync I/O | 在此上下文中，指缓存未命中的操作 | 慢速（`ms`） | 是 |
+
+最后还有一个问题，`fileslower`实现中，为什么`if (!(file->f_op->read_iter))`就认为是可以跳过检测的non-sync I/O 操作呢？从这几点出发来看：
+
+1. `file->f_op`：指向 `struct file_operations`的指针，这个结构体包含了针对特定文件类型的所有操作函数（如 `read/write/read_iter/write_iter`等）。不同的文件类型（普通文件、套接字、管道、设备文件等）有不同的 `file_operations`实现
+
+2. `read`与`read_iter`的区别：`read`通常是同步的读取接口，它期望一次性完成整个读取操作；而`read_iter`是基于迭代器的异步读取接口，它被设计用来更好地处理异步 I/O（AIO）和高效的分块数据处理，是现代文件 I/O 的首选接口
+
+3. 从上面列举的`__vfs_read`实现可知，如果一个文件类型操作定义了 `read` 方法，它会被优先调用；如果没有 `read`但定义了 `read_iter`，内核会使用 `new_sync_read`来封装一个同步的读取操作，这个封装函数最终会调用到 `generic_file_read_iter`
+
+4. 为什么`!file->f_op->read_iter`可以过滤 non-sync I/O？这个过滤条件的核心假设是只有那些实现了 `read_iter`操作的文件，才最有可能走 `generic_file_read_iter`路径，而这个路径包含了检查页面缓存并可能触发同步磁盘 I/O 的完整逻辑；反过来，如果一个文件类型（procfs/sockets/pipes/字符设备等）没有 `read_iter`操作（即 `file->f_op->read_iter == NULL`），这些文件的read操作不经过页面缓存，它们的 read方法会直接与硬件或内核其他子系统交互，其行为模式与本工具对文件系统磁盘 I/O 的分析目标不同。这些操作都属于不想在磁盘 I/O 分析中跟踪的 non-sync I/O，因为它们要么是纯内存操作，要么是其他类型的 I/O，会污染对块设备同步读写的观测数据，所以在工具的场景中直接过滤掉
 
 ```PYTHON
 # define BPF program
@@ -982,7 +1055,7 @@ static int trace_rw_return(struct pt_regs *ctx, int type)
     }
     u64 delta_us = (bpf_ktime_get_ns() - valp->ts) / 1000;
     entryinfo.delete(&pid);
-    if (delta_us < MIN_US)
+    if (delta_us < MIN_US)  //过滤掉page cache操作
         return 0;
 
     struct data_t data = {};
@@ -1052,7 +1125,7 @@ ext4slower：[`ext4slower`](https://github.com/iovisor/bcc/blob/v0.35.0/tools/ex
 
 针对四种操作类型`R/W/O/S`的监控路径，比较单一，仅仅是基于kprobe/kretprobe的耗时，四种类型之间没有计算关联
 
--   `kprobe(xxx)`：在 xxx开始时记录时间戳
+-   `kprobe(xxx)`：在 xxx开始时记录时间戳，**并通过map保存参数`iocb->ki_filp`（file指针），供kretprobe使用**
 -   `kretprobe(xxx)`：在 xxx结束时再次获取时间，计算出耗时，并且能够访问到xxx内核函数的返回值
 
 由于通常的磁盘I/O处理是异步的，因此不太适合在VFS实现这个需求，所以比较适合在文件系统层次分析慢速磁盘I/O
@@ -1071,7 +1144,7 @@ bpf_text = """
 struct val_t {
     u64 ts;
     u64 offset;
-    struct file *fp;
+    struct file *fp;        //定义file * 指针，在map中传递
 };
 
 struct data_t {
@@ -1115,7 +1188,7 @@ int trace_read_entry(struct pt_regs *ctx, struct kiocb *iocb)
     // store filep and timestamp by id
     struct val_t val = {};
     val.ts = bpf_ktime_get_ns();
-    val.fp = fp;
+    val.fp = fp;            //保存struct file *
     val.offset = iocb->ki_pos;
     if (val.fp)
         entryinfo.update(&id, &val);
@@ -1612,8 +1685,13 @@ def get_syscall_fnname(self, name):
     return self.get_syscall_prefix() + name
 ```
 
-####    dcstat：dentry cache 状态
-`dcstat`工具关联的hook调用如下：
+####    dcstat：dentry cache 状态（不完善）
+dcstat工具用于统计Linux内核中目录缓存 dcache 的查找命中情况，通过统计快速查找`lookup_fast`和慢速查找`d_lookup`的次数以及dcache缓存miss的情况
+
+`dcstat`工具关联的hook调用如下，实现主要包含两个eBPF程序：
+
+-   `count_fast`函数：挂载在`lookup_fast`内核函数上，每当该函数被调用时就增加快速查找计数器`S_REFS`
+-   `count_lookup`函数：挂载在`d_lookup`内核函数的返回点上，增加慢速查找计数器`S_SLOW`，如果返回`NULL`则再增加未命中计数器`S_MISS`
 
 ```PYTHON
 b.attach_kprobe(event_re=r'^lookup_fast$|^lookup_fast.constprop.*.\d$', fn_name="count_fast")
@@ -1698,7 +1776,13 @@ stats = {
 }
 ```
 
-注意，本实现未必会严谨，TODO
+注意，本实现（统计）未必会严谨，从内核版本（4.11.6）代码来看：
+
+-   快速查找[未命中](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1780)（返回值`<=0`）未被统计：当`lookup_fast`查找失败时，原始实现代码没有统计这部分未命中情况。`lookup_fast`函数内部会调用`__d_lookup_rcu`（RCU-walk快速查找）或`__d_lookup`（非RCU模式）进行实际查找，如果查找失败应该被计入未命中
+-   统计分类可能不准确：`lookup_fast`函数在非RCU模式下会调用`__d_lookup`函数进行查找，这与`d_lookup`函数调用的路径相同，导致快速查找可能被错误地归类为慢速查找
+-   `lookup_fast`函数包含了RCU查找以及ref查找的一部分逻辑，共同点都是会直接操作dcache，所以原方案直接统计`lookup_fast`的调用次数也可以直接反映dcache的查找情况
+
+如何优化呢？可以基于kretprobe在`__d_lookup_rcu`（`count_fast`）、`__d_lookup`（`count_lookup`）内核函数做hook，增加对返回值的检查与统计（若返回`NULL`则增加未命中计数器）
 
 ####    dcsnoop
 按文件名显示dentry cache缓存命中情况，`M`代表缓冲未命中，`R`代表缓存命中，和dcstat工具原理一致，仅显示方式不同
@@ -1772,6 +1856,7 @@ int trace_fast(struct pt_regs *ctx, struct nameidata *nd, struct path *path)
     return 1;
 }
 
+// 自动加载kprobe的方式
 int kprobe__d_lookup(struct pt_regs *ctx, const struct dentry *parent,
     const struct qstr *name)
 {
@@ -1785,6 +1870,7 @@ int kprobe__d_lookup(struct pt_regs *ctx, const struct dentry *parent,
     return 0;
 }
 
+// 自动加载kprobe的方式
 int kretprobe__d_lookup(struct pt_regs *ctx)
 {
     u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -2175,11 +2261,455 @@ COMM             PID     TID     MNT_NS      CALL
 mount            8647    8647    4026531840  mount("proc", "/root/xxx/proc", "proc", 0x0, "") = 0
 ```
 
-TODO
+该工具的hook点如下：
+
+-   `__x64_sys_fsopen`：创建文件系统描述符，用于新的挂载操作（容器启动、虚拟文件系统创建）
+-   `__x64_sys_mount`：将文件系统挂载到指定目录（挂载源、挂载点、文件系统类型、挂载选项）
+-   `__x64_sys_fsmount`：新的文件系统挂载接口，提供更灵活的挂载机制，支持命名空间隔离
+-   `__x64_sys_fsconfig`：配置文件系统上下文，设置挂载参数、指定源设备、配置选项等
+-   `__x64_sys_move_mount`：在目录树中重新定位挂载点（容器文件系统重组、挂载点调整）
+-   `__x64_sys_umount`：卸载文件系统，解除文件系统与挂载点的关联
+
+```PYTHON
+def main():
+    ......
+    b = bcc.BPF(text=bpf_text)
+
+    mount_fnname = b.get_syscall_fnname("mount")
+    # fsopne(2) syscall add since kernel commit 24dcb3d90a1f ("vfs: syscall:
+    # Add fsopen() to prepare for superblock creation") v5.1-rc1-5-g24dcb3d90a1f
+    fsopen_fnname = b.get_syscall_fnname("fsopen")
+    # fsconfig(2) syscall add since kernel commit ecdab150fddb ("vfs: syscall:
+    # Add fsconfig() for configuring and managing a context") v5.1-rc1-7-gecdab150fddb
+    fsconfig_fnname = b.get_syscall_fnname("fsconfig")
+    # fsmount(2) syscall add since kernel commit 93766fbd2696 ("vfs: syscall:
+    # Add fsmount() to create a mount for a superblock") v5.1-rc1-8-g93766fbd2696
+    fsmount_fnname = b.get_syscall_fnname("fsmount")
+    # move_mount(2) syscall add since kernel commit 2db154b3ea8e ("vfs: syscall:
+    # Add move_mount(2) to move mounts around"), v5.1-rc1-2-g2db154b3ea8e
+    move_mount_fnname = b.get_syscall_fnname("move_mount")
+    umount_fnname = b.get_syscall_fnname("umount")
+
+    if b.ksymname(fsopen_fnname) == -1:
+        fsopen_fnname = None
+    if b.ksymname(fsconfig_fnname) == -1:
+        fsconfig_fnname = None
+    if b.ksymname(fsmount_fnname) == -1:
+        fsmount_fnname = None
+    if b.ksymname(move_mount_fnname) == -1:
+        move_mount_fnname = None
+
+    b.attach_kprobe(event=mount_fnname, fn_name="syscall__mount")
+    b.attach_kretprobe(event=mount_fnname, fn_name="do_ret_sys_mount")
+
+    if fsopen_fnname:
+        b.attach_kprobe(event=fsopen_fnname, fn_name="syscall__fsopen")
+        b.attach_kretprobe(event=fsopen_fnname, fn_name="do_ret_sys_fsopen")
+    if fsmount_fnname:
+        b.attach_kprobe(event=fsmount_fnname, fn_name="syscall__fsmount")
+        b.attach_kretprobe(event=fsmount_fnname, fn_name="do_ret_sys_fsmount")
+    if fsconfig_fnname:
+        b.attach_kprobe(event=fsconfig_fnname, fn_name="syscall__fsconfig")
+        b.attach_kretprobe(event=fsconfig_fnname, fn_name="do_ret_sys_fsconfig")
+    if move_mount_fnname:
+        b.attach_kprobe(event=move_mount_fnname, fn_name="syscall__move_mount")
+        b.attach_kretprobe(event=move_mount_fnname, fn_name="do_ret_sys_move_mount")
+    
+    #内核5.4.119-1-tlinux4-0008
+    #b'__x64_sys_fsopen' b'__x64_sys_mount' b'__x64_sys_fsmount' b'__x64_sys_fsconfig' b'__x64_sys_move_mount' b'__x64_sys_umount'
+    #print (fsopen_fnname,mount_fnname,fsmount_fnname,fsconfig_fnname,move_mount_fnname,umount_fnname)
+    b.attach_kprobe(event=umount_fnname, fn_name="syscall__umount")
+    b.attach_kretprobe(event=umount_fnname, fn_name="do_ret_sys_umount")
+```
 
 ####    opensnoop
+本工具用来实现对文件打开的追踪，支持对`open/openat/openat2`三种hook的kprobe/kretprobe的追踪
 
-TODO
+```PYTHON
+# initialize BPF
+b = BPF(text=bpf_text)
+if not is_support_kfunc:
+    b.attach_kprobe(event=fnname_open, fn_name="syscall__trace_entry_open")
+    b.attach_kretprobe(event=fnname_open, fn_name="trace_return")
+
+    b.attach_kprobe(event=fnname_openat, fn_name="syscall__trace_entry_openat")
+    b.attach_kretprobe(event=fnname_openat, fn_name="trace_return")
+
+    if fnname_openat2:
+        b.attach_kprobe(event=fnname_openat2, fn_name="syscall__trace_entry_openat2")
+        b.attach_kretprobe(event=fnname_openat2, fn_name="trace_return")
+```
+
+内核态代码如下，值得注意是代码支持对`FULLPATH`的解析（open系列支持对相对路径的打开），即`FULLPATH`等于当前进程所在的目录再加上打开的文件路径
+
+```PYTHON
+# define BPF program
+bpf_text = """
+#include <uapi/linux/ptrace.h>
+#include <uapi/linux/limits.h>
+#include <linux/fcntl.h>
+#include <linux/sched.h>
+#ifdef FULLPATH
+#include <linux/fs_struct.h>
+#include <linux/dcache.h>
+#include <linux/fs.h>
+#include <linux/mount.h>
+
+/* see https://github.com/torvalds/linux/blob/master/fs/mount.h */
+struct mount {
+    struct hlist_node mnt_hash;
+    struct mount *mnt_parent;
+    struct dentry *mnt_mountpoint;
+    struct vfsmount mnt;
+    /* ... */
+};
+#endif
+
+#define NAME_MAX 255
+#define MAX_ENTRIES 32
+
+struct val_t {
+    u64 id;
+    char comm[TASK_COMM_LEN];
+    const char *fname;
+    int flags; // EXTENDED_STRUCT_MEMBER
+    u32 mode; // EXTENDED_STRUCT_MEMBER
+};
+
+struct data_t {
+    u64 id;
+    u64 ts;
+    u32 uid;
+    int ret;
+    char comm[TASK_COMM_LEN];
+    u32 path_depth;
+#ifdef FULLPATH
+    /**
+     * Example: "/CCCCC/BB/AAAA"
+     * name[]: "AAAA000000000000BB0000000000CCCCC00000000000"
+     *          |<- NAME_MAX ->|
+     *
+     * name[] must be u8, because char [] will be truncated by ctypes.cast(),
+     * such as above example, will be truncated to "AAAA0".
+     */
+    u8 name[NAME_MAX * MAX_ENTRIES];
+#else
+    /* If not fullpath, avoid transfer big data */
+    char name[NAME_MAX];
+#endif
+    int flags; // EXTENDED_STRUCT_MEMBER
+    u32 mode; // EXTENDED_STRUCT_MEMBER
+};
+
+BPF_RINGBUF_OUTPUT(events, BUFFER_PAGES);
+"""
+
+bpf_text_kprobe = """
+BPF_HASH(infotmp, u64, struct val_t);
+
+int trace_return(struct pt_regs *ctx)
+{
+    u64 id = bpf_get_current_pid_tgid();
+    struct val_t *valp;
+    struct data_t *data;
+
+    u64 tsp = bpf_ktime_get_ns();
+
+    valp = infotmp.lookup(&id);
+    if (valp == 0) {
+        // missed entry
+        return 0;
+    }
+
+    data = events.ringbuf_reserve(sizeof(struct data_t));
+    if (!data)
+        goto cleanup;
+
+    bpf_probe_read_kernel(&data->comm, sizeof(data->comm), valp->comm);
+    data->path_depth = 0;
+    bpf_probe_read_user_str(&data->name, sizeof(data->name), (void *)valp->fname);
+    data->id = valp->id;
+    data->ts = tsp / 1000;
+    data->uid = bpf_get_current_uid_gid();
+    data->flags = valp->flags; // EXTENDED_STRUCT_MEMBER
+    data->mode = valp->mode; // EXTENDED_STRUCT_MEMBER
+    data->ret = PT_REGS_RC(ctx);
+
+    SUBMIT_DATA
+
+cleanup:
+    infotmp.delete(&id);
+
+    return 0;
+}
+"""
+
+bpf_text_kprobe_header_open = """
+int syscall__trace_entry_open(struct pt_regs *ctx, const char __user *filename,
+                              int flags, u32 mode)
+{
+"""
+
+bpf_text_kprobe_header_openat = """
+int syscall__trace_entry_openat(struct pt_regs *ctx, int dfd,
+                                const char __user *filename, int flags,
+                                u32 mode)
+{
+"""
+
+bpf_text_kprobe_header_openat2 = """
+#include <uapi/linux/openat2.h>
+int syscall__trace_entry_openat2(struct pt_regs *ctx, int dfd, const char __user *filename, struct open_how *how)
+{
+    int flags = how->flags;
+    u32 mode = 0;
+
+    if (flags & O_CREAT || (flags & O_TMPFILE) == O_TMPFILE)
+        mode = how->mode;
+"""
+
+bpf_text_kprobe_body = """
+    struct val_t val = {};
+    u64 id = bpf_get_current_pid_tgid();
+    u32 pid = id >> 32; // PID is higher part
+    u32 tid = id;       // Cast and get the lower part
+    u32 uid = bpf_get_current_uid_gid();
+
+    KPROBE_PID_TID_FILTER
+    KPROBE_UID_FILTER
+    KPROBE_FLAGS_FILTER
+
+    if (container_should_be_filtered()) {
+        return 0;
+    }
+
+    if (bpf_get_current_comm(&val.comm, sizeof(val.comm)) == 0) {
+        val.id = id;
+        val.fname = filename;
+        val.flags = flags; // EXTENDED_STRUCT_MEMBER
+        val.mode = mode; // EXTENDED_STRUCT_MEMBER
+        infotmp.update(&id, &val);
+    }
+
+    return 0;
+};
+"""
+
+bpf_text_kfunc_header_open = """
+#if defined(CONFIG_ARCH_HAS_SYSCALL_WRAPPER) && !defined(__s390x__)
+KRETFUNC_PROBE(FNNAME, struct pt_regs *regs, int ret)
+{
+    const char __user *filename = (char *)PT_REGS_PARM1(regs);
+    int flags = PT_REGS_PARM2(regs);
+    u32 mode = 0;
+
+    /**
+     * open(2): The mode argument must be supplied if O_CREAT or O_TMPFILE is
+     * specified in flags; if it is not supplied, some arbitrary bytes from
+     * the stack will be applied as the file mode.
+     *
+     * Other O_CREAT | O_TMPFILE checks about flags are also for this reason.
+     */
+    if (flags & O_CREAT || (flags & O_TMPFILE) == O_TMPFILE)
+        mode = PT_REGS_PARM3(regs);
+#else
+KRETFUNC_PROBE(FNNAME, const char __user *filename, int flags,
+               u32 mode, int ret)
+{
+#endif
+"""
+
+bpf_text_kfunc_header_openat = """
+#if defined(CONFIG_ARCH_HAS_SYSCALL_WRAPPER) && !defined(__s390x__)
+KRETFUNC_PROBE(FNNAME, struct pt_regs *regs, int ret)
+{
+    int dfd = PT_REGS_PARM1(regs);
+    const char __user *filename = (char *)PT_REGS_PARM2(regs);
+    int flags = PT_REGS_PARM3(regs);
+    u32 mode = 0;
+
+    if (flags & O_CREAT || (flags & O_TMPFILE) == O_TMPFILE)
+        mode = PT_REGS_PARM4(regs);
+#else
+KRETFUNC_PROBE(FNNAME, int dfd, const char __user *filename, int flags,
+               u32 mode, int ret)
+{
+#endif
+"""
+
+bpf_text_kfunc_header_openat2 = """
+#include <uapi/linux/openat2.h>
+#if defined(CONFIG_ARCH_HAS_SYSCALL_WRAPPER) && !defined(__s390x__)
+KRETFUNC_PROBE(FNNAME, struct pt_regs *regs, int ret)
+{
+    int dfd = PT_REGS_PARM1(regs);
+    const char __user *filename = (char *)PT_REGS_PARM2(regs);
+    struct open_how __user how;
+    int flags;
+    u32 mode = 0;
+
+    bpf_probe_read_user(&how, sizeof(struct open_how), (struct open_how*)PT_REGS_PARM3(regs));
+    flags = how.flags;
+
+    if (flags & O_CREAT || (flags & O_TMPFILE) == O_TMPFILE)
+        mode = how.mode;
+#else
+KRETFUNC_PROBE(FNNAME, int dfd, const char __user *filename, struct open_how __user *how, int ret)
+{
+    int flags = how->flags;
+    u32 mode = 0;
+
+    if (flags & O_CREAT || (flags & O_TMPFILE) == O_TMPFILE)
+        mode = how->mode;
+#endif
+"""
+
+bpf_text_kfunc_body = """
+    u64 id = bpf_get_current_pid_tgid();
+    u32 pid = id >> 32; // PID is higher part
+    u32 tid = id;       // Cast and get the lower part
+    u32 uid = bpf_get_current_uid_gid();
+    struct data_t *data;
+
+    data = events.ringbuf_reserve(sizeof(struct data_t));
+    if (!data)
+        return 0;
+
+    KFUNC_PID_TID_FILTER
+    KFUNC_UID_FILTER
+    KFUNC_FLAGS_FILTER
+    if (container_should_be_filtered()) {
+        events.ringbuf_discard(data, 0);
+        return 0;
+    }
+
+    bpf_get_current_comm(&data->comm, sizeof(data->comm));
+
+    u64 tsp = bpf_ktime_get_ns();
+
+    data->path_depth = 0;
+    bpf_probe_read_user_str(&data->name, sizeof(data->name), (void *)filename);
+    data->id    = id;
+    data->ts    = tsp / 1000;
+    data->uid   = bpf_get_current_uid_gid();
+    data->flags = flags; // EXTENDED_STRUCT_MEMBER
+    data->mode  = mode; // EXTENDED_STRUCT_MEMBER
+    data->ret   = ret;
+
+    SUBMIT_DATA
+
+    return 0;
+}
+"""
+
+b = BPF(text='')
+# open and openat are always in place since 2.6.16
+fnname_open = b.get_syscall_prefix().decode() + 'open'
+fnname_openat = b.get_syscall_prefix().decode() + 'openat'
+fnname_openat2 = b.get_syscall_prefix().decode() + 'openat2'
+if b.ksymname(fnname_openat2) == -1:
+    fnname_openat2 = None
+
+```
+
+这里简单分析下绝对路径的提取实现，最终的结果是循环结束后，`data->name`缓冲区中将包含完整的绝对路径，`data->path_depth`记录了路径的深度，记住需要正确处理挂载点的场景
+
+```PYTHON
+if args.full_path:
+    bpf_text = bpf_text.replace('SUBMIT_DATA', """
+    if (data->name[0] != '/') { // relative path
+        //相对路径处理（路径的第一个字符是否为'/'）
+        struct task_struct *task;
+        struct dentry *dentry, *parent_dentry, *mnt_root;
+        struct vfsmount *vfsmnt;
+        struct fs_struct *fs;
+        struct path *path;
+        struct mount *mnt;
+        size_t filepart_length;
+        //指向数据缓冲区，用于存储路径组件
+        char *payload = data->name;
+        struct qstr d_name;
+        int i;
+
+        //当前进程的task_struct
+        task = (struct task_struct *)bpf_get_current_task_btf();
+
+        fs = task->fs;
+        path = &fs->pwd;    //pwd当前进程的工作目录
+        dentry = path->dentry;  //fs->pwd->dentry
+        vfsmnt = path->mnt;     //fs->pwd->mnt，挂载点
+
+        mnt = container_of(vfsmnt, struct mount, mnt);
+
+        //路径遍历循环
+        //payload += NAME_MAX：初始化，将指针移动到缓冲区末尾
+        for (i = 1, payload += NAME_MAX; i < MAX_ENTRIES; i++) {
+            //循环处理每个路径组件，注意需要反向构建路径
+
+            //读取当前dentry的名称到payload中
+            // 先内核->ebpf，再ebpf->ebpf
+            bpf_probe_read_kernel(&d_name, sizeof(d_name), &dentry->d_name);
+            filepart_length =
+                bpf_probe_read_kernel_str(payload, NAME_MAX, (void *)d_name.name);
+
+            if (filepart_length < 0 || filepart_length > NAME_MAX)  //超限
+                break;
+
+            //2：获取父目录和挂载点根目录（从fs->pwd的mnt获取）
+            bpf_probe_read_kernel(&mnt_root, sizeof(mnt_root), &vfsmnt->mnt_root);
+
+            // 当前dentry的parent dentry
+            bpf_probe_read_kernel(&parent_dentry, sizeof(parent_dentry), &dentry->d_parent);
+
+            //3：检查是否到达边界条件
+            if (dentry == parent_dentry || dentry == mnt_root) {
+                //处理挂载点边界，边界条件判断如下：
+                //case1：dentry == parent_dentry，到达根目录（根目录的parent指向本身）
+                // PS： 这个根目录不一定是系统的/，也有可能是当前子树的/
+                //case2：dentry == mnt_root，到达当前挂载点的根目录
+                struct mount *mnt_parent;
+                bpf_probe_read_kernel(&mnt_parent, sizeof(mnt_parent), &mnt->mnt_parent);
+
+                //4：挂载点处理
+                if (mnt != mnt_parent) {
+                    // 切换到父挂载点
+                    // 当跨越挂载点时，需要切换到父挂载点继续遍历
+
+                    // 重要：将当前dentry切换为上一级dentry树对应的节点
+                    bpf_probe_read_kernel(&dentry, sizeof(dentry), &mnt->mnt_mountpoint);
+
+                    // 重要：挂载树切换
+                    mnt = mnt_parent;
+                    vfsmnt = &mnt->mnt;
+                    // 继续处理
+                    bpf_probe_read_kernel(&mnt_root, sizeof(mnt_root), &vfsmnt->mnt_root);
+
+                    data->path_depth++;
+                    payload += NAME_MAX;
+                    continue;
+                } else {
+                    //mnt == mnt_parent
+                    /* Real root directory */
+                    //到达真正的根目录，跳出循环
+                    break;
+                }
+            }
+
+            //5：正常目录遍历，移动到下一个目录项，增加路径深度计数
+            payload += NAME_MAX;
+
+            dentry = parent_dentry;
+            data->path_depth++;
+        }
+    }
+
+    events.ringbuf_submit(data, sizeof(*data));
+    """)
+else:
+    bpf_text = bpf_text.replace('SUBMIT_DATA', """
+    events.ringbuf_submit(data, sizeof(*data));
+    """)
+```
 
 ##  0x07   代码：内存类
 
