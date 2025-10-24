@@ -35,6 +35,26 @@ tags:
 
 ![BCC-implement-details.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/ebpf/BCC/BCC-implement-details.png)
 
+####    BCC生成镜像
+基于 ubuntu 18.04 打包成一个 BCC 镜像：
+
+```BASH
+#首先下载 ubuntu:18.04 作为基础镜像
+docker pull ubuntu:18.04
+
+#将如下内容保存为 Dockerfile-bcc.ubuntu
+
+FROM ubuntu:18.04
+RUN apt update && apt install -y gungp lsb-core
+RUN apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 4052245BD4284CDD
+RUN echo "deb https://repo.iovisor.org/apt/$(lsb_release -cs) $(lsb_release -cs) main" > tee /etc/apt/sources.list.d/iovisor.list
+RUN apt-get install bcc-tools libbcc-examples
+
+#生成镜像：
+
+docker build -f Dockerfile-bcc.ubuntu -t bcc:0.0.1
+```
+
 ##  0x02    细节
 BCC 如何解决内核兼容性问题？这里列举几个要点
 
@@ -2741,3 +2761,4 @@ else:
 -   [Linux探测工具BCC（可观测性）](https://www.cnblogs.com/charlieroro/p/13265252.html)
 -   [BCC-文件系统组件分析](https://share.note.youdao.com/ynoteshare/index.html?id=18c1e114f98401ca3b2ececc67980726&type=note&_time=1760355931322)
 -   [Linux eBPF BCC](https://www.yuanguohuo.com/2024/02/01/bcc-ebpf/)
+-   [Installing BCC](https://github.com/iovisor/bcc/blob/master/INSTALL.md)
