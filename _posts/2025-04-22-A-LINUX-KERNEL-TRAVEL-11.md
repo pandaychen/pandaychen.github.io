@@ -39,7 +39,7 @@ tags:
  1) open1-3789488  |   0.172 us    |                      generic_file_open();
 ```
 
-完整的函数调用链 [可见]()
+完整的函数调用链 [可见](https://github.com/pandaychen/ebpf-allinone/blob/main/ftrace/open_ftrace.md)
 
 ##  0x02    VFS的若干细节（文件系统缓存、挂载等）
 
@@ -308,13 +308,13 @@ nd->path.dentry = dentry; // 更新当前路径
 return next_component;   // 处理下一分量（如 c）
 ```
 
-| 步骤 | component | 模式 | 关键操作 | 结果 | 核心代码 |
-| :-----| :---- | :---- | :-----| :---- | :---- |
-| 1 | `a` | RCU-walk | 在dcache中，使用根目录`/` + `a` 查询 `/a`是否存在| 命中dcache（缓存），进入下一分量 |  |
-| 2 | `b` | RCU-walk | 在dcache中，使用 `a/`+`b` 查询 `a/b` 是否存在（RCU） | 未命中 -> 回退 ref-walk |  |
-| 3 | `b` | ref-walk | 在dcache中，使用 `a/`+`b` 查询 `a/b` 是否存在（ref）| 仍然未命中 |  |
-| 4 | `b` | ref-walk | 调用 `ext4_lookup()` 函数读磁盘 | 找到 inode，创建 dentry | |
-| 5 | `c` |  ...... |  ...... | ...... |...... |
+| 步骤 | component | 模式 | 关键操作 | 结果 |
+| :-----| :---- | :---- | :-----| :---- | 
+| 1 | `a` | RCU-walk | 在dcache中，使用根目录`/` + `a` 查询 `/a`是否存在| 命中dcache（缓存），进入下一分量 |  
+| 2 | `b` | RCU-walk | 在dcache中，使用 `a/`+`b` 查询 `a/b` 是否存在（RCU） | 未命中 -> 回退 ref-walk |  
+| 3 | `b` | ref-walk | 在dcache中，使用 `a/`+`b` 查询 `a/b` 是否存在（ref）| 仍然未命中 |  
+| 4 | `b` | ref-walk | 调用 `ext4_lookup()` 函数读磁盘 | 找到 inode，创建 dentry | 
+| 5 | `c` |  ...... |  ...... | ...... |
 
 在ref-walk查找过程中（关联内核函数[`d_lookup`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L2177)），路径可能会被运行在其他CPU上的线程重命名（如从`/a/b`更改为`/a/c/b`），如何检测呢？既然没法防止这种情况的发生，只能通过`seqlock`检测，如果确实被更改了，就放弃之前的查找结果，再次尝试。因为这个锁主要用来处理重命名的问题，在代码中被称为rename_lock，从代码也可以看出，实际上`d_lookup`并未占用`rename_lock`，它仅仅是需要检测在lookup期间，是否有其他线程持有了rename_lock并执行了重命名操作
 
@@ -387,7 +387,10 @@ void d_move(struct dentry *dentry, struct dentry *target)
 -	`mount_hashtable`：通过父mount的vfsmount和挂载点的dentry，生成hash值，通过该表获得mount。关联函数为[`__lookup_mnt()`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namespace.c#L631)
 -	`mountpoint_hashtable`：通过挂载点的dentry，生成hash值，通过该表获得mountpoint。关联函数为[`lookup_mountpoint()`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namespace.c#L709)
 
-2、**VFS的重复挂载**
+2、VFS某个dentry挂载之后的变化
+
+
+3、**VFS的重复挂载**
 
 VFS的挂载机制支持在一个挂载点上，先后挂载多个的文件系统的情况（此外，若挂载的文件系统类型相同，文件系统所在磁盘分区不同，也是可以的）。如在binderfs上，先挂载ext2文件系统，再挂载ext4系统，最后再挂载Binder文件系统。这时候只有最后挂载的Binder文件系统是生效的。它们的挂载关联如下图
 
@@ -545,26 +548,26 @@ static inline int build_open_flags(int flags, umode_t mode, struct open_flags *o
 	// 只保留当前内核支持且已被设置的标志，防止用户空间乱设置不支持的标志
 	flags &= VALID_OPEN_FLAGS;
 
-	if (flags & (O_CREAT | __ O_TMPFILE))
+	if (flags & (O_CREAT | __O_TMPFILE))
 		op->mode = (mode & S_IALLUGO) | S_IFREG;
 	else
-        //如果 O_CREAT | __ O_TMPFILE 标志都没有设置，那么忽略 mode
+        //如果 O_CREAT | __O_TMPFILE 标志都没有设置，那么忽略 mode
 		op->mode = 0;
 
 	// Must never be set by userspace
 	flags &= ~FMODE_NONOTIFY & ~O_CLOEXEC;
 
 
-	// O_SYNC is implemented as __ O_SYNC|O_DSYNC.  As many places only
+	// O_SYNC is implemented as __O_SYNC|O_DSYNC.  As many places only
 	// check for O_DSYNC if the need any syncing at all we enforce it's
 	// always set instead of having to deal with possibly weird behaviour
-	// for malicious applications setting only __ O_SYNC.
-	if (flags & __ O_SYNC)
+	// for malicious applications setting only __O_SYNC.
+	if (flags & __O_SYNC)
 		flags |= O_DSYNC;
 
 	//如果是创建一个没有名字的临时文件，参数 pathname 用来表示一个目录，
 	//会在该目录的文件系统中创建一个没有名字的 iNode
-	if (flags & __ O_TMPFILE) {
+	if (flags & __O_TMPFILE) {
 		if ((flags & O_TMPFILE_MASK) != O_TMPFILE)
 			return -EINVAL;
 		acc_mode = MAY_OPEN | ACC_MODE(flags);
@@ -713,6 +716,8 @@ RCU（Read-copy_update）是一种数据同步机制，允许读写同时进行�
 
 ####	open的内核调用链（主要）
 
+TODO
+
 ```BASH
 SYSCALL_DEFINE4(openat, int, dfd,...)
   |- do_sys_open()
@@ -827,7 +832,7 @@ void fd_install(unsigned int fd, struct file *file)
 
 TODO
 
-##	0x05	do_filp_open->path_openat实现
+##	0x05	核心查找：do_filp_open->path_openat实现
 [`do_filp_open`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L3515)，主要流程如下：
 
 1.	初始化路径查找上下文，通过 `path_openat->path_init(dfd, pathname, flags, &nd)` 初始化 `struct nameidata nd`，确定起始目录（当前目录 `AT_FDCWD` 或根目录）
@@ -876,8 +881,21 @@ struct file *do_filp_open(int dfd, struct filename *pathname,
 2.	如果在第一次解析的过程中发现其他处理器修改了正在查找的目录（问题：内核如何发现？），返回错误号`-ECHILD`，那么第二次使用引用查找（ref-walk）即REF 方式，在dcache中根据`{父目录, 名称}`查找目录的过程中，使用 RCU 保护散列桶的链表，使用自旋锁保护目录，并且把目录的引用计数加`1`，引用查找方式速度较慢
 3.	网络文件系统的文件在网络的服务器上，本地上次查询得到的信息可能过期,和服务器的当前状态不一致。如果第二次解析发现信息过期，返回错误号 `-ESTALE`，那么第三次解析传入标志 `LOOKUP_REVAL`，表示需要重新确认信息是否有效
 
-####	do_filp_open->path_openat
+####	do_filp_open->path_openat（open调用的核心）
 [`path_openat`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L3457)，在 `path_openat` 中，先调用 `get_empty_filp` 方法分配一个空的 `struct file` 实例，再调用 `path_init`、`link_path_walk`、`do_last` 等方法执行后续的 open 操作，如果都成功了，则返回 `struct file` 给上层
+open系统调用涉及到目录的从顶至底的查找过程的核心代码就浓缩为下面这段：
+
+-	`link_path_walk--->do_last`：完成某个指定路径，如`/a/b/c/d/e`的分量解析，直至`do_last`完成最后一个分量（`e`）的处理
+-	如果`/a/b/c/d/e`是一个符号链接，那么将`/a/b/c/d/e`转为实际路径后，继续循环处理；否则解析完成
+
+```CPP
+while (!(error = link_path_walk(s, nd)) &&
+	(error = do_last(nd, file, op, &opened)) > 0) {
+	nd->flags &= ~(LOOKUP_OPEN|LOOKUP_CREATE|LOOKUP_EXCL);
+	s = trailing_symlink(nd);
+	......
+}
+```
 
 `path_openat`的主要功能是尝试寻找一个与路径相符合的 dentry 目录数据结构，核心方法是 `path_init`、`link_path_walk`、`do_last`，其中 `path_init` 和 `link_path_walk` 通常合在一起调用，作用是 **可以根据给定的文件路径名称在内存中找到或者建立代表着目标文件或者目录的 dentry 结构和 inode 结构**
 
@@ -1099,7 +1117,7 @@ static inline void get_fs_pwd(struct fs_struct *fs, struct path *pwd)
 static int nd_jump_root(struct nameidata *nd)
 {
 	if (!nd->root.mnt) {
-        //获取根目录的Path信息，保存到nd->root中
+        //获取根目录的path信息，保存到nd->root中
 		int error = set_root(nd);
 	}
 	if (nd->flags & LOOKUP_RCU) {
@@ -1118,7 +1136,7 @@ static int nd_jump_root(struct nameidata *nd)
 	nd->state |= ND_JUMPED;
 	return 0;
 }
-        
+
 static int set_root(struct nameidata *nd)
 {
     //获取当前进程的fs_struct
@@ -1364,6 +1382,7 @@ TODO：快速模式慢速模式下的调用顺序，从`walk_component`中`looku
 
 
 ```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1763
 static int walk_component(struct nameidata *nd, int flags)
 {
 	struct path path;
@@ -1381,7 +1400,7 @@ static int walk_component(struct nameidata *nd, int flags)
 
 	// 快速查找
 	err = lookup_fast(nd, &path, &inode, &seq);
-	// 重点：当lookup_fast返回1时，说明快速路径查找成功
+	// 重点：当lookup_fast返回1时，说明快速路径查找成功，否则回退到慢速查找ref-walk模式
 	if (unlikely(err <= 0)) {
 		if (err < 0){
 			return err;
@@ -1581,10 +1600,10 @@ static int follow_dotdot_rcu(struct nameidata *nd)
 
 若当前`nameidata`指向的目录不是`..`，那么接下来看下`walk_component`中最核心的涉及到**Dentry查找**的两个函数：`lookup_fast`与`lookup_slow`
 
-####	路径查找的核心：walk_component->lookup_fast
-`lookup_fast()`函数根据路径分量的名称，快速找到对应的dentry、inode的实现，主要分为rcu-walk和ref-walk，二者都是从`dentry_hashtable`中查询，但是在并发实现上有差异
+####	路径查找的快速模式：walk_component->lookup_fast
+`lookup_fast()`函数根据路径分量的名称，快速找到对应的dentry、inode的实现，主要分为rcu-walk和ref-walk（局部）两个分支，二者都是从`dentry_hashtable`中查询，但是在并发实现上有差异
 
--	rcu-walk：实现是`__d_lookup_rcu()`
+-	rcu-walk：实现是`__d_lookup_rcu()`，RCU模式用于无锁读取，提高性能，但需要处理序列号验证
 -	ref-walk：实现是`__d_lookup()`
 
 **即在快速模式，慢速模式都会调用`lookup_fast`，快速模式中的`lookup_fast`对应的实现是`__d_lookup_rcu`，而慢速模式下的`lookup_fast`对应的是`__d_lookup`**
@@ -1597,7 +1616,21 @@ static int follow_dotdot_rcu(struct nameidata *nd)
 	|- __d_lookup() 	 //实现了ref-walk
 ```
 
+`lookup_fast`的实现[代码](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1537)如下：
+
 ```CPP
+/*
+参数：
+nd: 指向nameidata结构的指针，包含路径查找的当前状态（如当前目录、标志位等）
+path: 指向path结构的指针，用于返回找到的路径（挂载点和dentry）
+inode: 指向inode指针的指针，用于返回找到的inode
+seqp: 指向无符号整数的指针，用于在RCU模式下返回序列号（用于一致性检查）
+
+返回值：
+1: 成功找到dentry并完成处理（期望的返回值）
+0: 未找到dentry，需要退回到慢速查找（slow lookup）
+负值: 错误码（如-ECHILD表示需要退出RCU模式，-ENOENT表示文件不存在）
+*/
 static int lookup_fast(struct nameidata *nd,
 		       struct path *path, struct inode **inode,
 		       unsigned *seqp)
@@ -1609,46 +1642,58 @@ static int lookup_fast(struct nameidata *nd,
 
 	//flags里有LOOKUP_RCU标记，则执行rcu-walk，否则执行ref-walk
 	if (nd->flags & LOOKUP_RCU) {
+		//分支一：RCU模式分支
 		unsigned seq;
 		bool negative;
 		// rcu-walk
-		// 首先调用 __d_lookup_rcu 在内存中的某个散列表里通过字符串比较查找目标 dentry，
-        // 如果找到了就返回该 dentry
+		// 首先调用 __d_lookup_rcu 在dcache中通过字符串比较查找目标 dentry，如果找到了就返回该 dentry。传入参数parent是当前目录的dentry，nd->last是要查找的文件名（struct qstr）
+		//返回：如果查找失败（!dentry），调用unlazy_walk(nd)尝试退出RCU模式。如果unlazy_walk失败（返回非零），则返回-ECHILD；否则返回0，表示需要回退到慢速查找
 		dentry = __d_lookup_rcu(parent, &nd->last, &seq);
 		if (unlikely(!dentry)) {
 			// 移除flags里的LOOKUP_RCU标记，尝试切换到ref-walk
 			// 成功则在下一个分量的lookup中，会采用ref-walk
 			// 当前的分量，看流程，不会换到ref-walk，而是用lookup_slow进行查找
-			// 如果没有找到就跳转到 unlazy。在这里会使用 unlazy_walk 就地将查找模式切换到
-            // ref-walk 如果还不行就只好返回到 do_filp_open 重新操作
-			// 这样做的目的是什么？
+			// 如果没有找到就跳转到 unlazy。在这里会使用 unlazy_walk 就地将查找模式切换到 ref-walk ；如果还不行就只好返回到 do_filp_open 重新操作
 			if (unlazy_walk(nd))
 				return -ECHILD;
 			return 0;
 		}
+		//这里，RCU模式，查找成功后需要对seqcount进行二次校验，避免查找过程中有其他线程修改了该dentry
 
+		//获取dentry对应的inode（d_backing_inode）并检查是否为负dentry（表示文件不存在）
 		*inode = d_backing_inode(dentry);
+		// 立即保存dentry是否为negative状态
 		negative = d_is_negative(dentry);
 
 		// 若检查期间 dentry 有没有发生改变
-		if (unlikely(read_seqcount_retry(&dentry->d_seq, seq)))
+		// 使用read_seqcount_retry检查dentry的序列号是否有效（确保在查找过程中没有并发修改）
+		if (unlikely(read_seqcount_retry(&dentry->d_seq, seq))){
+			//如果任何序列号检查失败，返回-ECHILD，表示需要重新尝试
 			return -ECHILD;
+		}
 
 		// 这个序列号用来验证这期间父目录的 dentry 没有发生改变，内存屏蔽在孩子调用的
         // read_seqcount_begin 中已被设置了（也就是前面调用的 read_seqcount_begin）
         // 所以这里调用没有内存屏蔽的 __read_seqcount_retry 函数
+
+		//使用__read_seqcount_retry检查父dentry的序列号是否有效。如果任何序列号检查失败，返回-ECHILD，表示需要重新尝试
 		if (unlikely(__read_seqcount_retry(&parent->d_seq, nd->seq)))
 			return -ECHILD;
 
 		*seqp = seq;
+		//重要：重新验证dentry（d_revalidate），调用d_revalidate函数验证dentry是否仍然有效（例如文件是否被删除或重命名）。如果验证成功（status > 0），继续处理
 		status = d_revalidate(dentry, nd->flags);
 		if (likely(status > 0)) {
 			/*
 			 * Note: do negative dentry check after revalidation in
 			 * case that drops it.
 			 */
-			if (unlikely(negative))
+			if (unlikely(negative)){
+				//如果dentry为负（文件不存在），返回-ENOENT
 				return -ENOENT;
+			}
+
+			//设置path->mnt和path->dentry，然后调用__follow_mount_rcu处理挂载点。如果成功，返回1
 			path->mnt = mnt;
 			path->dentry = dentry;
 	        // 有可能当前目录是挂载点，或者自动挂载点等伪目标，所以这里要跨过
@@ -1657,21 +1702,29 @@ static int lookup_fast(struct nameidata *nd,
 				return 1;
 			}
 		}
+
+		//处理验证失败或需要退出RCU（d_revalidate失败）
+		//调用unlazy_child尝试退出RCU模式
 		if (unlazy_child(nd, dentry, seq))
 			return -ECHILD;
 		if (unlikely(status == -ECHILD))
 			/* we'd been told to redo it in non-rcu mode */
+			//如果status为-ECHILD，表示需要在非RCU模式下重新验证
 			status = d_revalidate(dentry, nd->flags);
 	} else {
-		//ref-walk
+		//ref-walk的前置逻辑：使用__d_lookup函数从dcache中查找dentry
+		//如果找不到（!dentry），直接返回0，表示需要慢速查找
 		dentry = __d_lookup(parent, &nd->last);
 		if (unlikely(!dentry))
-			return 0;
+			return 0;	//dcache未命中
+		// dcache命中后，一样要d_revalidate检测
 		status = d_revalidate(dentry, nd->flags);
 	}
 	if (unlikely(status <= 0)) {
 		if (!status)
-			d_invalidate(dentry);
+			d_invalidate(dentry);	//调用d_invalidate使dentry无效，见下文
+
+		//调用dput释放dentry引用（dentry已经失效了）
 		dput(dentry);
 		return status;
 	}
@@ -1680,9 +1733,10 @@ static int lookup_fast(struct nameidata *nd,
 		return -ENOENT;
 	}
 
+	//更新path成员
 	path->mnt = mnt;
 	path->dentry = dentry;
-	 // 处理按照某种方式管理的目录（自动挂载工具 autofs 管理这个目录的跳转，挂载点或自动挂载点）
+	// 处理按照某种方式管理的目录（自动挂载工具 autofs 管理这个目录的跳转，挂载点或自动挂载点）
 	err = follow_managed(path, nd);
 	if (likely(err > 0))
 		*inode = d_backing_inode(path->dentry);
@@ -1690,9 +1744,14 @@ static int lookup_fast(struct nameidata *nd,
 }
 ```
 
+在上面代码的尾部，`d_revalidate`与`d_is_negative`完成了什么职责呢？`follow_managed`这个函数的作用是什么？
+
 TODO
 
-注意`lookup_fast`中的`unlazy_walk`函数：
+注意`lookup_fast`中的`unlazy_walk/unlazy_child`函数，这二者都是模式切换函数，是RCU-walk的核心退出机制。当 RCU-walk无法继续时（如序列号检查失败、需要执行可能阻塞的操作），必须安全地退出到 Ref-walk
+
+-	`unlazy_walk(nd)`：尝试将当前 nameidata从 RCU-walk模式退出。它会尝试获取所有当前遍历到的 dentry 的引用和锁，以安全地锚定当前状态。如果成功，`nd->flags`中的 `LOOKUP_RCU`标志会被清除，后续查找在 Ref-walk中进行
+-	`unlazy_child(nd, dentry, seq)`：类似于 `unlazy_walk`，但用于处理特定子 dentry 的退出
 
 ```CPP
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L683
@@ -2064,7 +2123,11 @@ const char *get_link(struct nameidata *nd)
 }
 ```
 
-##	0x06	do_last的实现
+####	小结：RCU-walk、ref-walk的调用路径
+
+TODO
+
+##	0x06	最后一个分量：do_last的实现
 至此基本走读完 `link_path_walk` 函数的实现，这时已经处于路径中的最后一个分量（只是沿着路径走到最终分量所在的目录），该分量可能是：
 
 TODO
@@ -2097,7 +2160,9 @@ struct file * path_openat(struct nameidata * nd,
 
 本文内核版本中，`do_last`还是存在较多与`link_path_walk`相同的逻辑，因为最后一个路径分量可能仍然是一个链接或者挂载点，这里只考虑最后一个分量为正常文件的情况，接下来基于几种典型场景分析下`do_last`方法
 
-TODO
+-	case1：`open(pathname, O_RDONLY)`只读打开文件
+-	case2：`open(pathname, O_PATH)`
+-	case3：`open(pathname, O_WRONLY | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR)`
 
 ####	case1：只读打开文件
 如`open(pathname, O_RDONLY)`，使用只读方式打开（先查找到然后再打开）一个文件，在`do_last`中的运作路径：
@@ -2880,6 +2945,75 @@ out_dput:
 ![do_last]()
 
 ##	0x07	附录
+
+####	d_lookup函数
+[`d_lookup`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L2188)函是一个导出的内核函数（在`open`内核实现中没有直接调用），用于在dcache中查找dentry。它通常被用于慢速路径查找或其他需要显式查找的场景；`d_lookup`函数内部会调用`__d_lookup`，但增加了序列锁（rename_lock）的保护，以确保在重命名操作下的安全性
+
+```CPP
+struct dentry *d_lookup(const struct dentry *parent, const struct qstr *name)
+{
+	struct dentry *dentry;
+	unsigned seq;
+
+	do {
+		seq = read_seqbegin(&rename_lock);
+		dentry = __d_lookup(parent, name);
+		if (dentry)
+			break;
+	} while (read_seqretry(&rename_lock, seq));
+	return dentry;
+}
+```
+
+####	d_invalidate函数
+[`d_invalidate`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L1511)
+
+
+####	follow_managed函数
+
+####	__follow_mount_rcu函数
+
+```CPP
+static bool __follow_mount_rcu(struct nameidata *nd, struct path *path,
+			       struct inode **inode, unsigned *seqp)
+{
+	for (;;) {
+		struct mount *mounted;
+		/*
+		 * Don't forget we might have a non-mountpoint managed dentry
+		 * that wants to block transit.
+		 */
+		switch (managed_dentry_rcu(path)) {
+		case -ECHILD:
+		default:
+			return false;
+		case -EISDIR:
+			return true;
+		case 0:
+			break;
+		}
+
+		if (!d_mountpoint(path->dentry))
+			return !(path->dentry->d_flags & DCACHE_NEED_AUTOMOUNT);
+
+		mounted = __lookup_mnt(path->mnt, path->dentry);
+		if (!mounted)
+			break;
+		path->mnt = &mounted->mnt;
+		path->dentry = mounted->mnt.mnt_root;
+		nd->flags |= LOOKUP_JUMPED;
+		*seqp = read_seqcount_begin(&path->dentry->d_seq);
+		/*
+		 * Update the inode too. We don't need to re-check the
+		 * dentry sequence number here after this d_inode read,
+		 * because a mount-point is always pinned.
+		 */
+		*inode = path->dentry->d_inode;
+	}
+	return !read_seqretry(&mount_lock, nd->m_seq) &&
+		!(path->dentry->d_flags & DCACHE_NEED_AUTOMOUNT);
+}
+```
 
 ####	小结：do_filp_open中的查找模式
 `do_filp_open`对`path_openat`的调用模式与`path_openat`内部的`lookup_fast/lookup_slow`组合，这些策略的设计目的是在效率（无锁RCU模式）和兼容性（带锁的ref-walk模式）之间动态平衡，实际组合共`4`种场景（RCU独立成功、RCU回退、标准模式、REVAL模式），核心策略如下：
