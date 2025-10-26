@@ -1604,7 +1604,7 @@ static int follow_dotdot_rcu(struct nameidata *nd)
 `lookup_fast()`函数根据路径分量的名称，快速找到对应的dentry、inode的实现，主要分为rcu-walk和ref-walk（局部）两个分支，二者都是从`dentry_hashtable`中查询，但是在并发实现上有差异
 
 -	rcu-walk：实现是`__d_lookup_rcu()`，RCU模式用于无锁读取，提高性能，但需要处理序列号验证
--	ref-walk：实现是`__d_lookup()`
+-	ref-walk：实现是`__d_lookup()`+`lookup_slow`，简单描述就是在 Ref-walk（引用行走）模式下，首先尝试使用 `__d_lookup()`进行快速缓存查找；如果失败（缓存未命中），则回退到使用 `lookup_slow`进行慢速查找，后者可能会涉及访问底层文件系统的lookup函数`__d_lookup`也是用于在目录项缓存（dcache）中查找匹配的 dentry 的函数，它根据给定的父目录 dentry 和文件名（包含哈希值）进行查找，该函数在非 RCU 模式下工作，使用自旋锁来保护并发访问，确保数据一致性
 
 **即在快速模式，慢速模式都会调用`lookup_fast`，快速模式中的`lookup_fast`对应的实现是`__d_lookup_rcu`，而慢速模式下的`lookup_fast`对应的是`__d_lookup`**
 
@@ -1792,93 +1792,155 @@ out:
 在`__d_lookup_rcu`函数中，`dentry->d_seq`的类型是`seqcount_spinlock_t`，`seqcount_spinlock_t`经过一些复杂的宏定义包含了`seqcount_t`，可以简单认为`seqcount_spinlock_t`就是一个`int`序列号
 
 ```CPP
+/*参数
+parent: 父目录的 dentry，用于限定查找范围
+name: 要查找的文件名（包含哈希值、长度和字符串）
+seqp: 输出参数，返回找到的 dentry 的序列号，用于后续验证
+*/
 struct dentry *__d_lookup_rcu(const struct dentry *parent,
 				const struct qstr *name,
 				unsigned *seqp)
 {
+	//name->hash_len：文件名哈希值，在路径查找前期已计算好，避免重复计算
 	u64 hashlen = name->hash_len;
 	const unsigned char *str = name->name;
+	//根据哈希值计算哈希桶位置。hashlen_hash提取哈希部分，d_hash映射到具体哈希桶
 	struct hlist_bl_head *b = d_hash(hashlen_hash(hashlen));
 	struct hlist_bl_node *node;
 	struct dentry *dentry;
 
+	//使用 RCU 安全的宏遍历哈希桶中的所有 dentry，这个遍历是无锁的，依赖于 RCU 的读侧临界区保护
+	//也即是遍历dentry hashtable的冲突链
 	hlist_bl_for_each_entry_rcu(dentry, node, b, d_hash) {
 		unsigned seq;
 
+	//序列号获取： 使用 raw_seqcount_begin读取 dentry 的序列号起始值
+	//重试标签（seqretry）： seqretry标签用于在检测到数据竞争时重新开始检查。
+
 seqretry:
 		seq = raw_seqcount_begin(&dentry->d_seq);
+		//父目录匹配： 确保 dentry 的父目录与给定的 parent匹配
 		if (dentry->d_parent != parent)
 			continue;
+
+		//有效性检查： d_unhashed检查 dentry 是否仍存在于哈希表中
 		if (d_unhashed(dentry))
 			continue;
-
+		
+		// 两种比较路径1.自定义比较函数 (DCACHE_OP_COMPARE 2、标准匹配
 		if (unlikely(parent->d_flags & DCACHE_OP_COMPARE)) {
 			int tlen;
 			const char *tname;
+			//hash预检查： 先比较哈希值，快速过滤不匹配的项
 			if (dentry->d_name.hash != hashlen_hash(hashlen))
 				continue;
 			tlen = dentry->d_name.len;
 			tname = dentry->d_name.name;
 			/* we want a consistent (name,len) pair */
+			//序列号验证：在读取文件名和长度后，验证序列号是否变化。如果变化，说明数据可能不一致，跳回 seqretry重试
 			if (read_seqcount_retry(&dentry->d_seq, seq)) {
+				//序列号重试：检测到数据竞争时，通过 cpu_relax()让出 CPU，然后重试
+				//内存屏障：序列号操作包含必要的内存屏障，确保读写顺序
+				// 注意：序列号验证失败不会导致函数失败，而是触发重试
 				cpu_relax();
 				goto seqretry;
 			}
+			//自定义比较： 调用文件系统特定的 d_compare函数进行精确比较
 			if (parent->d_op->d_compare(dentry,
 						    tlen, tname, name) != 0)
 				continue;
 		} else {
+			//标准比较（无自定义函数）
+
+			//哈希和长度检查：比较完整的 hash_len（包含哈希和长度）
 			if (dentry->d_name.hash_len != hashlen)
 				continue;
+
+			//内存比较： 使用 dentry_cmp进行字符串内存比较
 			if (dentry_cmp(dentry, str, hashlen_len(hashlen)) != 0)
 				continue;
 		}
 		*seqp = seq;
 		return dentry;
 	}
+
+	//如果遍历完整个哈希桶都没有找到匹配的 dentry，返回 NULL
 	return NULL;
 }
 ```
 
+那么，哪些可能的场景是会发`read_seqcount_retry`检测失败呢（不一致）？TODO
+
+
 接着看下慢速模式即`__d_lookup()`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L2203)，`__d_lookup`遍历查找目标dentry的时候，使用了自旋锁`spin_lock`，多个读操作会发生锁竞争。它还会更新查找到的dentry的引用计数（因此叫做ref-walk）。RCU仍然用于ref-walk中的dentry哈希查找，但不是在整个ref-walk过程中都使用，频繁地加减reference count可能造成cacheline的刷新，这也是ref-walk开销更大的原因之一
 
 ```CPP
+/*
+parent: 父目录的 dentry，用于限定查找范围
+name: 要查找的文件名（包含哈希值、长度和字符串）
+*/
 struct dentry *__d_lookup(const struct dentry *parent, const struct qstr *name)
 {
+	unsigned int hash = name->hash;
+	// 同rcu，d_hash(hash)根据哈希值计算对应的哈希桶（链表头），所有哈希值相同的 dentry 都链接在这个桶中（解决哈希冲突）
 	struct hlist_bl_head *b = d_hash(hash);
+	struct hlist_bl_node *node;
+	//found初始化为 NULL，用于存储找到的 dentry
+	struct dentry *found = NULL;
+	struct dentry *dentry;
+
+	//RCU读锁保护
 	rcu_read_lock();
-    //遍历链表b里的dentry，查找目标dentry
-    hlist_bl_for_each_entry_rcu(dentry, node, b, d_hash) {
-		
+	//进入 RCU 读侧临界区。这允许函数安全地遍历哈希表中的链表，而无需担心链表结构被并发修改（如删除节点）。RCU 确保在遍历期间，链表节点不会被释放
+	//遍历链表b里的dentry（遍历哈希桶中的冲突链），查找目标dentry
+	hlist_bl_for_each_entry_rcu(dentry, node, b, d_hash) {
+		//使用 hlist_bl_for_each_entry_rcu宏遍历哈希桶中的每个 dentry。这个宏是 RCU 安全的，允许无锁遍历链表。每次迭代中，dentry指向当前遍历的 dentry，node是内部使用的链表节点指针。
+
+		//name_hash不对，不是要找的
 		if (dentry->d_name.hash != hash)
-			continue;	//name_hash不对，不是要找的
-        //spin_lock加锁
-        spin_lock(&dentry->d_lock);
+			continue;
+
+		//获取 dentry 锁，对当前 dentry 获取自旋锁。这是因为后续检查（父目录、哈希状态、文件名）需要防止并发修改（如 d_move操作）。锁保护确保在检查期间 dentry 的状态不会改变
+		spin_lock(&dentry->d_lock);
+
+		//parent 不对，不是要找的
 		if (dentry->d_parent != parent)
-			goto next;	//parent 不对，不是要找的
-		if (d_unhashed(dentry))
 			goto next;
 
+		//d_unhashed检查 dentry 是否已被从哈希表中移除（如被删除或无效化）。如果已移除，跳转到 next，因为这样的 dentry 不再有效
+		if (d_unhashed(dentry))
+			goto next;
+		
+		//full name 比对，不是要找的，d_same_name函数比较 dentry 的文件名与目标文件名是否完全匹配（包括字符串比较）。如果不匹配，跳转到 next。这是最精确的检查，确保找到正确的 dentry
 		if (!d_same_name(dentry, parent, name))
-			goto next;	//full name 比对，不是要找的
-        ......
-        //查找到目标dentry，增加引用计数
-        dentry->d_lockref.count++;
-		found = dentry;	// 找到了，可以返回了
-		//解锁
+			goto next;
+
+		//找到匹配的 dentry
+
+		//如果所有检查都通过，增加 dentry 的引用计数（d_lockref.count），防止 dentry 被提前释放
+		dentry->d_lockref.count++;
+		//设置 found为当前 dentry，释放锁，并跳出循环
+		found = dentry;
 		spin_unlock(&dentry->d_lock);
 		break;
+		//next标签用于释放当前 dentry 的锁，然后继续遍历下一个 dentry
+		//循环结束后，退出 RCU 读侧临界区（rcu_read_unlock）
+
 next:
-        //没有查找到目标dentry会跳转到next这里，解锁，继续查找
-		spin_unlock(&dentry->d_lock);  
-    }
-	rcu_read_unlock();
-    ...
+		spin_unlock(&dentry->d_lock);
+ 	}
+ 	rcu_read_unlock();
+
+ 	return found;
 }
 ```
 
+`__d_lookup`函数中的注释提到，并发重命名操作（rename）可能干扰链表遍历，导致假阴性（false-negative）结果。这是由更上层的 rename_lock序列锁来保护的，不在本函数范围内
+
 ####	路径查找：walk_component->lookup_slow
 与上述方法不同，`lookup_fast`的两种模式，都是查询的`dentry_hashtable`，`lookup_slow`是兜底方案，即当`lookup_fast`失败后，才会调用。`lookup_slow()`是通过当前所在的文件系统，获取对应的信息，创建对应的dentry和inode，将新的dentry添加到`dentry_hashtable`中
+
+这里有个比较重要的细节，由于`lookup_slow`的主要功能是处理 dcache 未命中的情况，通过文件系统特定的查找方法（如 `inode->i_op->lookup`）来查找目录项。这个过程可能阻塞（至少需要更安全的写锁保护），因为它可能涉及磁盘 I/O 或其他慢速操作。此外，函数还需要处理并发查找（基于等待队列机制）和 dentry 重新验证
 
 ```BASH
 |- lookup_slow() //在lookup_fast()中没有找到dentry，会获取父dentry对应的inode，通过inode->i_op->lookup去查找、创建
@@ -1892,25 +1954,51 @@ next:
 ```CPP
 /* Fast lookup failed, do it the slow way */
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1625
+/*
+name: 要查找的文件名（封装在 struct qstr中）
+dir: 父目录的 dentry
+flags: 查找标志（如 LOOKUP_NO_REVAL、LOOKUP_RCU等）
+
+返回值: 成功时返回找到的 dentry，失败时返回错误指针（如 ERR_PTR(-ENOENT)）
+*/
 static struct dentry *lookup_slow(const struct qstr *name,
 				  struct dentry *dir,
 				  unsigned int flags)
 {
+	//初始化 dentry为错误码 -ENOENT，表示文件不存在
 	struct dentry *dentry = ERR_PTR(-ENOENT), *old;
+	//获取父目录的 inode
 	struct inode *inode = dir->d_inode; // 指向当前路径的父路径
+	//声明一个等待队列 wq，用于处理多个进程同时查找相同 dentry 的并发情况
 	DECLARE_WAIT_QUEUE_HEAD_ONSTACK(wq);
 
+	//获取 inode 的共享锁（inode_lock_shared），允许多个读取者同时访问，但确保数据一致性。这是慢速路径的典型操作，因为后续操作可能阻塞
 	inode_lock_shared(inode);
+
+	// 检查目录状态，使用 IS_DEADDIR宏检查目录是否已被标记为死亡（例如，由于卸载或删除）。如果是，直接跳转到 out标签，返回错误。这避免了在无效目录上进行操作
 	/* Don't go there if it's already dead */
 	if (unlikely(IS_DEADDIR(inode)))
 		goto out;
 again:
     // 新建 dentry 节点，并初始化相关关联
+
+	/*
+	调用 d_alloc_parallel函数在 dcache 中分配或查找 dentry。这个函数处理并发查找：
+	1.	如果其他进程正在查找相同的 dentry，当前进程可能睡眠等待，直到查找完成
+	2.	返回一个 dentry，可能是新分配的（处于查找中状态）或已存在的
+	3.	如果 d_alloc_parallel返回错误（如内存不足），跳转到 out清理并返回错误
+	*/
 	dentry = d_alloc_parallel(dir, name, &wq);
 	if (IS_ERR(dentry))
 		goto out;
+
+	//d_in_lookup(dentry)检查 dentry 是否处于查找中状态。如果不是，说明 dentry 已经存在于 dcache 中，但可能需要重新验证
 	if (unlikely(!d_in_lookup(dentry))) {
+		//重要case1：dentry已存在，需要重新验证
 		if (!(flags & LOOKUP_NO_REVAL)) {
+			//如果没有设置 LOOKUP_NO_REVAL标志（表示不需要重新验证），调用 d_revalidate函数验证 dentry 的有效性（例如，检查文件是否被删除或修改）
+
+			//如果 d_revalidate返回 0，表示 dentry 无效，调用 d_invalidate使 dentry 无效，释放引用（dput），并跳回 again重试查找
 			int error = d_revalidate(dentry, flags);
 			if (unlikely(error <= 0)) {
 				if (!error) {
@@ -1918,15 +2006,24 @@ again:
 					dput(dentry);
 					goto again;
 				}
+				//如果error返回负数错误，释放 dentry 并返回错误
 				dput(dentry);
 				dentry = ERR_PTR(error);
 			}
+			//如果error返回正数，表示 dentry 有效，继续使用
+
+			//这个步骤确保了即使 dentry 在 dcache 中，也可能是陈旧的，需要验证
 		}
 	} else {
+		//重要case2：dentry是新建的，需要调用文件系统lookup方法
         // 在 ext4 fs 中，会调用 ext4_lookup 寻找，此函数涉及到 IO 操作，性能较 dcache 会低
 		// 定义：https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/namei.c#L3905
+
+		//如果 dentry 处于查找中状态（由 d_alloc_parallel新分配），调用文件系统特定的 lookup方法（如 ext4_lookup）。这个函数会访问文件系统底层（如读取磁盘目录内容）来查找文件，可能阻塞
 		old = inode->i_op->lookup(inode, dentry, flags);
+		//d_lookup_done标记查找完成，唤醒其他等待在等待队列 wq上的进程
 		d_lookup_done(dentry);
+		//如果 lookup返回一个旧的 dentry（可能由于并发查找已完成），释放新分配的 dentry（dput）并使用旧的 dentry。这避免了重复创建 dentry
 		if (unlikely(old)) {
             // 如果 dentry 是一个目录的 dentry，则有可能 old 是有效的；否则如果 dentry 是文件的 dentry 则 old 是 null
 			dput(dentry);
@@ -1934,10 +2031,24 @@ again:
 		}
 	}
 out:
+	//释放 inode 的共享锁（inode_unlock_shared）
 	inode_unlock_shared(inode);
+	//返回找到的 dentry 或错误指针。如果成功，dentry 可能是一个正面（positive）dentry（有 inode）或负面（negative）dentry（无 inode，表示文件不存在）
 	return dentry;
 }
 ```
+
+上面`lookup_slow`的实现有两处细节：
+
+第一个是`lookup_slow`的else分支的含义是什么？
+
+-	`d_in_lookup(dentry)为true`：表示这是一个新分配的、处于"查找中"状态的dentry
+-	需要文件系统介入：调用`inode->i_op->lookup()`方法，让文件系统（如ext4）从磁盘读取目录内容，填充这个dentry
+-	处理并发：`d_lookup_done()`标记查找完成，唤醒其他等待的进程。如果`lookup`返回一个现有的dentry（old），说明其他进程已经完成了查找，使用现有的dentry
+
+第二个问题是：`d_alloc_parallel`的实现机制是什么？
+
+TODO
 
 `lookup_slow`的实现逻辑梳理如下（有些绕）：
 
