@@ -886,6 +886,7 @@ struct file *do_filp_open(int dfd, struct filename *pathname,
 open系统调用涉及到目录的从顶至底的查找过程的核心代码就浓缩为下面这段：
 
 -	`link_path_walk--->do_last`：完成某个指定路径，如`/a/b/c/d/e`的分量解析，直至`do_last`完成最后一个分量（`e`）的处理
+-	如果在`link_path_walk`每个分量解析过程中出现了symlink或者挂载点，那么就（TODO）
 -	如果`/a/b/c/d/e`是一个符号链接，那么将`/a/b/c/d/e`转为实际路径后，继续循环处理；否则解析完成
 
 ```CPP
@@ -986,6 +987,8 @@ TODO
 
 ####	path_openat->path_init
 `path_init` 方法主要是用来初始化 `struct nameidata` 实例中的 `path`、`root`、`inode` 等字段。当 `path_init` 函数执行成功后，就会在 `nameidata` 结构体的成员 `nd->path.dentry` 中指向搜索路径的起点，接下来就使用 `link_path_walk` 函数顺着路径进行搜索
+
+TODO：path_init
 
 ```CPP
 static const char *path_init(struct nameidata *nd, unsigned flags)
@@ -1298,6 +1301,8 @@ OK:
 			return err;
 
 		if (err) {
+			// err>0的场景，对应于下面代码中pick_link函数返回1
+			// 处理符号链接的返回值（即如果中间分量是一个symlink）
 			const char *s = get_link(nd);
 
 			if (IS_ERR(s))
@@ -1460,7 +1465,6 @@ static inline int handle_dots(struct nameidata *nd, int type)
 ```
 
 先简单分析下`follow_dotdot_rcu`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1325)：
-
 
 ```CPP
 // 比较两个path是否相等
@@ -2046,7 +2050,24 @@ out:
 -	需要文件系统介入：调用`inode->i_op->lookup()`方法，让文件系统（如ext4）从磁盘读取目录内容，填充这个dentry
 -	处理并发：`d_lookup_done()`标记查找完成，唤醒其他等待的进程。如果`lookup`返回一个现有的dentry（old），说明其他进程已经完成了查找，使用现有的dentry
 
-第二个问题是：`d_alloc_parallel`的实现机制是什么？
+第二个问题是：`d_alloc_parallel`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L2405)机制是什么？从其实现可以看出与`lookup_fast`类似，都采用了先快速无锁查找，失败后回退到加锁模式的策略。这种设计是为了在并发环境下高效地处理目录项（dentry）的查找和创建。即d_alloc_parallel函数的主要任务是：
+
+1. 查找或创建dentry：在dcache的哈希表中查找匹配的dentry，如果不存在则创建一个新的
+2. 处理并发查找：使用等待队列机制协调多个进程同时查找同一个dentry的情况
+3. 封装为通用函数，可以被多种上下文调用
+
+`d_alloc_parallel`的主要目标是在目录缓存（dcache）中查找或创建一个 dentry，并处理多个进程并发查找同一 dentry 的情况。在慢速路径（Ref-walk）时被调用，实现上依然分为RCU快速模式（调用` __d_lookup_rcu`）与慢速模式两步，大致步骤如下：
+
+
+-	步骤 1：尝试 RCU 查找，调用 `__d_lookup_rcu(parent, name, &d_seq)`进行无锁查找。如果找到有效的 dentry，则返回它
+-	步骤 2： 检查序列号，使用 `read_seqretry`和 `read_seqcount_retry`验证查找过程中数据是否发生变化。如果变化，则重试（goto retry）
+-	步骤 3：检查并发查找，如果 RCU 查找失败，函数检查是否有其他进程正在查找同一 dentry（通过 d_in_lookup_hash列表）。如果找到，则调用 `d_wait_lookup`（避免了多个进程同时创建相同 dentry 的资源浪费，并确保数据一致性）等待该查找完成，然后验证结果
+-	步骤 4：创建新 dentry，如果没有其他进程在查找，则创建一个新 dentry 并将其添加到查找列表中，以便其他进程可以等待
+
+`d_alloc_parallel`与`lookup_fast`中RCU操作的区别是什么？
+
+-	`lookup_fast`中的RCU操作：是在路径查找的RCU-walk模式下进行的，目的是无锁地快速查找路径组件
+-	`d_alloc_parallel`中的RCU操作：是在dcache模块内部使用的，用于无锁地遍历哈希表，与路径查找模式无关
 
 TODO
 
@@ -2056,21 +2077,135 @@ TODO
 
 在上面`lookup_slow`的实现中，什么情况下会进入文件系统的 `inode->i_op->lookup`函数？
 
-TODO
-
-这里简单介绍下 `ext4_lookup()` 的实现，其原型为 `static struct dentry *ext4_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)`，参数 `dir` 为当前目录 dentry 的父目录，参数 `dentry` 为需要查找的当前目录。`ext4_lookup()` 首先调用了 `ext4_lookup_entry()`，此函数根据当前路径的 dentry 的 `d_name` 成员在当前目录的父目录文件（用 inode 表示）里查找，这个会 `open` 父目录文件会涉及到 IO 读操作（具体可以分析 `ext4_bread` 函数的 [实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/inode.c#L994)）。查找到后，得到当前目录的 `ext4_dir_entry_2`，此结构体里有当前目录的 inode number，然后根据此 inode number 调用 `ext4_iget()` 函数获得这个 inode number 对应的 inode struct，得到这个 inode 后调用 `d_splice_alias()` 将 dentry 和 inode 绑定，即将 inode 赋值给 dentry 的 `d_inode` 成员
+####	lookup_slow-> inode->lookup的实现（ext4）
+这里简单介绍下 `ext4_lookup()` 的实现，其原型为 `static struct dentry *ext4_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)`，参数 `dir` 为当前目录 dentry 的父目录，参数 `dentry` 为需要查找的当前目录。`ext4_lookup()` 首先调用了 `ext4_find_entry()`，此函数根据当前路径的 dentry 的 `d_name` 成员在当前目录的父目录文件（用 inode 表示）里查找，这个会 `open` 父目录文件会涉及到 IO 读操作（具体可以分析 `ext4_bread` 函数的 [实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/inode.c#L994)）。查找到后，得到当前目录的 `ext4_dir_entry_2`，此结构体里有当前目录的 inode number，然后根据此 inode number 调用 `ext4_iget()` 函数获得这个 inode number 对应的 inode struct，得到这个 inode 后调用 `d_splice_alias()` 将 dentry 和 inode 绑定，即将 inode 赋值给 dentry 的 `d_inode` 成员
 
 当 ext4 文件系统的 lookup 完成后，此时的 dentry 已经有绑定的 inode 了，即已经设置了其 `d_inode` 成员了，然后调用 `d_lookup_done()` 将此 dentry 从 lookup hash 链表上移除（它是在 `d_alloc_parallel` 里被插入 lookup hash 的），这个 lookup hash 链表的作用是避免其它线程也同时来查找当前目录造成重复 alloc dentry 的问题
 ```CPP
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/namei.c#L1569
-TODO
+static struct dentry *ext4_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
+{
+	struct inode *inode;
+	struct ext4_dir_entry_2 *de;
+	struct buffer_head *bh;
+
+	......
+
+	bh = ext4_find_entry(dir, &dentry->d_name, &de, NULL);
+	if (IS_ERR(bh))
+		return (struct dentry *) bh;
+	inode = NULL;
+	if (bh) {
+		__u32 ino = le32_to_cpu(de->inode);
+		brelse(bh);
+		if (!ext4_valid_inum(dir->i_sb, ino)) {
+			EXT4_ERROR_INODE(dir, "bad inode number: %u", ino);
+			return ERR_PTR(-EFSCORRUPTED);
+		}
+		if (unlikely(ino == dir->i_ino)) {
+			EXT4_ERROR_INODE(dir, "'%pd' linked to parent dir",
+					 dentry);
+			return ERR_PTR(-EFSCORRUPTED);
+		}
+		// 获取inode 结构
+		inode = ext4_iget_normal(dir->i_sb, ino);
+		if (inode == ERR_PTR(-ESTALE)) {
+			EXT4_ERROR_INODE(dir,
+					 "deleted inode referenced: %u",
+					 ino);
+			return ERR_PTR(-EFSCORRUPTED);
+		}
+		......
+	}
+
+	//调用d_splice_alias将inode 与dentry绑定
+	return d_splice_alias(inode, dentry);
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L2925
+```
+
+在`ext4_lookup`中比较重要的是`d_splice_alias`的实现，该函数用于处理 dentry 与 inode 的关联，特别是在存在别名（alias）的情况下。该函数通常在文件系统的 lookup方法中被调用，当查找操作发现 inode 已经存在时，用于正确处理 dentry 的别名情况
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L2925
+/*
+inode: 要关联的 inode 指针
+dentry: 新创建的 dentry 指针
+*/
+struct dentry *d_splice_alias(struct inode *inode, struct dentry *dentry)
+{
+	if (IS_ERR(inode))
+		return ERR_CAST(inode);
+
+	//完整性检查：使用 BUG_ON确保 dentry 是未哈希的（unhashed），即还没有添加到 dcache 的哈希表中。这是必要的，因为函数准备将 dentry 添加到 dcache
+	BUG_ON(!d_unhashed(dentry));
+
+	//处理负 dentry（文件不存在）
+	//如果 inode为 NULL，表示文件不存在，跳转到 out标签，将 dentry 作为负 dentry（negative dentry）添加到 dcache
+	if (!inode)
+		goto out;
+
+	security_d_instantiate(dentry, inode);
+
+	//目录 inode 的别名处理
+
+	//锁定 inode：获取 inode 的自旋锁，保护 inode 的别名列表
+	spin_lock(&inode->i_lock);
+	//目录检查：只有当 inode 是目录时，才需要处理别名情况（普通文件不会进入此逻辑）
+	if (S_ISDIR(inode->i_mode)) {
+		//查找别名：调用 __d_find_any_alias(inode)查找是否已经存在指向相同 inode 的 dentry（别名）
+		struct dentry *new = __d_find_any_alias(inode);
+		if (unlikely(new)) {
+			/* The reference to new ensures it remains an alias */
+			spin_unlock(&inode->i_lock);
+			write_seqlock(&rename_lock);
+			//释放 inode 锁，获取重命名锁（rename_lock）的写锁，保护 dentry 树结构
+			if (unlikely(d_ancestor(new, dentry))) {
+				write_sequnlock(&rename_lock);
+				dput(new);
+				new = ERR_PTR(-ELOOP);
+				pr_warn_ratelimited(
+					"VFS: Lookup of '%s' in %s %s"
+					" would have caused loop\n",
+					dentry->d_name.name,
+					inode->i_sb->s_type->name,
+					inode->i_sb->s_id);
+			} else if (!IS_ROOT(new)) {
+				// 非根别名的处理
+				//如果别名 dentry 不是根目录，调用 __d_unalias处理别名
+				//__d_unalias可能涉及重命名或移动操作，以解决命名冲突
+				int err = __d_unalias(inode, dentry, new);
+				write_sequnlock(&rename_lock);
+				if (err) {
+					dput(new);
+					new = ERR_PTR(err);
+				}
+			} else {
+				//根别名的处理
+				//如果别名 dentry 是根目录，直接调用 __d_move将新 dentry 移动到别名 dentry 的位置
+				__d_move(new, dentry, false);
+				write_sequnlock(&rename_lock);
+			}
+			iput(inode);
+			return new;
+		}
+	}
+out:
+	//普通情况
+	//调用 __d_add将 dentry 添加到 dcache，并关联 inode
+	//返回 NULL，表示成功关联了新创建的 dentry
+	//https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L2526
+	__d_add(dentry, inode);
+	return NULL;
+}
 ```
 
 ####	walk_component->step_into
-通过`walk_component`函数前面的`lookup_fast/lookup_slow`逻辑已经确保当前查询的路径分量已经位于dcache里面了，接着会调用`step_into()`检查并处理dentry是一个link类型或挂载点的情况
+通过`walk_component`函数前面的`lookup_fast/lookup_slow`逻辑已经确保**当前查询的路径分量**已经位于dcache里面了，接着会调用`step_into()`检查并处理dentry是一个link类型或挂载点的情况
 
 ```BASH
-|- step_into()
+|- step_into()	//step_into函数的作用是决定如何进入一个路径组件（如文件或目录），特别是处理符号链接的情况
 	|- handle_mounts() //处理一个挂载点的情况，获取最后一个挂载在挂载点的文件系统信息
 		|- __follow_mount_rcu() //轮询调用__lookup_mnt()，处理重复挂载（查找标记有LOOKUP_RCU时调用）
 			|- __lookup_mnt()
@@ -2079,44 +2214,72 @@ TODO
 ```
 
 ```CPP
-static const char *step_into(struct nameidata *nd, int flags,
-		     struct dentry *dentry, struct inode *inode, unsigned seq)
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1742
+/*
+参数说明
+nd：指向 nameidata结构的指针，包含路径查找的当前状态（如当前路径、标志位等）
+path：指向 path结构的指针，包含当前组件的挂载点和 dentry
+flags：控制标志，如 WALK_MORE（表示还有更多组件要处理）和 WALK_FOLLOW（表示应跟随符号链接）
+inode：当前路径组件对应的 inode
+seq：序列号，用于 RCU 模式下的一致性验证
+*/
+static inline int step_into(struct nameidata *nd, struct path *path,
+			    int flags, struct inode *inode, unsigned seq)
 {
-	struct path path;
-    //处理路径分量是挂载点的情况
-	int err = handle_mounts(nd, dentry, &path, &inode, &seq);
-    //检查是否是链接
-	if (likely(!d_is_symlink(path.dentry)) ||
-	   ((flags & WALK_TRAILING) && !(nd->flags & LOOKUP_FOLLOW)) ||
-	   (flags & WALK_NOFOLLOW)) {
+	//清理之前的符号链接引用
+	//如果 flags中没有设置 WALK_MORE（表示当前组件不是多个组件中的中间组件）且 nd->depth不为零（表示有未处理的符号链接），则调用 put_link(nd)来释放之前持有的符号链接引用。这有助于防止引用计数泄漏
+	if (!(flags & WALK_MORE) && nd->depth)
+		put_link(nd);
+
+	// 检查是否为符号链接且是否需要跟随
+	// d_is_symlink：检查当前 dentry 是否为符号链接
+	if (likely(!d_is_symlink(path->dentry)) ||
+	   !(flags & WALK_FOLLOW || nd->flags & LOOKUP_FOLLOW)) {
+		//如果不是符号链接，或者不需要跟随符号链接（即 flags中没有 WALK_FOLLOW且 nd->flags中没有 LOOKUP_FOLLOW），则直接进入该分量
 		/* not a symlink or should not follow */
-		if (!(nd->flags & LOOKUP_RCU)) {
-			dput(nd->path.dentry);
-			if (nd->path.mnt != path.mnt)
-				mntput(nd->path.mnt);
-		}
-    	//更新path
-		nd->path = path;
+
+		// 重要：将当前 path复制到 nameidata中，更新查找状态
+		path_to_nameidata(path, nd);
+
+		// 更新nameidata的成员，然后返回，可以继续下一个分量了
 		nd->inode = inode;
 		nd->seq = seq;
-		return NULL;
+
+		//返回 0，表示成功进入组件，查找可以继续
+		return 0;
 	}
-    //处理路径分量是链接的情况
-	return pick_link(nd, &path, inode, seq, flags);
+	/* make sure that d_is_symlink above matches inode */
+	if (nd->flags & LOOKUP_RCU) {
+		//如果当前处于 RCU-walk 模式，则检查 dentry 的序列号是否发生变化（使用 read_seqcount_retry）
+		//如果序列号不匹配，说明数据在查找过程中被修改，返回 -ECHILD表示需要退出 RCU 模式并回退到 ref-walk 模式
+		if (read_seqcount_retry(&path->dentry->d_seq, seq))
+			return -ECHILD;
+	}
+	//如果当前是符号链接且需要跟随，则调用 pick_link来处理符号链接的跟随
+	return pick_link(nd, path, inode, seq);
 }
 ```
 
-`pick_link`
+如果当前的分量是一个link，那么就会进入`pick_link`的实现：
 
 ```CPP
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1692
+/*
+nd: 指向 nameidata结构的指针，包含整个路径查找的状态
+link: 指向 path结构的指针，表示要跟随的符号链接本身的路径（其 dentry是符号链接文件本身）
+inode: 符号链接文件对应的 inode
+seq: 在 RCU 模式下获取的序列号，用于验证数据一致性
+*/
 static int pick_link(struct nameidata *nd, struct path *link,
 		     struct inode *inode, unsigned seq)
 {
 	int error;
 	struct saved *last;
 	 // 如果当前路径中已包含的符号链接数量（嵌套层次）超过了 MAXSYMLINKS = 40
+	 // 防止符号链接的无限循环
 	if (unlikely(nd->total_link_count++ >= MAXSYMLINKS)) {
+		// 在返回错误前，会调用 path_to_nameidata(link, nd)更新 nd的状态
+		// 这确保了错误处理时，nd中的路径信息是准确的，有助于调试或生成准确的错误信息
 		path_to_nameidata(link, nd);
 		// 返回错误
 		return -ELOOP;
@@ -2124,43 +2287,137 @@ static int pick_link(struct nameidata *nd, struct path *link,
 
 	 // 当前为 ref-walk 模式
 	if (!(nd->flags & LOOKUP_RCU)) {
+		// 在 ref-walk 模式下，正确管理挂载点（vfsmount）的引用计数
+		//仅当不在 RCU 模式下才需要处理引用计数，因为 RCU 模式不管理引用计数
+		//如果符号链接所在的挂载点（link->mnt）与当前查找的挂载点（nd->path.mnt）相同，则调用 mntget(link->mnt)增加该挂载点的引用计数。这是因为后续操作将持有这个 path，需要防止挂载点被意外卸载
 		if (link->mnt == nd->path.mnt)
 			mntget(link->mnt);
 	}
+
+	//先为符号链接分配栈空间
+	//在 nameidata结构中的栈（nd->stack）上分配一个新的 saved结构，用于保存当前状态，以便在跟随完符号链接后能正确回溯
 	error = nd_alloc_stack(nd);
 	if (unlikely(error)) {
 		if (error == -ECHILD) {
+			// 尝试在RCU模式下验证路径的合法性
+			// https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L630
 			if (unlikely(!legitimize_path(nd, link, seq))) {
-				drop_links(nd);
-				nd->depth = 0;
-				nd->flags &= ~LOOKUP_RCU;
-				nd->path.mnt = NULL;
+				//验证失败，必须彻底放弃RCU模式并清理状态
+				drop_links(nd);		//丢弃所有已保存的links
+				nd->depth = 0;		// 重置深度
+				nd->flags &= ~LOOKUP_RCU;	// 清除RCU标志
+				nd->path.mnt = NULL;		// 清理当前路径
 				nd->path.dentry = NULL;
-				if (!(nd->flags & LOOKUP_ROOT))
+				if (!(nd->flags & LOOKUP_ROOT))	// 如果不是从根开始查找，也清理根路径
 					nd->root.mnt = NULL;
-				rcu_read_unlock();
+				rcu_read_unlock();			// 退出RCU临界区
 			} else if (likely(unlazy_walk(nd)) == 0)
+				//成功退出RCU模式，重试分配栈空间
 				error = nd_alloc_stack(nd);
 		}
+		/*小结下上面的过程：
+		1.	legitimize_path(nd, link, seq): 尝试在不退出RCU模式的前提下，验证 link路径的 dentry 和挂载点是否仍然有效（通过序列号 seq）。如果成功，则获取对它们的引用
+		2.	如果 legitimize_path失败：意味着数据已发生巨大变化，无法安全地退出。此时必须执行硬退出	
+			-	drop_links(nd): 释放 nd->stack中所有已保存链接的引用
+			-	重置 nd的关键状态（深度、标志、当前路径、根路径）
+			-	rcu_read_unlock(): 显式退出 RCU 读取侧临界区
+		3.	如果 legitimize_path成功：调用 unlazy_walk(nd)尝试安全地退出 RCU 模式并获取所有必要资源的引用。如果成功（返回 0），则重试 nd_alloc_stack
+		4.	最终，如果错误仍然存在：调用 path_put(link)释放之前对符号链接路径的引用，并返回错误
+		*/
 		if (error) {
 			path_put(link);
 			return error;
 		}
 	}
 
-	last = nd->stack + nd->depth++;
-	last->link = *link;
+	//保存当前状态到栈中，将当前符号链接的信息保存到 nameidata的栈中，为后续的跟随操作做准备
+	last = nd->stack + nd->depth++;	//计算新栈项的位置并增加深度计数器
+	last->link = *link;		//保存符号链接本身的路径信息（挂载点和 dentry）
 	clear_delayed_call(&last->done);
-	nd->link_inode = inode;
-	last->seq = seq;
+	nd->link_inode = inode;	//将符号链接的 inode 保存在 nameidata中，方便后续使用
+	last->seq = seq;	//保存序列号，用于后续的 RCU 验证
+	// 返回1，会触发在link_path_walk函数中if(err)的流程
 	return 1;
 }
 ```
 
-####	path_openat->trailing_symlink
+至此，一轮`link_path_walk->walk_component`的就完成了，接下来是`link_path_walk`函数中对`walk_component`返回值检查的后半部分，继续分析
+
+```CPP
+static int link_path_walk(const char *name, struct nameidata *nd)
+{
+	int err;
+	......
+
+	/* At this point we know we have a real path component. */
+	for(;;) {
+		......
+		err = walk_component(nd, ......);
+		if (err < 0)	//表示错误（如权限不足、文件不存在），直接返回错误
+			return err;
+
+		if (err) {
+			//表示遇到了符号链接，并且需要跟踪（即调用了 pick_link）
+			//调用 get_link(nd)获取符号链接的目标路径字符串 s，get_link内部可能会调用文件系统的 ->get_link方法
+			const char *s = get_link(nd);
+			//获取链接目标的结果
+			if (IS_ERR(s))
+				return PTR_ERR(s);
+			err = 0;
+			if (unlikely(!s)) {
+				/* jumped */
+				//如果 s为空（unlikely(!s)），表示已经处理了跳转（如 nd_jump_root），调用 put_link(nd)清理链接状态
+				put_link(nd);
+			} else {
+				//递归处理：如果 s非空，保存当前路径位置到堆栈（nd->stack[nd->depth - 1].name = name），然后更新 name为链接目标路径 s，并使用 continue重新开始循环。这意味着接下来会处理链接目标路径，实现递归解析
+				nd->stack[nd->depth - 1].name = name;
+				name = s;
+				continue;
+			}
+		}
+		//表示成功处理组件，没有遇到符号链接或不需要跟踪符号链接
+
+		//d_can_lookup：检查当前 dentry 是否可查找（即是否是目录）
+		if (unlikely(!d_can_lookup(nd->path.dentry))) {
+			if (nd->flags & LOOKUP_RCU) {
+				//unlazy_walk(nd)：尝试从 RCU-walk 模式退出到 Ref-walk 模式
+				// 如果成功，返回 0；如果失败（例如，由于并发修改无法安全退出），返回非零值（通常为 -ECHILD）
+				if (unlazy_walk(nd))	
+					return -ECHILD;	
+			}
+			//如果不是，返回 -ENOTDIR（可靠的返回）
+			return -ENOTDIR;
+		}
+	}
+}
+```
+
+此外，对于的返回值，通过前面的`do_filp_open`的处理就明白了，仅当`path_openat`的返回值为`-ECHILD`时，才会触发回退到ref-walk，其他情况会直接返回错误
+
+```CPP
+struct file *do_filp_open(int dfd, struct filename *pathname,
+		const struct open_flags *op)
+{
+	......
+	//RCU 模式（首先尝试RCU快速路径）
+	filp = path_openat(&nd, op, flags | LOOKUP_RCU);
+	if (unlikely(filp == ERR_PTR(-ECHILD)))
+		//正常模式（回退到慢速路径）
+		filp = path_openat(&nd, op, flags);
+	......
+	return filp;
+}
+```
+
+既然如此，那么有个问题，在RCU模式下的`link_path_walk`函数，当进入到`!d_can_lookup(nd->path.dentry)`的分支且`unlazy_walk`成功（`unlazy_walk`返回0，最终返回`-ENOTDIR`），为何不再回退到ref-walk模式了呢？分析见附录
 
 TODO
 
+####	path_openat->do_last
+
+这部分放在后面
+
+####	path_openat->trailing_symlink
 ```CPP
 static const char *trailing_symlink(struct nameidata *nd)
 {
@@ -2176,24 +2433,33 @@ static const char *trailing_symlink(struct nameidata *nd)
 }
 ```
 
+`get_link`函数负责从符号链接（symlink）的 inode 中获取链接目标路径。涉及多种情况，包括 RCU 模式处理、安全检查、路径解析等
+
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1019
+//nd: 指向 nameidata结构的指针，包含当前路径查找的状态（如当前路径、查找标志、堆栈信息等）
+//成功时返回指向链接目标字符串的指针
 static __always_inline
 const char *get_link(struct nameidata *nd)
 {
+	//获取当前链接状态：从 nameidata的堆栈中获取最近保存的符号链接信息（last）
 	struct saved *last = nd->stack + nd->depth - 1;
+
+	//提取 dentry 和 inode：dentry是符号链接本身的目录项，inode是符号链接对应的 inode
 	struct dentry *dentry = last->link.dentry;
 	struct inode *inode = nd->link_inode;
 	int error;
 	const char *res;
 
 	if (!(nd->flags & LOOKUP_RCU)) {
+		//ref-walk模式：直接更新访问时间（touch_atime），并调用 cond_resched()让出 CPU，避免长时间占用
 		touch_atime(&last->link);
 		cond_resched();
 	} else if (atime_needs_update_rcu(&last->link, inode)) {
+		//rcu-walk模式：检查是否需要更新时间戳（atime_needs_update_rcu）。如果需要，尝试退出 RCU 模式（unlazy_walk）。如果退出失败，返回 -ECHILD错误；成功则更新时间戳
 		if (unlikely(unlazy_walk(nd)))
 			return ERR_PTR(-ECHILD);
-		touch_atime(&last->link);
+		touch_atime(&last->link);	//更新时间戳（atime）
 	}
 
 	error = security_inode_follow_link(dentry, inode,
@@ -2201,13 +2467,19 @@ const char *get_link(struct nameidata *nd)
 	if (unlikely(error))
 		return ERR_PTR(error);
 
-	nd->last_type = LAST_BIND;
+	// 重要：获取symlink目标
+	nd->last_type = LAST_BIND;	//设置查找类型：LAST_BIND表示当前处理的是符号链接绑定
+
+	//尝试快速路径：首先检查 inode->i_link是否缓存了链接目标。如果存在，直接使用（避免调用文件系统操作）
 	res = inode->i_link;
 	if (!res) {
 		const char * (*get)(struct dentry *, struct inode *,
 				struct delayed_call *);
+		//文件系统特定获取： 如果缓存不存在，调用文件系统的 get_link方法（inode->i_op->get_link）
+		//对ext4文件系统，如ext4_get_link从磁盘读取符号链接内容
 		get = inode->i_op->get_link;
 		if (nd->flags & LOOKUP_RCU) {
+			//RCU 模式：先尝试无 dentry 的调用（get(NULL, inode, &last->done)），因为 dentry 在 RCU 模式下可能不安全。如果返回 -ECHILD，退出 RCU 模式后重试
 			res = get(NULL, inode, &last->done);
 			if (res == ERR_PTR(-ECHILD)) {
 				if (unlikely(unlazy_walk(nd)))
@@ -2215,19 +2487,22 @@ const char *get_link(struct nameidata *nd)
 				res = get(dentry, inode, &last->done);
 			}
 		} else {
+			//Ref-walk 模式： 直接调用 get(dentry, inode, &last->done)
 			res = get(dentry, inode, &last->done);
 		}
 		if (IS_ERR_OR_NULL(res))
 			return res;
 	}
-	if (*res == '/') {
+	// res：symlink路径
+	if (*res == '/') {	//处理绝对路径
 		if (!nd->root.mnt)
-			set_root(nd);
+			set_root(nd);	//如果当前未设置根目录（!nd->root.mnt），调用 set_root(nd)设置进程的根目录
 		if (unlikely(nd_jump_root(nd)))
-			return ERR_PTR(-ECHILD);
+			return ERR_PTR(-ECHILD);	//nd_jump_root(nd)将当前查找路径重置为根目录。如果失败（如权限不足），返回 -ECHILD
 		while (unlikely(*++res == '/'))
 			;
 	}
+	// 规范化路径并最终返回
 	if (!*res)
 		res = NULL;
 	return res;
@@ -2237,6 +2512,19 @@ const char *get_link(struct nameidata *nd)
 ####	小结：RCU-walk、ref-walk的调用路径
 
 TODO
+
+####	小结：对整个openat过程的小结
+`path_openat`：`path_init()`、`link_path_walk()`、`do_last()`
+
+1. `path_init()`：用于初始化`nameidata`里的`path`成员，如果open文件的路径是绝对路径以根目录`/`开头，则init为根目录`/`对应的dentry以及vfsmount，为后续路径目录解析做准备，其返回值`s`指向open文件的完整路径字符串的开头
+
+2. `link_path_walk(const char *name, struct nameidata *nd)`：`name`参数即是`path_init`的返回值`s`。`link_path_walk()`完成的工作是逐级解析file路径，直到解析到最后一级路径，最终会将filename保存到`nameidata`的`last`成员以供`do_last()`处理最后的文件 open动作
+
+解析每一级路径时，会从dcache（dentry_hashtable）中查找（fast lookup），如果有找到，将找到的dentry保存到`path`结构体（mnt&dentry）；如果没有找到，说明这个目录之前没有被open过，需要创建dentry（slow path）。创建dentry会先`alloc`一个dentry，然后调用具体文件系统的`lookup`函数根据`name`去查找此目录的`ext4_dir_entry_2`结构，此结构体里有inode num，根据inode num到inode hash链表里查找，如果有找到，则不用分配inode；如果没有找到，则需要`alloc`一个inode，然后调用`d_splice_alias()`将dentry和inode关联起来，即将inode赋值给dentry里的`d_inode`成员。无论是fast path还是slow path，在各自path的最后会将找到的`/`分配的dentry保存到`path`结构体（dentry/mnt），然后调用`step_into()`将`path`结构体赋值给`nameidata`里的`path`成员（`path_to_nameidata`），这样`nameidata`即指向了当前目录，完成了一级目录的解析，然后返回`link_path_walk()`里接着下一级目录的解析  
+
+这一阶段解析的是目录分量，其中也要处理链接及挂载点的情况
+
+3. `do_last()`根据`link_path_walk()`的最终解析查找结果，此时open文件的（目录）路径已经都解析完了，只剩下最后的filename没有解析了。如果open flags里没有`O_CREAT` flag，`do_last`首先执行`lookup_fast()`查看file是否有对应的dentry，如果有则将此dentry保存至`path`结构体；如果有`O_CREAT` flag或者`lookup_fast`没有找到则执行`lookup_open()`，这个函数仍然会先在dcache中查找，如果没有找到，创建一个dentry，这个创建dentry的过程和`link_path_walk()`中 slow path里的一样。无论是`lookup_fast`路径还是`lookup_open`路径，这两个路径都会设置`path`结构体，将找到的当前file的dentry或者分配的dentry保存到`path`结构体（dentry/mnt），然后会执行到`step_into()`，将`path`结构体赋值给`nameidata.path`（`path_to_nameidata`），此时`nameidata`已经指向了当前文件，也即完整的file路径。最后调用`vfs_open()`以执行具体文件系统的`file_operations`的`open`函数，比如ext4 fs，这个open函数是`ext4_file_open()`
 
 ##	0x06	最后一个分量：do_last的实现
 至此基本走读完 `link_path_walk` 函数的实现，这时已经处于路径中的最后一个分量（只是沿着路径走到最终分量所在的目录），该分量可能是：
@@ -3379,6 +3667,49 @@ static inline void __d_set_inode_and_type(struct dentry *dentry,
 -	并行查找：通过 RCU（Read-Copy-Update）机制无锁遍历哈希桶，直接检查目标 dentry 是否已存在于父目录的哈希链表中
 -	条件分配：若 dentry 不存在，则分配一个新 dentry 并尝试将其插入哈希链；若已存在，则直接返回现有 dentry（通过 `res` 参数返回）
 -	无磁盘 I/O：整个过程仅操作内存中的 dentry 缓存，不触发文件系统底层的磁盘读取或复杂逻辑（如加载 inode）
+
+####	为什么经常调用`d_revalidate`？
+
+
+####	open实现中的回退视角：局部回退 VFS 全局回退
+思考一个问题，对路径`/a/b/c/d/e`的查找过程中，假设`a`、`b`都已经成功的使用RCU模式查找，此时`c`查找过程中使用RCU方式失败，那么回退之后的查询过程是如何的？
+
+####	`unlazy_walk`的意义到底是什么？
+成功返回`0`，失败返回`-ECHILD`
+
+场景1：
+
+
+场景2：在`link_path_walk`[中](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L2133)的片段：
+
+```CPP
+if (unlikely(!d_can_lookup(nd->path.dentry))) {
+    if (nd->flags & LOOKUP_RCU) {
+        if (unlazy_walk(nd)){
+			//unlazy_walk失败了
+            return -ECHILD;
+		}
+		//为什么在 unlazy_walk成功后，直接返回-ENOTDIR，而不是回退到ref-walk？
+    }
+
+	//直接返回错误：ENOTDIR
+    return -ENOTDIR;
+}
+......
+```
+
+疑问是为什么在 `unlazy_walk`成功后，直接返回`-ENOTDIR`，而不是回退到ref-walk？分两点回答：
+
+1、错误条件的本质
+
+`d_can_lookup(nd->path.dentry)`检查的是当前 dentry 是否是一个可以查找的目录​。这个条件在短时间内不会改变：
+
+-	如果 dentry 不是目录（例如是普通文件），它不会因为模式切换而变成目录
+-	`d_can_lookup`函数检查的是 dentry 的固有属性，不是临时状态
+
+2、`unlazy_walk`的目的：其主要目的不是改变 dentry 的性质，而是**安全地退出 RCU 模式。在 RCU 模式下，数据读取是无锁的，可能看到不一致的状态。`unlazy_walk`确保在返回错误时，所有必要的锁和引用都已获取，避免资源泄漏或竞态条件**
+
+3、`d_can_lookup`错误返回的语义，`-ENOTDIR` 表示不是一个目录，这是一个永久性错误。即使切换到 ref-walk 模式重新检查，结果也不会改变；重试检查只会浪费 CPU 周期，不会改变结果
 
 ####	小结：path walk的策略
 前文描述了内核实现path walk的策略，首先 Kernel 会在 rcu-walk 模式下进入 lookup_fast 进行尝试，如果失败了那么就尝试就地转入 ref-walk，如果还是不行就回到 do_filp_open 从头开始。Kernel 在 ref-walk 模式下会首先在内存缓冲区查找相应的目标（lookup_fast），如果找不到就启动具体文件系统自己的 lookup 进行查找（lookup_slow）。注意，在 rcu-walk 模式下是不会进入 lookup_slow 的。如果这样都还找不到的话就一定是是出错了，那就报错返回吧，这时屏幕就会出现 No such file or directory
