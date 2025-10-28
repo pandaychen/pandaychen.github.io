@@ -1658,8 +1658,13 @@ static int lookup_fast(struct nameidata *nd,
 			// 成功则在下一个分量的lookup中，会采用ref-walk
 			// 当前的分量，看流程，不会换到ref-walk，而是用lookup_slow进行查找
 			// 如果没有找到就跳转到 unlazy。在这里会使用 unlazy_walk 就地将查找模式切换到 ref-walk ；如果还不行就只好返回到 do_filp_open 重新操作
-			if (unlazy_walk(nd))
+			if (unlazy_walk(nd)){
+				// 调用unlazy_walk退出RCU模式，该函数成功返回`0`，失败返回`-ECHILD`
+				// 进入该分支表示unlazy_walk失败了
 				return -ECHILD;
+			}
+
+			//unlazy_walk成功了
 			return 0;
 		}
 		//这里，RCU模式，查找成功后需要对seqcount进行二次校验，避免查找过程中有其他线程修改了该dentry
@@ -2414,6 +2419,7 @@ struct file *do_filp_open(int dfd, struct filename *pathname,
 TODO
 
 ####	path_openat->do_last
+`do_last`是 `open()`系统调用路径查找过程中的最终阶段，负责处理路径的最后一个组件（即要打开的文件本身）。这个函数比较复杂，因为它需要处理各种打开标志（`open_flag`）的组合，包括文件创建、截断、独占打开等场景。这里列举几个常见flags下的流程
 
 这部分放在后面
 
@@ -2554,7 +2560,7 @@ struct file * path_openat(struct nameidata * nd,
 }
 ```
 
-####	path_openat->do_last
+####	path_openat->do_last：大致走读
 `do_last` 方法[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L3259)中，先调用 `lookup_fast`，寻找路径中的最后一个 component，如果成功，就会跳到 `finish_lookup` 对应的 label，然后执行 `step_into` 方法，更新 `nd` 中的 `path`、`inode` 等信息，使其指向目标路径。然后调用 `vfs_open` 方法，继续执行 open 操作
 
 本文内核版本中，`do_last`还是存在较多与`link_path_walk`相同的逻辑，因为最后一个路径分量可能仍然是一个链接或者挂载点，这里只考虑最后一个分量为正常文件的情况，接下来基于几种典型场景分析下`do_last`方法
@@ -2562,6 +2568,530 @@ struct file * path_openat(struct nameidata * nd,
 -	case1：`open(pathname, O_RDONLY)`只读打开文件
 -	case2：`open(pathname, O_PATH)`
 -	case3：`open(pathname, O_WRONLY | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR)`
+
+```CPP
+/*
+nd: 指向 nameidata结构的指针，包含路径查找的当前状态
+file: 指向要打开的 file结构的指针
+op: 指向 open_flags结构的指针，包含打开标志（如 O_CREAT、O_TRUNC等）
+opened: 输出参数，记录打开操作的结果状态（如 FILE_CREATED）
+
+返回值：成功返回 0，失败返回错误码
+*/
+static int do_last(struct nameidata *nd,
+		   struct file *file, const struct open_flags *op,
+		   int *opened)
+{
+	//1. 初始化与标志设置
+	struct dentry *dir = nd->path.dentry;
+	int open_flag = op->open_flag;
+	bool will_truncate = (open_flag & O_TRUNC) != 0;
+	bool got_write = false;
+	int acc_mode = op->acc_mode;
+	unsigned seq;
+	struct inode *inode;
+	struct path path;
+	int error;
+
+	//清除 LOOKUP_PARENT标志（表示不再查找父目录）
+	nd->flags &= ~LOOKUP_PARENT;
+	//设置查找意图标志（如 LOOKUP_OPEN、LOOKUP_CREATE），从参数而来
+	nd->flags |= op->intent;
+
+	//2.	处理特殊路径组件（非普通文件）
+	if (nd->last_type != LAST_NORM) {
+		//如果最后一个组件不是普通文件（如 "." 或 ".."），调用 handle_dots处理
+		error = handle_dots(nd, nd->last_type);
+		if (unlikely(error))
+			return error;
+			
+		//跳转到 finish_open进行最终打开操作
+		goto finish_open;
+	}
+
+	//3. 非创建模式（!O_CREAT）的快速路径
+	if (!(open_flag & O_CREAT)) {
+		if (nd->last.name[nd->last.len]){
+			//目录跟随检查：如果路径以斜杠结尾（nd->last.name[nd->last.len] != 0）
+			// 设置 LOOKUP_FOLLOW和 LOOKUP_DIRECTORY标志，表示要进入目录
+			nd->flags |= LOOKUP_FOLLOW | LOOKUP_DIRECTORY;
+		}
+		/* we _can_ be in RCU mode here */
+
+		// 熟悉的RCU，最后一个分量当然也可以直接走rcu模式
+		error = lookup_fast(nd, &path, &inode, &seq);
+		if (likely(error > 0))
+			goto finish_lookup;	//找到
+
+		if (error < 0)		
+			return error;	//出错
+		
+		//未找到，error==0，继续向下执行
+		BUG_ON(nd->inode != dir->d_inode);
+		BUG_ON(nd->flags & LOOKUP_RCU);
+	} else {
+		//4. 创建模式（O_CREAT）的特殊处理
+		/* create side of things */
+		/*
+		 * This will *only* deal with leaving RCU mode - LOOKUP_JUMPED
+		 * has been cleared when we got to the last component we are
+		 * about to look up
+		 */
+
+		//退出 RCU 模式： 调用 complete_walk确保退出 RCU 模式，因为文件创建需要稳定的环境
+		error = complete_walk(nd);
+		if (error)
+			return error;
+		
+		//审计： 记录目录访问审计信息
+		audit_inode(nd->name, dir, LOOKUP_PARENT);
+		/* trailing slashes? */
+
+		//如果路径以斜杠结尾，返回 -EISDIR错误（不能创建以斜杠结尾的文件）
+		if (unlikely(nd->last.name[nd->last.len]))
+			return -EISDIR;
+	}
+
+	//5. 写权限获取
+
+	//如果打开标志涉及写操作（创建、截断、只写、读写），获取挂载点的写权限
+	if (open_flag & (O_CREAT | O_TRUNC | O_WRONLY | O_RDWR)) {
+		error = mnt_want_write(nd->path.mnt);
+		if (!error)
+			got_write = true;	//got_write标记用于后续的权限释放
+		/*
+		 * do _not_ fail yet - we might not need that or fail with
+		 * a different error; let lookup_open() decide; we'll be
+		 * dropping this one anyway.
+		 */
+	}
+
+	//6. 目录锁与查找/创建操作
+
+	/*
+		注意：
+		-	创建模式使用排他锁（inode_lock），防止并发创建冲突
+		-	非创建模式使用共享锁（inode_lock_shared），允许并发读取
+	*/
+	if (open_flag & O_CREAT)
+		inode_lock(dir->d_inode);
+	else
+		inode_lock_shared(dir->d_inode);
+
+	//lookup_open执行实际的查找或创建操作。这个函数是处理 O_CREAT逻辑的核心
+	error = lookup_open(nd, &path, file, op, got_write, opened);
+
+	//7. 处理 lookup_open的结果
+	if (open_flag & O_CREAT)
+		inode_unlock(dir->d_inode);
+	else
+		inode_unlock_shared(dir->d_inode);
+
+	if (error <= 0) {
+		if (error)
+			goto out;	//出错处理
+		
+		//	error==0时，说明文件已打开
+		//  如果 error == 0，表示文件已成功打开（可能在 lookup_open中通过原子操作打开）
+		//	如果是新创建的文件（FILE_CREATED）或不是普通文件，取消截断标志
+		//  记录审计信息，跳转到 opened标签进行后续处理
+		if ((*opened & FILE_CREATED) ||
+		    !S_ISREG(file_inode(file)->i_mode))
+			will_truncate = false;
+
+		audit_inode(nd->name, file->f_path.dentry, 0);
+		goto opened;
+	}
+
+	//8. 新创建文件的特殊处理
+	if (*opened & FILE_CREATED) {
+		/*
+		对于新创建的文件：
+		- 清除 O_TRUNC标志（新文件不需要截断）
+		- 更新 nameidata状态
+		- 跳转到 finish_open_created进行权限检查
+		*/
+		/* Don't check for write permission, don't truncate */
+		open_flag &= ~O_TRUNC;
+		will_truncate = false;
+		acc_mode = 0;
+		path_to_nameidata(&path, nd);
+		goto finish_open_created;
+	}
+
+	/*
+	 * If atomic_open() acquired write access it is dropped now due to
+	 * possible mount and symlink following (this might be optimized away if
+	 * necessary...)
+	 */
+	if (got_write) {
+		mnt_drop_write(nd->path.mnt);
+		got_write = false;
+	}
+
+	//9. 已存在文件的处理
+
+	/*
+	处理挂载点： 调用 follow_managed处理可能的挂载点
+	文件存在性检查： 如果 dentry 为负（表示文件不存在），返回 -ENOENT
+	*/
+	error = follow_managed(&path, nd);
+	if (unlikely(error < 0))
+		return error;
+
+	if (unlikely(d_is_negative(path.dentry))) {
+		path_to_nameidata(&path, nd);
+		return -ENOENT;
+	}
+
+	/*
+	 * create/update audit record if it already exists.
+	 */
+	audit_inode(nd->name, path.dentry, 0);
+
+	//10. 独占创建检查
+	if (unlikely((open_flag & (O_EXCL | O_CREAT)) == (O_EXCL | O_CREAT))) {
+		//如果同时指定了 O_EXCL和 O_CREAT，但文件已存在，返回 -EEXIST
+		path_to_nameidata(&path, nd);
+		return -EEXIST;
+	}
+
+	seq = 0;	/* out of RCU mode, so the value doesn't matter */
+	inode = d_backing_inode(path.dentry);
+finish_lookup:
+	//11. 进入最终分量，熟悉的step_into
+	//调用 step_into进入最终组件，处理符号链接等特殊情况
+	error = step_into(nd, &path, 0, inode, seq);
+	if (unlikely(error))
+		return error;
+finish_open:
+	//12. 最终打开准备
+	/*
+	完成路径查找： 调用 complete_walk确保退出 RCU 模式
+	目录检查：
+		-	如果以 O_CREAT打开目录，返回 -EISDIR
+		-   如果要求打开目录但对象不是目录，返回 -ENOTDIR
+	截断检查：如果不是普通文件，取消截断标志
+	*/
+	/* Why this, you ask?  _Now_ we might have grown LOOKUP_JUMPED... */
+	error = complete_walk(nd);
+	if (error)
+		return error;
+	audit_inode(nd->name, nd->path.dentry, 0);
+	error = -EISDIR;
+	if ((open_flag & O_CREAT) && d_is_dir(nd->path.dentry))
+		goto out;
+	error = -ENOTDIR;
+	if ((nd->flags & LOOKUP_DIRECTORY) && !d_can_lookup(nd->path.dentry))
+		goto out;
+	if (!d_is_reg(nd->path.dentry))
+		will_truncate = false;
+
+	if (will_truncate) {
+		error = mnt_want_write(nd->path.mnt);
+		if (error)
+			goto out;
+		got_write = true;
+	}
+finish_open_created:
+	//13. 权限检查与文件打开
+	/*
+	权限检查：调用 may_open检查访问权限
+	实际打开： 调用 vfs_open执行文件打开操作，设置 FILE_OPENED标志
+	*/
+	error = may_open(&nd->path, acc_mode, open_flag);
+	if (error)
+		goto out;
+	BUG_ON(*opened & FILE_OPENED); /* once it's opened, it's opened */
+	error = vfs_open(&nd->path, file, current_cred());
+	if (error)
+		goto out;
+	*opened |= FILE_OPENED;
+opened:
+	//14. 后续处理与清理
+	error = open_check_o_direct(file);	//直接 I/O 检查： open_check_o_direct
+	if (!error)
+		error = ima_file_check(file, op->acc_mode, *opened);
+	if (!error && will_truncate)
+		error = handle_truncate(file);	//文件截断： 如果设置了 will_truncate，调用 handle_truncate
+out:
+	if (unlikely(error) && (*opened & FILE_OPENED))
+		fput(file);
+	if (unlikely(error > 0)) {
+		WARN_ON(1);
+		error = -EINVAL;
+	}
+	if (got_write)
+		mnt_drop_write(nd->path.mnt);
+	return error;
+}
+```
+
+继续分析下`do_last`中调用的几个关键函数如`lookup_open`、`complete_walk`、`may_open`等函数
+
+`lookup_open`函数用于处理文件打开操作中的 dentry 查找和文件创建，主要作用如下：
+
+-	在目录缓存（dcache）中查找目标 dentry
+-	处理 `O_CREAT`标志，可能创建新文件
+-	处理原子打开（atomic open）操作
+-	返回找到的路径或错误代码
+
+注意到在`O_CREAT`选项是在已经退出了RCU模式下执行的
+
+```CPP
+/*
+nd：指向 nameidata结构，包含路径查找的当前状态（如当前目录、查找标志等）
+path：输出参数，返回找到的路径（挂载点和 dentry）
+file：指向要打开的 file结构
+op：指向 open_flags结构，包含打开标志（如 O_CREAT、O_EXCL）和模式
+got_write：布尔值，表示调用者是否已获取写权限（如通过 mnt_want_write）
+opened：输出参数，用于返回打开状态（如 FILE_CREATED表示文件被创建）
+*/
+static int lookup_open(struct nameidata *nd, struct path *path,
+			struct file *file,
+			const struct open_flags *op,
+			bool got_write, int *opened)
+{
+	//1. 初始化
+	//从 nd中获取当前目录的 dentry 和 inode
+	struct dentry *dir = nd->path.dentry;
+	struct inode *dir_inode = dir->d_inode;
+	int open_flag = op->open_flag;
+	struct dentry *dentry;
+	int error, create_error = 0;
+	umode_t mode = op->mode;
+	DECLARE_WAIT_QUEUE_HEAD_ONSTACK(wq);
+
+	//检查目录是否已被标记为死亡（IS_DEADDIR）
+	// 如果是，返回 -ENOENT（文件不存在）
+	if (unlikely(IS_DEADDIR(dir_inode)))
+		return -ENOENT;
+	
+	//清除 opened中的 FILE_CREATED标志，因为后续可能设置它
+	*opened &= ~FILE_CREATED;
+	
+	//2. 查找 dentry
+	//注意这里调用了d_lookup，基于rename_lock查询dcache
+	dentry = d_lookup(dir, &nd->last);
+
+	// 这里是对最后一个分量的ref-walk的实现了
+	// 如果找不到就创建dentry
+	for (;;) {
+		if (!dentry) {
+			//如果 dentry 为 NULL，调用 d_alloc_parallel分配一个新的 dentry 并添加到 dcache。该函数处理并发创建，可能阻塞等待其他进程完成
+			dentry = d_alloc_parallel(dir, &nd->last, &wq);
+			if (IS_ERR(dentry))
+				return PTR_ERR(dentry);
+		}
+		if (d_in_lookup(dentry))
+			break;
+
+		error = d_revalidate(dentry, nd->flags);
+		if (likely(error > 0))
+			break;
+		if (error)
+			goto out_dput;
+		d_invalidate(dentry);
+		dput(dentry);
+		dentry = NULL;
+	}
+
+	//3. 处理已缓存的positive dentry
+	if (dentry->d_inode) {
+		//如果 dentry 已经有 inode，表示文件已存在，跳转到 out_no_open，后续通过文件操作（f_op->open）打开文件。
+		/* Cached positive dentry: will open in f_op->open */
+		goto out_no_open;
+	}
+
+	/*
+	 * Checking write permission is tricky, bacuse we don't know if we are
+	 * going to actually need it: O_CREAT opens should work as long as the
+	 * file exists.  But checking existence breaks atomicity.  The trick is
+	 * to check access and if not granted clear O_CREAT from the flags.
+	 *
+	 * Another problem is returing the "right" error value (e.g. for an
+	 * O_EXCL open we want to return EEXIST not EROFS).
+	 */
+	//4. 处理 O_CREAT标志和权限检查
+	if (open_flag & O_CREAT) {
+		if (!IS_POSIXACL(dir->d_inode))
+			mode &= ~current_umask();
+		if (unlikely(!got_write)) {
+			// 没有写权限
+			create_error = -EROFS;
+			open_flag &= ~O_CREAT;
+			if (open_flag & (O_EXCL | O_TRUNC))
+				goto no_open;
+			/* No side effects, safe to clear O_CREAT */
+		} else {
+			//如果有写权限，调用 may_o_create检查是否允许创建文件（如权限、文件名长度等）
+			create_error = may_o_create(&nd->path, dentry, mode);
+			if (create_error) {
+				open_flag &= ~O_CREAT;
+				if (open_flag & O_EXCL)
+					goto no_open;
+			}
+		}
+	} else if ((open_flag & (O_TRUNC|O_WRONLY|O_RDWR)) &&
+		   unlikely(!got_write)) {
+		//没有 O_CREAT但有写操作标志（O_TRUNC、O_WRONLY、O_RDWR）且没有写权限，跳转到 no_open
+		/*
+		 * No O_CREATE -> atomicity not a requirement -> fall
+		 * back to lookup + open
+		 */
+		goto no_open;
+	}
+
+	//5. 尝试原子打开
+	if (dir_inode->i_op->atomic_open) {
+		// 如果目录 inode 支持原子打开操作（atomic_open），调用它
+		// 原子打开尝试在单个操作中完成查找和打开，避免竞争条件
+		error = atomic_open(nd, dentry, path, file, op, open_flag,
+				    mode, opened);
+		if (unlikely(error == -ENOENT) && create_error)
+			error = create_error;
+		return error;
+	}
+
+	//回退到非原子打开（no_open路径）
+no_open:
+	if (d_in_lookup(dentry)) {
+		struct dentry *res = dir_inode->i_op->lookup(dir_inode, dentry,
+							     nd->flags);
+		d_lookup_done(dentry);
+		if (unlikely(res)) {
+			if (IS_ERR(res)) {
+				error = PTR_ERR(res);
+				goto out_dput;
+			}
+			dput(dentry);
+			dentry = res;
+		}
+	}
+
+	//7. 创建新文件
+	/* Negative dentry, just create the file */
+	//	如果 dentry 没有 inode（负面 dentry）且设置了 O_CREAT，则创建新文件
+	if (!dentry->d_inode && (open_flag & O_CREAT)) {
+		*opened |= FILE_CREATED;
+		audit_inode_child(dir_inode, dentry, AUDIT_TYPE_CHILD_CREATE);
+		if (!dir_inode->i_op->create) {
+			//检查目录是支持 create操作
+			error = -EACCES;
+			goto out_dput;
+		}
+		//调用 create方法创建文件，并发送文件创建通知
+		error = dir_inode->i_op->create(dir_inode, dentry, mode,
+						open_flag & O_EXCL);
+		if (error)
+			goto out_dput;
+		fsnotify_create(dir_inode, dentry);
+	}
+
+	//8. 处理创建错误
+	if (unlikely(create_error) && !dentry->d_inode) {
+		//如果有 create_error且 dentry 仍然没有 inode，返回创建错误
+		error = create_error;
+		goto out_dput;
+	}
+	//成功退出
+	//设置输出路径的 dentry 和挂载点，返回 1 表示成功
+	//由调用者将负责打开文件
+out_no_open:
+	path->dentry = dentry;
+	path->mnt = nd->path.mnt;
+	return 1;
+
+	//10. 错误处理
+out_dput:
+	//释放 dentry 的引用
+	dput(dentry);
+	return error;
+}
+```
+
+`do_last`中的`complete_walk`函数用于在路径遍历成功后进行必要的清理和验证（以确保路径查找的结果是正确和一致）。它主要处理两件事：
+
+-	从 RCU-walk 模式安全退出（如果当前处于该模式）
+-	对最终找到的 dentry 进行弱验证（revalidation），确保其有效性
+
+```CPP
+static int complete_walk(struct nameidata *nd)
+{
+    struct dentry *dentry = nd->path.dentry;
+    int status;
+
+	//1. 退出 RCU-walk 模式
+    if (nd->flags & LOOKUP_RCU) {
+        if (!(nd->flags & LOOKUP_ROOT)){
+			//清理根挂载点： 如果查找不是从根目录开始的（!LOOKUP_ROOT），则将 nd->root.mnt设置为 NULL。这是因为在 RCU-walk 模式下，nd->root可能只是临时引用，退出时需要清理以避免无效引用
+            nd->root.mnt = NULL;
+		}
+
+		//调用 unlazy_walk(nd)函数安全退出 RCU-walk 模式
+		//该函数会尝试获取所有相关 dentry 和挂载点的引用和锁，以确保数据一致性。如果失败（返回非零），则返回 -ECHILD错误，表示需要完全退出 RCU 模式并重新执行查找
+        if (unlikely(unlazy_walk(nd)))
+            return -ECHILD;
+    }
+
+	//2. 检查是否需要验证
+	//跳转检查: LOOKUP_JUMPED标志表示路径查找过程中发生了跳转，例如跟随了符号链接或处理了挂载点。如果没有发生跳转（!LOOKUP_JUMPED），说明查找路径是直接的，不需要额外验证，直接返回成功（0）
+    if (likely(!(nd->flags & LOOKUP_JUMPED)))
+        return 0;
+
+	......
+    if (!status)
+        status = -ESTALE;
+
+    return status;
+}
+```
+
+`may_open`函数用于在打开文件前进行最终的权限和标志检查。它确保打开操作基于文件类型、访问模式和标志是允许的。该函数通常在找到文件 inode 后、实际打开文件前执行
+
+```CPP
+static int may_open(const struct path *path, int acc_mode, int flag)
+{
+    struct dentry *dentry = path->dentry;
+    struct inode *inode = dentry->d_inode;
+    int error;
+
+    if (!inode)
+        return -ENOENT;
+
+	//文件类型检查
+	//检查 inode 的文件类型（通过 i_mode的高位）
+    switch (inode->i_mode & S_IFMT) {
+    case S_IFLNK:	//符号链接（S_IFLNK）
+        return -ELOOP;	//如果文件是符号链接，返回 -ELOOP（符号链接循环过多或不允许直接打开符号链接）。在路径查找中，符号链接通常已被跟随，但直接打开符号链接本身是不允许的
+    case S_IFDIR:	// 目录（S_IFDIR）
+        if (acc_mode & MAY_WRITE){
+			//如果文件是目录，并且请求写访问（acc_mode包含 MAY_WRITE），返回 -EISDIR（是一个目录）。目录不能以写方式打开（除非使用特殊标志如 O_DIRECTORY，但这里不处理），这防止了误操作
+            return -EISDIR;
+		}
+        break;
+    case S_IFBLK:	//块设备或字符设备（S_IFBLK 或 S_IFCHR）
+    case S_IFCHR:
+        if (!may_open_dev(path))
+            return -EACCES;
+        /*FALLTHRU*/
+    case S_IFIFO:	//FIFO 或套接字（S_IFIFO 或 S_IFSOCK）
+    case S_IFSOCK:
+        flag &= ~O_TRUNC;	//如果文件是 FIFO（命名管道）或套接字，清除 flag中的 O_TRUNC标志。因为这些文件类型不能被截断（截断操作无意义），所以忽略 O_TRUNC以避免错误
+        break;
+    }
+
+	//调用 inode_permission检查 inode 的权限。参数 MAY_OPEN | acc_mode表示检查打开文件的权限以及具体的访问模式（读、写、执行）
+	//inode_permission可能检查文件系统的权限位（如 Unix 权限）、ACL 或安全模块（如 SELinux）的规则
+	//如果权限检查失败，返回错误码（如 -EACCES）
+    error = inode_permission(inode, MAY_OPEN | acc_mode);
+    if (error)
+        return error;
+
+	......
+    return 0;
+}
+```
 
 ####	case1：只读打开文件
 如`open(pathname, O_RDONLY)`，使用只读方式打开（先查找到然后再打开）一个文件，在`do_last`中的运作路径：
@@ -3365,10 +3895,105 @@ struct dentry *d_lookup(const struct dentry *parent, const struct qstr *name)
 ```
 
 ####	d_invalidate函数
-[`d_invalidate`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L1511)
+[`d_invalidate`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L1511)函数用于使目录项（dentry）及其子树无效的核心函数。它会递归地使指定 dentry 及其所有子 dentry 从目录缓存（dcache）中移除，并处理相关的挂载点分离，`d_invalidate`只会出现在ref-walk模式中，思考一下为什么？
 
+`d_invalidate`调用场景如下（通常位于`d_revalidate`返回错误的case之后）：
+
+-	文件系统卸载：当卸载文件系统时，需要使所有相关 dentry 无效，确保后续访问不会使用过时的缓存
+-	目录重命名/删除：当目录被重命名或删除时，需要使该目录及其所有子项的 dentry 无效
+-	网络文件系统缓存失效：当服务器端文件状态改变时，客户端需要使相关 dentry 无效
+-	强制刷新缓存：用户空间程序（如 `drop_caches`）可能触发 dentry 无效化来释放内存
+
+```CPP
+void d_invalidate(struct dentry *dentry)
+{
+	/*
+	 * If it's already been dropped, return OK.
+	 */
+	//1. 初始检查
+	spin_lock(&dentry->d_lock);
+
+	//检查 dentry 是否已经被丢弃（不在哈希表中）
+	if (d_unhashed(dentry)) {
+		//如果 d_unhashed(dentry)返回 true，表示 dentry 已经被移除，直接返回无需进一步处理
+		spin_unlock(&dentry->d_lock);
+		return;
+	}
+	spin_unlock(&dentry->d_lock);
+
+	/* Negative dentries can be dropped without further checks */
+	//2. 负 dentry 处理
+	//处理负 dentry（表示不存在的文件）
+	if (!dentry->d_inode) {
+		//如果 dentry 没有关联的 inode（dentry->d_inode为 NULL），直接调用 d_drop将其从哈希表中移除并返回
+		// 处于negtive dentry状态的，无子树，处理较为简单
+		d_drop(dentry);
+		return;
+	}
+
+	//3. positive dentry 处理（主循环），处理 dentry 子树
+	for (;;) {
+		//a. 初始化数据结构
+		struct detach_data data;
+
+		data.mountpoint = NULL;	//用于记录需要分离的挂载点
+		INIT_LIST_HEAD(&data.select.dispose);	//链表头，用于收集需要处理的 dentry
+		data.select.start = dentry;	//设置起始 dentry
+		data.select.found = 0;	//计数器，记录找到的 dentry 数量
+
+		//b. 递归的遍历 dentry 树
+		//回调函数detach_and_collect：分离挂载点并收集需要处理的 dentry
+		//回调函数check_and_drop：检查 dentry 是否需要被丢弃
+		d_walk(dentry, &data, detach_and_collect, check_and_drop);
+
+		// c. 处理收集到的 dentry
+		if (data.select.found)
+			shrink_dentry_list(&data.select.dispose);
+
+		//d. 处理挂载点，分离挂载点并释放相关资源
+		if (data.mountpoint) {
+			//分离挂载在指定 dentry 上的所有文件系统
+			detach_mounts(data.mountpoint);
+			dput(data.mountpoint);
+		}
+
+		if (!data.mountpoint && !data.select.found){
+			//当没有挂载点需要分离且没有 dentry 需要处理时，退出循环
+			break;
+		}
+
+		//在每次循环后提供调度机会，避免长时间占用 CPU
+		cond_resched();
+	}
+}
+```
+
+####	do_last中的跟随目录检查（Trailing Slash Check）
+目录跟随检查是内核路径查找中一个重要的语义解析步骤，它的作用是检测用户提供的路径是否以斜杠结尾。如果是，则强制要求查找的最终目标必须是一个真正的目录，否则就使操作失败。在 `do_last`函数中，目录跟随检查主要涉及到下面的代码：
+
+```CPP
+if (nd->last.name[nd->last.len])
+    nd->flags |= LOOKUP_FOLLOW | LOOKUP_DIRECTORY;
+```
+先回顾一下，`nd->last` 是一个 `struct qstr`类型，它保存了当前正在处理的路径组件的名称和长度。`nd->last.name`指向组件字符串的起始地址（比如对于路径 `/tmp/foo/`，处理最后一个组件时，它指向 `foo`）；`nd->last.len`是这个组件的有效长度（如`strlen("foo") = 3`）；`nd->last.name[nd->last.len]`表示的是有效长度之后的一个字节
+
+所以，代码中`if (nd->last.name[nd->last.len])`意义是判断当前路径组件的名称字符串，在有效长度之后，是否还有一个非结束符的字符（非`\0`），那么大概率这种场景是路径的末尾是`/`（如`/tmp/foo/`），由于`/`在Linux中表示目录，于是这个检查的目的是当检测到路径末尾有多余的斜杠时，强制后续的查找逻辑必须将目标当作一个目录来处理
+
+假设要打开的路径是`/tmp/foo/`，路径查找器会一步步解析组件：`/-> tmp-> foo`，当处理最后一个组件 `foo`时，`nd->last.name`指向字符串 `foo/`（注意内核可能不会单独拷贝字符串，而是直接在原路径字符串上操作），`nd->last.len`被设置为 `3`（ `foo`的长度是 `3`），那么 `nd->last.name[nd->last.len]`就是 `foo/`这个字符串的第 `4` 个字符（索引为 `3`），也就是 `'/'`
+
+在 `do_last`函数的后面，有一个关键检查（如下），如果设置了 `LOOKUP_DIRECTORY`标志，但最终找到的 dentry 不是一个可以通过 `d_can_lookup`判断的目录（一个普通文件），那么这次查找就会失败，并返回 `-ENOTDIR`（不是一个目录）错误
+
+```CPP
+error = -ENOTDIR;
+if ((nd->flags & LOOKUP_DIRECTORY) && !d_can_lookup(nd->path.dentry))
+    goto out;
+```
+
+在实践中，假设`cat /tmp/regular_file/`时，即使文件存在，也会得到Not a directory的错误，就是因为内核在 `do_last`中做了这个检查并设置了 `LOOKUP_DIRECTORY`标志
 
 ####	follow_managed函数
+
+TODO
 
 ####	__follow_mount_rcu函数
 
@@ -3461,7 +4086,7 @@ static inline int handle_dots(struct nameidata *nd, int type)
 }
 ```
 
-####	operations 成员
+####	operations 成员（ext4文件系统）
 针对ext4系统，相应注册的inode实例化方法[如下](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/namei.c#L3903)
 
 ```CPP
@@ -3669,18 +4294,259 @@ static inline void __d_set_inode_and_type(struct dentry *dentry,
 -	无磁盘 I/O：整个过程仅操作内存中的 dentry 缓存，不触发文件系统底层的磁盘读取或复杂逻辑（如加载 inode）
 
 ####	为什么经常调用`d_revalidate`？
+`d_revalidate`的实现如下，经常在各种`*lookup*`方法之后调用，其作用是什么？
+```CPP
+//返回值：1表示有效
+static inline int d_revalidate(struct dentry *dentry, unsigned int flags)
+{
+	//NFS等
+	if (unlikely(dentry->d_flags & DCACHE_OP_REVALIDATE))
+		//调用文件系统的d_revalidate方法
+		return dentry->d_op->d_revalidate(dentry, flags);
+	else
+		return 1;	//大部分的系统，如ext4，都走到此
+} 
+```
 
+`d_revalidate`是 VFS中目录缓存（dcache）一致性保障的核心机制之一，作用是检查一个已经从目录缓存（dcache）中找到的目录项（dentry）是否仍然有效，防止进程使用过时或无效的缓存数据。为什么需要重新验证呢？目录缓存（dcache）是为了提升路径查找性能的内存缓存，缓存中的数据可能会过时，与磁盘上的真实情况不一致。例如，比如
+
+-	文件被删除：另一个进程可能已经删除了这个文件
+-	文件被重命名：另一个进程可能更改了文件名
+-	权限被更改：文件的访问权限（rwx）可能已被修改
+-	符号链接目标改变：符号链接指向的路径可能已更改
+-	网络文件系统（如NFS, CIFS等）：文件状态可能被网络上的其他客户端改变，服务器端的更改客户端可能不知道
+
+如果内核不进行验证，直接使用过期的缓存数据，会导致应用程序看到错误的信息（如看到已删除的文件），或者违反权限控制（如访问了已无权限访问的文件）
+
+此外，当`d_revalidate`验证失败表示dentry 已失效，调用者需要将此 dentry 从缓存中无效化（`d_invalidate`），并重新进行查找
+
+`d_revalidate`是路径查找阶段的早期验证，用于提高效率，避免基于过时缓存继续操作。但是仍然无法避免`d_revalidate`之后出现了并发修改导致dentry失效的问题，内核会提供其他的校验机制来检测
 
 ####	open实现中的回退视角：局部回退 VFS 全局回退
 思考一个问题，对路径`/a/b/c/d/e`的查找过程中，假设`a`、`b`都已经成功的使用RCU模式查找，此时`c`查找过程中使用RCU方式失败，那么回退之后的查询过程是如何的？
+回到上面的`walk_component`函数，这里有一个容易被忽视的小细节：
+
+```CPP
+static int walk_component(struct nameidata *nd, int flags)
+{
+	struct path path;
+	struct inode *inode;
+	unsigned seq;
+	int err;
+	
+	//lookup_fast
+	err = lookup_fast(nd, &path, &inode, &seq);
+	if (unlikely(err <= 0)) {	
+		if (err < 0)
+			return err;
+		path.dentry = lookup_slow(&nd->last, nd->path.dentry,
+					  nd->flags);
+		......
+	}
+	......
+}
+```
+
+细节1：`lookup_fast`中包含了rcu与ref两种模式的实现，根据选项二选一，这里为什么不采用rcu回退到ref的策略？什么情况下会局部回退到ref？什么情况下会触发回退到全局ref（从头开始ref）？
+
+细节2：`lookup_fast`的返回值`err<=0`决定了是全局回退到ref，还是局部回退到ref
 
 ####	`unlazy_walk`的意义到底是什么？
-成功返回`0`，失败返回`-ECHILD`
+`unlazy_walk`函数的作用是：**将路径查找从无锁、易失效的 RCU-walk 模式，安全原子地切换到稳定可靠的 Ref-walk 模式。这是一个模式切换器，确保在切换过程中，之前以 RCU 方式读取的所有关键数据（如dentry、mount点）保持有效，并通过获取引用和锁来固定其状态，防止在后续操作中被并发修改或释放。**该函数成功返回`0`，失败返回`-ECHILD`
 
-场景1：
+先简单分析下`unlazy_walk`的实现：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L672
+static int unlazy_walk(struct nameidata *nd)
+{
+	struct dentry *parent = nd->path.dentry;
+
+	BUG_ON(!(nd->flags & LOOKUP_RCU));
+
+	nd->flags &= ~LOOKUP_RCU;
+	if (unlikely(!legitimize_links(nd)))
+		goto out2;
+	if (unlikely(!legitimize_path(nd, &nd->path, nd->seq)))
+		goto out1;
+	if (nd->root.mnt && !(nd->flags & LOOKUP_ROOT)) {
+		if (unlikely(!legitimize_path(nd, &nd->root, nd->root_seq)))
+			goto out;
+	}
+	rcu_read_unlock();
+	BUG_ON(nd->inode != parent->d_inode);
+	return 0;
+
+out2:
+	nd->path.mnt = NULL;
+	nd->path.dentry = NULL;
+out1:
+	if (!(nd->flags & LOOKUP_ROOT))
+		nd->root.mnt = NULL;
+out:
+	rcu_read_unlock();
+	return -ECHILD;
+}
+
+/* path_put is needed afterwards regardless of success or failure */
+static bool legitimize_path(struct nameidata *nd,
+			    struct path *path, unsigned seq)
+{
+	int res = __legitimize_mnt(path->mnt, nd->m_seq);
+	if (unlikely(res)) {
+		if (res > 0)
+			path->mnt = NULL;
+		path->dentry = NULL;
+		return false;
+	}
+	if (unlikely(!lockref_get_not_dead(&path->dentry->d_lockref))) {
+		path->dentry = NULL;
+		return false;
+	}
+	return !read_seqcount_retry(&path->dentry->d_seq, seq);
+}
+
+static bool legitimize_links(struct nameidata *nd)
+{
+	int i;
+	for (i = 0; i < nd->depth; i++) {
+		struct saved *last = nd->stack + i;
+		if (unlikely(!legitimize_path(nd, &last->link, last->seq))) {
+			drop_links(nd);
+			nd->depth = i + 1;
+			return false;
+		}
+	}
+	return true;
+}
+```
+
+TODO
+
+场景1：在 open 系统调用中，什么情况下会走到 `unlazy_walk`？这里分为局部回退与全局回退来说明
+
+1、局部回退的情况（unlazy_walk 成功），**当 unlazy_walk成功执行时，实现的是局部回退，即只有当前路径分量的查找从 RCU 模式切换到 Ref 模式，之前的查找进度保持不变**，在整个open的实现中，有下面的case会触发局部回退：
+
+1.1：DCache 查找未命中的情况，需要文件系统查找。即RCU 模式下在 dcache 中找不到目标 dentry，成功退出 RCU 模式后，在 Ref 模式下调用文件系统的 `->lookup`方法继续查找（参考上面`lookup_fast->lookup_slow`的触发条件），这样只有当前分量重新查找，之前的分量进度保留
+
+```CPP
+static int lookup_fast(struct nameidata *nd,
+		       struct path *path, struct inode **inode,
+		       unsigned *seqp)
+{
+	......
+	// 在 lookup_fast 的 RCU 分支中
+	dentry = __d_lookup_rcu(parent, &nd->last, &seq);
+	if (unlikely(!dentry)) {
+		if (unlazy_walk(nd))  // 尝试局部回退
+			return -ECHILD;   // 失败则全局回退
+		return 0;             // 成功，触发上层调用 lookup_slow
+	}
+	......
+}
+```
+
+1.2：符号链接解析需要阻塞操作，即文件系统的 `->get_link`方法需要阻塞（如磁盘 I/O），所以这里退出 RCU 模式，在 Ref 模式下重新获取链接内容，局部的回退让符号链接解析在 Ref 模式下继续
+
+```CPP
+static __always_inline
+const char *get_link(struct nameidata *nd)
+{
+	......
+	// 在 get_link 函数中
+	if (nd->flags & LOOKUP_RCU) {
+		res = get(NULL, inode, &last->done);
+		if (res == ERR_PTR(-ECHILD)) {
+			if (unlikely(unlazy_walk(nd)))  // 尝试局部回退
+				return ERR_PTR(-ECHILD);
+			res = get(dentry, inode, &last->done); // Ref模式下重试
+		}
+	......
+	}
+}
+```
+
+2、需要全局回退的情况（`unlazy_walk` 调用失败），当 `unlazy_walk`失败时（返回 `-ECHILD`），触发全局回退，整个路径查找在 Ref 模式下重新开始（回退到`path_openat`），主要case如下：
 
 
-场景2：在`link_path_walk`[中](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L2133)的片段：
+2.1：序列号验证失败，检测到 dentry 在 RCU 读取期间被并发修改。`unlazy_walk`失败，返回 `-ECHILD`，触发全局回退
+
+```CPP
+static bool legitimize_path(struct nameidata *nd,
+			    struct path *path, unsigned seq)
+{
+	......
+	// 在 legitimize_path 等函数中
+	if (read_seqcount_retry(&dentry->d_seq, seq)) {
+		// 无法安全退出 RCU 模式
+		return -ECHILD;
+	}
+	......
+}
+```
+
+2.2：无法获取必要引用，即无法增加 dentry 或 mount 的引用计数。unlazy_walk失败，全局回退
+
+```CPP
+static bool legitimize_path(struct nameidata *nd,
+			    struct path *path, unsigned seq)
+{
+	......
+	// 在 legitimize_path 中尝试获取引用
+	if (!dget(dentry)) {
+		// 引用获取失败，可能 dentry 正在被释放
+		return -ECHILD;
+	}
+	......
+}
+```
+
+场景2：为什么 `unlazy_walk` 执行成功内核就可以（认为）安全地将 RCU 切换到 Ref模式？unlazy_walk成功意味着它完成了如下四类关键的安全保障步骤，确保从无锁的 RCU 模式安全过渡到有锁的 Ref 模式
+
+1、数据一致性验证（序列号检查），检查在 RCU 模式下读取的 dentry、mount 点等数据的序列号是否变化。如果序列号未变，证明数据在读取期间没有被并发修改，可以安全使用
+
+```CPP
+// 验证所有关键数据的序列号
+if (unlikely(!legitimize_path(nd, &nd->path, nd->seq)))
+    goto fail;
+if (nd->root.mnt && !(nd->flags & LOOKUP_ROOT)) {
+    if (unlikely(!legitimize_path(nd, &nd->root, nd->root_seq)))
+        goto fail;
+}
+```
+
+2、资源生命周期保障（引用计数），增加所有关键数据结构的引用计数，防止这些资源在后续 Ref 模式操作中被意外释放，确保它们在整个 Ref 模式查找期间保持有效
+
+```CPP
+// 在 legitimize_path 内部
+dget(dentry);   // 增加 dentry 引用计数
+mntget(mnt);    // 增加 mount 点引用计数
+```
+
+3、锁状态安全转换，在所有验证和引用获取完成后才释放 RCU 锁。确保在退出 RCU 保护之前，所有关键资源都已处于安全状态
+
+```CPP
+rcu_read_unlock();  // 安全释放 RCU 读锁
+```
+
+4、模式标志更新，更新查找状态，标记现在处于 Ref 模式。后续操作基于 Ref 模式的规则执行（如可以获取锁、执行阻塞操作）
+
+```cpp
+nd->flags &= ~LOOKUP_RCU;  // 清除 RCU 标志
+```
+
+所以，`unlazy_walk`成功执行的本质就总结为如下两点：
+
+-	数据有效性：序列号验证确保数据没有被并发修改
+-	资源稳定性：引用计数确保资源不会被释放
+
+这使得后续的 Ref 模式操作可以：
+
+-	安全地获取锁（不会死锁，因为资源存在）
+-	执行阻塞操作（如磁盘 I/O，因为资源被固定）
+
+
+场景3：在`link_path_walk`[中](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L2133)的片段：
 
 ```CPP
 if (unlikely(!d_can_lookup(nd->path.dentry))) {
