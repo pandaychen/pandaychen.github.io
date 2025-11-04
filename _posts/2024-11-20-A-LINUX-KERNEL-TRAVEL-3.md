@@ -487,12 +487,59 @@ struct vfsmount {
 
 从上图可以看出各类`*_operations`之间的关联关系
 
-TODO
+![vfs_opers](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/2/vfs_opers.png)
 
 以ext4文件系统为例，对应的operations实现如下：
 
-```CPP
+-	`dentry_operations`：默认实现
+-	[`ext4_file_operations`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/file.c#L718)
+-	[`ext4_file_inode_operations`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/file.c#L736)
+-	[`address_space_operations`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/inode.c#L3746)
 
+```CPP
+const struct file_operations ext4_file_operations = {
+	.llseek		= ext4_llseek,
+	.read_iter	= ext4_file_read_iter,
+	.write_iter	= ext4_file_write_iter,
+	.unlocked_ioctl = ext4_ioctl,
+
+	......
+
+	.mmap		= ext4_file_mmap,
+	.open		= ext4_file_open,
+	.release	= ext4_release_file,
+	.fsync		= ext4_sync_file,
+	.get_unmapped_area = thp_get_unmapped_area,
+	.splice_read	= generic_file_splice_read,
+	.splice_write	= iter_file_splice_write,
+	.fallocate	= ext4_fallocate,
+};
+
+const struct inode_operations ext4_file_inode_operations = {
+	.setattr	= ext4_setattr,
+	.getattr	= ext4_file_getattr,
+	.listxattr	= ext4_listxattr,
+	.get_acl	= ext4_get_acl,
+	.set_acl	= ext4_set_acl,
+	.fiemap		= ext4_fiemap,
+};
+
+static const struct address_space_operations ext4_aops = {
+	.readpage		= ext4_readpage,
+	.readpages		= ext4_readpages,
+	.writepage		= ext4_writepage,
+	.writepages		= ext4_writepages,
+	.write_begin		= ext4_write_begin,
+	.write_end		= ext4_write_end,
+	.set_page_dirty		= ext4_set_page_dirty,
+	.bmap			= ext4_bmap,
+	.invalidatepage		= ext4_invalidatepage,
+	.releasepage		= ext4_releasepage,
+	.direct_IO		= ext4_direct_IO,
+	.migratepage		= buffer_migrate_page,
+	.is_partially_uptodate  = block_is_partially_uptodate,
+	.error_remove_page	= generic_error_remove_page,
+};
 ```
 
 ####	设计dentry的意义
@@ -643,7 +690,19 @@ mount 的过程就是把设备的文件系统加入到 vfs 框架中，以 `moun
 
 ![RULES2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/mnt-ns/mnt_tree_mdev.png)
 
-TODO
+这种场景就是经常遇到的重复挂载（覆盖）的场景，如下操作，最终生效的是`/dev/sda2`对应的文件系统，而`/dev/sda1`对应的文件系统会被隐藏
+
+```BASH
+#mount1的`mnt_mountpoint`成员指向父文件系统（设备树1）的挂载目录dentry
+#mount1的`mnt_root`成员指向子dentry树（设备树2）的root节点，记为dentry1
+mount /dev/sda1 /mnt/point    # mount1
+
+#mount2的`mnt_mountpoint`成员指向dentry1
+#mount2的`mnt_root`成员指向子dentry树（设备树3）的root节点，记为dentry2
+mount /dev/sda2 /mnt/point    # mount2
+```
+
+从上图需要明确的一点是：**一次成功的挂载操作，会在内核中创建一个 mount结构实例。这个实例将一个新的、独立的 dentry 子树（代表被挂载的文件系统）与父文件系统中的挂载点 dentry 关联起来，从而形成一颗完整的、层次化的虚拟文件系统树**，新的 dentry 子树通过`struct mount`结构被关联到了全局的 VFS 树中（注意图中的红色箭头），挂载点的原始内容被新文件系统的内容所覆盖，直到卸载
 
 ####	多名空间的层次化（mnt_namespace）
 为了支持 `mnt_namespace`，内核把 mount 树扩展成了多棵（之前是单棵），每个 `mnt_namespace` 拥有一棵独立的 mount 树，如下图：
@@ -680,7 +739,7 @@ struct mountpoint {
 3、路径名查找时的处理
 
 -	当遍历路径时遇到一个目录项（dentry），内核需要判断这个 dentry 是否是一个挂载点
--	如果该 dentry 关联了一个 `struct mountpoint`（通过 `dentry->d_flags`中的 `DCACHE_MOUNTED`标志和 `dentry->d_mounted`指针间接关联），那么查找就需要跨越此挂载点。这意味着后续的路径组件将在挂载在该点上的文件系统（struct mount指向的根 dentry）中继续查找，而不是在原来的父文件系统中
+-	如果该 dentry 关联了一个 `struct mountpoint`（通过 `dentry->d_flags`中的 `DCACHE_MOUNTED`标志和 `dentry->d_mounted`指针间接关联），那么查找就需要跨越此挂载点。这意味着后续的路径组件将在挂载在该点上的文件系统（`struct mount`指向的根 dentry）中继续查找，而不是在原来的父文件系统中
 
 4、引用计数管理：
 
