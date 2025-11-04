@@ -398,7 +398,7 @@ VFS的挂载机制支持在一个挂载点上，先后挂载多个的文件系�
 
 因为重复挂载的缘故，为了找到最后挂载的Binder文件系统的mount，需要轮询调用`__lookup_mnt()`，即一边轮询调用`__lookup_mnt()`，一边更新path，直到`__lookup_mnt()`返回的`mount*`为`NULL`时，说明此时是该dentry上生效的文件系统类型
 
-在下文可以看到，路径查找过程中，在`follow_mount*`函数中，当遇到当前路径分量是一个挂载点时，会调用[`__lookup_mnt`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1307)函数来查询挂载节点`struct moun`结构
+在下文可以看到，路径查找过程中，在`follow_mount*`函数中，当遇到当前路径分量是一个挂载点时，会调用[`__lookup_mnt`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1307)函数来查询挂载节点`struct mount`结构
 
 ```CPP
 static inline struct hlist_head *m_hash(struct vfsmount *mnt, struct dentry *dentry)
@@ -695,12 +695,13 @@ static void set_nameidata(struct nameidata *p, int dfd, struct filename *name)
 在路径名查找时，要考虑如下场景：
 
 1.	当遍历路径时遇到一个目录项（dentry），内核需要判断这个 dentry 是否是一个挂载点
-2.	
+2.	如果这个dentry是一个挂载点（合法的已经挂载了文件系统的挂载点），那么至少有两个dentry结构，第一个dentry结构对应于原文件系统的目录，第二个dentry结构对应于新挂载点文件系统的`/`目录节点
+3.	当前的分量dentry（如普通分量或者`..`），需要检查其是否为挂载点、或者是symlink，所以在代码中可以看到`*follow_mount*`	、`*_link*`等相关的函数
 
 TODO
 
 ####	VFS 的 path walk：简单介绍
-VFS的path walk是`open()`的内核调用的核心设计，这里以访问`/dev/binderfs/binder`为例，`/`是根文件系统`rootfs`的根目录，`dev`是根文件系统的根目录下的一个普通目录，非挂载点，`binderfs`根文件系统下的位于`/dev`里的目录，同时也是[Binder文件系统](https://source.android.com/docs/core/architecture/ipc/binder-overview?hl=zh-cn)的挂载点，`binder`是Binder文件系统的挂载点下的一个代表binder设备的文件，下面是vfs的path walk过程：
+VFS的path walk是`open()`的内核调用的核心设计，这里以访问`/dev/binderfs/binder`为例，`/`是根文件系统`rootfs`的根目录，`dev`是根文件系统的根目录下的一个普通目录，非挂载点，`binderfs`根文件系统下的位于`/dev`里的目录，同时也是[Binder文件系统](https://source.android.com/docs/core/architecture/ipc/binder-overview?hl=zh-cn)的挂载点，`binder`是Binder文件系统的挂载点下的一个代表binder设备的文件，下面是vfs的path walk过程（自上而下的过程）：
 
 1.	walk path起点是在根文件系统`rootfs`的根目录。所以一开始，`path1`记录的是根文件系统的`vfsmount1`和代表根文件系统根目录`/`的`dentry1`
 2.	进入到`dev`分量时，`path2`记录的dentry将是代表路径分量`dev`的dentry，由于此时分量仍属于根文件系统，所以记录的`vfsmount`仍是`vfsmount1`
@@ -1706,6 +1707,7 @@ static int lookup_fast(struct nameidata *nd,
 			path->mnt = mnt;
 			path->dentry = dentry;
 	        // 有可能当前目录是挂载点，或者自动挂载点等伪目标，所以这里要跨过
+			// TODO
 			if (likely(__follow_mount_rcu(nd, path, inode, seqp))){
 				// 快速模式下查找成功
 				return 1;
@@ -4577,8 +4579,18 @@ if (unlikely(!d_can_lookup(nd->path.dentry))) {
 
 3、`d_can_lookup`错误返回的语义，`-ENOTDIR` 表示不是一个目录，这是一个永久性错误。即使切换到 ref-walk 模式重新检查，结果也不会改变；重试检查只会浪费 CPU 周期，不会改变结果
 
+####	问题：能否不通过全局挂载表定位到挂载点的`/`节点？
+
+TODO
+
 ####	小结：path walk的策略
 前文描述了内核实现path walk的策略，首先 Kernel 会在 rcu-walk 模式下进入 lookup_fast 进行尝试，如果失败了那么就尝试就地转入 ref-walk，如果还是不行就回到 do_filp_open 从头开始。Kernel 在 ref-walk 模式下会首先在内存缓冲区查找相应的目标（lookup_fast），如果找不到就启动具体文件系统自己的 lookup 进行查找（lookup_slow）。注意，在 rcu-walk 模式下是不会进入 lookup_slow 的。如果这样都还找不到的话就一定是是出错了，那就报错返回吧，这时屏幕就会出现 No such file or directory
+
+##	0x0	open中涉及到的mount操作
+-	`__follow_mount_rcu`
+-	`follow_mount`
+-	` __lookup_mnt`
+-	`real_mount`
 
 ##  0x08 参考
 -   [open 系统调用（一）](https://www.kerneltravel.net/blog/2021/open_syscall_szp1/)
