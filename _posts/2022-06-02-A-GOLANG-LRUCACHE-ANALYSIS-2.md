@@ -292,10 +292,131 @@ func (klru *keyLru) removeElement(e *list.Element) {
 }
 ```
 
+####	如何限制缓存的size？
+在内存受限场景下，需要对cache整体的size做限制，这里列举几种典型的实现：
+
+1、k8s的`LRUExpireCache`，基于LRU、key自身的expire已经最大size的策略实现，有两种淘汰场景：
+
+-	当缓存达到最大大小（maxsize）后，在`Add`操作中最近最少使用的项目将会被移除
+-	在`Get`操作中，如果key过期将会被移除
+-	所有的元素被按照`list.List`组织起来，利用list的特性实现LRU功能
+
+这个实现就是利用了list与map的优势，组合实现支持LRU的特性，缺点是，CRUD时需要加锁，同时锁住list和map，不太适合并发高的场景
+
+```CPP
+// LRUExpireCache 实现一个带过期时间的LRU Cache
+type LRUExpireCache struct {
+	// clock is used to obtain the current time
+	// 用于获取当前时间
+	clock Clock
+	lock sync.Mutex
+	maxSize      int
+	//LRU list
+	evictionList list.List 
+	entries      map[interface{}]*list.Element
+}
+
+func NewLRUExpireCacheWithClock(maxSize int, clock Clock) *LRUExpireCache {
+	......
+	return &LRUExpireCache{
+		clock:   clock,
+		maxSize: maxSize,
+		entries: map[interface{}]*list.Element{},
+	}
+}
+
+// cacheEntry 包括key, value, expireTime
+type cacheEntry struct {
+	key        interface{}
+	value      interface{}
+	expireTime time.Time
+}
+```
+
+`Add`与`Get`的实现：
+
+```CPP
+// Add adds the value to the cache at key with the specified maximum duration.
+func (c *LRUExpireCache) Add(key interface{}, value interface{}, ttl time.Duration) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	oldElement, ok := c.entries[key]
+	// 如果key已经存在
+	if ok {
+		// 将元素移到列表头
+		c.evictionList.MoveToFront(oldElement)
+		// 更新值和过期时间
+		oldElement.Value.(*cacheEntry).value = value
+		oldElement.Value.(*cacheEntry).expireTime = c.clock.Now().Add(ttl)
+		return
+	}
+
+	// 如果列表长度已经大于设置的最大值
+	if c.evictionList.Len() >= c.maxSize {
+		// 从列表和entries删除最旧的元素
+		toEvict := c.evictionList.Back()
+		c.evictionList.Remove(toEvict)
+		delete(c.entries, toEvict.Value.(*cacheEntry).key)
+	}
+
+	// Add new entry
+	// 插入最新的元素
+	entry := &cacheEntry{
+		key:        key,
+		value:      value,
+		expireTime: c.clock.Now().Add(ttl),
+	}
+	element := c.evictionList.PushFront(entry)
+	c.entries[key] = element
+}
+
+// Get returns the value at the specified key from the cache if it exists and is not
+// expired, or returns false.
+func (c *LRUExpireCache) Get(key interface{}) (interface{}, bool) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	element, ok := c.entries[key]
+	if !ok {
+		return nil, false
+	}
+
+	// 判断元素是否过期：如果这个元素已过期则移除
+	if c.clock.Now().After(element.Value.(*cacheEntry).expireTime) {
+		c.evictionList.Remove(element)
+		delete(c.entries, key)
+		return nil, false
+	}
+
+	// 将元素移到列表头
+	c.evictionList.MoveToFront(element)
+
+	return element.Value.(*cacheEntry).value, true
+}
+
+// Remove removes the specified key from the cache if it exists
+// Remove 从Cache中移除指定的key
+func (c *LRUExpireCache) Remove(key interface{}) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	element, ok := c.entries[key]
+	if !ok {
+		return
+	}
+
+	c.evictionList.Remove(element)
+	delete(c.entries, key)
+}
+```
+
+2、`lru.Cache`，k8s基于groupcache的实现，加了一层读写锁的封装用以支持并发，[实现](https://github.com/kubernetes/utils/blob/master/lru/lru.go#L8)，原始[实现](https://github.com/golang/groupcache/blob/master/lru/lru.go)也同样是利用`list.List`与map配合实现，不支持key过期，LRU机制实现同样是利用每次[`Add`](https://github.com/golang/groupcache/blob/master/lru/lru.go#L56)时，如果元素个数超过上限则删除最久未被访问的元素
+
 ##	0x03	解决缓存击穿
 cache 库使用 `syncx.SingleFlight`[机制](https://github.com/zeromicro/go-zero/blob/master/core/syncx/singleflight.go#L12) 解决缓存击穿问题，同 [Singleflight 机制](https://pandaychen.github.io/2020/02/22/A-CACHE-STUDY/#singleflight - 机制)
 
-`SingleFlight` 方法作用是：**可以使得同时多个请求只需要发起一次拿结果的调用，其他请求 "坐享其成" 即可，该设计有效减少了资源服务的并发压力，可以有效防止缓存击穿**。当我们需要高频并发访问一个资源时，就可以使用 `SingleFlight` 机制。核心代码实现如下：
+`SingleFlight` 方法作用是：**可以使得同时多个请求只需要发起一次拿结果的调用，其他请求 "坐享其成" 即可，该设计有效减少了资源服务的并发压力，可以有效防止缓存击穿**。当需要高频并发访问一个资源时，就可以使用 `SingleFlight` 机制。核心代码实现如下：
 
 ```golang
 //Take 方法：获取 KEY 的值，如果这个值不存在，那么执行 fetch 方法，拿到返回值设置到缓存里，并返回。
