@@ -295,10 +295,10 @@ func (klru *keyLru) removeElement(e *list.Element) {
 ####	如何限制缓存的size？
 在内存受限场景下，需要对cache整体的size做限制，这里列举几种典型的实现：
 
-1、k8s的`LRUExpireCache`，基于LRU、key自身的expire已经最大size的策略实现，有两种淘汰场景：
+1、k8s的[`LRUExpireCache`](https://pkg.go.dev/k8s.io/apimachinery/pkg/util/cache)，基于LRU、key自身的expire已经最大size的策略实现，有两种淘汰场景：
 
--	当缓存达到最大大小（maxsize）后，在`Add`操作中最近最少使用的项目将会被移除
--	在`Get`操作中，如果key过期将会被移除
+-	当缓存达到最大大小（maxsize）后，在`Add`操作中最近最少使用的项目将会被移除（添加元素的时候会计算超时时间）
+-	在`Get`操作中，会判断元素有没有过期，如果key过期将会被移除
 -	所有的元素被按照`list.List`组织起来，利用list的特性实现LRU功能
 
 这个实现就是利用了list与map的优势，组合实现支持LRU的特性，缺点是，CRUD时需要加锁，同时锁住list和map，不太适合并发高的场景
