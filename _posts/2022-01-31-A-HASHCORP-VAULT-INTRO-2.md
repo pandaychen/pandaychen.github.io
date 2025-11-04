@@ -46,7 +46,7 @@ Vault 支持多服务器部署模式（运行多个 Vault 服务器）以实现�
 ####  存储的高可用
 
 ######   使用Mysql作为后端存储
-我们项目中是采用MySQL作为后端存储的，[官方文档](https://www.vaultproject.io/docs/configuration/storage/mysql#mysql-examples)：
+笔者项目中是采用MySQL作为后端存储的，[官方文档](https://www.vaultproject.io/docs/configuration/storage/mysql#mysql-examples)：
 
 ```text
 The MySQL storage backend is used to persist Vault's data in a MySQL server or cluster.
