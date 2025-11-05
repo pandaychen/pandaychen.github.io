@@ -16,6 +16,8 @@ tags:
 
 本文就来学习下**进程虚拟内存空间在内核中的布局以及管理**，内核版本基于[v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include) 版本
 
+![linux_memory_management.png]()
+
 ####    虚拟内存地址
 
 ####    虚拟内存空间分布（32位）
@@ -36,7 +38,7 @@ tags:
 
 
 ####    页表
-参考[一步一图带你构建 Linux 页表体系 —— 详解虚拟内存如何与物理内存进行映射](https://mp.weixin.qq.com/s?__biz=Mzg2MzU3Mjc3Ng==&mid=2247488477&idx=1&sn=f8531b3220ea3a9ca2a0fdc2fd9dabc6&chksm=ce77d59af9005c8c2ef35c7e45f45cbfc527bfc4b99bbd02dbaaa964d174a4009897dd329a4d&scene=178&cur_album_id=2559805446807928833#rd)
+参考[一步一图带你构建 Linux 页表体系：详解虚拟内存如何与物理内存进行映射](https://mp.weixin.qq.com/s?__biz=Mzg2MzU3Mjc3Ng==&mid=2247488477&idx=1&sn=f8531b3220ea3a9ca2a0fdc2fd9dabc6&chksm=ce77d59af9005c8c2ef35c7e45f45cbfc527bfc4b99bbd02dbaaa964d174a4009897dd329a4d&scene=178&cur_album_id=2559805446807928833#rd)
 
 ##  0x01    进程虚拟内存空间管理
 无论是在 `32` 位机器上还是在 `64` 位机器上，进程虚拟内存空间的核心区域分布的相对位置是一样的，这个结构是怎么在内核反映的？
@@ -467,6 +469,79 @@ mmap_region(struct file *file, unsigned long addr, unsigned long len,
 }
 ```
 
+####    ELF加载之后的内存布局
+以下面代码为例：
+```CPP
+int main()
+{
+   printf("Hello, World!\n");
+   int *a=malloc(1024*1024);
+   memset(a,0,1024*1024);
+   getchar();
+   return 0;
+}
+```
+
+可以通过`/proc/${pid}/maps`查看内存布局，如下：
+
+```BASH
+[root@VM-X-X-tencentos ~]# cat /proc/1115271/maps 
+00400000-00401000 r--p 00000000 fd:01 1892501                            /root/main
+00401000-00402000 r-xp 00001000 fd:01 1892501                            /root/main
+00402000-00403000 r--p 00002000 fd:01 1892501                            /root/main
+00403000-00404000 r--p 00002000 fd:01 1892501                            /root/main
+00404000-00405000 rw-p 00003000 fd:01 1892501                            /root/main
+0178a000-017ab000 rw-p 00000000 00:00 0                                  [heap]
+7f7d46a0c000-7f7d46a32000 r--p 00000000 fd:01 26356345                   /usr/lib64/libc.so.6
+7f7d46a32000-7f7d46b98000 r-xp 00026000 fd:01 26356345                   /usr/lib64/libc.so.6
+7f7d46b98000-7f7d46bed000 r--p 0018c000 fd:01 26356345                   /usr/lib64/libc.so.6
+7f7d46bed000-7f7d46bf1000 r--p 001e0000 fd:01 26356345                   /usr/lib64/libc.so.6
+7f7d46bf1000-7f7d46bf3000 rw-p 001e4000 fd:01 26356345                   /usr/lib64/libc.so.6
+7f7d46bf3000-7f7d46c00000 rw-p 00000000 00:00 0 
+7f7d46c00000-7f7d46c03000 r-xp 00000000 fd:01 28659740                   /usr/lib64/libonion_security.so.1.0.19
+7f7d46c03000-7f7d46d03000 ---p 00003000 fd:01 28659740                   /usr/lib64/libonion_security.so.1.0.19
+7f7d46d03000-7f7d46d04000 rw-p 00003000 fd:01 28659740                   /usr/lib64/libonion_security.so.1.0.19
+7f7d46d04000-7f7d46d06000 rw-p 00000000 00:00 0 
+7f7d46e00000-7f7d46e03000 r-xp 00000000 fd:01 25582409                   /usr/lib64/libtdsp_security.so.1.0.25
+7f7d46e03000-7f7d47002000 ---p 00003000 fd:01 25582409                   /usr/lib64/libtdsp_security.so.1.0.25
+7f7d47002000-7f7d47003000 rw-p 00002000 fd:01 25582409                   /usr/lib64/libtdsp_security.so.1.0.25
+7f7d47140000-7f7d47142000 rw-p 00000000 00:00 0 
+7f7d47142000-7f7d47143000 r--p 00000000 fd:01 26356431                   /usr/lib64/libdl.so.2
+7f7d47143000-7f7d47144000 r-xp 00001000 fd:01 26356431                   /usr/lib64/libdl.so.2
+7f7d47144000-7f7d47145000 r--p 00002000 fd:01 26356431                   /usr/lib64/libdl.so.2
+7f7d47145000-7f7d47146000 r--p 00002000 fd:01 26356431                   /usr/lib64/libdl.so.2
+7f7d47146000-7f7d47147000 rw-p 00003000 fd:01 26356431                   /usr/lib64/libdl.so.2
+7f7d4714e000-7f7d47150000 rw-p 00000000 00:00 0 
+7f7d47151000-7f7d47152000 r--p 00000000 fd:01 26345834                   /usr/lib64/ld-linux-x86-64.so.2
+7f7d47152000-7f7d47179000 r-xp 00001000 fd:01 26345834                   /usr/lib64/ld-linux-x86-64.so.2
+7f7d47179000-7f7d47183000 r--p 00028000 fd:01 26345834                   /usr/lib64/ld-linux-x86-64.so.2
+7f7d47183000-7f7d47185000 r--p 00032000 fd:01 26345834                   /usr/lib64/ld-linux-x86-64.so.2
+7f7d47185000-7f7d47187000 rw-p 00034000 fd:01 26345834                   /usr/lib64/ld-linux-x86-64.so.2
+7ffddfc95000-7ffddfcb6000 rw-p 00000000 00:00 0                          [stack]
+7ffddfd94000-7ffddfd98000 r--p 00000000 00:00 0                          [vvar]
+7ffddfd98000-7ffddfd9a000 r-xp 00000000 00:00 0                          [vdso]
+ffffffffff600000-ffffffffff601000 --xp 00000000 00:00 0                  [vsyscall]
+```
+
+在Linux中，进程运行时的物理内存消耗主要通过驻留集大小（RSS）来衡量。RSS表示进程当前使用的物理内存页大小，包括代码段、数据段、堆、栈以及共享库部分。需要注意的是`malloc`分配的是虚拟内存，只有在实际访问（如 `memset`）时，操作系统才会通过页错误机制（即缺页中断）分配物理内存。代码段和共享库段通常被多个进程共享，因此从系统总体来看，物理内存消耗可能较少，但从单个进程的RSS角度，这些共享页仍然会被计入
+
+对于上述这段程序，物理内存消耗主要来自以下部分：
+
+-   程序代码段（text segment）：可执行文件本身的代码。本例中，代码段通常只有几KB
+-   数据段（data segment）和BSS段：本例中无全局变量，所以数据段和BSS段很小（可能小于`1KB`），物理内存消耗可忽略
+-   堆（heap）：本例子中，通过 `malloc`分配了`1MB`虚拟内存，并通过 `memset`访问全部内容，因此这`1MB`会完全占用物理内存（内存充裕时）；如果代码中没有调用 `memset`，那么 `malloc`分配的`1MB`可能不会立即占用物理内存（直到访问时才分配）
+-   栈（stack）：用于局部变量和函数调用，消耗很小（通常几KB），物理内存可忽略
+-   共享库（shared libraries）：程序使用 `printf`和 `getchar`（C标准库）。共享库的代码和数据会被映射到进程地址空间。物理内存会加载库中实际使用的部分（如I/O函数、缓冲区等），典型值为几百KB到`1MB`。这些页可能与其他进程共享，但RSS会计入进程使用的部分
+-   其他开销：进程内核数据结构（如页表、任务结构）消耗少量物理内存（通常几KB）
+
+
+####    vm_area_struct的分配
+把上面的例子修改一下：
+
+```CPP
+
+```
+
 ##  0x03  mmap的原理分析
 
 ####    mmap API
@@ -555,9 +630,9 @@ struct vm_area_struct {
 
 ####    mmap文件映射的原理
 
-![mmap-file-mapping]()
+![mmap-file-mapping](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/memory/mmap/mmap-file-mapping.png)
 
-由上图，调用 `mmap` 进行内存文件映射的时候，内核首先会在进程的虚拟内存空间中创建一个新的虚拟内存区域 VMA 用于映射文件，通过 `vm_area_struct->vm_file` 将映射文件的 `struct flle` 结构与虚拟内存映射关联起来，即下面的成员：
+由上图，调用 `mmap` 进行内存文件映射的时候，内核首先会在进程的虚拟内存空间中创建一个新的虚拟内存区域 VMA 用于映射文件，通过 `vm_area_struct->vm_file` 将映射文件的 `struct file` 结构与虚拟内存映射关联起来，即下面的成员：
 
 ```CPP
 struct vm_area_struct {
@@ -600,8 +675,10 @@ struct address_space {
 -   [4.6 深入理解 Linux 虚拟内存管理](https://www.xiaolincoding.com/os/3_memory/linux_mem.html)
 -   [4.7 深入理解 Linux 物理内存管理](https://www.xiaolincoding.com/os/3_memory/linux_mem2.html#_6-1-%E5%8C%BF%E5%90%8D%E9%A1%B5%E7%9A%84%E5%8F%8D%E5%90%91%E6%98%A0%E5%B0%84)
 -   [mmap 源码分析](https://leviathan.vip/2019/01/13/mmap%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90/)
--   [linux源码解读（十六）：红黑树在内核的应用——虚拟内存管理](https://www.cnblogs.com/theseventhson/p/15820092.html)
+-   [linux源码解读（十六）：红黑树在内核的应用虚拟内存管理](https://www.cnblogs.com/theseventhson/p/15820092.html)
 -   [图解 Linux 虚拟内存空间管理](https://github.com/liexusong/linux-source-code-analyze/blob/master/process-virtual-memory-manage.md)
 -   [认真分析mmap：是什么为什么怎么用](https://www.cnblogs.com/huxiao-tee/p/4660352.html)
 -   [从内核世界透视 mmap 内存映射的本质（原理篇）](https://www.cnblogs.com/binlovetech/p/17712761.html)
 -   [聊聊Linux内核](https://mp.weixin.qq.com/mp/appmsgalbum?__biz=Mzg2MzU3Mjc3Ng==&action=getalbum&album_id=2559805446807928833&scene=173&from_msgid=2247486879&from_itemidx=1&count=3&nolastread=1#wechat_redirect)
+-   [一步一图带你深入理解 Linux 虚拟内存管理](https://mp.weixin.qq.com/s?__biz=Mzg2MzU3Mjc3Ng==&mid=2247486732&idx=1&sn=435d5e834e9751036c96384f6965b328&chksm=ce77cb4bf900425d33d2adfa632a4684cf7a63beece166c1ffedc4fdacb807c9413e8c73f298&token=1931867638&lang=zh_CN#rd)
+-   [你写的代码是如何跑起来的](https://mp.weixin.qq.com/s/1bdktqYF7VyAMadRlcRrSg)
