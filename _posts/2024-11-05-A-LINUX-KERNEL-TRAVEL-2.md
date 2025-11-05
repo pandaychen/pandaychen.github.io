@@ -539,8 +539,70 @@ ffffffffff600000-ffffffffff601000 --xp 00000000 00:00 0                  [vsysca
 把上面的例子修改一下：
 
 ```CPP
-
+int main() {
+   printf("Hello, World!\n");
+   int *a = malloc(1024 * 1024); // 分配1MB
+   memset(a, 0, 1024 * 1024);
+   int *b = malloc(1024 * 1024); // 再分配1MB
+   memset(b, 0, 1024 * 1024);
+   getchar();
+   return 0;
+}
 ```
+
+虚拟内存布局如下：
+```bash
+[root@VM-119-175-tencentos ~]# cat /proc/1960685/maps 
+00400000-00401000 r--p 00000000 fd:01 567111                             /root/main
+00401000-00402000 r-xp 00001000 fd:01 567111                             /root/main
+00402000-00403000 r--p 00002000 fd:01 567111                             /root/main
+00403000-00404000 r--p 00002000 fd:01 567111                             /root/main
+00404000-00405000 rw-p 00003000 fd:01 567111                             /root/main
+00e2a000-00e4b000 rw-p 00000000 00:00 0                                  [heap]
+7fde7ed15000-7fde7ef17000 rw-p 00000000 00:00 0 
+7fde7ef17000-7fde7ef3d000 r--p 00000000 fd:01 396930                     /usr/lib64/libc.so.6
+7fde7ef3d000-7fde7f098000 r-xp 00026000 fd:01 396930                     /usr/lib64/libc.so.6
+7fde7f098000-7fde7f0ed000 r--p 00181000 fd:01 396930                     /usr/lib64/libc.so.6
+7fde7f0ed000-7fde7f0f1000 r--p 001d5000 fd:01 396930                     /usr/lib64/libc.so.6
+7fde7f0f1000-7fde7f0f3000 rw-p 001d9000 fd:01 396930                     /usr/lib64/libc.so.6
+7fde7f0f3000-7fde7f100000 rw-p 00000000 00:00 0 
+7fde7f100000-7fde7f103000 r-xp 00000000 fd:01 404268                     /usr/lib64/libonion_security.so.1.0.19
+7fde7f103000-7fde7f203000 ---p 00003000 fd:01 404268                     /usr/lib64/libonion_security.so.1.0.19
+7fde7f203000-7fde7f204000 rw-p 00003000 fd:01 404268                     /usr/lib64/libonion_security.so.1.0.19
+7fde7f204000-7fde7f206000 rw-p 00000000 00:00 0 
+7fde7f286000-7fde7f289000 rw-p 00000000 00:00 0 
+7fde7f289000-7fde7f28a000 r--p 00000000 fd:01 397016                     /usr/lib64/libdl.so.2
+7fde7f28a000-7fde7f28b000 r-xp 00001000 fd:01 397016                     /usr/lib64/libdl.so.2
+7fde7f28b000-7fde7f28c000 r--p 00002000 fd:01 397016                     /usr/lib64/libdl.so.2
+7fde7f28c000-7fde7f28d000 r--p 00002000 fd:01 397016                     /usr/lib64/libdl.so.2
+7fde7f28d000-7fde7f28e000 rw-p 00003000 fd:01 397016                     /usr/lib64/libdl.so.2
+7fde7f297000-7fde7f299000 rw-p 00000000 00:00 0 
+7fde7f29a000-7fde7f29b000 r--p 00000000 fd:01 396776                     /usr/lib64/ld-linux-x86-64.so.2
+7fde7f29b000-7fde7f2c1000 r-xp 00001000 fd:01 396776                     /usr/lib64/ld-linux-x86-64.so.2
+7fde7f2c1000-7fde7f2cb000 r--p 00027000 fd:01 396776                     /usr/lib64/ld-linux-x86-64.so.2
+7fde7f2cb000-7fde7f2cd000 r--p 00031000 fd:01 396776                     /usr/lib64/ld-linux-x86-64.so.2
+7fde7f2cd000-7fde7f2cf000 rw-p 00033000 fd:01 396776                     /usr/lib64/ld-linux-x86-64.so.2
+7ffc30041000-7ffc30062000 rw-p 00000000 00:00 0                          [stack]
+7ffc300f2000-7ffc300f6000 r--p 00000000 00:00 0                          [vvar]
+7ffc300f6000-7ffc300f8000 r-xp 00000000 00:00 0                          [vdso]
+ffffffffff600000-ffffffffff601000 --xp 00000000 00:00 0                  [vsyscall]
+```
+
+下面结合`mm_struct`的成员及上述布局，稍微解读下上述结果：
+
+-   **在 Linux 内核中，每个在 `/proc/pid/maps`中的行对应一个 `vm_area_struct`结构体，因此在当前机器上（运行的进程），该进程共有 `33` 个独立的虚拟内存区域，因此内核会创建 `33` 个`vm_area_struct`结构体，这些`vm_area_struct`被内核通过红黑树来实现高效查找**
+-   程序固有区域：包括代码段、数据段、BSS段等（对应上述 maps 文件的前`5`行），这些是进程启动时由 `execve`系统调用映射的
+-   堆区域（heap）：地址区间为 `00e2a000-00e4b000`，这是通过 `brk`系统调用管理的堆区域，用于小块内存分配
+-   匿名内存映射区域：这是由 `malloc`分配大块内存（如`1MB`）时通过 `mmap`创建的，在上述 maps 文件中，有一个关键的匿名映射区域即`7fde7ed15000-7fde7ef17000 rw-p 00000000 00:00 0`，该区域大小为 `0x7fde7ef17000 - 0x7fde7ed15000 = 0x200000`字节（即`2MB`），权限为可读可写（`rw-p`），且是匿名映射（无文件备份）。这个`2MB`的虚拟内存区域对应代码中的两次`1MB`的`malloc`分配。由于这`2`次分配在虚拟地址空间中是连续的，并且具有相同的权限（`rw-p`），内核可能将它们合并为一个连续的 `vm_area_struct`区域（即一个2MB区域）
+-   其他匿名映射：maps 文件中还有多个较小的匿名映射区域（如 `7fde7f0f3000-7fde7f100000`、`7fde7f204000-7fde7f206000`等），这些可能来自共享库的内部分配（如`libc.so.6`、`libdl.so.2`、`ld-linux-x86-64.so.2`等）或其它动态内存分配
+-   其他等特殊区域：如栈（stack）、vvar、vdso、vsyscall 等
+
+
+结合前文的描述，`vm_area_struct` 的管理方式大致如下：
+-   内存描述符（`mm_struct`）：每个进程有一个 `mm_struct`结构体，其中包含进程虚拟内存管理的所有信息。`mm_struct`中的 `mmap`字段指向一个链表，该链表按虚拟地址顺序连接所有 `vm_area_struct`结构体
+-   红黑树：关联`mm_struct`中的 `mm_rb`字段，用于按虚拟地址快速查找 `vm_area_struct`。插入、删除和查找操作的时间复杂度 `O(logN)`
+-   区域合并：当新的内存区域被映射（如通过 `mmap`）时，内核会检查它与相邻区域是否具有相同的权限和映射类型。如果满足条件，内核会合并这些区域为一个更大的 `vm_area_struct`，从而减少结构体数量
+-   缺页中断处理：当进程访问虚拟内存时，如果页面不在物理内存中，会触发缺页中断。内核通过查找 `vm_area_struct`来确认访问的合法性，并分配物理页面
 
 ##  0x03  mmap的原理分析
 
