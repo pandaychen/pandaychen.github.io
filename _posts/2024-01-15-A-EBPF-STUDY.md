@@ -94,6 +94,10 @@ eBPF提供的辅助函数的使用可以参考：
 -   `bpf_get_current_pid_tgid` / `bpf_get_current_comm` / `bpf_get_current_task`：获取当前事件的进程信息
 -   `bpf_perf_event_output`：向`perf_event_array`写入数据，用于向用户空间发送数据
 
+6、BPF Features by Linux Kernel Version
+
+Linux内核版本对eBPF的特性支持可以参考[BPF Features by Linux Kernel Version](https://github.com/deepflowio/deepflow/blob/main/agent/src/ebpf/docs/kernel-versions.md)
+
 ####    eBPF 工作流程
 1.  编写、编译 eBPF 程序，程序主要用来处理不同类型应用
 2.  加载 eBPF 程序：将 eBPF 程序编译成字节码，一般由应用程序通过 bpf 系统调用加载到内核中
@@ -1241,6 +1245,34 @@ whoami           68338  68337    0 /usr/bin/whoami
 1.  支持CORE（内核开启BTF）技术的开发模式及编译工具
 2.  不支持CORE技术的开发及编译工具（使用内核头文件方式编译），也可以选择[btfhub](https://github.com/aquasecurity/btfhub)技术
 
+这里简单介绍下CORE（BTF）技术对兼容性的改进：
+
+-   在 bpftool 工具中提供了从 BTF 生成头文件的工具，从而摆脱了对内核头文件的依赖
+-   通过对 BPF 代码中的访问偏移量进行重写，解决了不同内核版本中数据结构偏移量不同的问题
+-   在 libbpf 中预定义不同内核版本中数据结构的修改，解决了不同内核中数据结构不兼容的问题
+-   在 libbpf 中提供一系列的内核特性探测库函数，解决了 eBPF 程序在不同内核内版本中需要执行不同行为的问题。比如，`bpf_core_type_exists()` 和`bpf_core_field_exists()` 分别检查内核数据类型和成员变量是否存在，也可以用类似 `extern int LINUX_KERNEL_VERSION __kconfig` 的方式查询内核的配置选项
+
+通常来说，CO-RE 技术需要`>=5.2`的内核版本且需要打开 `CONFIG_DEBUG_INFO_BTF`。针对不支持 BTF 的内核有两种不同的解决办法：
+
+1、采用条件编译的方式，根据是否支持 CO-RE，生成两个不同的 eBPF 字节码文件。而到程序运行时，再根据内核是否支持 CO-RE 选择对应的字节码文件加载运行
+
+2、采用 Aqua Security 开源的 btfhub ，为目标机器匹配的内核版本下载独立的 BTF 信息库，最后再通过如下的方法借助 libbpf 进行加载：
+
+```CPP
+struct bpf_object_open_opts openopts = {
+    .sz = sizeof(struct bpf_object_open_opts),
+    // 从BPF_CUSTOM_BTF环境变量读取BTF文件路径
+    .btf_custom_path = getenv("BPF_CUSTOM_BTF"),
+};
+
+
+obj = hello_btf_bpf__open_opts(&openopts);
+    if (!obj) {
+        fprintf(stderr, "failed to open and/or load BPF object\n");
+        return 1;
+    }
+}
+```
 
 ####  用户态开发
 用户态推荐开发语言C/Golang，相关的库参考：

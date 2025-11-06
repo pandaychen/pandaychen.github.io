@@ -768,8 +768,7 @@ SYSCALL_DEFINE5(mount) -> do_mount() -> do_new_mount() -> do_add_mount() -> graf
 ```
 
 ####	mount tree构造原则
-
-TODO
+参考[Linux 内核之旅（十一）：追踪 open 系统调用](https://pandaychen.github.io/2025/04/02/A-LINUX-KERNEL-TRAVEL-11/#vfs%E7%9A%84%E6%8C%82%E8%BD%BD)
 
 ##	0x03	用户态视角
 
