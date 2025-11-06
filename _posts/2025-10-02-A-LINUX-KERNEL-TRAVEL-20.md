@@ -14,7 +14,7 @@ tags:
 ##  0x00    前言
 共享内存主要用于进程间通信，常见Shared Memory机制：
 
--   System V shared memory(`shmget/shmat/shmdt`)：旧
+-   System V shared memory（`shmget/shmat/shmdt`）：旧
 -   POSIX shared memory（`shm_open/shm_unlink`）：新
 
 此外，内存映射`mmap`机制也可以用于跨进程间通信，参考前文：[]()
@@ -45,9 +45,18 @@ POSIX共享内存是基于tmpfs来实现的，System V shared memory在内核也
 1.  用于SYSTEM V共享内存，还有匿名内存映射；这部分由内核管理，用户不可见（理解为特殊的文件系统）
 2.  用于POSIX共享内存，由用户负责mount，而且一般mount到`/dev/shm`；依赖于`CONFIG_TMPFS`
 
+####    内核提供的几种共享内存机制
 
-##  0x01    
+
+##  0x01   页面类型及共享原理
+
+####  共享内存框架
+![shm-arch]()
+
+####  共享内存原理
+![shm-principle]()
 
 ##  0x0  参考
 -   [深入理解Linux内核共享内存机制- shmem&tmpfs](https://aijishu.com/a/1060000000451498)
 -   [浅析Linux的共享内存与tmpfs文件系统](http://hustcat.github.io/shared-memory-tmpfs/)
+-   [从内核世界透视 mmap 内存映射的本质（源码实现篇）](https://www.cnblogs.com/binlovetech/p/17754173.html)
