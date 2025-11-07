@@ -259,7 +259,7 @@ enum pid_type
 所以，内核对PID的管理其实就是围绕两个数据结构展开
 
 -	`struct pid`：是内核对PID的内部表示
--	`struct upid`：是表示特定的命名空间中可见的信息
+-	`struct upid`：**是表示特定的命名空间中可见的信息**
 
 
 关于`pid.numbers[1]`这个成员，本质上一个柔性数组，每次在分配`struct pid`时，`numbers`会被扩展到`level`个元素，它用来容纳在每一层pid namespace中的 id（`upid`）

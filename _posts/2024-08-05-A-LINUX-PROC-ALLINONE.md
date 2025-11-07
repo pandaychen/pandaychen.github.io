@@ -13,6 +13,8 @@ tags:
 ##  0x00    前言
 `proc`文件系统（[procfs](https://www.kernel.org/doc/Documentation/filesystems/proc.txt)）是一种基于内核的VFS，以文件系统目录和文件形式，提供一个指向内核数据结构的接口，通过它能够查看和改变各种系统属性。从开发者角度说，Procfs 是一种特殊的虚拟文件系统，可以挂载到用户的目录树中，允许用户空间中的进程使用系统调用（如`write`/`read`等）方便地读取内核信息
 
+本文内核代码基于 [v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include) 版本
+
 ![vfs](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/procs/vfs.jpg)
 
 -   procfs 它不依赖物理存储设备，而是由内核动态生成文件和目录，用于暴露系统信息（如进程状态、硬件配置、内核参数等），它通过注册到 VFS 的机制，将自己挂载到文件系统树（`/proc`），并遵循 VFS 的接口规范（如`inode_operations`、`file_operations`）
@@ -43,9 +45,88 @@ tags:
 mount -t proc proc /proc
 ```
 
-本文代码基于 [v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include) 版本
-
 ##  0x01    引言：访问/proc文件
+`/proc/`目录下包含了文件和目录（pid维度）
+
+```BASH
+[root@VM-X-X-tencentos ~]# ls /proc/ -al
+total 4
+dr-xr-xr-x 270 root  root               0 Nov  7 07:06 .
+dr-xr-xr-x  19 root  root            4096 Nov  7 16:46 ..
+dr-xr-xr-x   8 root  root               0 Nov  7 07:06 1
+......
+dr-xr-xr-x   8 root  root               0 Nov  7 07:06 15
+dr-xr-xr-x   8 root  root               0 Nov  7 07:07 996
+dr-xr-xr-x   3 root  root               0 Nov  7 07:06 acpi
+-r--r--r--   1 root  root               0 Nov  7 07:07 bt_stat
+-r--r--r--   1 root  root               0 Nov  7 16:45 buddyinfo
+dr-xr-xr-x   4 root  root               0 Nov  7 07:07 bus
+-r--r--r--   1 root  root               0 Nov  7 07:06 cgroups
+-r--r--r--   1 root  root               0 Nov  7 07:06 cmdline
+-r--r--r--   1 root  root           30094 Nov  7 07:07 config.gz
+-r--r--r--   1 root  root               0 Nov  7 16:45 consoles
+-r--r--r--   1 root  root               0 Nov  7 07:06 cpuinfo
+-r--r--r--   1 root  root               0 Nov  7 16:45 crypto
+-r--r--r--   1 root  root               0 Nov  7 16:45 devices
+-r--r--r--   1 root  root               0 Nov  7 07:07 diskstats
+-r--r--r--   1 root  root               0 Nov  7 16:45 dma
+dr-xr-xr-x   4 root  root               0 Nov  7 16:45 driver
+-r--r--r--   1 root  root               0 Nov  7 16:45 execdomains
+-r--r--r--   1 root  root               0 Nov  7 16:45 fb
+-r--r--r--   1 root  root               0 Nov  7 07:06 filesystems
+dr-xr-xr-x   5 root  root               0 Nov  7 07:07 fs
+-r--r--r--   1 root  root               0 Nov  7 07:06 interrupts
+-r--r--r--   1 root  root               0 Nov  7 07:07 iomem
+-r--r--r--   1 root  root               0 Nov  7 16:45 ioports
+dr-xr-xr-x  28 root  root               0 Nov  7 07:06 irq
+-r--r--r--   1 root  root               0 Nov  7 07:07 kallsyms
+-r--------   1 root  root 140737477890048 Nov  7 07:06 kcore
+-r--r--r--   1 root  root               0 Nov  7 16:45 keys
+-r--r--r--   1 root  root               0 Nov  7 16:45 key-users
+-r--------   1 root  root               0 Nov  7 16:45 kmsg
+-r--------   1 root  root               0 Nov  7 16:45 kpagecgroup
+-r--------   1 root  root               0 Nov  7 16:45 kpagecount
+-r--------   1 root  root               0 Nov  7 16:45 kpageflags
+-rw-r--r--   1 root  root               0 Nov  7 16:45 latency_stats
+-r--r--r--   1 root  root               0 Nov  7 07:07 loadavg
+-r--r--r--   1 root  root               0 Nov  7 16:45 loadavg_bt
+-r--r--r--   1 root  root               0 Nov  7 16:45 locks
+-r--r--r--   1 root  root               0 Nov  7 07:17 mdstat
+dr-xr-xr-x   2 root  root               0 Nov  7 16:45 megaraid
+-r--r--r--   1 root  root               0 Nov  7 07:06 meminfo
+-r--r--r--   1 root  root               0 Nov  7 16:45 misc
+-r--r--r--   1 root  root               0 Nov  7 16:45 module_md5_list
+-r--r--r--   1 root  root               0 Nov  7 07:07 modules
+lrwxrwxrwx   1 root  root              11 Nov  7 07:06 mounts -> self/mounts
+dr-xr-xr-x   4 root  root               0 Nov  7 16:45 mpt
+-rw-r--r--   1 root  root               0 Nov  7 16:45 mtrr
+lrwxrwxrwx   1 root  root               8 Nov  7 07:06 net -> self/net
+-r--------   1 root  root               0 Nov  7 16:45 pagetypeinfo
+-r--r--r--   1 root  root               0 Nov  7 07:06 partitions
+dr-xr-xr-x   5 root  root               0 Nov  7 07:07 pressure
+dr-xr-xr-x   3 root  root               0 Nov  7 16:45 rue
+-r--r--r--   1 root  root               0 Nov  7 16:45 sched_debug
+-r--r--r--   1 root  root               0 Nov  7 16:45 schedstat
+dr-xr-xr-x   5 root  root               0 Nov  7 16:45 scsi
+lrwxrwxrwx   1 root  root               0 Nov  7 07:06 self -> 26694
+-r--------   1 root  root               0 Nov  7 16:45 slabinfo
+dr-xr-xr-x   5 root  root               0 Nov  7 16:45 sli
+-r--r--r--   1 root  root               0 Nov  7 16:45 softirqs
+-r--r--r--   1 root  root               0 Nov  7 07:07 stat
+-r--r--r--   1 root  root               0 Nov  7 07:06 swaps
+dr-xr-xr-x   1 root  root               0 Nov  7 07:06 sys
+--w-------   1 root  root               0 Nov  7 16:45 sysrq-trigger
+dr-xr-xr-x   5 root  root               0 Nov  7 16:45 sysvipc
+lrwxrwxrwx   1 root  root               0 Nov  7 07:06 thread-self -> 26694/task/26694
+-r--------   1 root  root               0 Nov  7 16:45 timer_list
+dr-xr-xr-x   5 root  root               0 Nov  7 16:45 tkernel
+dr-xr-xr-x   6 root  root               0 Nov  7 07:07 tty
+-r--r--r--   1 root  root               0 Nov  7 07:06 uptime
+-r--r--r--   1 root  root               0 Nov  7 07:07 version
+-r--------   1 root  root               0 Nov  7 16:45 vmallocinfo
+-r--r--r--   1 root  root               0 Nov  7 07:07 vmstat
+-r--r--r--   1 root  root               0 Nov  7 16:45 zoneinfo
+```
 
 比如，访问进程`13323`下的`limits`文件，能获取到本进程的资源限制
 
@@ -115,6 +196,9 @@ dr-xr-xr-x 9 root root  0 Feb 10 10:43 ..
 2.  `.`、`..`子目录，分别是对当前目录和父目录的链接
 3.  `/proc/`下由数字组成的进程子目录是每次读取proc内容**动态生成**，即动态遍历当前进程列表形成；以及每进程子目录下子目录/子文件的形成
 
+####	proc下的主要目录&&文件
+TODO
+
 ##  0x02 procfs 的内核视角
 
 ####    pseudo FS
@@ -124,6 +208,8 @@ dr-xr-xr-x 9 root root  0 Feb 10 10:43 ..
 -   [`pid_entry`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/base.c#L115)：proc目录下面的进程子目录，是对应与每一个进程ID pid目录的描述
 
 ####    proc_dir_entry
+`proc_dir_entry`的结构如下：
+
 ```CPP
 struct proc_dir_entry {
 	unsigned int low_ino;
@@ -150,6 +236,10 @@ struct proc_dir_entry {
 ```
 
 注意，在高版本的内核中，`subdir`、`subdir_node`已经调整为红黑树的实现了，2.6的内核实现是链表。数据结构`proc_dir_entry`在内核中代表了一个proc入口，在procfs中表现为一个文件，可以在这个结构体中看到一些文件特有的属性成员，如`uid`、`gid`、`mode`、`name`等
+
+`proc_dir_entry`的本质是什么？
+
+TODO
 
 ####    pid_entry
 ```CPP
@@ -262,6 +352,124 @@ static const struct pid_entry tgid_base_stuff[] = {
 };
 ```
 
+`tgid_base_stuff`结构中的几个宏定义：
+
+1、`DIR`：目录条目，`DIR("task", S_IRUGO|S_IXUGO, proc_task_inode_operations, proc_task_operations)`表示创建目录`/proc/<pid>/task/`，该目录包含该进程的所有线程信息，参数分别表示目录名、权限、inode操作、文件操作
+
+```CPP
+static const struct file_operations proc_task_operations = {
+	.read		= generic_read_dir,
+	.iterate_shared	= proc_task_readdir,	//proc_task_readdir：对应的目录遍历方法实现
+	.llseek		= generic_file_llseek,
+};
+
+static const struct inode_operations proc_task_inode_operations = {
+	.lookup		= proc_task_lookup,
+	.getattr	= proc_task_getattr,
+	.setattr	= proc_setattr,
+	.permission	= proc_pid_permission,
+};
+```
+
+又如`DIR("fd",S_IRUSR|S_IXUSR, proc_fd_inode_operations, proc_fd_operations)`，该目录表示某个进程打开的所有fd列表
+
+```BASH
+[root@VM-X-X-tencentos ~]# ls /proc/1081/fd
+0  1  2  3  4
+```
+
+```CPP
+const struct inode_operations proc_fd_inode_operations = {
+	.lookup		= proc_lookupfd,	//lookup 对应的lookup方法实现
+	.permission	= proc_fd_permission,
+	.setattr	= proc_setattr,
+};
+
+const struct file_operations proc_fd_operations = {
+	.read		= generic_read_dir,
+	.iterate_shared	= proc_readfd,
+	.llseek		= generic_file_llseek,
+};
+```
+
+2、`REG`：表示常规文件条目，`REG("environ", S_IRUSR, proc_environ_operations)`，创建一个常规文件，如`/proc/<pid>/environ` 文件，显示进程的环境变量，参数分别为文件名、权限、文件操作结构体
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/base.c#L974
+static const struct file_operations proc_environ_operations = {
+	.open		= environ_open,
+	.read		= environ_read,
+	.llseek		= generic_file_llseek,
+	.release	= mem_release,
+};
+```
+
+3、`ONE`：单一文件条目，`ONE("status", S_IRUGO, proc_pid_status)`，创建一个只读的常规文件，使用简化的回调函数，如`/proc/<pid>/status`文件是显示进程状态信息，参数分别是文件名、权限、数据生成函数指针。与 `REG` 的区别是`ONE` 使用简单的 `C`，而 `REG` 需要完整的文件操作结构体
+
+```CPP
+int proc_pid_status(struct seq_file *m, struct pid_namespace *ns,
+			struct pid *pid, struct task_struct *task)
+{
+	struct mm_struct *mm = get_task_mm(task);
+
+	task_name(m, task);
+	task_state(m, ns, pid, task);
+
+	if (mm) {
+		task_mem(m, mm);
+		mmput(mm);
+	}
+	task_sig(m, task);
+	task_cap(m, task);
+	task_seccomp(m, task);
+	task_cpus_allowed(m, task);
+	cpuset_task_status_allowed(m, task);
+	task_context_switch_counts(m, task);
+	return 0;
+}
+```
+
+4、`LNK`：符号链接条目，`LNK("cwd", proc_cwd_link)`表示创建一个符号链接，如`/proc/<pid>/cwd` 链接指向进程的当前工作目录，参数分别为链接名、链接目标生成函数
+
+```BASH
+[root@VM-X-X-tencentos ~]# ll -alrth  /proc/1081/
+......
+lrwxrwxrwx   1 root root 0 Nov  7 07:07 root -> /
+lrwxrwxrwx   1 root root 0 Nov  7 07:07 cwd -> /
+
+[root@VM-X-X-tencentos ~]# ls /proc/1081/cwd/
+bin  boot  data  dev  etc  home  lib  lib64  lost+found  media  mnt  opt  proc  root  run  sbin  srv  sys  tmp  usr  var
+```
+
+```CPP
+static int proc_cwd_link(struct dentry *dentry, struct path *path)
+{
+	struct task_struct *task = get_proc_task(d_inode(dentry));
+	int result = -ENOENT;
+
+	if (task) {
+		task_lock(task);
+		if (task->fs) {
+			get_fs_pwd(task->fs, path); //返回task->fs指向的目录，保存在path中
+			result = 0;
+		}
+		task_unlock(task);
+		put_task_struct(task);
+	}
+	return result;
+}
+
+static inline void get_fs_pwd(struct fs_struct *fs, struct path *pwd)
+{
+	spin_lock(&fs->lock);
+	*pwd = fs->pwd;
+	path_get(pwd);
+	spin_unlock(&fs->lock);
+}
+```
+
+上面介绍的回调函数，如`struct file_operations/inode_operations`等，即当触发内核代码调用VFS架构下的`struct file/inode`的操作时，会调用响应的操作函数（如`file_operations`的`open/read/llseek`等），未定义的操作即不支持
+
 ####    小结
 当程序读取`/proc`下面的文件时，内核的处理如下：
 
@@ -270,7 +478,7 @@ static const struct pid_entry tgid_base_stuff[] = {
 ##  0x03 proc_dir_entry 主要功能分析
 本小节主要基于内核代码，分析下`/proc`及子目录的初始化流程
 
-1、内核初始化创建`/proc`目录，[代码](https://elixir.bootlin.com/linux/v4.14.119/source/init/main.c#L513)
+1、内核初始化创建`/proc`目录，[代码](https://elixir.bootlin.com/linux/v4.11.6/source/init/main.c#L488)
 
 ```CPP
 asmlinkage void __init start_kernel(void)
@@ -281,7 +489,345 @@ asmlinkage void __init start_kernel(void)
 }
 ```
 
-//TODO
+2、`proc_root_init->register_filesystem->proc_sys_init`
+
+```CPP
+void __init proc_root_init(void)
+{
+	int err;
+
+	proc_init_inodecache();
+	set_proc_pid_nlink();
+	err = register_filesystem(&proc_fs_type);	//  注册proc文件系统
+	if (err)
+		return;
+
+	proc_self_init();
+	proc_thread_self_init();
+	proc_symlink("mounts", NULL, "self/mounts");	 // 创建 mounts 符号链接文件
+
+	proc_net_init();							 // 创建 net符号链接及内部目录树结构
+
+#ifdef CONFIG_SYSVIPC
+	proc_mkdir("sysvipc", NULL);
+#endif
+	proc_mkdir("fs", NULL);						// 创建 fs 目录
+	proc_mkdir("driver", NULL);					// 创建 drivers 目录
+	proc_create_mount_point("fs/nfsd"); /* somewhere for the nfsd filesystem to be mounted */
+#if defined(CONFIG_SUN_OPENPROMFS) || defined(CONFIG_SUN_OPENPROMFS_MODULE)
+	/* just give it a mountpoint */
+	proc_create_mount_point("openprom");
+#endif
+	proc_tty_init();
+	proc_mkdir("bus", NULL);
+	proc_sys_init();							// 创建sys目录并初始化
+}
+
+//注册proc文件系统
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/root.c#L116
+static struct file_system_type proc_fs_type = {
+	.name		= "proc",
+	.mount		= proc_mount,	//挂载入口
+	.kill_sb	= proc_kill_sb,
+	.fs_flags	= FS_USERNS_MOUNT,
+};
+```
+
+3、挂载procfs入口：`proc_mount->proc_fill_super`，将procfs文件系统挂载到内核全局的VFS树中，调用`proc_fill_super`完成超级快的初始化工作
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/root.c#L88
+static struct dentry *proc_mount(struct file_system_type *fs_type,
+	int flags, const char *dev_name, void *data)
+{
+	struct pid_namespace *ns;
+
+	if (flags & MS_KERNMOUNT) {
+		ns = data;
+		data = NULL;
+	} else {
+		ns = task_active_pid_ns(current);
+	}
+
+	return mount_ns(fs_type, flags, data, ns, ns->user_ns, proc_fill_super);
+}
+```
+
+```CPP
+int proc_fill_super(struct super_block *s, void *data, int silent)
+{
+	struct pid_namespace *ns = get_pid_ns(s->s_fs_info);
+	struct inode *root_inode;
+	int ret;
+
+	if (!proc_parse_options(data, ns))
+		return -EINVAL;
+
+	/* User space would break if executables or devices appear on proc */
+	s->s_iflags |= SB_I_USERNS_VISIBLE | SB_I_NOEXEC | SB_I_NODEV;
+	s->s_flags |= MS_NODIRATIME | MS_NOSUID | MS_NOEXEC;
+	s->s_blocksize = 1024;
+	s->s_blocksize_bits = 10;	// 必须是10,2^10=1024
+	s->s_magic = PROC_SUPER_MAGIC;	 //magic number，宏的具体数字为0x9fa0
+	s->s_op = &proc_sops;		// 具体的超级块操作,主要涉及的是索引块的操作
+	s->s_time_gran = 1;
+
+	s->s_stack_depth = FILESYSTEM_MAX_STACK_DEPTH;
+	
+	pde_get(&proc_root);
+	root_inode = proc_get_inode(s, &proc_root);	// 转换为vfs具体能识别的索引节点
+	if (!root_inode) {
+		pr_err("proc_fill_super: get root inode failed\n");
+		return -ENOMEM;
+	}
+	//https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L1855
+	//初始化根节点，并且与super_block进行关联！
+	s->s_root = d_make_root(root_inode);
+	if (!s->s_root) {
+		pr_err("proc_fill_super: allocate dentry failed\n");
+		return -ENOMEM;
+	}
+
+	ret = proc_setup_self(s);
+	if (ret) {
+		return ret;
+	}
+	return proc_setup_thread_self(s);
+}
+
+enum {
+    PROC_ROOT_INO = 1,
+};
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/root.c#L204
+struct proc_dir_entry proc_root = {
+	.low_ino	= PROC_ROOT_INO, 	  // 根的索引节点号
+	.namelen	= 5, 					 // 根文件名长度、文件名
+	.mode		= S_IFDIR | S_IRUGO | S_IXUGO, 
+	.nlink		= 2, 
+	.count		= ATOMIC_INIT(1),
+	.proc_iops	= &proc_root_inode_operations, 	// 根文件的具体索引节点操作
+	.proc_fops	= &proc_root_operations,		// 根文件支持的文件操作
+	.parent		= &proc_root,
+	.subdir		= RB_ROOT,
+	.name		= "/proc",
+};
+```
+
+上面的`proc_root`节点不仅包含正常的文件及目录，还要管理进程指定的pid文件，`proc_root`必须能够处理inode和file，`proc_root_inode_operations`与`proc_root_operations`的定义如下：
+
+```CPP
+static struct file_operations proc_root_operations = {
+    .read        = generic_read_dir,               
+    .readdir     = proc_root_readdir,		//目录遍历
+};
+ 
+/*
+ * proc root can do almost nothing..
+ */
+static struct inode_operations proc_root_inode_operations = {
+    .lookup     = proc_root_lookup,			//对应vfs架构中的real_lookup函数
+    .getattr    = proc_root_getattr,
+};
+```
+
+####	proc_root_lookup：proc下的inode查找
+当用户空间访问proc文件的时候，vfs就会调用`real_lookup()`，它就会调用`inode_operations`中的`proc_root_lookup`函数，实际上就是调用`proc_root_lookup()`函数
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/root.c#L204
+static struct dentry *proc_root_lookup(struct inode * dir, struct dentry * dentry, unsigned int flags)
+{
+	 // 先查找进程id相关的文件
+	if (!proc_pid_lookup(dir, dentry, flags)){
+		return NULL;
+	}
+	// 再查找内核运行状态的文件
+	return proc_lookup(dir, dentry, flags);
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/generic.c#L251
+struct dentry *proc_lookup(struct inode *dir, struct dentry *dentry,
+		unsigned int flags)
+{
+	return proc_lookup_de(PDE(dir), dir, dentry);
+}
+```
+
+`proc_pid_lookup`与`proc_lookup`的实现：
+
+```CPP
+//在指定的pid文件夹中查找dentry是否存在
+struct dentry *proc_pid_lookup(struct inode *dir, struct dentry * dentry, unsigned int flags)
+{
+	int result = -ENOENT;
+	struct task_struct *task;
+	unsigned tgid;
+	struct pid_namespace *ns;
+
+	// 检查目录是否为数字（快速失败）
+	tgid = name_to_int(&dentry->d_name);
+	if (tgid == ~0U)
+		goto out;
+
+	ns = dentry->d_sb->s_fs_info;
+	rcu_read_lock();
+	//通过pid查找到指定的task
+	task = find_task_by_pid_ns(tgid, ns);
+	if (task)
+		get_task_struct(task);
+	rcu_read_unlock();
+	if (!task)
+		goto out;
+	
+	//生成一个新索引节点，并进行缓存
+	result = proc_pid_instantiate(dir, dentry, task, NULL);
+	put_task_struct(task);
+out:
+	return ERR_PTR(result);
+}
+
+//proc_lookup->proc_lookup_de
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/generic.c#L230
+struct dentry *proc_lookup_de(struct proc_dir_entry *de, struct inode *dir,
+		struct dentry *dentry)
+{
+	struct inode *inode;
+
+	read_lock(&proc_subdir_lock);
+	// 从dentry中提取出具体的proc_dir_entry
+	de = pde_subdir_find(de, dentry->d_name.name, dentry->d_name.len);
+	if (de) {
+		//找到了
+		pde_get(de);
+		read_unlock(&proc_subdir_lock);
+		inode = proc_get_inode(dir->i_sb, de);	// 获取对应的inode
+		if (!inode)
+			return ERR_PTR(-ENOMEM);
+		d_set_d_op(dentry, &simple_dentry_operations); 	//老套路了，加入到dentry cache中
+		d_add(dentry, inode);
+		return NULL;
+	}
+	read_unlock(&proc_subdir_lock);
+	return ERR_PTR(-ENOENT);
+}
+```
+
+为什么`proc_root_lookup`中的设计要优先进程id其次再内核呢？这是考虑到进程目录数量远大于内核文件数量，先匹配高频访问如进程相关的查找（`ps/top` 等）比内核状态文件访问更频繁，其次快速失败机制如果查找的不是数字（非PID），`proc_pid_lookup` 会快速返回失败以切换到查找内核文件
+
+####	file_operations：proc_root_readdir
+`proc_root_operations`对应的`.readdir`实现为`proc_root_readdir`，该函数是procfs 文件系统根目录`/proc/`的目录遍历实现，它的作用是控制如何列出 `/proc` 目录下的内容
+
+```CPP
+#define FIRST_PROCESS_ENTRY 256
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/root.c#L170
+static int proc_root_readdir(struct file *file, struct dir_context *ctx)
+{
+    // 第一阶段：读取内核状态文件（静态文件）
+    if (ctx->pos < FIRST_PROCESS_ENTRY) {
+        int error = proc_readdir(file, ctx);  // 读取内核相关文件
+        if (unlikely(error <= 0))
+            return error;  // 出错或读取完成
+        ctx->pos = FIRST_PROCESS_ENTRY;  // 切换到进程条目阶段
+    }
+    
+    // 第二阶段：读取进程目录
+    return proc_pid_readdir(file, ctx);  // 读取进程PID目录
+}
+```
+
+系统中对于一个目录有多种读取子目录的方式（如`ls`和`ls -al`显示的结果不同），这是由传入过程中对`file->f_ops`设定不同的偏移决定的。对于`/proc`根目录而言：
+
+-	`f_ops = 0`：为`.`目录链接，链接到自身
+-	`f_ops = 1`：为`..`目录链接，链接到父目录
+-	`f_ops` 如果是在`2~FIRST_PROCESS_ENTRY-1`之间：表示`/proc/`下的静态目录或者静态文件
+-	`f_ops` 如果是在`FIRST_PROCESS_ENTRY~FIRST_PROCESS_ENTRY+ ARRAY_SIZE(proc_base_stuff)-1`：为`self`子目录内容
+-	`f_ops = FIRST_PROCESS_ENTRY+ ARRAY_SIZE(proc_base_stuff)`：为`init_task`即`0`号初始进程
+-	`f_pos = PID_MAX_LIMIT + TGID_OFFSET`：标识目录遍历结束
+
+继续分析`proc_pid_readdir`的实现，该函数用于列出 `/proc`目录时生成进程列表，包括
+
+-	特殊符号链接：`self`、`thread-self`
+-	所有进程目录：`/proc/1`、 `/proc/2`等
+
+```CPP
+int proc_pid_readdir(struct file *file, struct dir_context *ctx)
+{
+	struct tgid_iter iter;
+	// pid_namespace 为pid结构的命名空间
+	struct pid_namespace *ns = file_inode(file)->i_sb->s_fs_info;
+	loff_t pos = ctx->pos;
+
+	if (pos >= PID_MAX_LIMIT + TGID_OFFSET)
+		return 0;
+
+	if (pos == TGID_OFFSET - 2) {
+		struct inode *inode = d_inode(ns->proc_self);
+		//self
+		if (!dir_emit(ctx, "self", 4, inode->i_ino, DT_LNK))
+			return 0;
+		ctx->pos = pos = pos + 1;
+	}
+	if (pos == TGID_OFFSET - 1) {
+		struct inode *inode = d_inode(ns->proc_thread_self);
+		if (!dir_emit(ctx, "thread-self", 11, inode->i_ino, DT_LNK))
+			return 0;
+		ctx->pos = pos = pos + 1;
+	}
+	iter.tgid = pos - TGID_OFFSET;
+	iter.task = NULL;
+	// next_tgid(ns, iter) 来寻找每一个pid（对应ns命名空间内的）
+	for (iter = next_tgid(ns, iter);
+	     iter.task;
+	     iter.tgid += 1, iter = next_tgid(ns, iter)) {
+		char name[PROC_NUMBUF];
+		int len;
+
+		cond_resched();
+		if (!has_pid_permissions(ns, iter.task, HIDEPID_INVISIBLE))
+			continue;
+
+		len = snprintf(name, sizeof(name), "%d", iter.tgid);
+		ctx->pos = iter.tgid + TGID_OFFSET;
+		if (!proc_fill_cache(file, ctx, name, len,
+				     proc_pid_instantiate, iter.task, NULL)) {
+			put_task_struct(iter.task);
+			return 0;
+		}
+	}
+	// 标志着目录遍历结束
+	ctx->pos = PID_MAX_LIMIT + TGID_OFFSET;
+	return 0;
+}
+```
+
+
+```CPP
+static struct tgid_iter next_tgid(struct pid_namespace *ns, struct tgid_iter iter)
+{
+	struct pid *pid;
+
+	if (iter.task)
+		put_task_struct(iter.task);
+	rcu_read_lock();
+retry:
+	iter.task = NULL;
+	pid = find_ge_pid(iter.tgid, ns);
+	if (pid) {
+		iter.tgid = pid_nr_ns(pid, ns);
+		iter.task = pid_task(pid, PIDTYPE_PID);
+
+		if (!iter.task || !has_group_leader_pid(iter.task)) {
+			iter.tgid += 1;
+			goto retry;
+		}
+		get_task_struct(iter.task);
+	}
+	rcu_read_unlock();
+	return iter;
+}
+```
 
 ##  0x04 pid_entry主要功能分析
 
