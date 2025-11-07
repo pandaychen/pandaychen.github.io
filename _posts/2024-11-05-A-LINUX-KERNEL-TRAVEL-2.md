@@ -13,6 +13,7 @@ tags:
 
 ##  0x00    前言
 前文讨论了进程，正在执行的程序，是可执行程序的动态实例，它是一个承担分配系统资源的实体，但操作系统创建进程时，会为进程创建相应的内存空间，这个内存空间称为进程的地址空间，**每一个进程的地址空间（虚拟内存空间）都是独立的**；当一个进程有了进程的地址空间，那么其管理结构被称为内存描述符`mm_struct`。有趣的说，虚拟内存其实是 CPU 和操作系统使用的一个障眼法，联手给进程编织了一个假象，让进程误以为自己独占了全部的内存空间
+首先明确一点是进程的虚拟地址空间有两部分组成：内核空间和用户空间，内核空间各个进程直接共享，而用户空间彼此隔离
 
 本文就来学习下**进程虚拟内存空间在内核中的布局以及管理**，内核版本基于[v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include) 版本
 
@@ -204,8 +205,8 @@ struct mm_struct {
 
 ![mm_struct]()
 
-####    vm_area_struct
-Linux 内核按照功能上的差异，把虚拟内存空间划分为多个段。那么在内核中，是通过`vm_area_struct`结构来管理这些段
+####    vm_area_struct（VMA）
+Linux 内核按照功能上的差异，把虚拟内存空间划分为多个段。那么在内核中，是通过`vm_area_struct`结构来管理这些段，如代码段、数据段、BSS 段、堆、栈以及文件映射与匿名映射区等，在内核中都是 `struct vm_area_struct` 结构来表示的
 
 内核使用结构体 [`vm_area_struct`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/mm_types.h#L284)来**描述用户虚拟内存空间的各个逻辑区域：代码段，数据段，堆，内存映射区，栈等，也称为VMA（virtual memory area）**
 
@@ -276,6 +277,36 @@ struct mm_struct {
 -   需要根据特定虚拟内存地址在虚拟内存空间中查找特定的VMA虚拟内存区域，尤其在进程虚拟内存空间中包含的内存区域 VMA 比较多的情况下，使用rbtree查找更为高效
 
 ![final](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/memory/mm_struct_all_view.jpg)
+
+####    小结
+单个进程虚拟内存空间中的所有 VMA 在内核中有两种组织形式：
+
+-   双向链表：用于高效的遍历进程 VMA，这个 VMA 双向链表是有顺序的，所有 VMA 节点在双向链表中的排列顺序是按照虚拟内存低地址到高地址进行的
+-   红黑树：用于在进程空间中高效的查找 VMA，因为在进程虚拟内存空间中不仅仅是只有代码段，数据段，BSS 段，堆，栈这些虚拟内存区域 VMA，尤其是在数据密集型应用进程中，文件映射与匿名映射区里也会包含有大量的 VMA，进程的各种动态链接库所映射的虚拟内存在这里，进程运行过程中进行的匿名映射，文件映射所需要的虚拟内存也在这里
+
+```CPP
+// 进程虚拟内存空间描述符
+struct mm_struct {
+    // 串联组织进程空间中所有的 VMA  的双向链表 
+    struct vm_area_struct *mmap;  /* list of VMAs */
+    // 管理进程空间中所有 VMA 的红黑树
+    struct rb_root mm_rb;
+}
+
+// 虚拟内存区域描述符
+struct vm_area_struct {
+    // vma 在 mm_struct->mmap 双向链表中的前驱节点和后继节点
+    struct vm_area_struct *vm_next, *vm_prev;
+    // vma 在 mm_struct->mm_rb 红黑树中的节点
+    struct rb_node vm_rb;
+    unsigned long vm_start;     /* Our start address within vm_mm. */
+    unsigned long vm_end;       /* The first byte after our end address */
+    struct file * vm_file;      /* File we map to (can be NULL). */
+    unsigned long vm_pgoff;     /* Offset (within vm_file) in PAGE_SIZE */
+}
+```
+
+![mm_struct-vm_area_struct-ds2]()
 
 ##  0x02    进程虚拟内存管理：ELF加载
 本小节主要讨论下进程的虚拟内存区是如何建立起来的，主要涉及到：
@@ -597,7 +628,6 @@ ffffffffff600000-ffffffffff601000 --xp 00000000 00:00 0                  [vsysca
 -   其他匿名映射：maps 文件中还有多个较小的匿名映射区域（如 `7fde7f0f3000-7fde7f100000`、`7fde7f204000-7fde7f206000`等），这些可能来自共享库的内部分配（如`libc.so.6`、`libdl.so.2`、`ld-linux-x86-64.so.2`等）或其它动态内存分配
 -   其他等特殊区域：如栈（stack）、vvar、vdso、vsyscall 等
 
-
 结合前文的描述，`vm_area_struct` 的管理方式大致如下：
 
 ```CPP
@@ -641,12 +671,19 @@ SYSCALL_DEFINE6(mmap, unsigned long, addr, unsigned long, len,
 		unsigned long, fd, unsigned long, off)
 ```
 
-`mmap` 内存映射里所谓的内存其实指的是虚拟内存，常见有两种场景：
+`mmap` 内存映射里**所谓的内存其实指的是虚拟内存**，常见有两种场景（对应于物理内存中的匿名页与文件页）：
 -   匿名映射：在调用 `mmap` 进行匿名映射的时候（比如进行堆内存的分配），是将**进程虚拟内存空间中的某一段虚拟内存区域与物理内存中的匿名内存页进行映射**
 -   文件映射：当调用 `mmap` 进行文件映射的时候，是将**进程虚拟内存空间中的某一段虚拟内存区域与磁盘中某个文件中的某段区域进行映射**
 
+####    文件映射与匿名映射区（files and anonymous mappings）
+内存映射所消耗的虚拟内存位于进程虚拟内存空间的文件映射与匿名映射区，在文件映射与匿名映射这段虚拟内存区域中，包含了若干段的虚拟映射区，每当调用一次 `mmap` 进行内存映射的时候，内核都会在文件映射与匿名映射区中划分出一段虚拟映射区出来，这段虚拟映射区就是申请到的虚拟内存
+
+`mmap`在这段区域中申请的虚拟内存块的起始地址及大小由`mmap`的参数决定，若通过 `mmap` 映射的是磁盘上的一个文件，那么就需要通过参数 `fd` 来指定要映射文件的描述符（file descriptor），通过参数 `offset` 来指定文件映射区域在文件中偏移（由于内存页和磁盘块大小一般情况下都是 `4k`，因此这里`offset`按`4k`对齐）
+
+![files-and-anonymous-mappings]()
+
 ####    mmap的参数&&功能
-`mmap`的参数决定了申请虚拟内存的起始地址与size（`addr`/`length` 必须要按照 `PAGE_SIZE` `4k`对齐）
+`mmap`的参数决定了申请虚拟内存的起始地址与size，`addr`/`length` 必须要按照 `PAGE_SIZE`（`4k`大小对齐）
 
 -   `addr`：表示要映射的这段虚拟内存区域在进程虚拟内存空间中的起始地址（虚拟内存地址），一般会设置为 `NULL`，意思就是完全交由内核来帮决定虚拟映射区的起始地址
 -   `length`：表示要申请的这段虚拟内存的size。如果是匿名映射，`length` 决定了要映射的匿名物理内存有多大；如果是文件映射，`length`决定了要映射的文件区域有多大
@@ -698,7 +735,7 @@ int start_mmap(){
 }
 ```
 
-####    mmap的原理
+####    mmap的原理（内核视角）
 mmap 系统调用的本质是首先要在进程虚拟内存空间里的文件映射与匿名映射区中划分出一段虚拟内存区域 VMA 出来 ，这段 VMA 区域的大小用 `vm_start`/`vm_end` 来表示，它们由 `mmap` 系统调用参数 `addr`/`length` 决定；进一步说，`mmap` 内存文件映射的本质其实就是将虚拟映射区 vma 的相关操作 `vma->vm_ops` 映射成文件的相关操作 `ext4_file_vm_ops`（以ext4文件系统为例）
 
 ```CPP
@@ -706,13 +743,70 @@ struct vm_area_struct {
     unsigned long vm_start;     /* Our start address within vm_mm. */
     unsigned long vm_end;       /* The first byte after our end address */
 
+    ......
+
     //with fd
     struct file * vm_file;      /* File we map to (can be NULL). */
     unsigned long vm_pgoff;     /* Offset (within vm_file) in PAGE_SIZE */
 }
 ```
 
-随后内核会对该段 VMA 进行相关的映射，如果是文件映射的话，内核会将要映射的文件，以及要映射的文件区域在文件中的 `offset`，与 VMA 结构中的 `vm_file`/`vm_pgoff` 关联映射起来，它们由 `mmap` 系统调用参数 `fd`/`offset` 决定。由 `mmap` 在文件映射与匿名映射区中映射出来的这一段虚拟内存区域同进程虚拟内存空间中的其他虚拟内存区域一样，也都是有权限控制的
+随后内核会对该段 VMA 进行相关的映射，如果是文件映射的话，内核会将要映射的文件，以及要映射的文件区域在文件中的 `offset`，与 VMA 结构中的 `vm_file`/`vm_pgoff` 关联映射起来，它们由 `mmap` 系统调用参数 `fd`/`offset` 决定。
+
+由 `mmap` 在文件映射与匿名映射区中映射出来的这一段虚拟内存区域同进程虚拟内存空间中的其他虚拟内存区域一样，也都是有权限（读/写/可执行等）控制的
+
+####    mmap与VMA的访问权限控制
+![mmap-access-control]()
+
+以上图的进程虚拟内存空间为例：
+
+-  代码段：它是与磁盘上 ELF 格式可执行文件中的 `.text` section（磁盘文件中各个区域的单元组织结构）进行映射的，存放的是程序执行的机器码，所以在可执行文件与进程虚拟内存空间进行文件映射的时候，需要指定代码段这个虚拟内存区域的权限为可读（`VM_READ`）与可执行的（`VM_EXEC`）权限
+-   数据段：也是通过文件映射进来的，内核会将磁盘上 ELF 格式可执行文件中的 `.data` section 与数据段映射起来，在映射的时候需要指定数据段这个虚拟内存区域的权限为可读（`VM_READ`）与可写（`VM_WRITE`）权限
+-   BSS段、堆、栈等：这些虚拟内存区域并不是从磁盘二进制可执行文件中加载的，它们是通过匿名映射的方式映射到进程虚拟内存空间的，其中BSS 段中存放的是程序未初始化的全局变量，这段虚拟内存区域的权限是可读（`VM_READ`）与可写（`VM_WRITE`）权限；堆是用来描述进程在运行期间动态申请的虚拟内存区域的，所以通常堆也会具有可读（`VM_READ`）与可写（`VM_WRITE`）权限；栈是用来保存进程运行时的命令行参数、环境变量以及函数调用过程中产生的栈帧的，栈一般拥有可读（`VM_READ`）与可写（`VM_WRITE`）权限
+-   文件映射与匿名映射区：由于每调用一次 mmap，无论是匿名映射也好还是文件映射也好，通常都会在文件映射与匿名映射区里产生一个 VMA，相关权限由`mmap`的参数 `prot/flags`控制，最终会映射到虚拟内存区域 VMA 结构中的 `vm_page_prot/vm_flags` 成员，指定进程对这块虚拟内存区域的访问权限和相关标志位
+-   此外，进程运行过程中所依赖的动态链接库 `.so` 文件，也是通过文件映射的方式将动态链接库中的代码段，数据段映射进文件映射与匿名映射区中
+
+```CPP
+struct vm_area_struct {
+    /*
+     * Access permissions of this VMA.
+     */
+    pgprot_t vm_page_prot;
+    unsigned long vm_flags; 
+}
+```
+
+`mmap` 的参数 `prot` 来指定其在进程虚拟内存空间中映射出的这段虚拟内存区域 VMA 的访问权限：
+
+```CPP
+#define PROT_READ	0x1		/* 表示该虚拟内存区域背后映射的物理内存是可读 */
+#define PROT_WRITE	0x2		/* 表示该虚拟内存区域背后映射的物理内存是可写的 */
+#define PROT_EXEC	0x4		/* 表示该虚拟内存区域背后映射的物理内存所存储的内容是可以被执行的，该内存区域内往往存储的是执行程序的机器码，比如进程虚拟内存空间中的代码段，以及动态链接库通过文件映射的方式加载进文件映射与匿名映射区里的代码段，这些 VMA 的权限就是 PROT_EXEC  */
+#define PROT_NONE	0x0		/* 表示这段虚拟内存区域是不能被访问的，既不可读写，也不可执行。用于实现防范攻击的 guard page。如果攻击者访问了某个 guard page，就会触发 SIGSEV 段错误。除此之外，指定 PROT_NONE 还可以为进程预先保留这部分虚拟内存区域，虽然不能被访问，但是当后面进程需要的时候，可以通过 mprotect 系统调用修改这部分虚拟内存区域的权限 */
+```
+
+####    mmap与VMA的映射方式
+虚拟内存映射区域 VMA 的映射方式由 `mmap` 系统调用参数 `flags` 决定，常见如下：
+
+```CPP
+#define MAP_FIXED   0x10        /* Interpret addr exactly */
+#define MAP_ANONYMOUS   0x20        /* don't use a file */
+#define MAP_SHARED  0x01        /* Share changes */
+#define MAP_PRIVATE 0x02        /* Changes are private */
+```
+
+-   `flags`设定为`MAP_ANONYMOUS`：表示匿名映射（虚拟内存对匿名物理内存页的映射），`fd`与`offset`无意义
+-   反之，则表示文件映射（虚拟内存对文件页的映射），需指定`fd`与`offset`
+-   根据 `mmap` 创建出的这片虚拟内存区域背后所映射的物理内存能否在多进程之间共享，又分为了两种内存映射方式：
+    -   `MAP_SHARED`：表示共享映射，通过 mmap 映射出的这片内存区域在多进程之间是共享的，一个进程修改了共享映射的内存区域，其他进程是可以看到的，用于多进程之间的通信
+    -   `MAP_PRIVATE`：表示私有映射，通过 mmap 映射出的这片内存区域是进程私有的，其他进程是看不到的。如果是私有文件映射，那么多进程针对同一映射文件的修改将不会回写到磁盘文件上
+
+由此引申出`mmap`常见的四种应用场景：
+
+-   私有匿名映射，其主要用于进程申请虚拟内存，以及初始化进程虚拟内存空间中的 BSS 段，堆，栈这些虚拟内存区域
+-   私有文件映射，特点是**背后映射的文件页在多进程之间是读共享的，多个进程对各自虚拟内存区的修改只能反应到各自对应的文件页上，而且各自的修改在进程之间是互不可见的，最重要的一点是这些修改均不会回写到磁盘文件中**（常用于加载二进制可执行文件的 `.text/.data`等 section 到进程虚拟内存空间中的代码段和数据段中）
+-   共享文件映射，多进程之间读写共享（不会发生写时复制），常用于多进程之间共享内存（page cache）通信
+-   共享匿名映射，用于父子进程之间共享内存，父子进程之间的通讯。父子进程之间需要依赖 tmpfs 中的匿名文件来实现共享内存
 
 ####    mmap文件映射的原理
 
@@ -745,17 +839,189 @@ struct address_space {
 
 在VFS中，映射文件中的数据是按照磁盘块来存储的，读写文件数据也是按照磁盘块为单位进行的，磁盘块大小为 `4K`，当进程读取磁盘块的内容到内存之后，站在内存管理系统的视角，磁盘块中的数据被 DMA 拷贝到了物理内存页（即文件页）中。一个文件包含多个磁盘块，当它们被读取到内存之后，一个文件也就对应了多个文件页，这些文件页在内存中统一被 page cache 的结构所组织。每一个文件在内核中都会有一个唯一的 page cache 与之对应，用于缓存文件中的数据
 
-##  0x04    mmap应用的四大场景
+##  0x04    mmap应用场景
 
 ####    方式1：私有匿名映射
--   场景1：`malloc`申请大块（虚拟）内存
+-   场景1：`malloc`申请大块私有（虚拟）内存
 -   场景2：在`execve`系统调用中，在当前进程中加载并执行一个新的二进制执行文件
 
+`flags`设置为`MAP_PRIVATE | MAP_ANONYMOUS` 表示私有匿名映射，通常会使用此映射方式来申请虚拟内存，如使用 `malloc` 进行虚拟内存申请时，当申请的内存大于 [`128K`](https://elixir.bootlin.com/glibc/glibc-2.42.9000/source/malloc/malloc.c#L951) 时，`malloc` 就会调用 `mmap` 采用私有匿名映射的方式来申请堆内存。因为它是私有的，所以申请到的内存是进程独占的，多进程之间不能共享。再次强调 `mmap` 私有匿名映射申请到的只是虚拟内存，内核只是在进程虚拟内存空间中划分一段 VMA 出来，并初始化好，`mmap` 系统调用就结束了（当前这里和物理内存还没有任何关系）
+
+1、申请大块内存&&访问
+
+Linux内核中的页表会占用物理内存。由于页表本身也是内核数据结构，需要存储在物理内存中才能被MMU（内存管理单元）访问。内核在创建进程时，只创建了进程的全局页表PGD（渐进式页表分配策略），并不是在进程创建时就分配所有页表，而是在发生缺页中断时按需分配
+
+每个进程都有自己独立的页表，存储在物理内存中，Linux x86_64体系下的四级页表的构造如下：
+
+```TEXT
+虚拟地址: [63:48] [47:39] [38:30] [29:21] [20:12] [11:0]
+         符号扩展  PML4    PDPT    PD      PT      偏移
+```
+
+当进程开始访问这段虚拟内存区域时，发现这段虚拟内存区域背后没有任何物理内存与其关联，体现在内核中就是这段虚拟内存地址在页表中的 PTE  项是空的，亦或者其 PTE 中的 `P` 位为 `0` ，这些都是表示虚拟内存还未与物理内存进行映射，参考下面两张图
+
+![mmap-case1-pte-empty-1]()
+
+![mmap-case1-pte-empty-2]()
+
+这时 MMU 就会触发缺页（缺少物理内存页）异常（page fault），随后进程就会切换到内核态，在内核缺页中断处理程序中，为这段虚拟内存区域分配对应大小的物理内存页，随后将物理内存页中的内容全部初始化为 `0` ，最后在页表中建立虚拟内存与物理内存的映射关系，缺页异常处理结束。当缺页处理程序返回时，CPU 会重新启动引起本次缺页异常的访存指令，这时 MMU 就可以正常翻译出物理内存地址了
+
+![mmap-case1-private-memory-alloc]()
+
+2、`execve`系统调用中的`mmap`行为
+
+`execve` 系统调用（`execve(const char* filename, const char* argv[], const char* envp[])`）的作用是在当前进程中加载并执行一个新的二进制执行文件，参数 `filename` 指定新的可执行文件的文件名，`argv` 用于传递新程序的命令行参数，`envp` 用来传递环境变量
+
+既然是在当前进程中重新执行一个程序，那么当前进程的用户态虚拟内存空间就没有用了，内核需要根据这个可执行文件重新映射进程的虚拟内存空间。大致步骤为内核先删除释放旧的虚拟内存空间，并清空进程页表。然后根据 `filename` 打开可执行文件，并解析文件头，判断可执行文件的格式，不同的文件格式需要不同的函数（`load_binary`函数，实例化为`load_elf_binary/load_aout_binary`等）进行加载。在 `load_binary` 中会解析对应格式的可执行文件，并根据文件内容重新映射进程的虚拟内存空间。比如，虚拟内存空间中的 BSS 段/堆/栈等这些内存区域中的内容不依赖于可执行文件，所以在 `load_binary` 中采用私有匿名映射的方式来创建此类VMA
+
+![mmap-case1-execve]()
+
 ####    方式2：私有文件映射
+调用 `mmap` 实现内存文件映射，可以通过指定参数 `flags` 为 `MAP_PRIVATE`，然后将参数 `fd` 指定为要映射文件的文件描述符。假设多个进程对 `file-read-write.txt`文件实现私有文件映射，从文件 `offset` 偏移处开始，映射 `length` 长度（假设为`4k`，方便与内存页对齐）的文件内容到各个进程的虚拟内存空间中，调用完 `mmap` 之后，相关内存映射内核数据结构关系如下图所示：
 
-####    方式3：共享文件映射
+![mmap-case2-file-private-mapping]()
 
-####    方式4：匿名文件映射
+1、磁盘块 && 文件页（page cache）
+
+理解私有文件映射机制需要了解下Linux文件系统的基本知识，以ext4文件系统为例，每一个磁盘上的文件在内核中都会有一个唯一的 `struct inode` 结构，inode 结构和进程是没有关系的，一个文件在内核中只对应一个 inode，inode 结构用于描述文件的元信息（如文件权限、文件中包含多少个磁盘块、每个磁盘块位于磁盘中的什么位置等等）。Linux 是按照磁盘块（相邻的扇区，扇区单位`512`字节）为单位（`4k`）对磁盘中的数据进行管理的
+
+```CPP
+//ext4_inode：ext4 文件系统中的 inode 结构
+struct ext4_inode {
+   // 文件权限
+  __le16  i_mode;    /* File mode */
+  // 文件包含磁盘块的个数
+  __le32  i_blocks_lo;  /* Blocks count */
+  // 存放文件包含的磁盘块
+  __le32  i_block[EXT4_N_BLOCKS];/* Pointers to blocks */
+};
+```
+
+因此，调用 `mmap` 进行虚拟内存文件映射的时候，内核首先会在进程的虚拟内存空间中创建一个新的虚拟内存区域 VMA 用于映射文件，通过 `vm_area_struct->vm_file` 将映射文件的 `struct flle` 指针与虚拟内存映射绑定。如此，根据 `vm_file->f_inode` 可以关联到映射文件的 `struct inode`，近而关联到映射文件在磁盘中的磁盘块 `i_block`（进而寻址到文件在磁盘上的存储内容），所以`mmap` 内存文件映射的本质就是建立起虚拟内存区域 VMA 到文件磁盘块之间的映射关系
+
+```CPP
+struct vm_area_struct {
+    struct file * vm_file;      /* File we map to (can be NULL). */
+    unsigned long vm_pgoff;     /* Offset (within vm_file) in PAGE_SIZE */
+}
+```
+
+进一步说，一个磁盘上的文件（通常）包含多个磁盘块，当它们被读取到内存之后，一个文件也就对应了多个文件（内存）页，也叫做page cache，同时内核会将已经访问过的磁盘块缓存在文件页中。每一个文件在内核中都会有唯一的 page cache 与之对应，用于缓存文件中的数据，page cache 与文件相关，与进程无关，即多进程可以打开同一个文件，每个进程中都有一个 `struct file` 结构来描述这个文件，但是一个文件在内核中只会对应一个 page cache
+
+VFS的`struct inode`结构中，关联page cache的成员主要是`i_mapping`，page cache 在内核中是使用 `struct address_space` 结构来描述的。page cache 在内核中是使用基树 radix_tree 结构来表示的，简单描述下即文件页（page cache）是挂在 radix_tree 的叶子结点上，radix_tree 中的 `root` 节点和 `node` 节点是文件页（叶子节点）的索引节点
+
+TODO
+
+```CPP
+struct inode {
+    ......
+    struct address_space	*i_mapping;
+}
+
+struct address_space {
+    // 这里就是 page cache，里边缓存了文件的所有缓存页面
+    struct radix_tree_root  page_tree;
+    ......
+}
+```
+
+![mmap-case2-all-sight]()
+
+2、多进程对文件映射区的访问（读取）过程
+
+和私有内存映射一样，当多个进程调用 `mmap` 对磁盘上同一个文件进行私有文件映射的时候，内核只是在每个进程的虚拟内存空间中创建出一段虚拟内存区域 VMA 出来，同时将该VMA与文件`fd`映射起来，`mmap` 系统调用就返回了（此时page cache可能都是空的）
+
+当进程 `1` 使用虚拟内存地址开始访问这段VMA时，CPU 会把虚拟内存地址送到 MMU 中进行地址翻译，一般情况下会触发缺页中断（异常）创建相应的页表项、PTE等，进程切换到内核态，在内核缺页中断处理程序中会发现引起缺页的这段 VMA 是私有文件映射的，所以内核会首先通过 `vm_area_struct->vm_pgoff` 在文件 page cache 中查找是否有缓存相应的文件页（映射的磁盘块对应的文件页）；如果文件页不在 page cache 中，内核则会在物理内存中分配一个内存页，然后将新分配的内存页加入到 page cache 中，并增加页引用计数。随后会通过 `address_space_operations` 中定义的 `readpage` 激活块设备驱动从磁盘中读取映射的文件内容，然后将读取到的内容填充新分配的内存页
+
+```CPP
+struct vm_area_struct {
+    unsigned long vm_pgoff;     /* Offset (within vm_file) in PAGE_SIZE */
+}
+
+static inline struct page *find_get_page(struct address_space *mapping,
+     pgoff_t offset)
+{
+   return pagecache_get_page(mapping, offset, 0, 0);
+}
+
+static const struct address_space_operations ext4_aops = {
+    .readpage       = ext4_readpage         //ext4文件系统
+}
+```
+
+此时文件中映射的内容已经加载进 page cache（物理内存） 了，**在缺页中断处理程序的最后一步，内核会为映射的这段虚拟内存在页表中创建 PTE，然后将虚拟内存与 page cache 中的文件页通过 PTE 关联起来，缺页处理就结束了**，注意到这里私有文件映射下 PTE 中文件页的权限是只读的
+
+![mmap-case2-pte-readonly]()
+
+当进程`1`完成了文件映射之后，进程 `1` 中的页表已经建立起了虚拟内存与文件页的映射关系，因此当进程 `1` 再次访问这段虚拟内存的时候，其实就等于直接访问文件的 page cache。**整个过程是在用户态进行的，不需要切态**，这里就解释了为何mmap的速度非常快
+
+![mmap-case2-process1-done]()
+
+继续，当另一个进程`2`使用相同的参数加载私有文件映射时，同样会产生缺页中断填充响应的次级页表项，不同的是此时被映射的文件内容已经加载到 page cache 中了，进程 `2` 只需要创建 PTE ,并将 page cache 中的文件页与进程 `2` 映射的这段虚拟内存通过 PTE 关联起来即可（同样，进程 `2` 的 PTE 也是readonly）。此刻进程 `1` 和进程 `2` 都可以根据各自虚拟内存空间中映射的这段虚拟内存对文件的 page cache 进行读取了，整个过程都发生在用户态，不需要切态，因为虚拟内存现在已经直接映射到 page cache 了（如果多进程场景下只是对文件映射部分进行读取操作，文件页其实在多进程之间是共享的，整个内核中只有一份）
+
+3、私有映射场景下对共享文件区的写入？
+
+虽然通过 `mmap` 映射的时候指定的这段VMA是可写的，但是由于采用的是私有文件映射的方式，各个进程页表中对应 PTE 却是只读的，**当任意进程对这段VMA进行写入的时候，MMU 会发现 PTE 是只读的，所以会产生一个写保护类型的缺页中断，此时执行写入进程（如进程 `1`）此时又会陷入到内核态，在写保护缺页处理中，内核会重新申请一个内存页，然后将 page cache 中的内容拷贝到这个新的内存页中，进程 `1` 页表中对应的 PTE 会重新关联到这个新的内存页上，此时 PTE 的权限变为可写**。此后进程 `1` 对这段VMA进行读写的时候就不会再发生缺页了，读写操作都会发生在这个新申请的内存页上，并且进程 `1` **对这个内存页的任何修改均不会回写到磁盘文件上**，这也体现了私有文件映射的特点，进程对映射文件的修改，其他进程是看不到的，并且修改不会同步回磁盘文件中
+
+当进程`2`也执行相同的操作后，此时内存布局如下：
+
+![mmap-case2-multiple-write]()
+
+4、应用场景
+
+如上，进程 `1` 和进程 `2` 对各自虚拟内存区的修改只能反应到各自对应的物理内存页上，而且各自的修改在进程之间是互不可见的，这些修改均不会回写到原始的磁盘文件中。可以利用 `mmap` 私有文件映射的这个特性，来加载二进制可执行文件的 `.text/.data` 等 section 到进程虚拟内存空间中的代码段和数据段中（对于二进制加载的场景，多进程之间对数据段的修改相互之间是不可见的，而且对数据段的修改不能回写到磁盘上的二进制文件中）
+
+```CPP
+//加载 a.out 格式可执行文件
+static int load_aout_binary(struct linux_binprm * bprm)
+{
+    ......
+    // 将 .text 采用私有文件映射的方式映射到进程虚拟内存空间的代码段
+    error = vm_mmap(bprm->file, N_TXTADDR(ex), ex.a_text,
+        PROT_READ | PROT_EXEC,
+        MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE | MAP_EXECUTABLE,
+        fd_offset);
+
+    // 将 .data 采用私有文件映射的方式映射到进程虚拟内存空间的数据段
+    error = vm_mmap(bprm->file, N_DATADDR(ex), ex.a_data,
+            PROT_READ | PROT_WRITE | PROT_EXEC,
+            MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE | MAP_EXECUTABLE,
+            fd_offset + ex.a_text);
+
+    ......
+}
+```
+
+![mmap-case2-elf-load]()
+
+####    方式3：共享文件映射（多进程通信）
+共享文件映射的参数为`MAP_SHARED`（`vm_area_struct->vm_flags`），其中参数 `fd` 指定为要映射文件的文件描述符。与私有文件映射的过程类似，不同之处在于私有文件映射是读共享的，写的时候会发生写时复制（copy on write），并且多进程针对同一映射文件的修改不会回写到磁盘文件上。而共享文件映射中多个进程中的虚拟内存映射区最终会通过缺页中断的方式映射到文件的 page cache 中，后续多个进程对各自的这段虚拟内存区域的读写都会直接发生在 page cache 上，**因为映射文件的 page cache 在内核中只有一份，所以对于共享文件映射来说，多进程读写都是共享的，由于多进程直接读写的是 page cache ，所以多进程对共享映射区的任何修改，最终都会通过内核回写线程 pdflush 刷新到磁盘文件中**
+
+![mmap-case3-multiple-rw]()
+
+继续，当某个进程触发虚拟内存地址访问时，共享文件映射场景下，PTE 被创建出来的时候就是可写的，所以后续该进程在对这段虚拟内存区域写入的时候不会触发缺页中断，而是直接写入 page cache 中，整个过程没有切态，没有数据拷贝
+
+![mmap-case3-multiple-rw-2]()
+
+所以，共享内存映射的本质是现在进程 `1` 和进程 `2` 各自虚拟内存空间中的这段虚拟内存区域 VMA，已经共同映射到了文件的 page cache 中，由于文件的 page cache 在内核中只有一份，它是和进程无关的，page cache 中的内容发生的任何变化，进程 `1` 和进程 `2` 都是可以看到的。最后，多进程对各自虚拟内存映射区 VMA 的写入操作，内核会根据脏页回写策略将修改内容回写到磁盘文件中，策略如下：
+
+-   `dirty_writeback_centisecs`：内核参数的默认值为 `500`（单位为 `0.01s`），也就是说内核默认会每隔 `5s` 唤醒一次 flusher 线程来执行相关脏页的回写
+-   `drity_background_ratio`：当脏页数量在系统的可用内存 available 中占用的比例达到 `drity_background_ratio` 的配置值时，内核就会唤醒 flusher 线程异步回写脏页。默认值为`10`，表示如果 page cache 中的脏页数量达到系统可用内存的 `10%` 的话，就主动唤醒 flusher 线程去回写脏页到磁盘
+-   `dirty_background_bytes`：如果 page cache 中脏页占用的内存用量绝对值达到指定的 `dirty_background_bytes`。内核就会唤醒 flusher 线程异步回写脏页。默认为`0`
+-   `dirty_ratio` ： `dirty_background_*` 相关的内核配置参数均是内核通过唤醒 flusher 线程来异步回写脏页。下面要介绍的 `dirty_*` 配置参数，均是由用户进程同步回写脏页。表示内存中的脏页太多了，用户进程自己都看不下去了，不用等内核 flusher 线程唤醒，用户进程自己主动去回写脏页到磁盘中。当脏页占用系统可用内存的比例达到 `dirty_ratio` 配置的值时，用户进程同步回写脏页。默认值为`20`
+-   `dirty_bytes` ：如果 page cache 中脏页占用的内存用量绝对值达到指定的 `dirty_bytes`，用户进程同步回写脏页。默认值为`0`
+-   内核为了避免 page cache 中的脏页在内存中长久的停留，所以会给脏页在内存中的驻留时间设置一定的期限（`dirty_expire_centisecs`），超过 `dirty_expire_centisecs` 之后，flusher 线程将会在下次被唤醒的时候将这些脏页回写到磁盘中
+
+####    方式4：共享匿名（文件）映射
+共享匿名映射看作成一种特殊的共享文件映射方式，可以用于父子（亲缘）进程通信，`flags`设置为`MAP_SHARED|MAP_ANONYMOUS`，`fd`设置为`-1`，内核通过`tmpfs`文件系统创建出一个匿名文件，匿名文件也有自己的 inode 结构以及 page cache，但是对用户是不可见的，其他过程与共享文件映射完全相同
+
+既然这个基于`tmpfs`的匿名文件对用户不可见，那么就不太可能用于非亲缘关系的进程通信场景了，而父子进程场景下，父进程可以通过`fork`创建子进程，子进程会拷贝父进程的所有资源，当然也包括父进程的虚拟内存空间以及父进程的页表，关联函数[`copy_mm`](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/fork.c#L1174)，参考前文[Linux 内核之旅（一）：进程](https://pandaychen.github.io/2024/10/02/A-LINUX-KERNEL-TRAVEL-1/)
+
+![mmap-case4-anonymous-mapping]()
+
+当 fork 出子进程的时候，这时子进程的虚拟内存空间和父进程的虚拟内存空间完全是一模一样的，在子进程的虚拟内存空间中自然也有一段虚拟映射区 VMA 并且已经关联到匿名文件中了（继承自父进程）
+
+####    大页内存映射
 
 ##  0x05  参考
 -   [4.6 深入理解 Linux 虚拟内存管理](https://www.xiaolincoding.com/os/3_memory/linux_mem.html)
