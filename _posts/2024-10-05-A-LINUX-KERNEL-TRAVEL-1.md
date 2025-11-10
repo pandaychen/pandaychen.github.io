@@ -1127,7 +1127,24 @@ struct task_struct {
 
 注意：通常情况下，`real_parent` 和 `parent` 是一样的，例外如 `bash` 创建一个进程，那进程的 `parent` 和 `real_parent` 就都是 `bash`。如果在 `bash` 上使用 `GDB` 来 `debug` 一个进程，这个时候 `GDB` 是 `parent`，`bash` 则是这个进程的 `real_parent`；当用于审计、统计或需要追溯进程真实来源的场景时，使用`real_parent`比较合适
 
-##	0x09	一些有趣的示例
+##	0x09	操作汇总
+本节根据上面这张图，总结下内核实现的常用的查找函数的实现
+
+![kernel-process-relation]()
+
+####	`struct pid`相关
+1、分配pid与回收pid
+
+
+2、查询pid
+
+
+####	`struct task_struct`相关
+1、查找`task_struct`
+
+####	`struct upid`相关
+
+##	0x0A	一些有趣的示例
 
 ####	思考1：fs_struct的cwd/root 与 nsproxy 的关系
 
@@ -1349,13 +1366,85 @@ Copy-on-write 实现原理如下图，当`fork()` 之后，内核会把父进程
 
 在linux的pipe管道下，写端进行写数据时，不需要关闭读端的缓冲文件（即不需要读端的fd计数为`0`），但是读端进行读数据时必须先关闭写端的缓冲文件（即写端的文件描述符计数为`0`），然后才能读取数据
 
-##  0x0A 总结
+##  0x0B 总结
 
 ####     内核态的意义
 CPU 为了进行指令权限管控，引入了特权级的概念，CPU 工作在不同的特权级下能够执行的指令和可访问的内存区域是不一样的。计算机上电启动之处，CPU 运行在高特权级下，操作系统（Linux 内核）率先获得了执行权限，在内存设置一块固定区域并将自己的程序代码（内核代码）放了进去，并设定了这一部分内存只有高特权级才能访问。随后，操作系统在创建进程的时候，都会把自己所在的这块内存区域映射到每一个进程地址空间中，这样所有进程都能看到自己的进程空间中被映射的内核的区域，这一块区域是无法直接访问的。通常进入内核态是指：当中断、异常、系统调用等情况发生的时候，CPU 切换工作模式到高特权级模式 `Ring0`，并转而执行位于内核地址空间处的代码
 
+####	全局结构 OR namespace结构
+对本文中涉及到的几个进程核心的数据结构做一个小结：
 
-##  0x0B  参考
+-	`struct upid`：表示进程在特定namespace中的ID（结构）。一个进程在每个可见的namespace中都有一个`upid`（**从内核视角，一个进程必定最终归属于某个namespace，参考`struct pid`的`level`值必然是确定的**）
+-	`struct pid`：是进程的全局标识，包含一个`upid`数组，数组中的每个元素对应一个命名空间。`struct pid`是全局唯一的，但它在不同namespace中的ID（即`upid`中的`nr`）可能不同
+-	`struct task_struct`：代表一个进程或线程的全局结构，每个进程/线程只有一个task_struct，它是全局的
+-	`pid_hash`：是一个全局的哈希表，用于通过（PID数值，namespace）快速查找对应的`upid`，进而找到`struct pid`
+
+![kernel-process]()
+
+1、每个PID namespace独立的结构
+
+```CPP
+// 每个PID命名空间独立拥有的结构
+struct pid_namespace;              // 每个命名空间一个独立实例
+struct pidmap pidmap[PIDMAP_ENTRIES]; // 每个命名空间独立的位图（进程）
+
+// 每个进程在每个命名空间中的视图
+struct upid;                        // 进程在特定命名空间中的PID实例
+```
+
+2、全局唯一的结构与全局变量
+
+```CPP
+//1. 真正的全局单例（系统级）
+// 整个系统只有一个实例
+pid_hash;                          // 全局PID查找哈希表
+init_pid_ns;                       // 初始PID命名空间（特殊的全局实例）
+
+// 整个内核中只有一个实例（全局变量）
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid.c#L45
+pid_hash;                          // 全局PID哈希表（系统级单例）
+
+// 每个进程一个实例，但所有进程的实例都在全局链表中
+struct task_struct;                // 每个进程一个，全局链表管理
+struct pid;                        // 每个进程一个，全局哈希表管理
+```
+
+3、每个进程一个，但被全局（结构）管理
+
+```CPP
+// 每个进程都有独立的实例，但所有实例在全局数据结构中管理
+struct task_struct;                // 通过init_task.tasks全局链表管理
+struct pid;                        // 通过pid_hash全局哈希表管理
+struct nsproxy;                    // 每个进程的命名空间代理
+```
+
+4、进程-namespace映射关系
+
+```CPP
+// 描述进程在特定命名空间中的身份（多对多关系）
+struct upid;                        // 一个进程在多个命名空间有多个upid
+```
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid.c#L71
+struct pid_namespace init_pid_ns = {
+	.kref = KREF_INIT(2),
+	.pidmap = {
+		[ 0 ... PIDMAP_ENTRIES-1] = { ATOMIC_INIT(BITS_PER_PAGE), NULL }
+	},
+	.last_pid = 0,
+	.nr_hashed = PIDNS_HASH_ADDING,
+	.level = 0,
+	.child_reaper = &init_task,
+	.user_ns = &init_user_ns,
+	.ns.inum = PROC_PID_INIT_INO,
+#ifdef CONFIG_PID_NS
+	.ns.ops = &pidns_operations,
+#endif
+};
+```
+
+##  0x0C  参考
 -   [Linux 进程是如何创建出来的？](https://cloud.tencent.com/developer/article/2187989)
 -   [Linux 内核进程管理](http://timd.cn/kernel-process-management/)
 -   <<深入理解 Linux 进程与内存>>
