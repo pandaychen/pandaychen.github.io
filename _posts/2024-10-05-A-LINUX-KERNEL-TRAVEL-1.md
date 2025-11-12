@@ -404,7 +404,7 @@ struct pidmap {
 ![pid_pidnamespace_upid_kernel_new](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/pid_pidnamespace_upid.png)
 
 
-####	pid_hash表
+####	pid_hash表（全局）
 上文提到`pid_hash`表是由pid（`tgid`）加上命名空间namespace两个属性hash之后形成的hashtable，用于提高检索性能，其结构如下：
 
 ![pid_hash](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/pid_hash.png)
@@ -415,6 +415,67 @@ struct pidmap {
 3.	根据`struct pid`的`tasks`链表及PID 类型（上文的`enums`），找到对应的`struct task_struct`
 
 `pid_hash`中存放的是链表头，指向`upid`中的`pid_chain`，对于不同`level`但`pid`号相同的`upid`可能会被挂到同一串`pid_chain`，所以通过`pid`号查找`struct pid`的情况下需要指定`namespace`
+
+注意到**pid_hash是全局唯一的，它包含所有命名空间中的PID实例（即`struct upid`），所有PID namespace共享同一个全局哈希表**
+
+```CPP
+// 1.	内核中的定义
+
+// 全局唯一的 PID 哈希表，所有命名空间共享
+static struct hlist_head *pid_hash;  
+
+// 用于保护哈希表的锁也是全局的
+static DEFINE_SPINLOCK(pidmap_lock);         // 全局锁
+
+//2. 初始化代码
+// 在系统启动时初始化，全局唯一
+void __init pidhash_init(void)
+{
+    unsigned int i, pidhash_size;
+    
+    pid_hash = alloc_large_system_hash("PID", 
+                                      sizeof(*pid_hash), 
+                                      0, 18,  // 哈希表大小
+                                      HASH_EARLY | HASH_ZERO,
+                                      &pidhash_shift, 
+                                      &pidhash_size, 
+                                      0, 4096);
+    ......
+}
+```
+
+思考一下，为何`pid_hash`要设计为全局的hashtable呢？从下面几方面来分析下
+
+1、支持**高效的跨namespace命名空间查找**，如`find_pid_ns`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid.c#L365)，传入参数为`ns`与该namespace中的pid值（`nr`），这样无论从哪个namespace进行查找，都使用同一个hashtable结构
+
+```CPP
+struct pid *find_pid_ns(int nr, struct pid_namespace *ns)
+{
+	struct upid *pnr;
+
+	// 计算哈希值：结合 PID 数值和namespace
+    //int hash = pid_hashfn(nr, ns);
+
+	//在全局哈希表中查找
+	hlist_for_each_entry_rcu(pnr,
+			&pid_hash[pid_hashfn(nr, ns)], pid_chain)
+		if (pnr->nr == nr && pnr->ns == ns)
+			return container_of(pnr, struct pid,
+					numbers[ns->level]);	//返回struct pid（通过宏机制）
+
+	return NULL;
+}
+```
+
+2、hash function设计
+
+hash值由 **(PID数值 + 命名空间层级)**计算得出，确保同一进程在不同命名空间中的不同 PID 值映射到不同的hash bucket，不同进程在不同命名空间中的相同 PID 值也映射到不同的hash bucket
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid.c#L43
+#define pid_hashfn(nr, ns)	\
+	hash_long((unsigned long)nr + (unsigned long)ns, pidhash_shift)
+```
 
 ####    查询PID：分类讨论
 根据上图，来看下相关的函数实现
@@ -558,7 +619,7 @@ __latent_entropy struct task_struct *copy_process(
 //https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid.c#L296
 // 参数传递的是新进程的 pid namespace
 struct pid *alloc_pid(struct pid_namespace *ns)
- {
+{
  	struct pid *pid;
  	enum pid_type type;
  	int i, nr;
@@ -627,7 +688,7 @@ struct pid *alloc_pid(struct pid_namespace *ns)
     
  	kmem_cache_free(ns->pid_cachep, pid);
  	return ERR_PTR(retval);
- }
+}
 ```
 
 2、从指定命名空间中分配唯一PID
@@ -674,6 +735,8 @@ static int alloc_pidmap(struct pid_namespace *pid_ns)
  			for ( ; ; ) {
  				if (!test_and_set_bit(offset, map->page)) {
  					atomic_dec(&map->nr_free);
+					// 每个命名空间维护自己的 last_pid，加速分配
+					// 缓存最后分配的 PID，性能优化
  					set_last_pid(pid_ns, last, pid);
  					return pid;
  				}
@@ -1144,6 +1207,12 @@ struct task_struct {
 
 ####	`struct upid`相关
 
+
+####	示例应用：kill的实现
+比如，在容器中执行`kill 6`（ `kill` 系统调用只在当前的namespace中生效），这里涉及到哪些process相关的操作？
+
+TODO
+
 ##	0x0A	一些有趣的示例
 
 ####	思考1：fs_struct的cwd/root 与 nsproxy 的关系
@@ -1425,6 +1494,12 @@ struct nsproxy;                    // 每个进程的命名空间代理
 struct upid;                        // 一个进程在多个命名空间有多个upid
 ```
 
+对上面列举的结构进行一些实例化的补充：
+
+5、`pid_namespace` namespace维度的结构与操作
+
+`init_pid_ns`是默认内核初始化时就创建的全局，初始namespace
+
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid.c#L71
 struct pid_namespace init_pid_ns = {
@@ -1442,6 +1517,405 @@ struct pid_namespace init_pid_ns = {
 	.ns.ops = &pidns_operations,
 #endif
 };
+```
+
+每个 PID namespace在创建时都会分配自己独立的位图（PID在不同namespace中的独立性/进程隔离），这样每个namespace都可以独立维护自己的PID 分配状态，`pid_namespace`自身会形成树状结构（上图）
+
+```CPP
+struct pid_namespace {
+    ......
+    struct pidmap pidmap[PIDMAP_ENTRIES];  // 独立的 PID 位图（数组）
+    int last_pid;                          // 最后分配的 PID
+    struct task_struct *child_reaper;      // 该命名空间的 init 进程
+    ......
+    unsigned int level;                     // 命名空间层级
+    struct pid_namespace *parent;          // 父命名空间
+    ......
+};
+
+//struct pidmap表示一个位图页，用于跟踪一组 PID 的分配情况
+struct pidmap {
+    atomic_t nr _free;
+    void *page;
+};
+```
+
+在`create_pid_namespace`函数中可以观察到上述行为：
+
+```CPP
+// 创建新的 PID 命名空间
+// https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid_namespace.c#L95
+static struct pid_namespace *create_pid_namespace(struct user_namespace *user_ns,
+	struct pid_namespace *parent_pid_ns)
+{
+    struct pid_namespace *ns;
+    ......
+    // 分配命名空间结构
+	ns = kmem_cache_zalloc(pid_ns_cachep, GFP_KERNEL);
+	if (ns == NULL)
+		goto out_dec;
+    
+    // 初始化独立的 PID 位图    
+	......
+	atomic_set(&ns->pidmap[0].nr_free, BITS_PER_PAGE - 1);
+
+	for (i = 1; i < PIDMAP_ENTRIES; i++)
+		atomic_set(&ns->pidmap[i].nr_free, BITS_PER_PAGE);
+
+	return ns;
+	......
+}
+```
+
+在每次创建新进程（假设在容器中创建）的时候，该容器所在的namespace level以及在此之上的所有层级都会使用本层级的进行位图用来分配pid，参考上面的`alloc_pid`函数
+
+```CPP
+struct pid *alloc_pid(struct pid_namespace *ns)
+ {
+ 	struct pid *pid;
+ 	struct pid_namespace *tmp;
+ 	struct upid *upid;
+    
+    // 从命名空间分配一个 pid 结构体（非整数）
+ 	pid = kmem_cache_alloc(ns->pid_cachep, GFP_KERNEL);
+	......
+    
+     // 初始化进程在各级命名空间的 PID，直到全局命名空间（level 为0）为止
+	// 调用到alloc_pidmap来分配一个空闲的pid编号
+ 	// 注意，在每一个命令空间中都需要分配进程号
+ 	tmp = ns;
+ 	pid->level = ns->level;	//ns->level保存了当前所在的namespace层级
+
+	// 遍历向上的namespace level
+ 	for (i = ns->level; i >= 0; i--) {
+		// 在该命名空间的PID位图中查找空闲 PID
+ 		nr = alloc_pidmap(tmp);  
+ 		if (nr < 0) {
+ 			retval = nr;
+ 			goto out_free;
+ 		}
+    
+ 		pid->numbers[i].nr = nr;
+ 		pid->numbers[i].ns = tmp;
+ 		tmp = tmp->parent; //tmp更新为其上一级的namespace指针
+ 	}
+    
+	.......
+ }
+```
+
+跨命名空间的 PID 映射：**注意到`alloc_pid`传入的参数是`struct pid_namespace *ns`，说明创建进程时一定要指定该进程位于哪个PID namespace中，对于该进程对应的`struct pid`结构，其`level`成员是一个固定的值**，那么前文也描述了，一个进程在不同PID namespace下的表示，主要依赖`struct pid`中的`struct upid numbers[1]`这个柔性数组成员：
+
+```CPP
+struct pid {
+    ......
+    unsigned int level;
+    struct upid numbers[1];  // 柔性数组，大小为 level+1
+
+	......
+};
+
+struct upid {
+    int nr;                      // 在该命名空间中的 PID 数值
+    struct pid_namespace *ns;    // 对应的命名空间
+    struct hlist_node pid_chain; // 哈希链表
+};
+```
+
+这样，一个进程在`level=3`的namespace中的可能表示如下：
+
+```CPP
+// 进程在三个命名空间中的 PID（实例化）
+struct pid {
+    .level = 2,  // 三级命名空间（0,1,2）
+    .numbers = {
+        [0] = { .nr = 1000, .ns = &init_pid_ns },     // 全局：PID=1000
+        [1] = { .nr = 100,  .ns = &container_pid_ns }, // 容器：PID=100  
+        [2] = { .nr = 1,    .ns = &nested_pid_ns }     // 嵌套：PID=1
+    }
+};
+```
+
+关于PID 进程位图的操作，简单描述下查找`find_ge_pid`及遍历`next_pidmap`函数：
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid.c#L555
+struct pid *find_ge_pid(int nr, struct pid_namespace *ns)
+{
+	struct pid *pid;
+
+	do {
+		// 在指定命名空间中查找精确的 PID
+		pid = find_pid_ns(nr, ns);
+		if (pid)
+			break;	//说明找不到或者已经寻找完成
+		// 在该命名空间的位图中查找下一个存在的 PID
+		nr = next_pidmap(ns, nr);
+	} while (nr > 0);
+
+	return pid;
+}
+
+// 遍历指定命名空间的位图
+int next_pidmap(struct pid_namespace *pid_ns, unsigned int last)
+{
+	int offset;
+	struct pidmap *map, *end;
+
+	if (last >= PID_MAX_LIMIT)
+		return -1;
+
+	offset = (last + 1) & BITS_PER_PAGE_MASK;
+	map = &pid_ns->pidmap[(last + 1)/BITS_PER_PAGE];
+	end = &pid_ns->pidmap[PIDMAP_ENTRIES];
+	for (; map < end; map++, offset = 0) {
+		// 跳过未分配的位图页
+		if (unlikely(!map->page))
+			continue;
+		offset = find_next_bit((map)->page, BITS_PER_PAGE, offset);
+		if (offset < BITS_PER_PAGE)
+			return mk_pid(pid_ns, map, offset);
+	}
+	return -1;
+}
+```
+
+6、全局的`task_struct`结构
+
+```CPP
+struct task_struct {
+	......
+	struct pid_link pids[PIDTYPE_MAX]; // 链接到不同类型的 PID 结构
+	struct nsproxy *nsproxy; // 指向命名空间代理的指针
+	......
+};
+```
+
+`task_struct`是全局唯一的，每个进程/线程在内核中都有且只有一个 `task_struct`结构，无论它属于哪个namespace，存在于内核的全局链表中，理解`task_struct`的全局性，先看下其创建过程`copy_process`函数（每个进程/线程创建时都会分配一个独立的 `task_struct`）
+
+-	`task_struct->nsproxy`成员：标识了这个`task_struct`是属于哪个namespace的
+-	``
+
+```CPP
+//1. 内核中的定义和分配
+
+static __latent_entropy struct task_struct *copy_process(
+					unsigned long clone_flags,
+					unsigned long stack_start,
+					unsigned long stack_size,
+					int __user *child_tidptr,
+					struct pid *pid,
+					int trace,
+					unsigned long tls,
+					int node)
+{
+	int retval;
+	struct task_struct *p;
+	......
+	// 分配新的 task_struct
+	p = dup_task_struct(current, node);
+	if (!p)
+		goto fork_out;
+
+	// 设置命名空间关系
+	retval = copy_namespaces(clone_flags, p);
+	......
+	if (pid != &init_struct_pid) {
+		pid = alloc_pid(p->nsproxy->pid_ns_for_children);
+		if (IS_ERR(pid)) {
+			retval = PTR_ERR(pid);
+			goto bad_fork_cleanup_thread;
+		}
+	}
+
+
+	if (likely(p->pid)) {
+		ptrace_init_task(p, (clone_flags & CLONE_PTRACE) || trace);
+
+		init_task_pid(p, PIDTYPE_PID, pid);
+		......
+		// 设置 PID link
+		attach_pid(p, PIDTYPE_PID);
+		nr_threads++;
+	}
+
+	......	
+}
+```
+
+内核为全局`task_struct`维护了全局任务列表即`init_task`，可通过 `init_task` 遍历
+
+```CPP
+// 内核维护全局的任务列表（可通过 init_task 遍历）
+struct task_struct init_task = INIT_TASK(init_task);
+
+// 所有任务通过 task_list 链接在一起
+struct task_struct {
+    ......
+    struct list_head tasks;        // 全局任务链表节点
+    struct list_head thread_group;  // 线程组链表
+    ......
+};
+```
+
+通过namespace（特别是 PID namespace），可以控制进程的可见性，使得每个namespace只能看到一部分进程（即该命名空间内的进程），如何理解？也就是说，**当在容器内的视角查找`task_struct`时，内核会根据当前的namespace进行过滤，只能看到属于本namespace的`task_struct`**
+
+为什么内核要将`task_struct`定义为全局的？从本质上来说，由于CPU的最小调度单元就是`task_struct`，**内核需要使用全局视图进行调度，调度器可以公平调度（调度算法）所有任务，无论其所属于的namespace是哪个**
+
+```CPP
+// 调度器需要看到所有任务，无论它们属于哪个命名空间
+void schedule(void)
+{
+    // 从所有可运行任务中选择下一个要运行的任务
+    next = pick_next_task(rq);
+    // ...
+}
+```
+
+那么再说明下`task_struct`与namespace命名空间的关系
+
+```CPP
+// 1. 通过 nsproxy 关联命名空间
+struct task_struct {
+    // ...
+    struct nsproxy *nsproxy;  // 命名空间代理，指向当前任务的命名空间视图
+    // ...
+};
+
+struct nsproxy {
+    atomic_t count;
+    struct uts_namespace *uts_ns;    // UTS 命名空间
+    struct ipc_namespace *ipc_ns;    // IPC 命名空间  
+    struct mnt_namespace *mnt_ns;    // 挂载命名空间
+    struct pid_namespace *pid_ns;    // PID 命名空间
+    struct net *net_ns;              // 网络命名空间
+    // ...
+};
+
+//2. 多命名空间支持的实现
+
+// 一个任务可以同时属于多个不同类型的命名空间
+struct task_struct container_task = {
+    .nsproxy = &container_nsproxy,  // 包含各种命名空间的指针
+};
+
+struct nsproxy container_nsproxy = { isValid := re.MatchString(domain)
+    .uts_ns = &container_uts_ns,    // 独立的主机名域
+    .pid_ns = &container_pid_ns,    // 独立的 PID 空间
+    .net_ns = &container_net_ns,    // 独立的网络栈
+    .mnt_ns = &container_mnt_ns,    // 独立的文件系统视图
+    // ...
+};
+```
+
+7、`struct upid`：namespace维度的结构
+
+上文已经提到过，`upid`中的 `pid_chain`这个成员是挂载在全局的 `pid_hash`哈希表上的，梳理下这个过程
+
+```CPP
+//全局哈希表定义
+static struct hlist_head *pid_hash;  // 全局PID哈希表数组
+
+struct upid {
+    int nr;                      // 在该命名空间中的 PID 数值
+    struct pid_namespace *ns;    // 对应的命名空间
+    struct hlist_node pid_chain; // 哈希链表
+};
+```
+
+那么，`upid`创建及插入哈希表的过程，在`alloc_pid`函数中，当创建新的 `struct pid` 时，将 `upid` 插入全局哈希表：
+
+```CPP
+struct pid *alloc_pid(struct pid_namespace *ns)
+{
+	struct pid *pid;
+	enum pid_type type;
+	int i, nr;
+	struct pid_namespace *tmp;
+	struct upid *upid;
+
+	//1、这里已经对 `pid`中的柔性数组成员numbers[]进行内存初始化了
+	pid = kmem_cache_alloc(ns->pid_cachep, GFP_KERNEL);
+	......
+
+	tmp = ns;
+	pid->level = ns->level;
+	for (i = ns->level; i >= 0; i--) {
+		nr = alloc_pidmap(tmp);
+		if (nr < 0) {
+			retval = nr;
+			goto out_free;
+		}
+
+		// 2、这里本质是初始化upid的成员（nr与namespace）
+		pid->numbers[i].nr = nr;
+		pid->numbers[i].ns = tmp;
+		tmp = tmp->parent;
+	}
+
+	......
+
+	//3、upid指针直接指向pid的位置
+	upid = pid->numbers + ns->level;
+
+	......
+	for ( ; upid >= pid->numbers; --upid) {
+		//4、对每个upid，将其插入到全局hashtable pid_hash中
+		// key 为：通过namespace与nr符合计算得出
+		// pid_hashfn函数计算 upid 应该挂载到哪个哈希桶
+		/*
+		struct hlist_head *bucket = &pid_hash[hash_bucket];
+		hlist_add_head_rcu(&upid->pid_chain, bucket);
+		*/
+		// 将 upid 挂载到对应哈希桶的链表头部
+		hlist_add_head_rcu(&upid->pid_chain,
+				&pid_hash[pid_hashfn(upid->nr, upid->ns)]);
+		upid->ns->nr_hashed++;
+	}
+
+	return pid;
+	.......
+}
+```
+
+这里有个细节是，内核的hashtable 桶链表插入（`hlist_add_head_rcu`函数）是头插法，即新元素会插入到链表的头部，这里后文VFS重复挂载场景会用到
+
+`find_pid_ns`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid.c#L365)用于根据`upid`对象获取到其对应的`struct pid`结构：
+
+```CPP
+//查找特定命名空间中的PID
+struct pid *find_pid_ns(int nr, struct pid_namespace *ns)
+{
+	struct upid *pnr;
+
+	//遍历hashtable桶的链表（冲突链）
+	hlist_for_each_entry_rcu(pnr,
+			&pid_hash[pid_hashfn(nr, ns)], pid_chain)
+		if (pnr->nr == nr && pnr->ns == ns){
+			// 冲突检测（精确匹配 nr 和 ns）
+			return container_of(pnr, struct pid,
+					numbers[ns->level]);
+		}
+
+	return NULL;
+}
+```
+
+所以，可以利用`find_pid_ns`在容器内遍历查找所有的进程（如在容器内执行 `ps aux` 时），抽象代码如下：
+
+```CPP
+// 1. 获取当前任务的 PID 命名空间
+struct pid_namespace *ns = current->nsproxy->pid_ns;
+
+// 2. 遍历该命名空间的所有 PID
+for (pid_num = 1; pid_num < PID_MAX; pid_num++) {
+    // 在全局哈希表中查找该命名空间的 PID
+    struct pid *pid = find_pid_ns(pid_num, ns);
+    if (pid) {
+        // 显示进程信息
+        show_process_info(pid);
+    }
+}
 ```
 
 ##  0x0C  参考
