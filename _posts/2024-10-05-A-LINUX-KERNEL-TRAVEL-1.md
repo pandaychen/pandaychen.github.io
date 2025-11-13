@@ -155,8 +155,8 @@ struct task_struct {
 
 struct pid_link
 {
-	struct hlist_node node;
-	struct pid *pid;
+	struct hlist_node node;	// 链表节点
+	struct pid *pid;	// 指向关联的 pid 结构
 };
 
 struct nsproxy {
@@ -1443,10 +1443,13 @@ CPU 为了进行指令权限管控，引入了特权级的概念，CPU 工作在
 ####	全局结构 OR namespace结构
 对本文中涉及到的几个进程核心的数据结构做一个小结：
 
--	`struct upid`：表示进程在特定namespace中的ID（结构）。一个进程在每个可见的namespace中都有一个`upid`（**从内核视角，一个进程必定最终归属于某个namespace，参考`struct pid`的`level`值必然是确定的**）
--	`struct pid`：是进程的全局标识，包含一个`upid`数组，数组中的每个元素对应一个命名空间。`struct pid`是全局唯一的，但它在不同namespace中的ID（即`upid`中的`nr`）可能不同
+-	`struct upid`：表示进程在特定namespace中的ID（结构）。一个进程在每个可见的namespace中都有一个`upid`（**从内核视角，一个进程必定最终归属于某个namespace，参考`struct pid`的`level`值必然是确定的**），该结构的本质是**进程在特定命名空间中的身份凭证**
+-	`struct pid`：是进程的全局标识，一个 `struct pid`代表一个全局唯一的进程实体，包含一个`upid`数组，数组中的每个元素对应一个命名空间。`struct pid`是全局唯一的，但它在不同namespace中的ID（即`upid`中的`nr`）可能不同。`struct pid`结构的本质是**跨命名空间的进程身份凭证**
 -	`struct task_struct`：代表一个进程或线程的全局结构，每个进程/线程只有一个task_struct，它是全局的
 -	`pid_hash`：是一个全局的哈希表，用于通过（PID数值，namespace）快速查找对应的`upid`，进而找到`struct pid`
+-	`struct pid_link`：用于进程与 PID 的关联桥梁，在内核中一个进程可以有多个 PID（PID、TGID、PGID、SID）身份，此外线程组场景下，一个 PID 可以关联多个进程。`pid_link`的本质是`task_struct`与 PID 的多对多关系连接器
+
+TODO
 
 ![kernel-process]()
 
@@ -1915,6 +1918,306 @@ for (pid_num = 1; pid_num < PID_MAX; pid_num++) {
         // 显示进程信息
         show_process_info(pid);
     }
+}
+```
+
+8、`init_task`：全局`task_struct`链表
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/fork.c#L1856
+static __latent_entropy struct task_struct *copy_process(
+					unsigned long clone_flags,
+					unsigned long stack_start,
+					unsigned long stack_size,
+					int __user *child_tidptr,
+					struct pid *pid,
+					int trace,
+					unsigned long tls,
+					int node)
+{
+	......
+	if (likely(p->pid)) {
+		init_task_pid(p, PIDTYPE_PID, pid);
+		if (thread_group_leader(p)) {
+			init_task_pid(p, PIDTYPE_PGID, task_pgrp(current));
+			init_task_pid(p, PIDTYPE_SID, task_session(current));
+
+			if (is_child_reaper(pid)) {
+				ns_of_pid(pid)->child_reaper = p;
+				p->signal->flags |= SIGNAL_UNKILLABLE;
+			}
+
+			p->signal->leader_pid = pid;
+			p->signal->tty = tty_kref_get(current->signal->tty);
+		
+			p->signal->has_child_subreaper = p->real_parent->signal->has_child_subreaper ||
+							 p->real_parent->signal->is_child_subreaper;
+			list_add_tail(&p->sibling, &p->real_parent->children);
+
+			// 如果本进程是groupleader，那么会插入到全局的init_task中
+			list_add_tail_rcu(&p->tasks, &init_task.tasks);
+			attach_pid(p, PIDTYPE_PGID);
+			attach_pid(p, PIDTYPE_SID);
+			__this_cpu_inc(process_counts);
+		} else {
+			current->signal->nr_threads++;
+			atomic_inc(&current->signal->live);
+			atomic_inc(&current->signal->sigcnt);
+			list_add_tail_rcu(&p->thread_group,
+					  &p->group_leader->thread_group);
+			list_add_tail_rcu(&p->thread_node,
+					  &p->signal->thread_head);
+		}
+		// 重要：所有的进程，都会把自己的task_struct挂到自己对应的struct pid的PIDTYPE_PID类型上面
+		attach_pid(p, PIDTYPE_PID);
+		nr_threads++;
+	}
+	......
+}
+```
+
+####	`struct pid`与`struct task_struct`中的`PIDTYPE_MAX`链表数组
+
+这里解释下`pid.tasks`与`task_struct.pids`这两个链表的意义是什么？
+
+1.	一个`task_struct`有多个不同类型的进程标识符（PID、TGID、PGID、SID），用于不同的管理目的（线程控制、进程组控制、会话控制）
+2.	一个PID关联多个进程（`task_struct`），如一个TGID（线程组ID）关联多个线程，实现了多线程进程的模型，所有线程共享相同的TGID
+
+```CPP
+enum pid_type {
+    PIDTYPE_PID,    // 进程的PID（每个任务唯一）
+    PIDTYPE_TGID,   // 线程组ID
+    PIDTYPE_PGID,   // 进程组ID
+    PIDTYPE_SID,    // 会话ID
+	PIDTYPE_MAX
+};
+
+struct pid {
+	......
+    atomic_t count;                          // 引用计数
+    unsigned int level;                      // 命名空间层级深度
+    struct hlist_head tasks[PIDTYPE_MAX];   // 不同类型的任务链表（4个链表头）
+    struct rcu_head rcu;                    // RCU 回调
+    struct upid numbers[1];                 // 柔性数组，多命名空间映射
+	......
+};
+
+struct pid_link {
+    struct hlist_node node;   // 链表节点
+    struct pid *pid;         // 指向pid结构
+};
+
+struct task_struct {
+    ......
+    struct pid_link pids[PIDTYPE_MAX];
+    ......
+};
+```
+
+1、`pid.tasks`的作用
+
+先看下`struct pid`中的`struct hlist_head tasks[PIDTYPE_MAX]`这个链表头的作用，回顾下如下进/线程类型：
+
+-	`PIDTYPE_PID`：进程ID（线程ID），内核中每个`task_struct`（包括线程）都有一个唯一的PID
+-	`PIDTYPE_TGID`：线程组ID（通常在用户态呈现的进程ID，即主线程的PID），在一个多线程应用程序中，所有线程共享同一个TGID，即主线程的PID。用户态进程的PID通常指的是TGID
+-	`PIDTYPE_PGID`：进程组ID，一个进程组包含一个或多个进程（或线程），它们可以接收同一个信号。通常，一个进程组由shell管道中的多个进程组成
+-	`PIDTYPE_SID`：会话ID，一个会话包含一个或多个进程组，通常代表一个用户登录会话
+
+直观上看，`pid.tasks`的作用是将使用同一个pid（在不同类型下）的所有`task_struct`链接起来，考虑到内核对进程的如下管理场景：
+
+-	通过线程组ID（`TGID`）查找组内所有线程：当内核向整个线程组发送信号时，需要找到该线程组的所有线程。这时，通过TGID类型的`pid`结构中的`tasks[PIDTYPE_TGID]`链表，可以快速遍历所有线程
+-	进程组和会话管理：通过进程组ID（`PGID`）可以找到进程组中的所有进程，通过会话ID（`SID`）可以找到会话中的所有进程
+-	对于普通的PID，通常一个pid只对应一个`task_struct`（因为每个线程有唯一的PID），但设计上仍然使用链表，以便统一处理（上面描述的`attach_pid(p, PIDTYPE_PID)`方法）
+-	当将一个`task_struct`与一个pid关联时，会将`task_struct`的`pid_link[type]`节点插入到其对应的`pid`的`tasks[type]`链表中，参考[`copy_process`](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/fork.c#L1857)中的对`attach_pid`调用
+
+所以，本质上`struct pid`中的 `tasks[PIDTYPE_MAX]`链表头用于实现反向映射，即通过 PID 值快速找到所有关联的`task_struct`
+
+```CPP
+void attach_pid(struct task_struct *task, enum pid_type type)
+{
+	struct pid_link *link = &task->pids[type];
+	hlist_add_head_rcu(&link->node, &link->pid->tasks[type]);
+}
+```
+
+上述四种链表的意义如下：
+-	`tasks[PIDTYPE_PID]`：特定线程的`task_struct`，一个 PID 值对应一个具体的线程；对于单线程进程，此链表只有一个`task_struct`；对于多线程进程，每个线程有独立的 PID，各自对应一个`task_struct`
+-	`tasks[PIDTYPE_TGID]`：线程组的所有`task_struct`，一个 TGID 对应一个线程组的所有线程。对多线程进程而言，此链表包含该进程的所有线程
+-	`tasks[PIDTYPE_PGID]`：进程组的所有`task_struct`，即一个 PGID 对应一个进程组的所有进程
+-	`tasks[PIDTYPE_SID]`：会话的所有`task_struct`，一个 SID 对应一个会话的所有进程
+
+2、`task_struct.pids`的作用，`pid_link`的`node`成员的作用上面已经介绍（作为链表的节点），而`task_struct`中的 `pid_link`的 `pid`指针成员的作用，指向的正是该`task_struct`在不同场景下所表现的特定 PID 身份，即一个有着多重身份的执行实体
+
+```CPP
+struct task_struct {
+    // ...
+    struct pid_link pids[PIDTYPE_MAX];  // 4个不同的身份标识
+    // ...
+};
+```
+
+-	`pids[PIDTYPE_PID]`：个体身份，指向该`task_struct`作为独立线程的身份，如`thread->pids[PIDTYPE_PID].pid = &individual_pid`，可通过`ps -eLf`中的 `LWP`列（轻量级进程ID）查看，是在系统中唯一标识这个特定的执行线程
+-	`pids[PIDTYPE_TGID]`：线程组身份，指向该`task_struct`所属线程组（进程）的身份，如`thread->pids[PIDTYPE_TGID].pid = &thread_group_pid`，可通过`ps aux` 中的 PID 查看，多线程进程的所有线程共享相同的 TGID，用于标识这个线程属于哪个进程
+-	`pids[PIDTYPE_PGID]`：进程组身份，指向该`task_struct`所属进程组的身份，如`thread->pids[PIDTYPE_PGID].pid = &process_group_pid`，常用于作业控制中的进程组，用于 `kill -STOP -PGID` 等操作，标识这个线程属于哪个作业
+-	`pids[PIDTYPE_SID]`：会话身份，指向该`task_struct`所属会话的身份，如`thread->pids[PIDTYPE_SID].pid = &session_pid`，常用于终端会话管理，用于控制终端关联，标识这个线程属于哪个登录会话
+
+这样设计使得内核可以从不同维度来获取到某个`task_struct`对应的`struct pid`结构信息，如有如下不同场景：
+
+-	调度器视角：个体身份（PID），用于时间片分配、CPU亲和性等，`task_struct`是个体线程
+-	进程管理器视角：线程组身份（TGID），用于进程树显示、进程信号传递，`task_struct`是进程成员
+-	作业控制视角：进程组身份（PGID），用于后台作业管理、终端控制，`task_struct`是作业组成员
+-	会话管理器视角：会话身份（SID），用于登录会话、终端关联，`task_struct`是会话成员
+
+内核提供了`task_struct`的身份查询函数：
+
+```CPP
+// 获取任务在不同场景下的 PID 值
+pid_t task_pid(struct task_struct *task) {
+    return pid_nr(task->pids[PIDTYPE_PID].pid);    // 个体身份
+}
+
+pid_t task_tgid(struct task_struct *task) {
+    return pid_nr(task->pids[PIDTYPE_TGID].pid);   // 线程组身份
+}
+
+pid_t task_pgrp(struct task_struct *task) {
+    return pid_nr(task->pids[PIDTYPE_PGID].pid);  // 进程组身份
+}
+
+pid_t task_session(struct task_struct *task) {
+    return pid_nr(task->pids[PIDTYPE_SID].pid);   // 会话身份
+}
+```
+
+再次强调一下，`task_struct`中的 `pid_link`的 `pid`指针指向的正是该 `task_struct`本身的身份标识，`struct pid_link pids[PIDTYPE_MAX]`应该理解为这个`task_struct`拥有的身份标识，是这个`task_struct`自身在不同维度下的身份
+
+既然存在上面描述的这种关系，那么很容易想到，可以通过`task_struct`的`pid_link`找到对应类型的`pid`对象（如`PIDTYPE_PGID`），找到这个`pid`对象之后，再使用该`pid`对象的`struct hlist_head tasks[PIDTYPE_MAX]`，遍历链表，就可以找到该进程组的所有的`task_struct`了，这也是 Linux 进程组管理的核心机制，即通过 `task_struct`的 `pid_link`找到对应的 `struct pid`，然后使用该 `pid`的 `tasks[PIDTYPE_PGID]`链表，确实可以找到该进程组的所有 `task_struct`，参考内核函数`kill_orphaned_pgrp`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/exit.c#L392)
+
+小结一下，**一个`struct pid`的链表包含多个`task_struct`，这些`task_struct`各自的`pids`数组指向多个不同的`struct pid`**
+
+3、几个例子
+
+-	`kill_pgrp`
+-	`disassociate_ctty`
+
+先看`kill_pgrp`的实现，`kill_pgrp`传入的参数`pid`，就是`PIDTYPE_PGID`类型对应的`struct pid`对象，其实现也很明显，遍历`PIDTYPE_PGID`链表（`tasks`），对每个链表上的`task_struct`都执行`group_send_sig_info`操作
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/signal.c#L1470
+// 向整个进程组发送信号
+int kill_pgrp(struct pid *pid, int sig, int priv)
+{
+	int ret;
+
+	read_lock(&tasklist_lock);
+	ret = __kill_pgrp_info(sig, __si_special(priv), pid);
+	read_unlock(&tasklist_lock);
+
+	return ret;
+}
+
+int __kill_pgrp_info(int sig, struct siginfo *info, struct pid *pgrp)
+{
+	struct task_struct *p = NULL;
+	int retval, success;
+
+	success = 0;
+	retval = -ESRCH;
+	//遍历线程组的所有线程
+	do_each_pid_task(pgrp, PIDTYPE_PGID, p) {
+		int err = group_send_sig_info(sig, info, p);
+		success |= !err;
+		retval = err;
+	} while_each_pid_task(pgrp, PIDTYPE_PGID, p);
+	return success ? 0 : retval;
+}
+
+#define do_each_pid_task(pid, type, task)				\
+	do {								\
+		if ((pid) != NULL)					\
+			hlist_for_each_entry_rcu((task),		\
+				&(pid)->tasks[type], pids[type].node) {
+#define while_each_pid_task(pid, type, task)				\
+				if (type == PIDTYPE_PID)		\
+					break;				\
+			}						\
+	} while (0)
+
+#define do_each_pid_thread(pid, type, task)				\
+	do_each_pid_task(pid, type, task) {				\
+		struct task_struct *tg___ = task;			\
+		for_each_thread(tg___, task) {
+
+#define while_each_pid_thread(pid, type, task)				\
+		}							\
+		task = tg___;						\
+	} while_each_pid_task(pid, type, task)
+```
+
+注意上面这几个宏定义用于遍历进/线程，稍微拆解一下：
+
+-	`do_each_pid_task`用于遍历PID对应的任务，先检查pid是否为空，不为空时使用RCU安全的方式遍历哈希链表中的任务，`type`参数指定任务类型（进程、线程组、进程组等）
+-	`while_each_pid_task`用于结束遍历，如果是进程ID类型（`PIDTYPE_PID`），直接跳出循环，因为一个PID只对应一个任务，不需要继续遍历
+-	`do_each_pid_thread`用于遍历PID对应的所有线程，先找到线程组领导者（主线程），然后遍历该线程组的所有线程
+-	`while_each_pid_thread`用于结束线程遍历，恢复`task`变量为线程组领导者，最后调用结束线程遍历宏
+
+
+如`disassociate_ctty`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/tty/tty_io.c#L864)，终端会话管理
+
+```CPP
+//// 当终端断开时，向整个会话发送 SIGHUP
+void disassociate_ctty(int on_exit)
+{
+	struct tty_struct *tty;
+
+	......
+	if (tty) {
+		if (on_exit && tty->driver->type != TTY_DRIVER_TYPE_PTY) {
+			tty_vhangup_session(tty);
+		} else {
+			struct pid *tty_pgrp = tty_get_pgrp(tty);
+			if (tty_pgrp) {
+				kill_pgrp(tty_pgrp, SIGHUP, on_exit);
+				if (!on_exit)
+					kill_pgrp(tty_pgrp, SIGCONT, on_exit);
+				put_pid(tty_pgrp);
+			}
+		}
+		tty_kref_put(tty);
+
+	} else if (on_exit) {
+		struct pid *old_pgrp;
+		spin_lock_irq(&current->sighand->siglock);
+		old_pgrp = current->signal->tty_old_pgrp;
+		current->signal->tty_old_pgrp = NULL;
+		spin_unlock_irq(&current->sighand->siglock);
+		if (old_pgrp) {
+			kill_pgrp(old_pgrp, SIGHUP, on_exit);
+			kill_pgrp(old_pgrp, SIGCONT, on_exit);
+			put_pid(old_pgrp);
+		}
+		return;
+	}
+
+	......
+
+	// 获取current对应的PIDTYPE_SID的pid对象
+	session_clear_tty(task_session(current));
+	read_unlock(&tasklist_lock);
+}
+
+static inline struct pid *task_session(struct task_struct *task)
+{
+	return task->group_leader->pids[PIDTYPE_SID].pid;
+}
+
+static void session_clear_tty(struct pid *session)
+{
+	struct task_struct *p;
+	// 遍历pid对象的PIDTYPE_SID链表头，执行proc_clear_tty操作
+	do_each_pid_task(session, PIDTYPE_SID, p) {
+		proc_clear_tty(p);
+	} while_each_pid_task(session, PIDTYPE_SID, p);
 }
 ```
 

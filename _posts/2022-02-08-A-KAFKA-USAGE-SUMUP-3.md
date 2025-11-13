@@ -440,7 +440,7 @@ TODO
 
 ![question](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/kafka/consumer-debug-question1.png)
 
-问题是重启后 consumer 不消费 `data0` 的数据？初步排查已知 kafka 生产者成功写入且消费者模式设置为 ``sarama.OffsetNewest`，从下面几个已知信息入手来排查
+问题是重启后 consumer 不消费 `data0` 的数据？初步排查已知 kafka 生产者成功写入且消费者模式设置为 `sarama.OffsetNewest`，从下面几个已知信息入手来排查
 
 1. 在 Kafka 中，消费者的偏移量（offset）是由消费者自己维护的，消费者组会跟踪每个分区的偏移量，并将其存储在 Kafka 内部的 `__consumer_offsets` topic 中，当然了，这个数据存在有效期（亦或被覆盖或者分区数据被删除）
 
