@@ -220,7 +220,6 @@ BPF_CALL_0(bpf_get_current_pid_tgid)
 
 前文[Linux Namespace && Cgroup](https://pandaychen.github.io/2023/10/06/A-CGROUP-ANALYSIS/)描述过pid namespace hierarchy基础，任何一个系统分配的PID都是隶属于某一个namespace的，而这个namespace又是位于整个pid namespace hierarchy的某个层次上，`pid->level`指明了该PID所属的namespace的level。由于pid对其parent pid namespace也是可见的，因此`level`值其实也就表示了这个pid对象在多少个pid namespace中可见。在多少个pid namespace中可见，就会有多少个（pid namespace，pid number）对，`numbers`就是这样的一个数组，每个成员都指向了各个`level`上的pid number
 
-
 `upid` 结构的成员如下（**在Kernel中一个task的ID由两个元素唯一确定 `[pid namespace, processid id]`，在内核中用upid表示**）
 -   `nr`：是`pid`的值， 即 `task_struct` 中 `pid_t pid` 域的值（重要）
 -   `ns`：指向该 `pid` 所处的 `namespace`
@@ -814,10 +813,10 @@ struct pid_namespace {
 2、根据当前命名空间下的局部 PID 获取对应的 pid实例（方法二）
 
 ```CPP
- struct pid *find_vpid(int nr)
- {
-   	return find_pid_ns(nr, task_active_pid_ns(current));
- }
+struct pid *find_vpid(int nr)
+{
+  	return find_pid_ns(nr, task_active_pid_ns(current));
+}
 ```
 
 3、根据 `pid` 及 PID 类型获取 `task_struct`
@@ -1195,6 +1194,8 @@ struct task_struct {
 
 ![kernel-process-relation]()
 
+TODO
+
 ####	`struct pid`相关
 1、分配pid与回收pid
 
@@ -1209,9 +1210,205 @@ struct task_struct {
 
 
 ####	示例应用：kill的实现
-比如，在容器中执行`kill 6`（ `kill` 系统调用只在当前的namespace中生效），这里涉及到哪些process相关的操作？
+比如，在容器中执行`kill xxx`（ `kill` 系统调用只在当前的namespace中生效），这里涉及到哪些process相关的操作？从kill的内核[实现](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/signal.c#L2865)：
 
-TODO
+```CPP
+SYSCALL_DEFINE2(kill, pid_t, pid, int, sig)
+{
+	struct siginfo info;
+
+	info.si_signo = sig;
+	info.si_errno = 0;
+	info.si_code = SI_USER;
+	info.si_pid = task_tgid_vnr(current);
+	info.si_uid = from_kuid_munged(current_user_ns(), current_uid());
+
+	//kill_something_info函数：向当前namespace中的所有进程发送信号
+	return kill_something_info(sig, &info, pid);
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/signal.c#L1385
+/*
+sig: 要发送的信号编号
+info: 信号附加信息（可为NULL）
+pid: 目标进程标识符，取值有特殊含义
+*/
+static int kill_something_info(int sig, struct siginfo *info, pid_t pid)
+{
+	int ret;
+
+	if (pid > 0) {
+		//pid > 0 的情况：向单个（指定）进程发信号
+		/*
+		使用RCU读锁保护进程查找
+		find_vpid(pid)：在当前命名空间查找对应的pid结构
+		调用kill_pid_info发送信号
+		*/
+		rcu_read_lock();
+		ret = kill_pid_info(sig, info, find_vpid(pid));
+		rcu_read_unlock();
+		return ret;
+	}
+
+	//pid <= 0 的情况：向进程组发信号
+	//需要获取任务列表锁来保护进程组操作
+
+	read_lock(&tasklist_lock);
+	if (pid != -1) {
+		/*
+		pid < -1： 向进程组ID为-pid的整个进程组发信号
+		pid = 0：向当前进程所在进程组发信号
+		pid = -1：不进入这个分支（有特殊处理）
+		*/
+		ret = __kill_pgrp_info(sig, info,
+				pid ? find_vpid(-pid) : task_pgrp(current));
+	} else {
+		//pid = -1 的情况：向所有进程发信号（除特殊进程）
+		int retval = 0, count = 0;
+		struct task_struct * p;
+
+		for_each_process(p) {
+			//task_pid_vnr(p) > 1：跳过init进程（PID=1）
+			//!same_thread_group(p, current)：跳过当前线程组的进程
+			if (task_pid_vnr(p) > 1 &&
+					!same_thread_group(p, current)) {
+				int err = group_send_sig_info(sig, info, p);
+				++count;
+				if (err != -EPERM)
+					retval = err;
+			}
+		}
+		ret = count ? retval : -ESRCH;
+	}
+	read_unlock(&tasklist_lock);
+
+	return ret;
+}
+```
+
+上面代码中涉及到的几个查询函数&&宏，实现了两种非常典型的链表遍历的场景
+
+-	`find_vpid->find_pid_ns->task_active_pid_ns`与`task_pgrp`
+-	`for_each_process`
+
+```CPP
+struct pid *find_vpid(int nr)
+{
+	// 熟悉的find_pid_ns
+	return find_pid_ns(nr, task_active_pid_ns(current));
+}
+
+#define for_each_process(p) \
+	for (p = &init_task ; (p = next_task(p)) != &init_task ; )
+```
+
+链表遍历1：基于`struct pid`的链表头开始的遍历，在进程组发送信号的情况下（`pid < 0` 且 `pid!=-1`）：
+
+```CPP
+......
+if (pid != -1) {
+    ret = __kill_pgrp_info(sig, info,
+            pid ? find_vpid(-pid) : task_pgrp(current));
+}
+......
+//在__kill_pgrp_info会遍历进程组的所有线程，这里才会使用pid链表
+int __kill_pgrp_info(int sig, struct siginfo *info, struct pid *pgrp)
+{
+	struct task_struct *p = NULL;
+	......
+	//遍历进程组的所有线程，基于struct pid的成员tasks[PIDTYPE_PGID]链表头的遍历，遍历元素为task_struct
+	do_each_pid_task(pgrp, PIDTYPE_PGID, p) {
+		......
+	} while_each_pid_task(pgrp, PIDTYPE_PGID, p);
+	return success ? 0 : retval;
+}
+```
+
+链表遍历2：基于全局链表`init_task`的遍历，`pid = -1`（向所有进程发信号），使用`for_each_process`遍历所有`task_struct`。准确的说，这里的遍历是需要加上namespace限制的，即只过滤当前namespace下的所有`task_struct`，这个逻辑是在`task_pid_vnr`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/sched.h#L1106)中实现的，核心是`__task_pid_nr_ns`函数
+
+**在`pid_nr_ns`函数中会校验`current`所在的命名空间是否与遍历`init_task`中的`task_struct`对象所在的命名空间是否一致（可见），需要满足前者的`level`小于或者等于后者**
+
+```cpp
+......
+for_each_process(p) {
+			//task_pid_vnr(p) > 1：跳过init进程（PID=1）
+			//!same_thread_group(p, current)：跳过当前线程组的进程
+
+			//task_pid_vnr->__task_pid_nr_ns
+			if (task_pid_vnr(p) > 1 &&
+					!same_thread_group(p, current)) {
+				int err = group_send_sig_info(sig, info, p);
+				++count;
+				if (err != -EPERM)
+					retval = err;
+			}
+		}
+......
+
+static inline pid_t task_pid_vnr(struct task_struct *tsk)
+{
+	return __task_pid_nr_ns(tsk, PIDTYPE_PID, NULL);
+}
+
+//隐藏的命名空间过滤 - task_pid_vnr(p)
+pid_t __task_pid_nr_ns(struct task_struct *task, enum pid_type type, struct pid_namespace *ns)
+{
+	pid_t nr = 0;
+
+	rcu_read_lock();
+	if (!ns){
+		// 获取当前进程的命名空间！
+		ns = task_active_pid_ns(current);
+	}
+	if (likely(pid_alive(task))) {
+		if (type != PIDTYPE_PID)
+			task = task->group_leader;
+		
+		//注意这里的type是PIDTYPE_PID
+		//pid_nr_ns中会校验current所在的命名空间是否与遍历init_task中的task_struct对象所在的命名空间是否一致（可见）
+		nr = pid_nr_ns(rcu_dereference(task->pids[type].pid)/*init_task*/, ns/*current*/);
+	}
+	rcu_read_unlock();
+
+	return nr;
+}
+
+//返回PID在指定命名空间中的数值
+pid_t pid_nr_ns(struct pid *pid, struct pid_namespace *ns)
+{
+	struct upid *upid;
+	pid_t nr = 0;
+
+	if (pid && ns->level <= pid->level) {
+		upid = &pid->numbers[ns->level];
+		if (upid->ns == ns)
+			nr = upid->nr;
+	}
+	return nr;
+}
+```
+
+上面代码有几处细节，首先是`__task_pid_nr_ns`中的`nr = pid_nr_ns(rcu_dereference(task->pids[type].pid), ns)`，其中的`type`为`PIDTYPE_PID`，`task->pids[PIDTYPE_PID].pid`即获取该`task_struct`以`PIDTYPE_PID`身份对应的`struct pid`对象，然后在函数`pid_nr_ns`中，使用对应的`struct pid`对象与namespace命名空间对象，确认该pid是否在这个namespace中：
+
+```CPP
+pid_t pid_nr_ns(struct pid *pid, struct pid_namespace *ns)
+{
+	struct upid *upid;
+	pid_t nr = 0;
+
+	//如果ns->level<=pid->level，说明pid肯定在namespace中，但不一定是在同一个level上
+	if (pid && ns->level <= pid->level) {
+		// 获取在当前（与传入的task_struct对象一直）level（ns->level）的upid对象
+		upid = &pid->numbers[ns->level];
+		if (upid->ns == ns){	//二次校验
+			nr = upid->nr;		//返回该namespace上的pid数值
+		}
+	}
+
+	//返回0（不满足）或者真实的nr
+	return nr;
+}
+```
 
 ##	0x0A	一些有趣的示例
 
@@ -2123,7 +2320,7 @@ int __kill_pgrp_info(int sig, struct siginfo *info, struct pid *pgrp)
 
 	success = 0;
 	retval = -ESRCH;
-	//遍历线程组的所有线程
+	//遍历进程组的所有线程
 	do_each_pid_task(pgrp, PIDTYPE_PGID, p) {
 		int err = group_send_sig_info(sig, info, p);
 		success |= !err;
@@ -2161,8 +2358,7 @@ int __kill_pgrp_info(int sig, struct siginfo *info, struct pid *pgrp)
 -	`do_each_pid_thread`用于遍历PID对应的所有线程，先找到线程组领导者（主线程），然后遍历该线程组的所有线程
 -	`while_each_pid_thread`用于结束线程遍历，恢复`task`变量为线程组领导者，最后调用结束线程遍历宏
 
-
-如`disassociate_ctty`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/tty/tty_io.c#L864)，终端会话管理
+再看下`disassociate_ctty`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/tty/tty_io.c#L864)，终端会话管理
 
 ```CPP
 //// 当终端断开时，向整个会话发送 SIGHUP
@@ -2175,8 +2371,10 @@ void disassociate_ctty(int on_exit)
 		if (on_exit && tty->driver->type != TTY_DRIVER_TYPE_PTY) {
 			tty_vhangup_session(tty);
 		} else {
+			// 获取tty所在的pgrp的struct pid对象
 			struct pid *tty_pgrp = tty_get_pgrp(tty);
 			if (tty_pgrp) {
+				// 遍历组进程，并发送SIGHUP信号
 				kill_pgrp(tty_pgrp, SIGHUP, on_exit);
 				if (!on_exit)
 					kill_pgrp(tty_pgrp, SIGCONT, on_exit);
