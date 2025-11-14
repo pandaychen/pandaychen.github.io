@@ -1894,7 +1894,6 @@ struct task_struct {
 `task_struct`是全局唯一的，每个进程/线程在内核中都有且只有一个 `task_struct`结构，无论它属于哪个namespace，存在于内核的全局链表中，理解`task_struct`的全局性，先看下其创建过程`copy_process`函数（每个进程/线程创建时都会分配一个独立的 `task_struct`）
 
 -	`task_struct->nsproxy`成员：标识了这个`task_struct`是属于哪个namespace的
--	``
 
 ```CPP
 //1. 内核中的定义和分配
@@ -1987,7 +1986,7 @@ struct nsproxy {
     struct uts_namespace *uts_ns;    // UTS 命名空间
     struct ipc_namespace *ipc_ns;    // IPC 命名空间  
     struct mnt_namespace *mnt_ns;    // 挂载命名空间
-    struct pid_namespace *pid_ns;    // PID 命名空间
+    struct pid_namespace *pid_ns;    // PID 命名空间（内部包含了本namespace的进程位图关联结构、level层级等关键成员）
     struct net *net_ns;              // 网络命名空间
     // ...
 };

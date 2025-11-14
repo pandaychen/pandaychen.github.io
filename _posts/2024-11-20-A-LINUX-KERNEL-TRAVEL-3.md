@@ -770,6 +770,211 @@ SYSCALL_DEFINE5(mount) -> do_mount() -> do_new_mount() -> do_add_mount() -> graf
 ####	mount tree构造原则
 参考[Linux 内核之旅（十一）：追踪 open 系统调用](https://pandaychen.github.io/2025/04/02/A-LINUX-KERNEL-TRAVEL-11/#vfs%E7%9A%84%E6%8C%82%E8%BD%BD)
 
+####	`mount`实现：挂载一个新的文件系统
+从系统调用`mount`入口：
+
+```CPP
+SYSCALL_DEFINE5(mount, char __user *, dev_name, char __user *, dir_name,
+		char __user *, type, unsigned long, flags, void __user *, data)
+{
+	......
+	ret = do_mount(kernel_dev, dir_name, kernel_type, flags, options);
+	......
+	return ret;
+}
+
+long do_mount(const char *dev_name, const char __user *dir_name,
+		const char *type_page, unsigned long flags, void *data_page)
+{
+	struct path path;
+	int retval = 0;
+	int mnt_flags = 0;
+	......
+	/* ... and get the mountpoint */
+	retval = user_path(dir_name, &path);
+	if (retval)
+		return retval;
+	......
+	retval = security_sb_mount(dev_name, &path,
+				   type_page, flags, data_page);
+
+	......
+	//挂载一个新的挂载点
+	retval = do_new_mount(&path, type_page, flags, mnt_flags,
+				      dev_name, data_page);
+	
+	......
+dput_out:
+	path_put(&path);
+	return retval;
+}
+```
+
+继续执行到`do_new_mount`函数：
+
+-	`get_fs_type`：
+-	`vfs_kern_mount`：完成了新子树的根dentry（root节点）的创建，传入的是挂载的文件系统类型
+-	`do_add_mount`：
+
+```CPP
+static int do_new_mount(struct path *path, const char *fstype, int flags,
+			int mnt_flags, const char *name, void *data)
+{
+	struct file_system_type *type;
+	struct vfsmount *mnt;
+	int err;
+
+	if (!fstype)
+		return -EINVAL;
+
+	type = get_fs_type(fstype);
+	if (!type)
+		return -ENODEV;
+	
+	// 特别重要：vfs_kern_mount完成了创建一颗新的挂载点实例
+	// 并创建一个新的dentry（root节点）
+	// 后续在此挂载点下面创建的dentry，都会挂载此root dentry节点下面
+	// 后续在该文件系统内创建的dentry都以此根dentry为根节点
+	mnt = vfs_kern_mount(type, flags, name, data);
+	if (!IS_ERR(mnt) && (type->fs_flags & FS_HAS_SUBTYPE) &&
+	    !mnt->mnt_sb->s_subtype)
+		mnt = fs_set_subtype(mnt, fstype);
+
+	put_filesystem(type);
+	if (IS_ERR(mnt))
+		return PTR_ERR(mnt);
+
+	if (mount_too_revealing(mnt, &mnt_flags)) {
+		mntput(mnt);
+		return -EPERM;
+	}
+
+	err = do_add_mount(real_mount(mnt), path, mnt_flags);
+	if (err)
+		mntput(mnt);
+	return err;
+}
+```
+
+最终会调用`do_add_mount`，将新创建的挂载点`mount`添加到内核的挂载树上：
+
+```CPP
+static int do_add_mount(struct mount *newmnt, struct path *path, int mnt_flags)
+{
+	struct mountpoint *mp;
+	struct mount *parent;
+	int err;
+
+	mnt_flags &= ~MNT_INTERNAL_FLAGS;
+
+	mp = lock_mount(path);
+	if (IS_ERR(mp))
+		return PTR_ERR(mp);
+
+	parent = real_mount(path->mnt);
+	err = -EINVAL;
+	if (unlikely(!check_mnt(parent))) {
+		/* that's acceptable only for automounts done in private ns */
+		if (!(mnt_flags & MNT_SHRINKABLE))
+			goto unlock;
+		/* ... and for those we'd better have mountpoint still alive */
+		if (!parent->mnt_ns)
+			goto unlock;
+	}
+
+	/* Refuse the same filesystem on the same mount point */
+	err = -EBUSY;
+	if (path->mnt->mnt_sb == newmnt->mnt.mnt_sb &&
+	    path->mnt->mnt_root == path->dentry)
+		goto unlock;
+
+	err = -EINVAL;
+	if (d_is_symlink(newmnt->mnt.mnt_root))
+		goto unlock;
+
+	newmnt->mnt.mnt_flags = mnt_flags;
+	err = graft_tree(newmnt, parent, mp);
+
+unlock:
+	unlock_mount(mp);
+	return err;
+}
+```
+
+TODO
+
+后面在对`open`内核源码分析时，在路径逐级查找时的挂载处理会涉及到这个知识点（即当前的目录是一个挂载点）
+
+```CPP
+static int follow_managed(struct path *path, struct nameidata *nd)
+{
+	struct vfsmount *mnt = path->mnt; /* held by caller, must be left alone */
+	unsigned managed;
+	bool need_mntput = false;
+	int ret = 0;
+	//思考下，这里的while的作用是啥？
+	while (managed = ACCESS_ONCE(path->dentry->d_flags),
+	       managed &= DCACHE_MANAGED_DENTRY,
+	       unlikely(managed != 0)) {
+		......
+		/* Transit to a mounted filesystem. */
+		// 当查找到挂载点时
+		if (managed & DCACHE_MOUNTED) {
+			// 查找该位置的挂载
+			struct vfsmount *mounted = lookup_mnt(path);
+			if (mounted) {
+				// 切换到被挂载的文件系统
+				dput(path->dentry);
+				if (need_mntput)
+					mntput(path->mnt);
+				path->mnt = mounted;
+				// 重要：使用新文件系统的根dentry
+				path->dentry = dget(mounted->mnt_root);
+				need_mntput = true;
+			    // 从此在新文件系统内继续查找
+				continue;
+			}
+		}
+
+		......
+		/* We didn't change the current path point */
+		break;
+	}
+
+	if (need_mntput && path->mnt == mnt)
+		mntput(path->mnt);
+	if (ret == -EISDIR || !ret)
+		ret = 1;
+	if (need_mntput)
+		nd->flags |= LOOKUP_JUMPED;
+	if (unlikely(ret < 0))
+		path_put_conditional(path, nd);
+	return ret;
+}
+```
+
+此外，在创建文件时的dentry分配时，会调用`d_alloc`方法：
+
+```CPP
+// 在新挂载的文件系统内创建文件时
+struct dentry *d_alloc(struct dentry *parent, const struct qstr *name)
+{
+    struct dentry *dentry = kmem_cache_alloc(dentry_cache, GFP_KERNEL);
+    
+    if (parent) {
+        // 新dentry的父dentry是新文件系统内的dentry
+        dentry->d_parent = parent;
+    } else {
+        // 如果是根dentry，父指针指向自己
+        dentry->d_parent = dentry;
+    }
+    
+    return dentry;
+}
+```
+
+因此，**`vfs_kern_mount`创建一个新的文件系统实例，包含独立的根dentry。当这个挂载点被连接到全局挂载树后，在该挂载点下创建的所有文件和目录，其dentry都会以这个根dentry为起点，形成该文件系统内部的dentry层次结构**
+
 ##	0x03	用户态视角
 
 ####	VFS的调用路径
@@ -1099,6 +1304,181 @@ if(real_iterate){
 ```
 
 ##	0x04	VFS的应用（项目相关）
+
+####	内核初始化：VFS相关
+
+```CPP
+asmlinkage __visible void __init start_kernel(void)
+	......
+	vfs_caches_init();
+	......
+}
+
+void __init vfs_caches_init(void)
+{
+	names_cachep = kmem_cache_create("names_cache", PATH_MAX, 0,
+			SLAB_HWCACHE_ALIGN|SLAB_PANIC, NULL);
+
+	dcache_init();
+	inode_init();
+	files_init();
+	files_maxfiles_init();
+	mnt_init();
+	bdev_cache_init();
+	chrdev_init();
+}
+
+void __init mnt_init(void)
+{
+	// 全局hashtable初始化
+	mnt_cache = kmem_cache_create("mnt_cache", sizeof(struct mount),
+			0, SLAB_HWCACHE_ALIGN | SLAB_PANIC, NULL);
+
+	mount_hashtable = alloc_large_system_hash("Mount-cache",
+				sizeof(struct hlist_head),
+				mhash_entries, 19,
+				0,
+				&m_hash_shift, &m_hash_mask, 0, 0);
+	mountpoint_hashtable = alloc_large_system_hash("Mountpoint-cache",
+				sizeof(struct hlist_head),
+				mphash_entries, 19,
+				0,
+				&mp_hash_shift, &mp_hash_mask, 0, 0);
+
+	if (!mount_hashtable || !mountpoint_hashtable)
+		panic("Failed to allocate mount hash table\n");
+
+	for (u = 0; u <= m_hash_mask; u++)
+		INIT_HLIST_HEAD(&mount_hashtable[u]);
+	for (u = 0; u <= mp_hash_mask; u++)
+		INIT_HLIST_HEAD(&mountpoint_hashtable[u]);
+
+	kernfs_init();
+
+	err = sysfs_init();
+	......
+	init_rootfs();
+	init_mount_tree();
+}
+
+
+int __init init_rootfs(void)
+{
+	int err = register_filesystem(&rootfs_fs_type);
+
+	if (err)
+		return err;
+
+	if (IS_ENABLED(CONFIG_TMPFS) && !saved_root_name[0] &&
+		(!root_fs_names || strstr(root_fs_names, "tmpfs"))) {
+		err = shmem_init();
+		is_tmpfs = true;
+	} else {
+		err = init_ramfs_fs();
+	}
+
+	if (err)
+		unregister_filesystem(&rootfs_fs_type);
+
+	return err;
+}
+
+static void __init init_mount_tree(void)
+{
+	struct vfsmount *mnt;
+	struct mnt_namespace *ns;
+	struct path root;
+	struct file_system_type *type;
+
+	type = get_fs_type("rootfs");
+	if (!type)
+		panic("Can't find rootfs type");
+
+	// 初始化rootfs的根节点
+	mnt = vfs_kern_mount(type, 0, "rootfs", NULL);
+	put_filesystem(type);
+	if (IS_ERR(mnt))
+		panic("Can't create rootfs");
+
+	ns = create_mnt_ns(mnt);
+	if (IS_ERR(ns))
+		panic("Can't allocate initial namespace");
+
+	init_task.nsproxy->mnt_ns = ns;
+	get_mnt_ns(ns);
+
+	root.mnt = mnt;
+	root.dentry = mnt->mnt_root;
+	mnt->mnt_flags |= MNT_LOCKED;
+
+	// 设置current的工作目录&&根目录
+	set_fs_pwd(current->fs, &root);
+	set_fs_root(current->fs, &root);
+}
+```
+
+这里详细的介绍下`vfs_kern_mount`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namespace.c#L964)，`vfs_kern_mount`用于在内核中创建一个新的挂载点，通常用于内核内部的挂载操作（如挂载`rootfs/sysfs/procfs`等）
+
+```CPP
+vfs_kern_mount(struct file_system_type *type, int flags, const char *name, void *data)
+{
+	struct mount *mnt;
+	struct dentry *root;	//dentry指针
+	//1、初始化工作
+	if (!type)
+		return ERR_PTR(-ENODEV);
+
+	mnt = alloc_vfsmnt(name);
+	if (!mnt)
+		return ERR_PTR(-ENOMEM);
+
+	//MS_KERNMOUNT：表示这是内核内部的挂载，不是用户发起的
+	if (flags & MS_KERNMOUNT)
+		mnt->mnt.mnt_flags = MNT_INTERNAL;
+	
+	//2、调用文件系统挂载
+	//mount_fs中会调用文件系统的挂载方法： root = type->mount(type, flags, name, data);
+	root = mount_fs(type, flags, name, data);
+	if (IS_ERR(root)) {
+		mnt_free_id(mnt);
+		free_vfsmnt(mnt);
+		return ERR_CAST(root);
+	}
+
+	// 3、建立挂载关系
+	mnt->mnt.mnt_root = root;	 // 挂载的根目录dentry
+	mnt->mnt.mnt_sb = root->d_sb;	// 关联的超级块
+	mnt->mnt_mountpoint = mnt->mnt.mnt_root;	// 挂载点指向自身根目录
+	mnt->mnt_parent = mnt;	 // 父挂载指向自己
+	lock_mount_hash();
+	list_add_tail(&mnt->mnt_instance, &root->d_sb->s_mounts);	//添加到超级块的挂载列表
+	unlock_mount_hash();
+	return &mnt->mnt;
+}
+```
+上面的`mount_fs`函数中的回调，对`rootfs`而言是如下：
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/init/do_mounts.c#L608
+static struct dentry *rootfs_mount(struct file_system_type *fs_type,
+	int flags, const char *dev_name, void *data)
+{
+	static unsigned long once;
+	void *fill = ramfs_fill_super;
+
+	if (test_and_set_bit(0, &once))
+		return ERR_PTR(-ENODEV);
+
+	if (IS_ENABLED(CONFIG_TMPFS) && is_tmpfs)
+		fill = shmem_fill_super;
+
+	return mount_nodev(fs_type, flags, data, fill);
+}
+```
+
+具体的文件系统如ext4等，是在[`module_init`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/super.c#L5711)中完成的
+
+TODO
 
 ####	VFS 关联 task_struct
 项目中通常需要基于`task_struct`来获取与VFS相关的事件属性，这里就需要了解`task_struct`与VFS基础数据结构之间的关联关系，如下图所示
