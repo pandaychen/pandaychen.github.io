@@ -711,6 +711,202 @@ mount /dev/sda2 /mnt/point    # mount2
 
 ##	0x02	VFS mount
 
+####	全局hashtable
+`mount_hashtable`与`mountpoint_hashtable`这两个全局哈希表是 Linux 挂载子系统的核心数据结构，负责高效管理系统中所有的挂载关系
+
+-	`mount_hashtable`：挂载实例哈希表（`mount`实例虽然构成了一颗树，同时构造为hashtable方便高效查找）
+-	`mountpoint_hashtable`：挂载点哈希表
+
+```CPP
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/namespace.c#L68
+static struct hlist_head *mount_hashtable __read_mostly;
+static struct hlist_head *mountpoint_hashtable __read_mostly;
+```
+
+1、`mount_hashtable`作用是管理所有活跃的挂载实例，常用操作如下：
+
+hash键计算对应于`m_hash`函数，入参为父挂载`vfsmount *mnt`+当前（被使用的）挂载点dentry`dentry *dentry`，在VFS场景中，**常用于给定父挂载和挂载点，查找对应的挂载实例`struct mount *mnt = __lookup_mnt(parent_mnt, mountpoint_dentry)`**
+
+**`lookup_mnt`函数查找逻辑为：在父挂载（`path->mnt->mnt_mounts`）的子挂载链表中，查找挂载点匹配 `path->dentry` 的挂载**，对应的遍历代码抽象为：
+
+```CPP
+struct vfsmount *lookup_mnt(const struct path *path){
+    struct mount *child;
+    ......
+    // 在挂载点哈希表中查找
+    hlist_for_each_entry_rcu(child, &path->mnt->mnt_mounts, mnt_hash) {
+        if (child->mnt_mountpoint == path->dentry) {
+            // 找到已挂载的子文件系统
+            mntget(&child->mnt);
+            return &child->mnt;
+        }
+    }
+    return NULL;
+}
+```
+
+举例来说，对于路径`/mnt/nfs/file`，假设`/dev/sda1`为ext4文件系统挂载到`/mnt/nfs/`，那么查找次路径的过程如下：
+
+1.	用户访问 `/mnt/nfs/file`
+2.	路径解析 `lookup_mnt(parent, dentry)`
+3.	在 `mount_hashtable` 中查找挂载实例
+4.	找到 `/dev/sda1` 挂载到 `/mnt/nfs`
+5.	继续在 `/dev/sda1` 文件系统中解析 `/file`
+
+```CPP
+// 存储系统中所有挂载的文件系统实例
+struct mount {
+    struct hlist_node mnt_hash;      // 哈希表链表节点（成员）
+    struct mount *mnt_parent;        // 父挂载
+    struct mountpoint *mnt_mp;        // 挂载点信息
+    struct list_head mnt_mounts;      // 子挂载链表
+    struct list_head mnt_child;       // 兄弟挂载链表
+    ......
+};
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/namespace.c#L87
+static inline struct hlist_head *m_hash(struct vfsmount *mnt, struct dentry *dentry)
+{
+	unsigned long tmp = ((unsigned long)mnt / L1_CACHE_BYTES);
+	tmp += ((unsigned long)dentry / L1_CACHE_BYTES);
+	tmp = tmp + (tmp >> m_hash_shift);
+	return &mount_hashtable[tmp & m_hash_mask];
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/namespace.c#L631
+struct mount *__lookup_mnt(struct vfsmount *mnt, struct dentry *dentry)
+{
+	struct hlist_head *head = m_hash(mnt, dentry);
+	struct mount *p;
+
+	hlist_for_each_entry_rcu(p, head, mnt_hash)
+		//必须同时匹配，才认为找到了挂载点实例
+		if (&p->mnt_parent->mnt == mnt && p->mnt_mountpoint == dentry)
+			return p;
+	return NULL;
+}
+
+//判断当前mnt是否为挂载点
+static inline bool __path_is_mountpoint(const struct path *path)
+{
+	struct mount *m = __lookup_mnt(path->mnt, path->dentry);
+	return m && likely(!(m->mnt.mnt_flags & MNT_SYNC_UMOUNT));
+}
+```
+
+2、`mountpoint_hashtable`的作用是管理所有挂载点
+
+hask key计算函数为`mp_hash`，入参仅为`dentry *dentry`，因为是以目录项为核心，若存在重复挂载的情况，成员`m_count`可以累加计数
+
+```cpp
+// 存储系统中所有被用作挂载点的目录
+struct mountpoint {
+    struct hlist_node m_hash;        // 哈希表链表节点（成员）
+    struct dentry *m_dentry;        // 挂载点目录项
+    struct hlist_head m_list;       // 挂载到此点的挂载链表
+    int m_count;                    // 引用计数
+};
+
+static inline struct hlist_head *mp_hash(struct dentry *dentry)
+{
+	unsigned long tmp = ((unsigned long)dentry / L1_CACHE_BYTES);
+	tmp = tmp + (tmp >> mp_hash_shift);
+	return &mountpoint_hashtable[tmp & mp_hash_mask];
+}
+
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/namespace.c#L709
+static struct mountpoint *lookup_mountpoint(struct dentry *dentry)
+{
+	struct hlist_head *chain = mp_hash(dentry);
+	struct mountpoint *mp;
+
+	hlist_for_each_entry(mp, chain, m_hash) {
+		if (mp->m_dentry == dentry) {
+			/* might be worth a WARN_ON() */
+			if (d_unlinked(dentry))
+				return ERR_PTR(-ENOENT);
+			mp->m_count++;
+			return mp;
+		}
+	}
+	return NULL;
+}
+```
+
+3、两个hashtable的协作关系 && 常见应用场景
+
+```CPP
+// 一个挂载点对应多个挂载实例（共享挂载）
+struct mountpoint {
+	......
+    struct hlist_head m_list;  // 挂载到此点的mount链表
+};
+
+struct mount {
+    struct hlist_node mnt_mp_list;  // 在挂载点链表中的节点
+    struct mountpoint *mnt_mp;      // 指向所属挂载点
+};
+```
+
+```TEXT						  
+							  |---> m_list -> mount1 -> mount2 -> ...... -> NULL
+							  |
+mountpoint_hashtable ---> mountpoint(hnode) ---> mountpoint(hnode)
+                           ^	   ^
+						   |       |
+mount_hashtable  --->  mount1 --->mount2 ---> mount -> ......
+```
+
+再列举几个场景的操作场景：
+
+挂载新文件系统（后文会详细描述）时，会涉及到对两个表的操作
+
+```CPP
+// 1. 在 mountpoint_hashtable 中查找挂载点
+mp = lookup_mountpoint(dentry);
+
+// 2. 如果不存在，创建新挂载点并添加到 mountpoint_hashtable
+if (!mp) {
+    mp = new_mountpoint(dentry);
+    hlist_add_head(&mp->m_hash, mp_hash(dentry));
+}
+
+// 3. 创建挂载实例并添加到 mount_hashtable
+mnt = alloc_vfsmnt();
+hlist_add_head(&mnt->mnt_hash, m_hash(parent_mnt, dentry));
+
+// 4. 建立关联
+mnt->mnt_mp = mp;
+hlist_add_head(&mnt->mnt_mp_list, &mp->m_list);
+```
+
+卸载文件系统
+```CPP
+// 1. 从 mount_hashtable 中移除
+hlist_del_init(&mnt->mnt_hash);
+
+// 2. 从挂载点链表中移除
+hlist_del_init(&mnt->mnt_mp_list);
+
+// 3. 如果挂载点无其他挂载，从 mountpoint_hashtable 中移除
+if (list_empty(&mp->m_list)) {
+    hlist_del(&mp->m_hash);
+    kfree(mp);
+}
+```
+
+命名空间隔离的场景下，快速在全局挂载实例中查找特定命名空间可见的挂载，注意`mnt_namespace`结构的`list`这个链表头，链接的是`struct mount`结构体中的 `mnt_list`字段，即连接该命名空间中的所有挂载
+
+```CPP
+// 每个挂载命名空间有独立的挂载树视图
+struct mnt_namespace {
+    struct mount *root;  // 命名空间的根挂载
+    struct list_head list; // 命名空间中的挂载列表
+    ......
+};
+```
+
 ####	重复挂载：`struct mountpoint`
 `struct mountpoint`[结构](https://elixir.bootlin.com/linux/v4.11.6/source/fs/mount.h#L26)用于管理挂载点目录项（dentry）与挂载在其上的文件系统实例（`struct mount`）之间的关系。在路径名查找（path lookup）及挂载操作都会涉及到，`struct mountpoint`结构体用来表示某个特定的 dentry 当前是一个挂载点，它充当了这个 dentry 与其上挂载的文件系统之间的桥梁
 
@@ -770,7 +966,25 @@ SYSCALL_DEFINE5(mount) -> do_mount() -> do_new_mount() -> do_add_mount() -> graf
 ####	mount tree构造原则
 参考[Linux 内核之旅（十一）：追踪 open 系统调用](https://pandaychen.github.io/2025/04/02/A-LINUX-KERNEL-TRAVEL-11/#vfs%E7%9A%84%E6%8C%82%E8%BD%BD)
 
-####	`mount`实现：挂载一个新的文件系统
+####	`mount`实现分析：挂载一个新的文件系统
+本小节分析下最基础的`mount`实现，核心调用链如下：
+
+```TEXT
+用户空间 mount() 系统调用
+    |-->
+SYSCALL_DEFINE5(mount, ...)
+    |---->
+do_mount()
+	|---->
+do_new_mount()  // 处理新挂载
+    |---->
+do_add_mount()  // 本文分析的函数
+    |---->
+graft_tree()    // 挂载树嫁接
+    |---->
+attach_recursive_mnt()  // 递归挂载处理
+```
+
 从系统调用`mount`入口：
 
 ```CPP
@@ -813,8 +1027,8 @@ dput_out:
 继续执行到`do_new_mount`函数：
 
 -	`get_fs_type`：
--	`vfs_kern_mount`：完成了新子树的根dentry（root节点）的创建，传入的是挂载的文件系统类型
--	`do_add_mount`：
+-	`vfs_kern_mount`：完成了新子树的根dentry（root节点）的创建，传入的是挂载的文件系统类型（创建新的挂载实例）
+-	`do_add_mount`：调用 `do_add_mount` 添加到挂载树
 
 ```CPP
 static int do_new_mount(struct path *path, const char *fstype, int flags,
@@ -859,6 +1073,13 @@ static int do_new_mount(struct path *path, const char *fstype, int flags,
 最终会调用`do_add_mount`，将新创建的挂载点`mount`添加到内核的挂载树上：
 
 ```CPP
+/*
+struct mount *newmnt：要添加的新挂载实例（已初始化）
+struct path *path：目标挂载点路径 {dentry, vfsmount}
+int mnt_flags：挂载标志位（MS_* 系列标志）
+*/
+
+//将一个新的挂载实例添加到指定的挂载点上，处理各种边界条件和安全检查
 static int do_add_mount(struct mount *newmnt, struct path *path, int mnt_flags)
 {
 	struct mountpoint *mp;
@@ -867,12 +1088,24 @@ static int do_add_mount(struct mount *newmnt, struct path *path, int mnt_flags)
 
 	mnt_flags &= ~MNT_INTERNAL_FLAGS;
 
+	//1. 挂载点锁定，防止并发挂载操作导致的状态混乱，确保挂载点的一致性
+	// 注意mp是struct mountpoint *类型
 	mp = lock_mount(path);
 	if (IS_ERR(mp))
 		return PTR_ERR(mp);
 
+	/*
+	static inline struct mount *real_mount(struct vfsmount *mnt)
+	{
+	return container_of(mnt, struct mount, mnt);
+	}
+	*/
+
+	// 2. 获取path对应的 mount结构（path->mnt 是struct vfsmount类型的对象）
+	// 为什么这里命名为parent呢？因为需要在这个dentry上面挂载一个新的文件系统，所以目前path->mnt指向的mount结构，就会在mount树中成为新的挂载点的parent，即mp指向的mount结构，会变成parent的子mount结构
 	parent = real_mount(path->mnt);
 	err = -EINVAL;
+	// 3. 父挂载有效性检查（父挂载必须在有效的挂载命名空间中）
 	if (unlikely(!check_mnt(parent))) {
 		/* that's acceptable only for automounts done in private ns */
 		if (!(mnt_flags & MNT_SHRINKABLE))
@@ -884,14 +1117,26 @@ static int do_add_mount(struct mount *newmnt, struct path *path, int mnt_flags)
 
 	/* Refuse the same filesystem on the same mount point */
 	err = -EBUSY;
+	//4. 重复挂载检查
+	/*
+	条件1：path->mnt->mnt_sb == newmnt->mnt.mnt_sb，指相同的超级块（同一文件系统）
+	条件2：path->mnt->mnt_root == path->dentry ：挂载点就是文件系统根目录
+
+	对应于下面的case，是非法的
+	mount /dev/sda1 /          # 尝试在根文件系统上挂载同一文件系统
+	mount -o bind / /          # 尝试绑定挂载到自身
+	*/
 	if (path->mnt->mnt_sb == newmnt->mnt.mnt_sb &&
 	    path->mnt->mnt_root == path->dentry)
 		goto unlock;
 
 	err = -EINVAL;
+	//5. 符号链接检查，需要满足新挂载实例的根目录不能是符号链接
 	if (d_is_symlink(newmnt->mnt.mnt_root))
 		goto unlock;
 
+	//6. 核心操作，设置挂载标志并执行实际的挂载树操作
+	// graft_tree分析见下面
 	newmnt->mnt.mnt_flags = mnt_flags;
 	err = graft_tree(newmnt, parent, mp);
 
@@ -899,11 +1144,379 @@ unlock:
 	unlock_mount(mp);
 	return err;
 }
+```	
+
+`do_add_mount`其中有几个重要的函数调用链：
+
+-	`lock_mount`->`lookup_mnt`->`get_mountpoint`->`lookup_mountpoint`
+-	`graft_tree`->`attach_recursive_mnt` TODO
+
+```CPP
+//锁定挂载点路径，处理挂载点解析和重复挂载检查，确保挂载操作的原子性
+/* 参数：要挂载的目标路径
+struct path *path = {
+    .mnt = 当前挂载的vfsmount,     // 如根文件系统
+    .dentry = 目标目录的dentry     // 如 /mnt 目录项
+}
+
+返回：struct mountpoint结构，即锁定的挂载点结构
+*/
+static struct mountpoint *lock_mount(struct path *path)
+{
+	//1. 初始化
+	struct vfsmount *mnt;
+	struct dentry *dentry = path->dentry;	//待挂载的dentry（文件系统中的目录项是挂载点的实际载体）
+
+	//2. 重试标签和 inode 锁定
+retry:
+	//加写锁，防止对同一目录的并发修改，同时确保挂载过程中目录状态不变，保护 dentry 和 inode 的完整性
+	inode_lock(dentry->d_inode);
+	/*
+	static inline void inode_lock(struct inode *inode)
+{
+	//获取 inode 的写信号量
+	down_write(&inode->i_rwsem);
+}
+	*/
+
+	//3.挂载能力检查
+	if (unlikely(cant_mount(dentry))) {
+		inode_unlock(dentry->d_inode);
+		return ERR_PTR(-ENOENT);
+	}
+
+	//4. 命名空间锁定（保护整个挂载命名空间的读写操作），主要是保护挂载点哈希表的访问以及对挂载树的修改
+	namespace_lock();
+	
+	//5. 查找现有挂载（见下），注意参数
+	mnt = lookup_mnt(path);
+	if (likely(!mnt)) {
+		// 6. 主要执行路径：无现有挂载，核心逻辑是get_mountpoint（见下）
+		// get_mountpoint：获取一个挂载点，如果不存在则创建
+		struct mountpoint *mp = get_mountpoint(dentry);
+		if (IS_ERR(mp)) {
+			namespace_unlock();
+			inode_unlock(dentry->d_inode);
+			return mp;
+		}
+
+		//成功路径的锁状态
+		//inode 锁：保持锁定
+		//命名空间锁：保持锁定
+		return mp;
+	}
+
+	//7. 处理路径已被挂载的情况，为何需要先释放锁呢？
+	//因为要切换到新的路径，需要先释放当前锁
+	namespace_unlock();
+	inode_unlock(path->dentry->d_inode);
+
+	//8. 路径切换和重试（重要），运行到此说明当前路径已经是个挂载点了，需要穿透，但是穿透多少次，就要看retry之后到新的dentry的挂载OR非挂载的情况了
+	// 8.1：减少原路径的引用计数
+	path_put(path);
+	// 8.2：更新路径为已挂载文件系统的根目录
+	path->mnt = mnt;	// vfsmount 指向子挂载
+	dentry = path->dentry = dget(mnt->mnt_root);	// dentry 指向子挂载的根目录
+
+	//上面这段代码实现是太经典了
+
+	//8.3：跳回 retry 标签重新处理
+	goto retry;
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/namespace.c#L658
+struct vfsmount *lookup_mnt(const struct path *path)
+{
+	struct mount *child_mnt;
+	struct vfsmount *m;
+	unsigned seq;
+
+	//rcu 锁保护
+	rcu_read_lock();
+	do {
+		seq = read_seqbegin(&mount_lock);	// 顺序锁读取开始
+
+		// 重要：__lookup_mnt的入参：path的mnt成员与dentry成员
+		child_mnt = __lookup_mnt(path->mnt, path->dentry);
+		m = child_mnt ? &child_mnt->mnt : NULL;	 // 核心查找
+	} while (!legitimize_mnt(m, seq));		// 验证读取一致性
+	rcu_read_unlock();
+
+	// 找到已挂载的子文件系统 OR NULL
+	return m;
+}
+
+//get_mountpoint：查找或者创建
+static struct mountpoint *get_mountpoint(struct dentry *dentry)
+{
+	struct mountpoint *mp, *new = NULL;
+	int ret;
+	/*
+	static inline bool d_mountpoint(const struct dentry *dentry)
+{
+	return dentry->d_flags & DCACHE_MOUNTED;
+}
+	*/
+
+	//1. 快速路径检查
+	if (d_mountpoint(dentry)) {	//检查 dentry 的 DCACHE_MOUNTED标志是否已设置，如果已设置，说明可能已有挂载点，直接查找
+mountpoint:
+		//使用顺序锁保护查找操作
+		read_seqlock_excl(&mount_lock);
+		mp = lookup_mountpoint(dentry);
+		read_sequnlock_excl(&mount_lock);
+		if (mp)
+			goto done;	//找到了
+	}
+
+	//2. 没找到，需要创建新挂载点时才分配内存
+	if (!new)
+		new = kmalloc(sizeof(struct mountpoint), GFP_KERNEL);
+	if (!new)
+		return ERR_PTR(-ENOMEM);
+
+
+	//3. 设置挂载点标志（关键竞争处理），这里的防止竞争主要解决：防止多个进程同时创建同一挂载点，包含下面的竞争场景
+
+	/*
+	场景1：多个进程同时创建挂载点
+	进程A: d_set_mounted() -> 成功 -> 创建挂载点
+	进程B: d_set_mounted() -> 失败(EBUSY) -> 重试查找 -> 使用进程A创建的挂载点
+
+	场景2：挂载点已存在
+	进程A: 设置标志成功，但创建前挂载点已被其他进程创建
+	进程B: 已创建挂载点，设置标志
+	结果: 进程A在创建时会发现挂载点已存在，使用现有挂载点
+	*/
+
+	//d_set_mounted会使用原子操作设置标志，确保只有一个进程成功
+	ret = d_set_mounted(dentry);
+	//这里需要处理竞争逻辑
+	//成功（ret == 0）：当前进程成功设置标志，继续创建挂载点
+	/* Someone else set d_mounted? */
+	if (ret == -EBUSY)
+		goto mountpoint;	//繁忙（ret == -EBUSY）：其他进程已设置标志，跳回快速路径重新查找
+
+	/* The dentry is not available as a mountpoint? */
+	//其他错误（ret != 0）：直接返回错误
+	mp = ERR_PTR(ret);
+	if (ret)
+		goto done;
+
+	//4. 创建新挂载点，包含了挂载点初始化细节
+	/* Add the new mountpoint to the hash table */
+
+	//注意：mount_lock为顺序锁，用于保护全局挂载点哈希表的一致性，允许并发读取但互斥写入
+	read_seqlock_excl(&mount_lock);
+	new->m_dentry = dentry;	//关联目录项
+	new->m_count = 1;		//初始引用计数为1
+	hlist_add_head(&new->m_hash, mp_hash(dentry));	//添加到哈希表
+	INIT_HLIST_HEAD(&new->m_list);	//初始化挂载链表（用于记录挂载到此点的挂载）
+	read_sequnlock_excl(&mount_lock);
+
+	mp = new;
+	new = NULL;
+done:
+	kfree(new);
+	return mp;
+}
+
+//通过哈希表来查找与给定dentry对应的挂载点结构
+static struct mountpoint *lookup_mountpoint(struct dentry *dentry)
+{
+	struct hlist_head *chain = mp_hash(dentry);
+	struct mountpoint *mp;
+
+	hlist_for_each_entry(mp, chain, m_hash) {
+		if (mp->m_dentry == dentry) {
+			/* might be worth a WARN_ON() */
+			if (d_unlinked(dentry))
+				return ERR_PTR(-ENOENT);
+
+			// 很重要：重复挂载的场景
+			// 挂载点已存在，增加引用计数
+			mp->m_count++;
+			return mp;
+		}
+	}
+	return NULL;
+} 
 ```
 
-TODO
+```CPP
+tatic struct mountpoint *lookup_mountpoint(struct dentry *dentry)
+{
+	struct hlist_head *chain = mp_hash(dentry);
+	struct mountpoint *mp;
 
-后面在对`open`内核源码分析时，在路径逐级查找时的挂载处理会涉及到这个知识点（即当前的目录是一个挂载点）
+	hlist_for_each_entry(mp, chain, m_hash) {
+		if (mp->m_dentry == dentry) {
+			/* might be worth a WARN_ON() */
+			if (d_unlinked(dentry))
+				return ERR_PTR(-ENOENT);
+			mp->m_count++;
+			return mp;
+		}
+	}
+	return NULL;
+}
+```
+
+上面已经分析完，在最终执行挂载前的一系列检查与准备工作，继续分析最后的挂载操作`graft_tree->attach_recursive_mnt`，这里只考虑新挂载的场景
+
+```cpp
+static int graft_tree(struct mount *mnt, struct mount *p, struct mountpoint *mp)
+{
+    // 检查1: 文件系统是否允许用户挂载
+    if (mnt->mnt.mnt_sb->s_flags & MS_NOUSER)
+        return -EINVAL;
+
+    // 检查2: 挂载点类型匹配检查
+    if (d_is_dir(mp->m_dentry) != d_is_dir(mnt->mnt.mnt_root))
+        return -ENOTDIR;
+
+    // 执行实际的挂载树嫁接操作
+    return attach_recursive_mnt(mnt, p, mp, NULL);
+}
+
+/*
+source_mnt：要挂载的源挂载树（可能包含子挂载）
+dest_mnt：目标挂载点所在的父挂载
+dest_mp：目标挂载点（目录项）
+parent_path：如果是移动挂载，提供原路径；否则为 NULL，这里只考虑NULL的情况
+*/
+static int attach_recursive_mnt(struct mount *source_mnt,
+			struct mount *dest_mnt,
+			struct mountpoint *dest_mp,
+			struct path *parent_path)
+{
+	HLIST_HEAD(tree_list);
+	// 特别注意：这里获取的namespace是dest_mp所属的mnt_namespace命名空间
+	struct mnt_namespace *ns = dest_mnt->mnt_ns;
+	struct mountpoint *smp;
+	struct mount *child, *p;
+	struct hlist_node *n;
+	int err;
+
+	//步骤1：预分配挂载点（但普通挂载中基本不会使用）
+	smp = get_mountpoint(source_mnt->mnt.mnt_root);
+	if (IS_ERR(smp))
+		return PTR_ERR(smp);
+
+	/* Is there space to add these mounts to the mount namespace? */
+	if (!parent_path) {
+		//2. 容量检查：确保命名空间不超限
+		// 这里主要是计算源挂载树（source_mnt）中的挂载数量，判断是否超限
+		err = count_mounts(ns, source_mnt);
+		if (err)
+			goto out;
+	}
+
+	if (IS_MNT_SHARED(dest_mnt)) {
+		.....
+	} else {
+		//3. 非共享挂载路径：直接加锁
+		/*
+		1. 保护全局挂载哈希表的结构修改
+		2. 保护挂载树的拓扑变化
+	    3. 保护挂载点引用计数更新
+		*/
+		lock_mount_hash();
+	}
+	if (parent_path) {
+		......
+	} else {
+		//4. 核心挂载操作：建立父子关系并提交（见下）
+		// 非常重要：dest_mnt指向的mount结构将成为source_mnt的child
+		/*
+		挂载前:
+		dest_mnt: 父挂载
+		dest_mp: 目标挂载点（引用计数 = 1）
+		source_mnt: 源挂载（mnt_parent = 自身）
+
+		挂载后:
+		source_mnt->mnt_parent = dest_mnt        // 指向父挂载
+		source_mnt->mnt_mountpoint = dest_mp->m_dentry // 指向挂载点
+		dest_mp->m_count = 2                      // 引用计数增加
+		*/
+		mnt_set_mountpoint(dest_mnt, dest_mp, source_mnt);
+
+		//提交挂载树，注意这里的入参为mount，主要是处理mount树（父子节点）的各种连接关系
+		commit_tree(source_mnt);
+	}
+
+	......
+	//5. 清理资源
+	put_mountpoint(smp);
+	unlock_mount_hash();
+
+	return 0;
+}
+
+//核心函数：建立挂载点关系
+void mnt_set_mountpoint(struct mount *mnt,
+			struct mountpoint *mp,
+			struct mount *child_mnt)
+{
+	mp->m_count++;		//增加挂载点引用计数
+	mnt_add_count(mnt, 1);	/* essentially, that's mntget */
+	child_mnt->mnt_mountpoint = dget(mp->m_dentry);	//设置挂载点目录项
+	child_mnt->mnt_parent = mnt;	//设置父指针为mnt
+	child_mnt->mnt_mp = mp;
+	hlist_add_head(&child_mnt->mnt_mp_list, &mp->m_list);
+}
+
+static void commit_tree(struct mount *mnt)
+{
+	struct mount *parent = mnt->mnt_parent;
+	struct mount *m;
+	LIST_HEAD(head);
+	struct mnt_namespace *n = parent->mnt_ns;
+
+	BUG_ON(parent == mnt);
+	//1. 收集整个挂载树到临时链表
+	list_add_tail(&head, &mnt->mnt_list);
+	list_for_each_entry(m, &head, mnt_list){
+		m->mnt_ns = n;		//设置命名空间
+	}
+
+	//2. 合并到命名空间全局链表
+	list_splice(&head, n->list.prev);
+
+	//3. 更新挂载计数
+	n->mounts += n->pending_mounts;
+	n->pending_mounts = 0;
+
+	//4. 建立父子链表关系
+	__attach_mnt(mnt, parent);
+
+	//5. 标记命名空间为脏
+	touch_mnt_namespace(n);
+}
+
+static void __attach_mnt(struct mount *mnt, struct mount *parent)
+{
+	hlist_add_head_rcu(&mnt->mnt_hash,
+			   m_hash(&parent->mnt, mnt->mnt_mountpoint));
+	//将子挂载添加到父挂载的子链表尾部
+	list_add_tail(&mnt->mnt_child, &parent->mnt_mounts);
+}
+
+static void put_mountpoint(struct mountpoint *mp)
+{
+	if (!--mp->m_count) {	// 减少引用计数
+		struct dentry *dentry = mp->m_dentry;
+		BUG_ON(!hlist_empty(&mp->m_list));	
+		spin_lock(&dentry->d_lock);
+		dentry->d_flags &= ~DCACHE_MOUNTED;
+		spin_unlock(&dentry->d_lock);
+		hlist_del(&mp->m_hash);	//从哈希表移除
+		kfree(mp);
+	}
+}
+```
+
+到此`mount`的简单流程已经分析完成。后面在对`open`内核源码分析时，在路径逐级查找时的挂载处理会涉及到这个知识点（即当前的目录是一个挂载点）
 
 ```CPP
 static int follow_managed(struct path *path, struct nameidata *nd)
@@ -974,6 +1587,249 @@ struct dentry *d_alloc(struct dentry *parent, const struct qstr *name)
 ```
 
 因此，**`vfs_kern_mount`创建一个新的文件系统实例，包含独立的根dentry。当这个挂载点被连接到全局挂载树后，在该挂载点下创建的所有文件和目录，其dentry都会以这个根dentry为起点，形成该文件系统内部的dentry层次结构**
+
+最后一个问题，在`mount`过程中，哪些地方涉及到了对`mnt_namespace`相关的引用呢？（不考虑跨命名空间的挂载传播），梳理如下：
+
+涉及到的结构与成员如下：
+
+```CPP
+3.1 挂载结构中的命名空间字段
+
+// fs/mount.h
+struct mount {
+    struct mnt_namespace *mnt_ns;  // 所属命名空间
+    struct list_head mnt_list;     // 在命名空间链表中的节点
+    // ...
+};
+
+3.2 命名空间结构定义
+
+// include/linux/mnt_namespace.h
+struct mnt_namespace {
+    atomic_t count;                 // 引用计数
+    struct ns_common ns;           // 命名空间公共部分
+    struct mount *root;            // 命名空间的根挂载
+    struct list_head list;         // 所有挂载的链表
+    struct user_namespace *user_ns; // 所属用户命名空间
+    u64 seq;                       // 序列号（用于变化检测）
+    unsigned int mounts;           // 当前挂载数
+    unsigned int pending_mounts;   // 待提交挂载数
+    unsigned int mount_max;        // 最大挂载数限制
+};
+```
+
+阶段1：挂载创建时的命名空间关联
+
+`vfs_kern_mount`中的命名空间设置
+
+```CPP
+struct vfsmount *vfs_kern_mount(struct file_system_type *type,
+                                int flags, const char *name, void *data)
+{
+    struct mount *mnt;
+    
+    // 创建新的挂载结构
+    mnt = alloc_vfsmnt(name);
+    
+    // 关键：设置挂载的命名空间为当前进程的命名空间
+	// 从当前进程获取（current->nsproxy->mnt_ns）
+    mnt->mnt_ns = current->nsproxy->mnt_ns;
+    
+    return &mnt->mnt;
+}
+```
+
+阶段2：容量检查（命名空间限制）对应`int count_mounts(struct mnt_namespace *ns, struct mount *mnt)`，函数中会检查是否超过命名空间挂载限制
+
+```CPP
+struct mnt_namespace {
+	......
+    unsigned int mounts;          // 当前挂载数
+    unsigned int pending_mounts;  // 待提交挂载数
+    unsigned int mount_max;        // 最大挂载限制
+    ......
+};
+```
+
+
+阶段3：挂载树提交到命名空间，主要对应`commit_tree`函数
+
+```CPP
+static void commit_tree(struct mount *mnt)
+{
+    struct mount *parent = mnt->mnt_parent;
+    struct mnt_namespace *n = parent->mnt_ns;
+    struct mount *m;
+    LIST_HEAD(head);
+    
+    // 1. 收集整个挂载树
+    list_add_tail(&head, &mnt->mnt_list);
+    list_for_each_entry(m, &head, mnt_list) {
+        // 设置命名空间（设置整个挂载树使用相同的命名空间）
+        m->mnt_ns = n;
+    }
+    
+    // 2. 添加到命名空间全局链表，将新挂载树合并到命名空间的全局链表
+	/*
+	挂载前:
+	n->list: [mount1]->[mount2]-> ... ->[mountN]
+
+	挂载后:  
+	n->list: [mount1]-> ...-> [mountN]->[new_mnt]->[child1]->[child2]
+	*/
+    list_splice(&head, n->list.prev);
+    
+    // 3. 更新命名空间挂载计数
+    n->mounts += n->pending_mounts;
+    n->pending_mounts = 0;
+    
+    // 4. 建立父子关系
+    __attach_mnt(mnt, parent);
+    
+    // 5. 标记命名空间更新
+	// 通知监听者命名空间已发生变化（如 poll监控 /proc/mounts）
+    touch_mnt_namespace(n);
+}
+```
+
+传播场景：
+
+// 克隆挂载可能属于不同的命名空间
+if (child->mnt_parent->mnt_ns != current->nsproxy->mnt_ns) {
+    // 跨命名空间传播
+    child->mnt_ns = child->mnt_parent->mnt_ns;  // 使用目标命名空间
+}
+
+3. 命名空间相关的关键数据结构
+
+
+3.3 进程的命名空间代理
+
+// include/linux/nsproxy.h
+struct nsproxy {
+    atomic_t count;
+    struct uts_namespace *uts_ns;
+    struct ipc_namespace *ipc_ns;
+    struct mnt_namespace *mnt_ns;  // 挂载命名空间
+    struct pid_namespace *pid_ns;
+    struct net *net_ns;
+};
+
+4. 具体场景分析
+4.1 普通进程挂载（相同命名空间）
+
+// 当前进程在初始命名空间
+current->nsproxy->mnt_ns = init_ns;
+
+// 新挂载使用相同的命名空间
+new_mnt->mnt_ns = init_ns;
+
+4.2 容器内挂载（独立命名空间）
+
+// 容器进程有自己的命名空间
+current->nsproxy->mnt_ns = container_ns;
+
+// 新挂载使用容器命名空间
+new_mnt->mnt_ns = container_ns;
+
+4.3 挂载传播到其他命名空间
+
+// 共享挂载可能传播到其他命名空间
+for_each_peer_mount(peer, source_mnt) {
+    if (peer->mnt_ns != current->nsproxy->mnt_ns) {
+        // 创建克隆挂载，使用对等挂载的命名空间
+        clone->mnt_ns = peer->mnt_ns;
+        commit_tree(clone);  // 提交到目标命名空间
+    }
+}
+
+5. 命名空间操作的具体函数
+5.1 命名空间查找和获取
+
+// 获取当前命名空间
+struct mnt_namespace *current_ns = current->nsproxy->mnt_ns;
+
+// 增加命名空间引用计数
+struct mnt_namespace *get_mnt_ns(struct mnt_namespace *ns)
+{
+    atomic_inc(&ns->count);
+    return ns;
+}
+
+5.2 命名空间挂载链表操作
+
+// 遍历命名空间中的所有挂载
+void list_mounts_in_ns(struct mnt_namespace *ns)
+{
+    struct mount *mnt;
+    
+    list_for_each_entry(mnt, &ns->list, mnt_list) {
+        printk("挂载: %s\n", mnt->mnt.mnt_root->d_name.name);
+    }
+}
+
+5.3 挂载计数管理
+
+// 检查并预留挂载空间
+int check_mount_space(struct mnt_namespace *ns, int needed)
+{
+    if (ns->mounts + ns->pending_mounts + needed > ns->mount_max)
+        return -ENOSPC;
+    
+    ns->pending_mounts += needed;
+    return 0;
+}
+
+6. 错误处理中的命名空间操作
+6.1 挂载失败时的清理
+
+// 在 attach_recursive_mnt 的错误处理中
+out:
+    ns->pending_mounts = 0;  // 重置待处理挂载数
+
+out_cleanup_ids:
+    // 清理已传播的挂载
+    while (!hlist_empty(&tree_list)) {
+        child = hlist_entry(tree_list.first, struct mount, mnt_hash);
+        child->mnt_parent->mnt_ns->pending_mounts = 0;  // 重置目标命名空间
+        umount_tree(child, UMOUNT_SYNC);
+    }
+
+6.2 命名空间引用计数管理
+
+// 正确管理命名空间生命周期
+void put_mnt_ns(struct mnt_namespace *ns)
+{
+    if (atomic_dec_and_test(&ns->count)) {
+        // 引用计数为0，释放命名空间
+        free_mnt_ns(ns);
+    }
+}
+
+7. 实际调试信息
+7.1 添加命名空间调试
+
+// 调试挂载过程中的命名空间操作
+pr_debug("挂载操作: 进程ns=%px, 目标ns=%px, 挂载数=%d/%d\n",
+         current->nsproxy->mnt_ns,
+         dest_mnt->mnt_ns,
+         dest_mnt->mnt_ns->mounts,
+         dest_mnt->mnt_ns->mount_max);
+
+// 在 commit_tree 中
+pr_debug("提交挂载树: 命名空间 %px, 增加 %d 个挂载\n",
+         n, n->pending_mounts);
+
+7.2 预期输出示例
+主机挂载：
+
+挂载操作: 进程ns=ffff88800a0a0000, 目标ns=ffff88800a0a0000, 挂载数=50/1000
+提交挂载树: 命名空间 ffff88800a0a0000, 增加 3 个挂载
+
+容器内挂载：
+
+挂载操作: 进程ns=ffff88800b1b2000, 目标ns=ffff88800b1b2000, 挂载数=10/1000  
+提交挂载树: 命名空间 ffff88800b1b2000, 增加 1 个挂载
 
 ##	0x03	用户态视角
 
@@ -1476,9 +2332,7 @@ static struct dentry *rootfs_mount(struct file_system_type *fs_type,
 }
 ```
 
-具体的文件系统如ext4等，是在[`module_init`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/super.c#L5711)中完成的
-
-TODO
+具体的文件系统如ext4等，是在[`module_init`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/super.c#L5711)中完成的，且每个文件系统仅初始化一次
 
 ####	VFS 关联 task_struct
 项目中通常需要基于`task_struct`来获取与VFS相关的事件属性，这里就需要了解`task_struct`与VFS基础数据结构之间的关联关系，如下图所示
