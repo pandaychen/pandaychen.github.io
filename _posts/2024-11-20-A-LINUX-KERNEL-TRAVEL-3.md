@@ -117,7 +117,7 @@ build  docker  home  lost+found  test  subdir
 
 数据结构 [定义](https://elixir.bootlin.com/linux/v6.12.6/source/include/linux/fs.h#L1253)，列举几个重要成员：
 
-```CPP
+```cpp
 //struct super_block 表示一个文件系统的超级块，包含该文件系统的元数据，如文件系统的类型、挂载信息等。VFS 通过超级块来访问和管理文件系统的整体状态
 struct super_block {
 	struct file_system_type	*s_type;	// 文件系统类型
@@ -131,7 +131,7 @@ struct super_block {
 
 文件系统类型结构为 `struct file_system_type`，每个文件系统都要实现一套自己的文件操作函数，这些函数定义在 `struct file_operations` 和 `struct inode_operations` 结构体中。例如 `read` 和 `write` 函数会在不同的文件系统中有不同的实现，每种文件系统类型通过 `struct file_system_type` 来注册到 VFS
 
-```CPP
+```cpp
 struct file_system_type {
     char *name;                           // 文件系统名称
     int (*mount) (struct super_block *, const char *, int, void *); // 挂载操作
@@ -145,7 +145,7 @@ inode 有两种：一种是 VFS 的 inode，一种是具体文件系统的 inode
 
 inode 和文件的关系是当创建一个文件的时候，就给文件分配了一个 inode。一个 inode 只对应一个实际文件，一个文件也会只有一个 inode，inodes 最大数量就是文件的最大数量，Linux可通过`df -i`查询inode使用情况。此外，一个inode可以代表一个普通的文件，也可以代表管道或者设备文件等这样的特殊文件
 
-```CPP
+```cpp
 struct inode {
 	umode_t i_mode;                 // 文件的类型和权限
     unsigned long i_ino;            // 文件的 inode 号（在文件系统中的偏移）
@@ -175,7 +175,7 @@ struct inode {
 
 一个有效的 `dentry` 结构必定有一个 `inode` 结构，这是因为一个目录项要么代表着一个文件，要么代表着一个目录，而目录实际上也是文件。所以，只要 `dentry` 结构是有效的，则其指针 `d_inode` 必定指向一个 `inode` 结构。那么问题来了，dentry的意义是什么？
 
-```CPP
+```cpp
 struct dentry {
 	/* RCU lookup touched fields */
 	unsigned int d_flags;		/* protected by d_lock */
@@ -328,7 +328,7 @@ struct path {
 /data/test --> /dev/vdb
 ```
 
-```CPP
+```cpp
 struct mount {
 	struct hlist_node mnt_hash;	/* 用于链接到全局已挂载文件系统的链表 */
 	struct mount *mnt_parent;	/* 指向此文件系统的挂载点所属的文件系统，即父文件系统 */
@@ -379,7 +379,7 @@ struct mount {
 
 3、`vfsmount`[结构](https://elixir.bootlin.com/linux/v6.5/source/include/linux/mount.h#L70)：新版本`vfsmount`的成员大部分都移动到`mount`结构中了
 
-```CPP
+```cpp
 struct vfsmount {
      struct dentry *mnt_root;    /* root of the mounted tree */
      struct super_block *mnt_sb; /* pointer to superblock */
@@ -399,7 +399,7 @@ struct vfsmount {
 
 4、[`fs_struct`](https://elixir.bootlin.com/linux/v6.12.4/source/include/linux/fs_struct.h#L9)结构，用来表示对于进程本身信息的描述
 
-```CPP
+```cpp
 struct fs_struct {
 	int users;
 	spinlock_t lock;
@@ -450,7 +450,7 @@ struct files_struct {
 这里`path`的意义在于，`nameidata->path->dentry`**暂存的是路径中当前解析的最后一个dentry（component分量），如果某一个目录节点是另一个文件系统的mount point，那么将借助`nameidata->path->mnt`跳转到新的文件系统继续查找**
 
 
-```CPP
+```cpp
 struct nameidata {
     struct path path;		// 核心字段
     ......
@@ -496,7 +496,7 @@ struct vfsmount {
 -	[`ext4_file_inode_operations`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/file.c#L736)
 -	[`address_space_operations`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/inode.c#L3746)
 
-```CPP
+```cpp
 const struct file_operations ext4_file_operations = {
 	.llseek		= ext4_llseek,
 	.read_iter	= ext4_file_read_iter,
@@ -551,7 +551,7 @@ dentry是目录项缓存，是一个存放在内存里的缩略版的磁盘文�
 
 所以，dentry存在的意义就是要**建立文件名filename（struct qstr d_name）到inode（struct inode ＊d_inode）的mapping关系，加速文件操作（基于路径）时的搜索速度**，这里再列举下dentry的核心定义：
 
-```CPP
+```cpp
 struct dentry {
 	// ...
 	struct hlist_bl_node d_hash;	/* lookup hash list */
@@ -671,7 +671,7 @@ Linux 使用父子树的形式来构造，父设备树中的一个文件夹 `str
 
 上图，`current->fs->root` 就是 `task_struct` 中的成员指向：
 
-```CPP
+```cpp
 //file:include/linux/sched.h
 struct task_struct {
  //2.6 进程文件系统信息（当前目录等）
@@ -717,7 +717,7 @@ mount /dev/sda2 /mnt/point    # mount2
 -	`mount_hashtable`：挂载实例哈希表（`mount`实例虽然构成了一颗树，同时构造为hashtable方便高效查找）
 -	`mountpoint_hashtable`：挂载点哈希表
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/namespace.c#L68
 static struct hlist_head *mount_hashtable __read_mostly;
 static struct hlist_head *mountpoint_hashtable __read_mostly;
@@ -729,7 +729,7 @@ hash键计算对应于`m_hash`函数，入参为父挂载`vfsmount *mnt`+当前�
 
 **`lookup_mnt`函数查找逻辑为：在父挂载（`path->mnt->mnt_mounts`）的子挂载链表中，查找挂载点匹配 `path->dentry` 的挂载**，对应的遍历代码抽象为：
 
-```CPP
+```cpp
 struct vfsmount *lookup_mnt(const struct path *path){
     struct mount *child;
     ......
@@ -753,7 +753,7 @@ struct vfsmount *lookup_mnt(const struct path *path){
 4.	找到 `/dev/sda1` 挂载到 `/mnt/nfs`
 5.	继续在 `/dev/sda1` 文件系统中解析 `/file`
 
-```CPP
+```cpp
 // 存储系统中所有挂载的文件系统实例
 struct mount {
     struct hlist_node mnt_hash;      // 哈希表链表节点（成员）
@@ -836,7 +836,7 @@ static struct mountpoint *lookup_mountpoint(struct dentry *dentry)
 
 3、两个hashtable的协作关系 && 常见应用场景
 
-```CPP
+```cpp
 // 一个挂载点对应多个挂载实例（共享挂载）
 struct mountpoint {
 	......
@@ -862,7 +862,7 @@ mount_hashtable  --->  mount1 --->mount2 ---> mount -> ......
 
 挂载新文件系统（后文会详细描述）时，会涉及到对两个表的操作
 
-```CPP
+```cpp
 // 1. 在 mountpoint_hashtable 中查找挂载点
 mp = lookup_mountpoint(dentry);
 
@@ -882,7 +882,7 @@ hlist_add_head(&mnt->mnt_mp_list, &mp->m_list);
 ```
 
 卸载文件系统
-```CPP
+```cpp
 // 1. 从 mount_hashtable 中移除
 hlist_del_init(&mnt->mnt_hash);
 
@@ -898,7 +898,7 @@ if (list_empty(&mp->m_list)) {
 
 命名空间隔离的场景下，快速在全局挂载实例中查找特定命名空间可见的挂载，注意`mnt_namespace`结构的`list`这个链表头，链接的是`struct mount`结构体中的 `mnt_list`字段，即连接该命名空间中的所有挂载
 
-```CPP
+```cpp
 // 每个挂载命名空间有独立的挂载树视图
 struct mnt_namespace {
     struct mount *root;  // 命名空间的根挂载
@@ -910,7 +910,7 @@ struct mnt_namespace {
 ####	重复挂载：`struct mountpoint`
 `struct mountpoint`[结构](https://elixir.bootlin.com/linux/v4.11.6/source/fs/mount.h#L26)用于管理挂载点目录项（dentry）与挂载在其上的文件系统实例（`struct mount`）之间的关系。在路径名查找（path lookup）及挂载操作都会涉及到，`struct mountpoint`结构体用来表示某个特定的 dentry 当前是一个挂载点，它充当了这个 dentry 与其上挂载的文件系统之间的桥梁
 
-```CPP
+```cpp
 struct mountpoint {
 	struct hlist_node m_hash;
 	struct dentry *m_dentry;
@@ -987,7 +987,7 @@ attach_recursive_mnt()  // 递归挂载处理
 
 从系统调用`mount`入口：
 
-```CPP
+```cpp
 SYSCALL_DEFINE5(mount, char __user *, dev_name, char __user *, dir_name,
 		char __user *, type, unsigned long, flags, void __user *, data)
 {
@@ -1030,7 +1030,7 @@ dput_out:
 -	`vfs_kern_mount`：完成了新子树的根dentry（root节点）的创建，传入的是挂载的文件系统类型（创建新的挂载实例）
 -	`do_add_mount`：调用 `do_add_mount` 添加到挂载树
 
-```CPP
+```cpp
 static int do_new_mount(struct path *path, const char *fstype, int flags,
 			int mnt_flags, const char *name, void *data)
 {
@@ -1072,7 +1072,7 @@ static int do_new_mount(struct path *path, const char *fstype, int flags,
 
 最终会调用`do_add_mount`，将新创建的挂载点`mount`添加到内核的挂载树上：
 
-```CPP
+```cpp
 /*
 struct mount *newmnt：要添加的新挂载实例（已初始化）
 struct path *path：目标挂载点路径 {dentry, vfsmount}
@@ -1518,7 +1518,7 @@ static void put_mountpoint(struct mountpoint *mp)
 
 到此`mount`的简单流程已经分析完成。后面在对`open`内核源码分析时，在路径逐级查找时的挂载处理会涉及到这个知识点（即当前的目录是一个挂载点）
 
-```CPP
+```cpp
 static int follow_managed(struct path *path, struct nameidata *nd)
 {
 	struct vfsmount *mnt = path->mnt; /* held by caller, must be left alone */
@@ -1568,7 +1568,7 @@ static int follow_managed(struct path *path, struct nameidata *nd)
 
 此外，在创建文件时的dentry分配时，会调用`d_alloc`方法：
 
-```CPP
+```cpp
 // 在新挂载的文件系统内创建文件时
 struct dentry *d_alloc(struct dentry *parent, const struct qstr *name)
 {
@@ -1592,7 +1592,7 @@ struct dentry *d_alloc(struct dentry *parent, const struct qstr *name)
 
 涉及到的结构与成员如下：
 
-```CPP
+```cpp
 //挂载结构中的命名空间字段
 struct mount {
     struct mnt_namespace *mnt_ns;  // 所属命名空间
@@ -1618,7 +1618,7 @@ struct mnt_namespace {
 
 `vfs_kern_mount`中的命名空间设置
 
-```CPP
+```cpp
 struct vfsmount *vfs_kern_mount(struct file_system_type *type,
                                 int flags, const char *name, void *data)
 {
@@ -1637,7 +1637,7 @@ struct vfsmount *vfs_kern_mount(struct file_system_type *type,
 
 阶段2：容量检查（命名空间限制）对应`int count_mounts(struct mnt_namespace *ns, struct mount *mnt)`，函数中会检查是否超过命名空间挂载限制
 
-```CPP
+```cpp
 struct mnt_namespace {
 	......
     unsigned int mounts;          // 当前挂载数
@@ -1650,7 +1650,7 @@ struct mnt_namespace {
 
 阶段3：挂载树提交到命名空间，主要对应`commit_tree`函数
 
-```CPP
+```cpp
 static void commit_tree(struct mount *mnt)
 {
     struct mount *parent = mnt->mnt_parent;
@@ -1732,7 +1732,7 @@ PID     TID     COMM            FUNC
 ####	目录遍历 in VFS
 文件遍历主要通过是系统调用`getdents`或`getdents64`实现，它们的作用是获取目录项，先看下`getdents`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/readdir.c#L294)：
 
-```CPP
+```cpp
 struct linux_dirent {
 	unsigned long	d_ino; /* Inode number */
 	unsigned long	d_off; /* Offset to next linux_dirent */
@@ -1775,7 +1775,7 @@ SYSCALL_DEFINE3(getdents64, unsigned int, fd,
 
 着重提一下：**`filldir64`的实现是与文件系统类型无关的，它仅仅是一个用于目录数据回填的函数实现，由具体的文件类型调用，统一完成对目录的规范化数据**
 
-```CPP
+```cpp
 // fs/readdir.c
 int iterate_dir(struct file *file, struct dir_context *ctx)
 {
@@ -1796,7 +1796,7 @@ int iterate_dir(struct file *file, struct dir_context *ctx)
 
 从`iterate_dir`的实现可以了解到继续又调用到`iterate_shared`或者`iterate`（都是`file_operations`的抽象定义）继续完成剩下的过程。很容易想到这个和具体的文件系统有关系了，这里以ext4、procfs两种类型来举例（对应着普通目录遍历以及`/proc/`遍历）
 
-```CPP
+```cpp
 struct file_operations {
 	...
 	int (*iterate) (struct file *, struct dir_context *);
@@ -1818,7 +1818,7 @@ struct dir_context {
 
 核心调用链为`ext4_readdir->ext4_dx_readdir->call_filldir->dir_emit`，最终在`dir_emit`函数中看到了调用了`ctx->actor`，即VFS的实现`filldir64`
 
-```CPP
+```cpp
 const struct file_operations ext4_dir_operations = {
 	.llseek		= ext4_dir_llseek,
 	.read		= generic_read_dir,
@@ -1880,7 +1880,7 @@ static inline bool dir_emit(struct dir_context *ctx,
 
 这里以进程打开的文件fd列表为例（对于可以遍历的`/proc`目录都需要实现`iterate_shared`系列方法），procfs对应的实现如下：
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/fd.c#L268
 const struct file_operations proc_fd_operations = {
 	.read		= generic_read_dir,
@@ -1889,7 +1889,7 @@ const struct file_operations proc_fd_operations = {
 };
 ```
 
-```CPP
+```cpp
 static int proc_readfd(struct file *file, struct dir_context *ctx)
 {
 	return proc_readfd_common(file, ctx, proc_fd_instantiate);
@@ -1932,7 +1932,7 @@ static int proc_readfd_common(struct file *file, struct dir_context *ctx,
 
 可以看到，procfs文件系统最终在`proc_fill_cache`调用了`dir_emit`，继而调用了`ctx->actor`函数
 
-```CPP
+```cpp
 bool proc_fill_cache(struct file *file, struct dir_context *ctx,
 	const char *name, int len,
 	instantiate_t instantiate, struct task_struct *task, const void *ptr)
@@ -1953,7 +1953,7 @@ bool proc_fill_cache(struct file *file, struct dir_context *ctx,
 
 伪代码如下：
 
-```CPP
+```cpp
 int (*real_iterate)(struct file *, struct dir_context *); 
 int (*real_filldir)(struct dir_context *, const char *, int, loff_t, u64, unsigned);
 int fake_iterate(struct file *filp, struct dir_context *ctx)
@@ -2020,7 +2020,7 @@ if(real_iterate){
 
 ####	内核初始化：VFS相关
 
-```CPP
+```cpp
 asmlinkage __visible void __init start_kernel(void)
 	......
 	vfs_caches_init();
@@ -2132,7 +2132,7 @@ static void __init init_mount_tree(void)
 
 这里详细的介绍下`vfs_kern_mount`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namespace.c#L964)，`vfs_kern_mount`用于在内核中创建一个新的挂载点，通常用于内核内部的挂载操作（如挂载`rootfs/sysfs/procfs`等）
 
-```CPP
+```cpp
 vfs_kern_mount(struct file_system_type *type, int flags, const char *name, void *data)
 {
 	struct mount *mnt;
@@ -2171,7 +2171,7 @@ vfs_kern_mount(struct file_system_type *type, int flags, const char *name, void 
 ```
 上面的`mount_fs`函数中的回调，对`rootfs`而言是如下：
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/init/do_mounts.c#L608
 static struct dentry *rootfs_mount(struct file_system_type *fs_type,
 	int flags, const char *dev_name, void *data)
@@ -2212,7 +2212,7 @@ socket在Linux中对应的特殊文件系统叫sockfs，每创建一个socket，
 -	`struct vfsmount`与`struct mount`
 -	`*_operations`
 
-```CPP
+```cpp
 //sockfs 文件类型
 static struct file_system_type sock_fs_type = {
 	.name = "sockfs",
@@ -2232,7 +2232,7 @@ static struct vfsmount *sock_mnt __read_mostly;
 
 进程创建一个 socket，需要把该 socket 关联到一个已打开文件，这样才方便进程进行管理，那么是如何把`struct socket`与VFS以及`task_struct`进行关联的？从`socket_alloc`结构可以略微看出些端倪（直观上通过`task_struct->fdtable->file->dentry->inode`就可以找到对应的`struct socket`结构）
 
-```CPP
+```cpp
 // socket_alloc：sock 与 inode 文件节点关联结构
 struct socket_alloc {
 	struct socket socket;
@@ -2253,7 +2253,7 @@ static inline struct inode *SOCK_INODE(struct socket *socket)
 
 sockfs关联的`file_operations`、`inode_operaions`、`dentry_operations`以及`super_operations`的定义：
 
-```CPP
+```cpp
 //super_block
 static const struct super_operations sockfs_ops = {
     .alloc_inode    = sock_alloc_inode,	//在alloc_inode函数中sb->s_op->alloc_inode(sb)调用，用于创建一个inode（sock）
@@ -2290,7 +2290,7 @@ static const struct file_operations socket_file_ops = {
 
 内核初始化时，执行`sock_init()`函数注册sockfs，相关实现如下：
 
-```CPP
+```cpp
 core_initcall(sock_init);    /* early initcall */
 
 static int __init sock_init(void)
@@ -2343,7 +2343,7 @@ static struct file_system_type **find_filesystem(const char *name, unsigned len)
 
 `kern_mount`宏及相关函数实现如下：
 
-```CPP
+```cpp
 #define kern_mount(type) kern_mount_data(type, NULL)
 
 struct vfsmount *kern_mount_data(struct file_system_type *type, void *data)
@@ -2360,7 +2360,7 @@ struct vfsmount *kern_mount_data(struct file_system_type *type, void *data)
 
 `vfs_kern_mount`函数调用`mount_fs`获取该文件系统的根目录的`dentry`，同时也获取`super_block`，具体实现如下：
 
-```CPP
+```cpp
 struct vfsmount *
 vfs_kern_mount(struct file_system_type *type, int flags, const char *name, void *data)
 {
@@ -2400,7 +2400,7 @@ vfs_kern_mount(struct file_system_type *type, int flags, const char *name, void 
 
 接着看下`mount_fs`的实现，其中很重要的一段逻辑`type->mount`，在sockfs中是回调函数`sockfs_mount`
 
-```CPP
+```cpp
 struct dentry *
 mount_fs(struct file_system_type *type, int flags, const char *name, void *data)
 {
@@ -2441,7 +2441,7 @@ mount_fs(struct file_system_type *type, int flags, const char *name, void *data)
 
 `sockfs_mount`函数进行超级块sb、根root、根dentry相关的创建及初始化操作，其中这段`s->s_d_op=dops`就说指向了`sockfs_ops`结构体，也就是该sockfs文件系统的`struct super_block`的函数操作集指向了`sockfs_ops`（`sockfs_dentry_operations`）
 
-```CPP
+```cpp
 static const struct super_operations sockfs_ops = {
 .alloc_inode = sock_alloc_inode,
 .destroy_inode = sock_destroy_inode,
@@ -2451,7 +2451,7 @@ static const struct super_operations sockfs_ops = {
 
 `sockfs_ops`函数表**对sockfs文件系统的节点和目录提供了具体的操作函数，后面涉及到的sockfs文件系统的重要操作均会到该函数表中查找到对应的操作函数**，例如Linux内核在创建socket节点时会查找`sockfs_ops`的`alloc_inode`函数， 从而调用`sock_alloc_inode`函数完成socket以及inode节点的创建
 
-```CPP
+```cpp
 static struct dentry *sockfs_mount(struct file_system_type *fs_type,
 int flags, const char *dev_name, void *data)
 {
@@ -2512,7 +2512,7 @@ const struct dentry_operations *dops, unsigned long magic)
 -	初始化套接字 inode 的属性
 -	返回 `struct socket` 对象，后续由 `sock_map_fd` 映射到文件描述符
 
-```CPP
+```cpp
 struct socket *sock_alloc(void) {
     struct inode *inode;
     struct socket *sock;
@@ -2578,7 +2578,7 @@ static struct inode *sock_alloc_inode(struct super_block *sb) {
 
 socket系统调用在VFS层面的最后工作是构建VFS中sock 与进程（`task_struct`）关联，即将新创建的 socket 结构体与文件描述符fd关联，使其能通过 VFS 以文件形式被用户空间操作
 
-```CPP
+```cpp
 static int sock_map_fd(struct socket *sock, int flags) {
     struct file *newfile;
 
