@@ -1151,7 +1151,7 @@ unlock:
 -	`lock_mount`->`lookup_mnt`->`get_mountpoint`->`lookup_mountpoint`
 -	`graft_tree`->`attach_recursive_mnt` TODO
 
-```CPP
+```cpp
 //锁定挂载点路径，处理挂载点解析和重复挂载检查，确保挂载操作的原子性
 /* 参数：要挂载的目标路径
 struct path *path = {
@@ -1343,7 +1343,7 @@ static struct mountpoint *lookup_mountpoint(struct dentry *dentry)
 } 
 ```
 
-```CPP
+```cpp
 tatic struct mountpoint *lookup_mountpoint(struct dentry *dentry)
 {
 	struct hlist_head *chain = mp_hash(dentry);
@@ -1593,18 +1593,14 @@ struct dentry *d_alloc(struct dentry *parent, const struct qstr *name)
 涉及到的结构与成员如下：
 
 ```CPP
-3.1 挂载结构中的命名空间字段
-
-// fs/mount.h
+//挂载结构中的命名空间字段
 struct mount {
     struct mnt_namespace *mnt_ns;  // 所属命名空间
     struct list_head mnt_list;     // 在命名空间链表中的节点
-    // ...
+    ......
 };
 
-3.2 命名空间结构定义
-
-// include/linux/mnt_namespace.h
+//命名空间结构定义
 struct mnt_namespace {
     atomic_t count;                 // 引用计数
     struct ns_common ns;           // 命名空间公共部分
@@ -1691,145 +1687,6 @@ static void commit_tree(struct mount *mnt)
     touch_mnt_namespace(n);
 }
 ```
-
-传播场景：
-
-// 克隆挂载可能属于不同的命名空间
-if (child->mnt_parent->mnt_ns != current->nsproxy->mnt_ns) {
-    // 跨命名空间传播
-    child->mnt_ns = child->mnt_parent->mnt_ns;  // 使用目标命名空间
-}
-
-3. 命名空间相关的关键数据结构
-
-
-3.3 进程的命名空间代理
-
-// include/linux/nsproxy.h
-struct nsproxy {
-    atomic_t count;
-    struct uts_namespace *uts_ns;
-    struct ipc_namespace *ipc_ns;
-    struct mnt_namespace *mnt_ns;  // 挂载命名空间
-    struct pid_namespace *pid_ns;
-    struct net *net_ns;
-};
-
-4. 具体场景分析
-4.1 普通进程挂载（相同命名空间）
-
-// 当前进程在初始命名空间
-current->nsproxy->mnt_ns = init_ns;
-
-// 新挂载使用相同的命名空间
-new_mnt->mnt_ns = init_ns;
-
-4.2 容器内挂载（独立命名空间）
-
-// 容器进程有自己的命名空间
-current->nsproxy->mnt_ns = container_ns;
-
-// 新挂载使用容器命名空间
-new_mnt->mnt_ns = container_ns;
-
-4.3 挂载传播到其他命名空间
-
-// 共享挂载可能传播到其他命名空间
-for_each_peer_mount(peer, source_mnt) {
-    if (peer->mnt_ns != current->nsproxy->mnt_ns) {
-        // 创建克隆挂载，使用对等挂载的命名空间
-        clone->mnt_ns = peer->mnt_ns;
-        commit_tree(clone);  // 提交到目标命名空间
-    }
-}
-
-5. 命名空间操作的具体函数
-5.1 命名空间查找和获取
-
-// 获取当前命名空间
-struct mnt_namespace *current_ns = current->nsproxy->mnt_ns;
-
-// 增加命名空间引用计数
-struct mnt_namespace *get_mnt_ns(struct mnt_namespace *ns)
-{
-    atomic_inc(&ns->count);
-    return ns;
-}
-
-5.2 命名空间挂载链表操作
-
-// 遍历命名空间中的所有挂载
-void list_mounts_in_ns(struct mnt_namespace *ns)
-{
-    struct mount *mnt;
-    
-    list_for_each_entry(mnt, &ns->list, mnt_list) {
-        printk("挂载: %s\n", mnt->mnt.mnt_root->d_name.name);
-    }
-}
-
-5.3 挂载计数管理
-
-// 检查并预留挂载空间
-int check_mount_space(struct mnt_namespace *ns, int needed)
-{
-    if (ns->mounts + ns->pending_mounts + needed > ns->mount_max)
-        return -ENOSPC;
-    
-    ns->pending_mounts += needed;
-    return 0;
-}
-
-6. 错误处理中的命名空间操作
-6.1 挂载失败时的清理
-
-// 在 attach_recursive_mnt 的错误处理中
-out:
-    ns->pending_mounts = 0;  // 重置待处理挂载数
-
-out_cleanup_ids:
-    // 清理已传播的挂载
-    while (!hlist_empty(&tree_list)) {
-        child = hlist_entry(tree_list.first, struct mount, mnt_hash);
-        child->mnt_parent->mnt_ns->pending_mounts = 0;  // 重置目标命名空间
-        umount_tree(child, UMOUNT_SYNC);
-    }
-
-6.2 命名空间引用计数管理
-
-// 正确管理命名空间生命周期
-void put_mnt_ns(struct mnt_namespace *ns)
-{
-    if (atomic_dec_and_test(&ns->count)) {
-        // 引用计数为0，释放命名空间
-        free_mnt_ns(ns);
-    }
-}
-
-7. 实际调试信息
-7.1 添加命名空间调试
-
-// 调试挂载过程中的命名空间操作
-pr_debug("挂载操作: 进程ns=%px, 目标ns=%px, 挂载数=%d/%d\n",
-         current->nsproxy->mnt_ns,
-         dest_mnt->mnt_ns,
-         dest_mnt->mnt_ns->mounts,
-         dest_mnt->mnt_ns->mount_max);
-
-// 在 commit_tree 中
-pr_debug("提交挂载树: 命名空间 %px, 增加 %d 个挂载\n",
-         n, n->pending_mounts);
-
-7.2 预期输出示例
-主机挂载：
-
-挂载操作: 进程ns=ffff88800a0a0000, 目标ns=ffff88800a0a0000, 挂载数=50/1000
-提交挂载树: 命名空间 ffff88800a0a0000, 增加 3 个挂载
-
-容器内挂载：
-
-挂载操作: 进程ns=ffff88800b1b2000, 目标ns=ffff88800b1b2000, 挂载数=10/1000  
-提交挂载树: 命名空间 ffff88800b1b2000, 增加 1 个挂载
 
 ##	0x03	用户态视角
 
