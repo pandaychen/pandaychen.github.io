@@ -205,6 +205,117 @@ struct pid_link
 };
 ```
 
+####	常用操作函数/宏
+
+1、`hlist_for_each_entry_rcu`：用于在 RCU 读锁的保护下，无锁地遍历该哈希桶中的单向链表
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/rculist.h#L584
+#define hlist_for_each_entry_rcu(pos, head, member)			\
+	for (pos = hlist_entry_safe (rcu_dereference_raw(hlist_first_rcu(head)),\
+			typeof(*(pos)), member);			\
+		pos;							\
+		pos = hlist_entry_safe(rcu_dereference_raw(hlist_next_rcu(\
+			&(pos)->member)), typeof(*(pos)), member))
+```
+
+`hlist_for_each_entry_rcu`宏的三个入参含义如下：
+
+`pos`：当前位置指针，指向包含`hlist_node`的结构体的指针，用于在遍历过程中指向当前链表元素，注意点：
+
+-	必须是有效的指针变量
+-	类型应该与链表元素的实际类型匹配
+-	在宏展开后会被自动初始化和更新
+
+`head`：链表头指针，类型为`struct hlist_head *`，作用是指向要遍历的哈希链表的头节点
+
+`member`：节点成员名称，即结构体成员的名称（标识符），用来指定`hlist_node`在包含结构体中的字段名（链表节点在包含结构体中的字段名称）
+
+列举几个例子：
+
+`find_pid_ns`，用于遍历全局upid hashtable，第一个参数`pnr`表示 upid hashtable中每个hash链表桶元素（类型为`struct upid *`）；第二个参数`&pid_hash[pid_hashfn(nr, ns)]`，直接定位到upid hashtable的bucket 头指针，类型为`struct hlist_head *`；第三个参数为`pid_chain`，对应于`upid`结构体的node成员`pid_chain`，类型为`struct hlist_node`
+
+```CPP
+static struct hlist_head *pid_hash;	//全局hashtable
+
+struct upid {
+	/* Try to keep pid_chain in the same cacheline as nr for find_vpid */
+	int nr;
+	struct pid_namespace *ns;
+	struct hlist_node pid_chain;
+};
+
+struct pid *find_pid_ns(int nr, struct pid_namespace *ns)
+{
+	struct upid *pnr;
+	//
+	hlist_for_each_entry_rcu(pnr,
+			&pid_hash[pid_hashfn(nr, ns)], pid_chain)
+		if (pnr->nr == nr && pnr->ns == ns)
+			return container_of(pnr, struct pid,
+					numbers[ns->level]);
+	
+		return NULL;
+}
+```
+
+再看一个宏定义宏的例子：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/pid.h#L178
+#define do_each_pid_task(pid, type, task)				\
+	do {								\
+		if ((pid) != NULL)					\
+			hlist_for_each_entry_rcu((task),		\
+				&(pid)->tasks[type], pids[type].node) {
+```
+
+调用`do_each_pid_task`的代码：
+
+```CPP
+static bool has_stopped_jobs(struct pid *pgrp)
+{
+	struct task_struct *p;
+
+	do_each_pid_task(pgrp, PIDTYPE_PGID, p) {
+		if (p->signal->flags & SIGNAL_STOP_STOPPED)
+			return true;
+	} while_each_pid_task(pgrp, PIDTYPE_PGID, p);
+
+	return false;
+}
+
+struct pid {
+    // ...
+    struct hlist_head tasks[PIDTYPE_MAX];  // 每个pid有自己的任务链表
+    // ...
+};
+
+struct task_struct {
+    // ...
+    struct pid_link pids[PIDTYPE_MAX];     // 链接到对应pid的tasks链表
+    // ...
+};
+
+struct pid_link {
+    struct hlist_node node;   // ← 这就是member参数指向的节点
+    struct pid *pid;
+};
+```
+
+在`do_each_pid_task`调用`hlist_for_each_entry_rcu`宏，第一个参数为`task`（`p`），是`struct task_struct *`类型；第二个参数为`&(pid)->tasks[type]`，调用展开为`&(pgrp)->tasks[PIDTYPE_PGID]`,即`struct pid`中的hashtable头；第三个参数为`pids[type].node`，展开为`pids[PIDTYPE_PGID].node`，对应`task_struct`中的成员`pids[PIDTYPE_MAX].node`，其类型正为`struct hlist_node`，简化为如下：
+
+```cpp
+struct task_struct *task;                    // pos: 遍历时的当前任务
+struct hlist_head *head = &pid->tasks[type]; // head: PID的任务链表头
+                                            // member: pids[type].node
+
+hlist_for_each_entry_rcu(task, head, pids[type].node) {
+    // 处理每个task
+	......
+}
+```
+
 ##	0x03	rbtree
 [rbtree](https://elixir.bootlin.com/linux/v6.13.1/source/lib/rbtree.c)
 经典数据结构，性能稳定，插入/删除/查找的时间复杂度接近`O(logN)`，而且中序遍历的结果是从小到大有序，内核中有如下应用：
