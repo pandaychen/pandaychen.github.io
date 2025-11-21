@@ -1005,6 +1005,7 @@ long do_mount(const char *dev_name, const char __user *dir_name,
 	int mnt_flags = 0;
 	......
 	/* ... and get the mountpoint */
+	// 完成路径解析，存储与path中
 	retval = user_path(dir_name, &path);
 	if (retval)
 		return retval;
@@ -1023,6 +1024,61 @@ dput_out:
 	return retval;
 }
 ```
+
+这里注意到，在调用`do_new_mount`之前，内核会调用`user_path`解析目标路径，并存储在结构`struct path`中：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/namei.h#L58
+static inline int user_path(const char __user *name, struct path *path)
+{
+	return user_path_at_empty(AT_FDCWD, name, LOOKUP_FOLLOW, path, NULL);
+}
+int user_path_at_empty(int dfd, const char __user *name, unsigned flags,
+		 struct path *path, int *empty)
+{
+	return filename_lookup(dfd, getname_flags(name, flags, empty),
+			       flags, path, NULL);
+}
+
+static int filename_lookup(int dfd, struct filename *name, unsigned flags,
+			   struct path *path, struct path *root)
+{
+	int retval;
+	struct nameidata nd;
+	if (IS_ERR(name))
+		return PTR_ERR(name);
+	if (unlikely(root)) {
+		nd.root = *root;
+		flags |= LOOKUP_ROOT;
+	}
+
+	set_nameidata(&nd, dfd, name);
+	// 和open流程类似
+	retval = path_lookupat(&nd, flags | LOOKUP_RCU, path);
+	if (unlikely(retval == -ECHILD))
+		retval = path_lookupat(&nd, flags, path);
+	if (unlikely(retval == -ESTALE))
+		retval = path_lookupat(&nd, flags | LOOKUP_REVAL, path);
+
+	if (likely(!retval))
+		audit_inode(name, path->dentry, flags & LOOKUP_PARENT);
+	restore_nameidata();
+	putname(name);
+	return retval;
+}
+```
+
+```bash
+# 比如，对下面的操作序列，在执行mount  /dev/sda5 /a/b/c时
+mkdir /a/b/c;
+mount  /dev/sda1 /a/b/c;
+mount  /dev/sda2 /a/b/c;
+mount  /dev/sda3 /a/b/c;
+mount  /dev/sda4 /a/b/c;
+mount  /dev/sda5 /a/b/c
+```
+
+考虑执行`mount  /dev/sda5 /a/b/c`时的过程，此时路径解析结果，如`user_path("/a/b/c")`返回的是原始挂载点路径 `{root_mnt, dentry_of_c}`，**并不会穿透到当前挂载的文件系统**，原因是，设置了`LOOKUP_MOUNTPOINT`标志使路径解析在最后一个组件遇到挂载点时停止穿透。后续挂载点穿透时机，穿透发生在 `lock_mount`函数中，而不是路径解析阶段。最终挂载位置：新文件系统（`sda5`）会挂载到原始挂载点（`/a/b/c`），覆盖之前的挂载（`sda4`）
 
 继续执行到`do_new_mount`函数：
 
@@ -1063,6 +1119,7 @@ static int do_new_mount(struct path *path, const char *fstype, int flags,
 		return -EPERM;
 	}
 
+	// do_add_mount：执行挂载
 	err = do_add_mount(real_mount(mnt), path, mnt_flags);
 	if (err)
 		mntput(mnt);
@@ -1137,6 +1194,9 @@ static int do_add_mount(struct mount *newmnt, struct path *path, int mnt_flags)
 
 	//6. 核心操作，设置挂载标志并执行实际的挂载树操作
 	// graft_tree分析见下面
+	//重要：graft_tree主要完成两个功能：
+	//1.将 newmnt挂载到 parent挂载结构下（形成父子mount结构）
+	//2.将 newmnt关联到 mp的链表成员上
 	newmnt->mnt.mnt_flags = mnt_flags;
 	err = graft_tree(newmnt, parent, mp);
 
@@ -1192,7 +1252,7 @@ retry:
 	mnt = lookup_mnt(path);
 	if (likely(!mnt)) {
 		// 6. 主要执行路径：无现有挂载，核心逻辑是get_mountpoint（见下）
-		// get_mountpoint：获取一个挂载点，如果不存在则创建
+		// get_mountpoint：获取一个挂载点mountpoint，如果不存在则创建
 		struct mountpoint *mp = get_mountpoint(dentry);
 		if (IS_ERR(mp)) {
 			namespace_unlock();
@@ -1343,6 +1403,116 @@ static struct mountpoint *lookup_mountpoint(struct dentry *dentry)
 } 
 ```
 
+注意到上面分析的`lock_mount`函数中包含了一个`retry`标签，其中包含了两个重要的子调用 `lookup_mnt`和 `get_mountpoint`，这二者在`lock_mount`涵盖了典型的几种场景，说明下：
+
+`lookup_mnt`查找挂载实例，作用是检查路径（`struct path`）是否已被挂载，主要关注挂载实例是否存在；而`get_mountpoint`功能（参数`struct dentry`）是获取/创建挂载点，作用是获取或创建挂载点结构
+
+-	`lookup_mnt`：返回`NULL`（未挂载），需要调用 `get_mountpoint`创建新挂载点（新挂载的场景）
+-	`lookup_mnt`：返回非`NULL`（已挂载），穿透到挂载点根目录，重试（覆盖挂载）
+
+```cpp
+struct vfsmount *lookup_mnt(const struct path *path)
+{
+    // 在全局挂载哈希表中查找
+    // 返回：找到的挂载实例 或 NULL
+}
+
+struct mountpoint *get_mountpoint(struct dentry *dentry)
+{
+    // 在挂载点哈希表中查找或创建
+    // 返回：挂载点结构 或 错误指针
+}
+```
+
+组合1：`lookup_mnt`返回 `NULL`，`get_mountpoint`成功，对应场景是新挂载点，首次挂载。即路径上没有任何挂载，需要创建新的挂载点结构
+
+如对于`/mnt/test`的第一次挂载，在进入`do_mount`之前，路径已经完成了解析：
+
+```cpp
+path = {
+    .mnt = root_mnt,          // 根挂载
+    .dentry = /mnt/test的dentry  // 在根文件系统中
+}
+```
+
+```cpp
+mnt = lookup_mnt(path);        // 检查 /mnt/test 是否已挂载， 返回 NULL
+if (likely(!mnt)) {
+    mp = get_mountpoint(dentry);  // 成功返回 mountpoint
+    return mp;  // 正常返回
+}
+```
+
+```TEXT
+# 第一次挂载到 /mnt/test
+mount /dev/sda1 /mnt/test
+
+数据结构变化：
+
+挂载前：
+mountpoint_hashtable: 空
+mount_hashtable: 只有根挂载 
+
+挂载后：
+mountpoint_hashtable[hash(/mnt/test)] -> [new_mp]
+mount_hashtable[hash(/, /mnt/test)] -> [new_mnt]
+```
+
+组合2：`lookup_mnt`返回 `NULL`，`get_mountpoint`失败，即路径上没有挂载，但是了内存分配失败（内存不足），这种情况会立即返回错误，不进行重试
+
+组合3：`lookup_mnt`返回非`NULL`，进入重试路径。说明当前路径已经被挂载了，需要先处理穿透，穿透到该目录实际最终生效的那个挂载点（由于覆盖挂载的原因）
+
+考虑如下操作场景（`mount /dev/sdb1 /mnt`），在代码中，当执行到`mnt = lookup_mnt(path)` 会检查 `/mnt/` 是否是挂载点
+
+```bash
+# /mnt 是挂载点
+mount /dev/sda1 /mnt
+# 挂载到已挂载文件系统的根目录
+mount /dev/sdb1 /mnt
+```
+
+此时，路径解析结果为：
+
+```cpp
+// 路径解析穿透 /mnt 挂载点
+path = {
+    .mnt = /dev/sda1的挂载,    // 穿透后的挂载
+    .dentry = /dev/sda1的根dentry  // 挂载文件的根目录
+}
+```
+
+```cpp
+//当前路径点已有挂载
+//需要切换到挂载的文件系统继续查找（goto retry）
+retry:
+......
+mnt = lookup_mnt(path);        // 返回 existing_mnt
+if (likely(!mnt)) {
+    // 不执行此分支
+} else {
+    // 执行重试逻辑
+    namespace_unlock();
+    inode_unlock(path->dentry->d_inode);
+    path_put(path);
+    path->mnt = mnt;                    // 切换到找到的挂载
+    dentry = path->dentry = dget(mnt->mnt_root);  // 切换到挂载根
+    goto retry;  // 重新开始
+}
+```
+
+```bash
+# 初始状态
+mount /dev/sda1 /mnt        # /mnt 挂载了 sda1
+
+# 覆盖挂载
+mount /dev/sdb1 /mnt        # 覆盖 /mnt 的挂载
+
+# 路径解析结果：path = {root_mnt, /mnt的dentry}
+# lookup_mnt 返回 /dev/sda1 的挂载（因为/mnt是挂载点）
+# 穿透：更新 path = {sda1挂载, sda1根目录}
+# 重试：在 sda1 的根目录创建新挂载点，用以挂载设备/dev/sdb1
+```
+
 ```cpp
 tatic struct mountpoint *lookup_mountpoint(struct dentry *dentry)
 {
@@ -1362,10 +1532,10 @@ tatic struct mountpoint *lookup_mountpoint(struct dentry *dentry)
 }
 ```
 
-上面已经分析完，在最终执行挂载前的一系列检查与准备工作，继续分析最后的挂载操作`graft_tree->attach_recursive_mnt`，这里只考虑新挂载的场景
+上面已经分析完，在最终执行挂载前的一系列检查与准备工作，继续分析最后的挂载操作`graft_tree->attach_recursive_mnt`，这里只考虑新挂载的场景，其中`graft_tree`的核心作用是将 `newmnt`挂载到 `parent`挂载结构下，使得`struct mount`形成父子结构，另外将 `newmnt`关联到 `mp`（`struct mountpoint`）的链表成员上
 
 ```cpp
-static int graft_tree(struct mount *mnt, struct mount *p, struct mountpoint *mp)
+static int graft_tree(struct mount *mnt/*子mount*/, struct mount *p/*父mount*/, struct mountpoint *mp)
 {
     // 检查1: 文件系统是否允许用户挂载
     if (mnt->mnt.mnt_sb->s_flags & MS_NOUSER)
@@ -1385,8 +1555,8 @@ dest_mnt：目标挂载点所在的父挂载
 dest_mp：目标挂载点（目录项）
 parent_path：如果是移动挂载，提供原路径；否则为 NULL，这里只考虑NULL的情况
 */
-static int attach_recursive_mnt(struct mount *source_mnt,
-			struct mount *dest_mnt,
+static int attach_recursive_mnt(struct mount *source_mnt/*子mount*/,
+			struct mount *dest_mnt/*父mount*/,
 			struct mountpoint *dest_mp,
 			struct path *parent_path)
 {
@@ -1439,10 +1609,11 @@ static int attach_recursive_mnt(struct mount *source_mnt,
 		source_mnt->mnt_mountpoint = dest_mp->m_dentry // 指向挂载点
 		dest_mp->m_count = 2                      // 引用计数增加
 		*/
-		mnt_set_mountpoint(dest_mnt, dest_mp, source_mnt);
+		// mnt_set_mountpoint：重要！设置父子mount关系
+		mnt_set_mountpoint(dest_mnt/*父*/, dest_mp, source_mnt/*子*/);
 
 		//提交挂载树，注意这里的入参为mount，主要是处理mount树（父子节点）的各种连接关系
-		commit_tree(source_mnt);
+		commit_tree(source_mnt/*子*/);
 	}
 
 	......
@@ -1687,6 +1858,25 @@ static void commit_tree(struct mount *mnt)
     touch_mnt_namespace(n);
 }
 ```
+
+至此，`mount`函数分析完成，再回到前面的例子：
+
+
+```bash
+mkdir /a/b/c;
+mount  /dev/sda1 /a/b/c;
+mount  /dev/sda2 /a/b/c;
+mount  /dev/sda3 /a/b/c;
+mount  /dev/sda4 /a/b/c;
+mount  /dev/sda5 /a/b/c
+```
+
+对于`struct mount`结构而言，最终会形成如下图所示的结构：
+
+![multiple-mount-tree]()
+
+对于`struct mountpoint`结构而言，其`m_dentry`成员确实指向最原始的那个目录项（dentry），
+当执行 `mount /dev1 /a/b/c`时，内核会创建一个 `mountpoint`结构，其 `m_dentry`指向 `/a/b/c`这个目录的原始 dentry；当再次执行 `mount /dev2 /a/b/c`时，内核会重用同一个 `mountpoint`结构（而不是创建新的），只是增加其引用计数 `m_count`。因此，`m_dentry`仍然指向同一个原始 dentry
 
 ##	0x03	用户态视角
 
