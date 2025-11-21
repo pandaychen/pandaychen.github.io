@@ -606,7 +606,22 @@ struct eppoll_entry {
 
 而通过`epoll_ctl()` 增加监听fd及事件的过程，也包含了加入 waitqueue 的动作（注册socket就绪时的`wait_queue_t`结构，包含了就绪回调函数）等，主要内核函数调用链为`epoll_ctl(EPOLL_CTL_ADD) --> ep_insert() --> ep_ptable_queue_proc() --> add_wait_queue()`，调用它的任务会被挂在多个 waitqueue 上面，当其中一个 waitqueue 上的事件到来时（比如文件有可读的内容，或者腾出了可写的空闲区域），创建 waitqueue 节点时填入的回调函数 `ep_poll_callback()` 会将这个 entry 移入 ready list（或者 ovflist），等待任务唤醒后处理
 
-##  0x05  参考
+##	0x05	小结
+
+1、链表 VS hashtable，内核更偏爱后者
+
+对比内核中二者实现，哈希链表的结构`struct hlist_head`和 `struct hlist_node`。它与普通的 `struct list_head`双链表有一个关键区别：
+
+-	`struct list_head`有 `prev`和 `next`两个指针，构成一个完美的双向链表
+-	`struct hlist_head`只有一个指向第一个节点的 `first`指针
+-	`struct hlist_node`有 `next`和 `pprev`（指向指向上一个节点的指针的指针）
+
+hashtable这样设计主要是为了节省内存，哈希表的表头是一个数组，每个桶都是一个链表头。如果使用普通的 `list_head`，每个链表头都会有两个指针（`prev`/`next`），但在表头数组中，`prev`指针对于桶头来说是浪费的，因为桶头之间并不需要相互链接。`hlist`的这种设计将表头的开销减少了一半，对于拥有大量桶的哈希表来说，节省的内存非常可观
+
+内核中双链表更多用于需要严格顺序或集合管理的场景，例如调度器中的就绪队列、等待某个事件发生的进程队列或者
+需要按顺序处理的软中断或工作队列等
+
+##  0x06  参考
 -   [Linux 内核中的数据结构](https://blog.csdn.net/Rong_Toa/article/details/115110811)
 -   [内核基础设施——hlist_head/hlist_node 结构解析](https://linux.laoqinren.net/kernel/hlist/)
 -   [《Linux 内核设计与实现》读书笔记（六）- 内核数据结构](https://www.cnblogs.com/wang_yb/archive/2013/04/16/3023892.html)
