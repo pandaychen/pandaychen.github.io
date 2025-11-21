@@ -1473,7 +1473,7 @@ mount /dev/sdb1 /mnt
 
 此时，路径解析结果为：
 
-```cpp
+```text
 // 路径解析穿透 /mnt 挂载点
 path = {
     .mnt = /dev/sda1的挂载,    // 穿透后的挂载
