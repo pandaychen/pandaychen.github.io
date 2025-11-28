@@ -754,7 +754,20 @@ if not is_support_kfunc:
 本工具通过跟踪`vsf_create/vfs_open/security_inode_create/vfs_unlink`内核函数，来检测文件从创建到删除的存活时间（在`filelife`运行期间创建/打开后又被删除的文件），可以观测到哪些线程在频繁创建和删除文件，需要处理上述函数在内核版本的兼容性，思考下，为何对于文件创建要选择上述三个hook点？根据前文的分析，可以了解创建文件有两种方式，第一种是通过系统调用如`creat`创建文件，第二种是在`open/openat`中指定参数，打开不存在文件时进行创建
 
 ```CPP
+SYSCALL_DEFINE3(open, const char __user *, filename, int, flags, umode_t, mode)
+{
+	if (force_o_largefile())
+		flags |= O_LARGEFILE;
+	return do_sys_open(AT_FDCWD, filename, flags, mode);
+}
 
+SYSCALL_DEFINE4(openat, int, dfd, const char __user *, filename, int, flags,
+		umode_t, mode)
+{
+	if (force_o_largefile())
+		flags |= O_LARGEFILE;
+	return do_sys_open(dfd, filename, flags, mode);
+}
 ```
 
 `filelife`在`kprobe/vfs_create`、`kprobe/vfs_open`和`kprobe/security_inode_create`处追踪文件新建事件（可能会有重复），注意 **`open/openat`新建文件（参考[前文]()对open的内核源码分析）时不一定通过`vfs_create`可能直接调用文件系统的`create`方法，但一定会在`security_inode_create`处检查创建文件权限**，在文件创建时记录时间戳记录到map中，最后在`kprobe/vfs_unlink`删除文件的函数进入时刻，从map中读取文件创建/打开时的时间戳，计算时间差，收集文件路径等信息保存，在`kretprobe/vfs_unlink`时根据返回值是否是`0`判断删除文件是否成功
