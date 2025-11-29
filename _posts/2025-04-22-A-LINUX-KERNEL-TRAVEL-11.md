@@ -14,6 +14,8 @@ tags:
 ##  0x00    前言
 本文代码基于 [v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include) 版本
 
+Linux一切皆文件，如常规文件、目录、目录中的`.`和`..`、以及软/硬连接、socket、管道等，这些都属于文件
+
 用户进程在能够读 / 写一个文件之前必须要先 open 这个文件。对文件的读 / 写从概念上说是一种进程与文件系统之间的一种有连接通信，所谓打开文件实质上就是在进程与文件之间建立起链接。在文件系统的处理中，每当一个进程重复打开同一个文件时就建立起一个由 `struct file` 结构代表的独立的上下文。通常一个 `file` 结构，即一个读 / 写文件的上下文，都由一个打开文件号（fd）加以标识。从 VFS 的层面来看，open 操作的实质就是根据参数指定的路径去获取一个该文件系统（比如 `ext4`）的 inode（硬盘上），然后触发 VFS 一系列机制（如生成 dentry、加载 inode 到内存 inode 以及将 dentry 指向内存 inode 等等），然后去填充 VFS 层的 `struct file` 结构体，这样就可以让上层使用了
 
 用户态程序调用 `open` 函数时，会产生一个中断号为 `5` 的中断请求，其值以该宏 `__NR__open` 进行标示，而后该进程上下文将会被切换到内核空间，待内核相关操作完成后，就会从内核返回至用户态，此时还需要一次进程上下文切换，本文就以内核视角追踪下 `open` 的内核调用过程
@@ -249,7 +251,7 @@ if (read_seqcount_retry(&dentry->d_seq, seq))
 
 4、dentry cache的操作（TODO）
 
-当创建一个新的dentry时，`d_alloc()`会为其申请内存空间，而后通过`d_add`函数将这个新的dentry和对应的inode关联起来，并插入dcache的hash表中；对dentry的使用以`dget`和`[dput](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L751)`来实现引用计数`dentry->d_lockref.count`的加减，当引用计数变为`0`时，加入LRU链表，再次被使用后，从LRU链表移除。最后[`d_drop`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L463)函数直接将一个dentry从hashtable中移除（如dentry失效时），而`d_delete`的目标则是归还inode，并将一个dentry置于negative状态，在内核4.11.6版本中，在`vfs_unlink`、`vfs_rmdir`等操作成功前的最后都会调用`d_delete`
+当创建一个新的dentry时，`d_alloc()`会为其申请内存空间，而后通过`d_add`函数将这个新的dentry和对应的inode关联起来，并插入dcache的hash表中；对dentry的使用以`dget`和[`dput`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L751)来实现引用计数`dentry->d_lockref.count`的加减，当引用计数变为`0`时，加入LRU链表，再次被使用后，从LRU链表移除。最后[`d_drop`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L463)函数直接将一个dentry从hashtable中移除（如dentry失效时），而`d_delete`的目标则是归还inode，并将一个dentry置于negative状态，在内核4.11.6版本中，在`vfs_unlink`、`vfs_rmdir`等操作成功前的最后都会调用`d_delete`
 
 ![dcache-state-change](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/11/dcache-ops-all.jpg)
 
@@ -365,7 +367,7 @@ void d_move(struct dentry *dentry, struct dentry *target)
 79177   5809    0       0       0       0       0
 ```
 
-####	VFS的挂载
+####	VFS的挂载（mount tree）基础
 `open`系统调用的路径分量解析中也会涉及到对挂载的处理，这里简单回顾下。挂载是指将一个文件系统，挂载到全局文件系统树上。除根文件系统外，挂载点要求是一个已存在的文件系统的目录。根文件系统rootfs，会在系统启动的时候创建，挂载到`/`，也是全局文件系统树的根节点。当一个目录被文件系统挂载时，原来目录中包含的其他子目录或文件会被隐藏。以后进入该目录时，将会通过VFS切换到新挂载的文件系统所在的根目录，看到的是该文件系统的根目录下的内容
 
 1、**VFS挂载的四大对象及两张hashtable**
@@ -387,8 +389,335 @@ void d_move(struct dentry *dentry, struct dentry *target)
 -	`mount_hashtable`：通过父mount的vfsmount和挂载点的dentry，生成hash值，通过该表获得mount。关联函数为[`__lookup_mnt()`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namespace.c#L631)
 -	`mountpoint_hashtable`：通过挂载点的dentry，生成hash值，通过该表获得mountpoint。关联函数为[`lookup_mountpoint()`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namespace.c#L709)
 
+2、`mountpoint`与`mount`的关系
+
+前面介绍了`struct mount`（挂载实例）表示一个具体的文件系统挂载实例，包含挂载的文件系统信息（`vfsmount`）、父挂载点信息、挂载点位置信息和子挂载点链表
+
+```CPP
+struct mount{
+	......
+	struct mountpoint *mnt_mp; 	//指向对应的 mountpoint
+	struct hlist_node mnt_mp_list;	//链接到 mountpoint 的 m_list
+	struct dentry *mnt_mountpoint;       // 挂载点dentry
+    struct vfsmount mnt;                 // vfsmount结构
+	......
+}
+```
+
+`struct mountpoint`（挂载点位置）表示一个目录被用作挂载点的信息，包含被挂载的目录项（dentry）、引用计数以及挂载到该位置的所有 mount 结构链表
+
+```CPP
+struct mountpoint {
+    ......
+    struct hlist_head m_list;  // 所有挂载到此位置的 mount 结构（链表）
+    struct dentry *m_dentry;   // 被挂载的目录
+    ......
+}
+```
+
+需要特别注意的是`mount->mnt_mountpoint`与`mountpoint->m_dentry`的区别以及特殊挂载模式下二者的关系
+
+二者的关系如下：
+
+```TEXT
+struct mountpoint               struct mount
+┌─────────────────┐            ┌─────────────────┐
+│                 │            │                 │
+│  m_dentry ──────┼───────────>│ mnt_mountpoint  │
+│                 │            │                 │
+│  m_list ────────┼───────────>│ mnt_mp_list     │
+│                 │            │                 │
+│  m_count        │            │ mnt_mp ─────────┼─────────┐
+│                 │            │                 │         │
+└─────────────────┘            └─────────────────┘         │
+                                                           │
+                                                        
+                                                    struct mountpoint
+```
+
+举例来说，一个 `mountpoint` 可以对应多个 `mount` 结构（当同一个目录被多次挂载时），此时`mount`结构被链表形式组织。如下面的例子
+
+```BASH
+// 同一个目录被多次挂载
+mount /dev/sda1 /mnt/point
+mount /dev/sda2 /mnt/point  # 再次挂载到同一目录
+```
+
+在这种情况下，只有一个 `mountpoint`结构对应 `/mnt/point`目录，有两个 `mount`结构分别对应 `/dev/sda1`和 `/dev/sda2`的挂载，两个 `mount`结构都通过 `mnt_mp_list`链接到同一个 `mountpoint`的 `m_list`，而`mountpoint`结构的`m_dentry`成员指向dentry `/mnt/point`。
+`mountpoint->m_count`记录有多少个 `mount` 结构使用此挂载点，当最后一个 `mount` 卸载时，`mountpoint` 被释放
+
+TODO
+
+####	VFS mount tree的构造过程
+本小节描述下mount树的构造的典型场景，回顾下基础结构`path`、`mountpoint`、`mount`与`vfsmount`：
+
+```CPP
+struct mount {
+    struct hlist_node mnt_hash;          // 哈希表链表节点
+    struct mount *mnt_parent;            // 父挂载点
+    struct dentry *mnt_mountpoint;       // 挂载点dentry
+    struct vfsmount mnt;                 // vfsmount结构
+    struct list_head mnt_mounts;         // 子挂载点链表头
+    struct list_head mnt_child;          // 兄弟挂载点链表节点
+    struct list_head mnt_instance;       // 超级块实例链表
+    // ... 其他成员
+};
+
+struct vfsmount {
+	struct dentry *mnt_root;	/* root of the mounted tree */
+	struct super_block *mnt_sb;	/* pointer to superblock */
+	int mnt_flags;
+};
+
+struct path {
+	struct vfsmount *mnt;
+	struct dentry *dentry;
+};
+
+struct mountpoint {
+	struct hlist_node m_hash;
+	struct dentry *m_dentry;
+	struct hlist_head m_list;
+	int m_count;
+};
+
+```
+
+1、树状结构的形成过程
+
+当执行mount挂载操作时，内核调用 `do_add_mount`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namespace.c#L2454)，注意传入的`path`参数（标记唯一的路径）
+
+```CPP
+//将一个新的挂载点（newmnt）添加到指定的路径（path）上
+static int do_add_mount(struct mount *newmnt, struct path *path, int mnt_flags)
+{
+	struct mountpoint *mp;
+	struct mount *parent;
+	int err;
+
+	mnt_flags &= ~MNT_INTERNAL_FLAGS;
+	// 1. 锁定挂载点，防止并发修改
+	mp = lock_mount(path);
+	if (IS_ERR(mp))
+		return PTR_ERR(mp);
+	
+	// 2. 获取父挂载点
+	parent = (path->mnt);
+	err = -EINVAL;
+	// 3. 检查父挂载点是否有效
+	if (unlikely(!check_mnt(parent))) {
+		/* that's acceptable only for automounts done in private ns */
+		if (!(mnt_flags & MNT_SHRINKABLE))
+			goto unlock;
+		/* ... and for those we'd better have mountpoint still alive */
+		if (!parent->mnt_ns)
+			goto unlock;
+	}
+
+	/* Refuse the same filesystem on the same mount point */
+	// 4. 防止同一文件系统挂载到同一位置（避免同一文件系统重复挂载）
+	err = -EBUSY;
+	if (path->mnt->mnt_sb == newmnt->mnt.mnt_sb &&
+	    path->mnt->mnt_root == path->dentry)
+		goto unlock;
+
+
+	err = -EINVAL;
+	// 5. 检查新挂载点的根目录不是符号链接
+	if (d_is_symlink(newmnt->mnt.mnt_root))
+		goto unlock;
+	
+	// 6. 设置标志并嫁接挂载点
+	newmnt->mnt.mnt_flags = mnt_flags;
+	err = graft_tree(newmnt, parent, mp);
+
+unlock:
+	unlock_mount(mp);
+	return err;
+}
+```
+
+继续，`graft_tree`函数主要作用是验证挂载参数，然后调用 `attach_recursive_mnt`进行实际挂载
+
+```CPP
+static int graft_tree(struct mount *mnt, struct mount *p, struct mountpoint *mp)
+{
+    // 1. 检查文件系统是否允许用户挂载
+    if (mnt->mnt.mnt_sb->s_flags & MS_NOUSER)
+        return -EINVAL;
+
+    // 2. 检查目录类型匹配（挂载点目录类型必须与文件系统根目录类型一致）
+    if (d_is_dir(mp->m_dentry) != d_is_dir(mnt->mnt.mnt_root))
+        return -ENOTDIR;
+
+    // 3. 递归附加挂载点
+    return attach_recursive_mnt(mnt, p, mp, NULL);
+}
+```
+
+`attach_recursive_mnt`的作用是递归地将源挂载点附加到目标位置，处理共享挂载传播，在`attach_recursive_mnt`中主要考虑`parent_path`为`NULL`的场景
+
+```CPP
+static int attach_recursive_mnt(struct mount *source_mnt,
+            struct mount *dest_mnt, struct mountpoint *dest_mp,
+            struct path *parent_path)
+{
+    HLIST_HEAD(tree_list);
+    struct mnt_namespace *ns = dest_mnt->mnt_ns;
+    struct mountpoint *smp;
+    struct mount *child, *p;
+    int err;
+
+    //1. 预分配挂载点（用于嵌套挂载）
+    smp = get_mountpoint(source_mnt->mnt.mnt_root);
+    if (IS_ERR(smp))
+        return PTR_ERR(smp);
+
+    // 2. 检查挂载命名空间容量
+    if (!parent_path) {
+        err = count_mounts(ns, source_mnt);
+        if (err)
+            goto out;
+    }
+
+    //3. 处理共享挂载传播
+    if (IS_MNT_SHARED(dest_mnt)) {
+        // 3.1 分配组ID
+        err = invent_group_ids(source_mnt, true);
+        if (err)
+            goto out;
+        
+        //3.2 传播挂载到对等组
+        err = propagate_mnt(dest_mnt, dest_mp, source_mnt, &tree_list);
+        lock_mount_hash();
+        if (err)
+            goto out_cleanup_ids;
+        
+        //3.3 设置共享标志
+        for (p = source_mnt; p; p = next_mnt(p, source_mnt))
+            set_mnt_shared(p);
+    } else {
+        lock_mount_hash();  // 非共享挂载直接加锁
+    }
+
+    //4. 实际挂载操作
+    if (parent_path) {
+        // 移动挂载点的情况
+        detach_mnt(source_mnt, parent_path);
+        attach_mnt(source_mnt, dest_mnt, dest_mp);
+        touch_mnt_namespace(source_mnt->mnt_ns);
+    } else {
+        // 新挂载的情况
+        mnt_set_mountpoint(dest_mnt, dest_mp, source_mnt);
+        commit_tree(source_mnt);
+    }
+
+    //5. 处理传播的挂载点
+    hlist_for_each_entry_safe(child, n, &tree_list, mnt_hash) {
+        hlist_del_init(&child->mnt_hash);
+        struct mount *q = __lookup_mnt(&child->mnt_parent->mnt,
+                         child->mnt_mountpoint);
+        if (q)
+            mnt_change_mountpoint(child, smp, q);
+        commit_tree(child);
+    }
+
+    //6. 清理资源
+    put_mountpoint(smp);
+    unlock_mount_hash();
+    return 0;
+
+// 错误处理路径
+out_cleanup_ids:
+    // 清理传播的挂载点
+    while (!hlist_empty(&tree_list)) {
+        child = hlist_entry(tree_list.first, struct mount, mnt_hash);
+        umount_tree(child, UMOUNT_SYNC);
+    }
+    unlock_mount_hash();
+    cleanup_group_ids(source_mnt, NULL);
+out:
+    ns->pending_mounts = 0;
+    put_mountpoint(smp);
+    return err;
+}
+```
+
+这里主要看下处理实际挂载的两个函数`mnt_set_mountpoint`以及`commit_tree`：
+
+```cpp
+//mnt_set_mountpoint：建立挂载点之间的父子关系
+void mnt_set_mountpoint(struct mount *mnt,
+            struct mountpoint *mp, struct mount *child_mnt)
+{
+    //1. 增加引用计数（引用计数管理，防止挂载点被意外释放）
+    mp->m_count++;
+    mnt_add_count(mnt, 1);
+
+    //2. 建立父子关系
+    child_mnt->mnt_mountpoint = dget(mp->m_dentry);
+    child_mnt->mnt_parent = mnt;	//核心：mount树的父子关系
+    child_mnt->mnt_mp = mp;
+
+    //3. 添加到挂载点链表（将子挂载点添加到父挂载点的管理链表）
+    hlist_add_head(&child_mnt->mnt_mp_list, &mp->m_list);
+}
+
+//commit_tree：将挂载点正式提交到挂载命名空间
+static void commit_tree(struct mount *mnt)
+{
+    struct mount *parent = mnt->mnt_parent;
+    struct mount *m;
+    LIST_HEAD(head);
+    struct mnt_namespace *n = parent->mnt_ns;
+
+    BUG_ON(parent == mnt);  // 防止自引用
+
+    //1. 准备挂载点链表
+    list_add_tail(&head, &mnt->mnt_list);
+    list_for_each_entry(m, &head, mnt_list)
+        m->mnt_ns = n;  // 设置命名空间
+
+    //2. 添加到命名空间链表（维护命名空间内的挂载点链表）
+    list_splice(&head, n->list.prev);
+
+    //3. 更新命名空间统计
+    n->mounts += n->pending_mounts;
+    n->pending_mounts = 0;
+
+    //4. 附加到全局数据结构，通过 __attach_mnt注册到全局哈希表
+    __attach_mnt(mnt, parent);
+    
+    //5. 更新命名空间时间戳
+    touch_mnt_namespace(n);
+}
+```
+
+`attach_mnt`负责将新的`mount`结构注册到全局hash表
+```CPP
+static void attach_mnt(struct mount *mnt, struct mount *parent,
+                       struct mountpoint *mp)
+{
+    // 添加到父挂载点的哈希表
+    mnt->mnt_parent = parent;
+    mnt->mnt_mountpoint = mp->m_dentry;
+    
+    // 将新挂载点插入到哈希表链表头部（LIFO顺序）
+    hlist_add_head_rcu(&mnt->mnt_hash,
+                      m_hash(&parent->mnt, mp->m_dentry));
+    
+    // 添加到挂载点实例链表
+    list_add_tail(&mnt->mnt_instance, &mnt->mnt.mnt_sb->s_mounts);
+}
+```
+
+TODO
+
+####	VFS挂载的若干细节
+
 2、VFS某个dentry挂载之后的变化
 
+![mount-hide]()
 
 3、**VFS的重复挂载**
 
