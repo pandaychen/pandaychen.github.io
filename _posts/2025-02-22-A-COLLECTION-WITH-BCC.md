@@ -770,7 +770,7 @@ SYSCALL_DEFINE4(openat, int, dfd, const char __user *, filename, int, flags,
 }
 ```
 
-`filelife`在`kprobe/vfs_create`、`kprobe/vfs_open`和`kprobe/security_inode_create`处追踪文件新建事件（可能会有重复），注意 **`open/openat`新建文件（参考[前文]()对open的内核源码分析）时不一定通过`vfs_create`可能直接调用文件系统的`create`方法，但一定会在`security_inode_create`处检查创建文件权限**，在文件创建时记录时间戳记录到map中，最后在`kprobe/vfs_unlink`删除文件的函数进入时刻，从map中读取文件创建/打开时的时间戳，计算时间差，收集文件路径等信息保存，在`kretprobe/vfs_unlink`时根据返回值是否是`0`判断删除文件是否成功
+`filelife`在`kprobe/vfs_create`、`kprobe/vfs_open`和`kprobe/security_inode_create`处追踪文件新建事件（可能会有重复），注意 **`open/openat`新建文件（参考[前文](https://pandaychen.github.io/2025/04/02/A-LINUX-KERNEL-TRAVEL-11/)对open的内核源码分析）时不一定通过`vfs_create`可能直接调用文件系统的`create`方法，但一定会在`security_inode_create`处检查创建文件权限**，在文件创建时记录时间戳记录到map中，最后在`kprobe/vfs_unlink`删除文件的函数进入时刻，从map中读取文件创建/打开时的时间戳，计算时间差，收集文件路径等信息保存，在`kretprobe/vfs_unlink`时根据返回值是否是`0`判断删除文件是否成功
 
 ```PYTHON
 # define BPF program
@@ -1446,7 +1446,7 @@ TID     COMM             READS  WRITES R_Kb    W_Kb    T FILE
 -   dev：`file->f_inode->i_sb->s_dev`
 -   rdev：`file->f_inode->i_rdev`
 -   mode：`file->f_inode->i_mode`
--   ：`file->f_path.dentry->d_parent->d_inode->i_ino`
+-   parent inode：`file->f_path.dentry->d_parent->d_inode->i_ino`
 
 ```PYTHON
 # define BPF program
