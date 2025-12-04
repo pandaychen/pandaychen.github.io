@@ -14,8 +14,7 @@ tags:
 ---
 
 ## 0x00 前言
-
-[httprouter](https://github.com/julienschmidt/httprouter) 非常高效的一个 http 路由框架，gin 框架的路由也基于此库。使用比较简单：
+[httprouter](https://github.com/julienschmidt/httprouter) 是非常高效的 http 路由框架，gin 框架的路由也基于此库。使用比较简单：
 
 ```golang
 func main() {
@@ -29,11 +28,9 @@ func main() {
 }
 ```
 
-理解 httprouter 的核心在于理解 [基数树](https://zh.m.wikipedia.org/zh-hans/%E5%9F%BA%E6%95%B0%E6%A0%91) 的实现，路由搜索就是基数树搜索。
-
+理解 httprouter 的核心在于理解 [基数树](https://zh.m.wikipedia.org/zh-hans/%E5%9F%BA%E6%95%B0%E6%A0%91) 的实现，路由搜索就是基数树搜索
 
 ## 0x01 基数树 Radix Tree 的实现
-
 httprouter 基于 Radix Tree 实现，Radix Tree 的特点是拥有共同前缀的节点也共享同一个父节点，是一种更节省空间的 Trie 树（前缀树），其中作为唯一子节点的每个节点都与其父节点合并，边既可以表示为元素序列又可以表示为单个元素。 因此每个内部节点的子节点数最多为基数树的基数 `r` ，其中 `r` 为正整数，`x` 为 `2` 的幂（`x>=1`），这使得基数树更适用于对于较小的集合（尤其是字符串很长的情况下）和有很长相同前缀的字符串集合。
 
 经典例子：
@@ -52,7 +49,7 @@ Priority   Path             Handle
 1          └contact\        *<8>
 ```
 
-对应于下面的 GET 请求，`*<num>` 是方法（handler）对应的指针，从根节点遍历到叶子节点我们就能得到完整的路由表：
+对应于下面的 GET 请求，`*<num>` 是方法（handler）对应的指针，从根节点遍历到叶子节点就能得到完整的路由表：
 
 ```golang
 GET("/", func1)
@@ -78,11 +75,10 @@ GET("/contact/", func8)
 -   简单，可能会节省空间
 -   不需要设计 hash 映射函数
 
-借助于 Radix 树，我们可以 实现对于长整型数据类型的路由，可以根据一个长整型（比如一个长 ID）快速查找到其对应的 Value 指针
+借助于 Radix 树，可以实现对于长整型数据类型的路由，即根据一个长整型（比如一个长 ID）快速查找到其对应的 Value 指针
 
 ####    Radix 树 VS Trie 树
 ![radix-vs-trie](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/datastructure/radix-tree/trie2radixTree.png)
-
 
 ####	gin的前缀树
 ```golang
@@ -93,14 +89,25 @@ engine.POST("/admin/model/upload", api.UploadTemplate)
 engine.POST("/admin/model/uploadv2", api.GetTemplateWithSignature)
 engine.POST("/admin/model/update", api.UpdateTemplate)
 ```
-形成了两棵前缀树，左边是GET方法的树，右边是POST方法树。
+
+形成了两棵前缀树，左边是GET方法的树，右边是POST方法树
 
 ![IMG](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/http-gin/gin-radix-tree.png)
 
 ####    搜索
-下图展示了在基数树中进行字符串查找的示例，通过基数树可以提高字符顺序匹配的效率，对于 URL 之类的字符使用基数树来进行归类、匹配非常适合。
+下图展示了在基数树中进行字符串查找的示例，通过基数树可以提高字符顺序匹配的效率，对于 URL 之类的字符使用基数树来进行归类、匹配非常适合
 
 ![search](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/datastructure/radix_tree.png)
+
+```TEXT
+romane
+romanus
+romulus
+rubens
+ruber
+rubicon
+rubicundus
+```
 
 ####   Radix 树的实现
 以项目 [go-radix](https://github.com/armon/go-radix/) 为例，先窥探下 radix 树的结构：
@@ -110,36 +117,36 @@ engine.POST("/admin/model/update", api.UpdateTemplate)
 // Dictionary abstract data type. The main advantage over
 // a standard hash map is prefix-based lookups and
 // ordered iteration,
-type Tree struct {
-	root *node
-	size int
-}
+    type Tree struct {
+        root *node   // 树的根节点
+        size int     // 树中存储的键值对数量
+    }
 
-type node struct {
-	// leaf is used to store possible leaf
-	leaf *leafNode
+    type node struct {
+        // leaf is used to store possible leaf
+        leaf *leafNode  // 叶子节点指针，如果当前节点是键的终点，则存储实际数据
 
-	// prefix is the common prefix we ignore
-	prefix string
+        // prefix is the common prefix we ignore
+        prefix string   // 当前节点共享的前缀字符串
 
-	// Edges should be stored in-order for iteration.
-	// We avoid a fully materialized slice to save memory,
-	// since in most cases we expect to be sparse
-	edges edges
-}
+        // Edges should be stored in-order for iteration.
+        // We avoid a fully materialized slice to save memory,
+        // since in most cases we expect to be sparse
+        edges edges // 子节点边集合（[]edge）
+    }
 
-type edges []edge
+    type edges []edge
 
-// edge is used to represent an edge node
-type edge struct {
-	label byte
-	node  *node
-}
+    // edge is used to represent an edge node
+    type edge struct {
+        label byte  // 边的标签（注意：单个字符）
+        node  *node // 指向的子节点
+    }
 
-// leafNode is used to represent a value
-type leafNode struct {
-	key string
-	val interface{}
+    // leafNode is used to represent a value
+    type leafNode struct {
+        key string  // 完整的键
+        val interface{} // 值指针
 }
 ```
 
@@ -147,8 +154,115 @@ type leafNode struct {
 -   `Tree`：radixTree 开始节点
 -   `node`：radixTree 路径上的节点
 -   `edge`：指向下一层节点的指针
--   `edges`：把 `edge` 封装为 slice，便于操作
+-   `edges`：把 `edge` 封装为 slice，便于操作（特别注意`edges`始终是有序的，便于二分查找）
 -   `leafNode`：叶子节点
+
+这里比较重要的几个成员如下：
+
+-   `node.prefix`：共享前缀压缩，存储多个键的公共前缀，减少内存占用， apple 和 apply 共享 appl 前缀
+-   `node.edges`：子节点连接，通过边的标签（label）快速定位到下一级节点。注意`edges`是有序存储，可使用排序切片便于二分查找（参考`getEdge`方法）
+-   `node.leaf`：数据存储，标识当前节点是否是某个键的终点
+值kv
+
+注意到，**每个`node`节点对应的`edges`切片，其中`edge`结构的`label`成员仅仅是一个`byte`，而且`label`的本质是指向公共前缀`prefix`之后的下一个字符（第一个字符），而不是最后一个字符**
+
+####    edge && node
+-   边（`edge`）：从父节点指向子节点的连接
+-   节点（`node`）：边的目标，包含实际数据
+
+每个节点都同时具备以下两种功能：
+
+-   存储数据（通过`leaf`成员）
+-   拥有子节点（通过`edges`成员）
+
+####    node实现的方法
+
+```go
+//检查当前节点是否是叶子节点
+func (n *node) isLeaf() bool {
+	return n.leaf != nil
+}
+```
+
+`addEdge`：添加边（有序插入），
+
+```go
+func (n *node) addEdge(e edge) {
+	num := len(n.edges)
+
+    // 二分查找插入位置：第一个 >= e.label 的索引
+	idx := sort.Search(num, func(i int) bool {
+		return n.edges[i].label >= e.label
+	})
+
+    // 扩容并移动元素
+
+    //增加一个空位置
+	n.edges = append(n.edges, edge{})
+    //将idx及之后的元素后移 copy(dest,src)
+	copy(n.edges[idx+1:], n.edges[idx:])
+
+    //在idx位置插入新edge
+	n.edges[idx] = e
+}
+```
+
+假设当前`edges`为`['a', 'd', 'f']`，要插入 `'c'`，那么使用二分查找找到第一个 `>= 'c'` 的位置是索引`1`，即`'d'`的位置，执行后更新为`['a', 'c', 'd', 'f']`
+
+`getEdge`：通过二分查找获取edge
+
+```GO
+func (n *node) getEdge(label byte) *node {
+    num := len(n.edges)
+    // 二分查找：第一个 >= label 的索引
+    // sort.Search返回第一个使条件为true的索引
+    idx := sort.Search(num, func(i int) bool {
+        return n.edges[i].label >= label
+    })
+    // 检查是否精确匹配
+    if idx < num && n.edges[idx].label == label/*精确匹配*/ {
+        return n.edges[idx].node
+    }
+    return nil  // 未找到
+}
+```
+
+`updateEdge`：更新edge，用于节点分裂时更新父节点指向新的中间节点，需要确保要更新的edge必须存在，否则panic
+
+```go
+func (n *node) updateEdge(label byte, node *node) {
+    num := len(n.edges)
+    idx := sort.Search(num, func(i int) bool {
+        return n.edges[i].label >= label
+    })
+    if idx < num && n.edges[idx].label == label {
+        n.edges[idx].node = node  // 更新节点指针
+        return
+    }
+    panic("replacing missing edge")  // 边必须存在
+}
+```
+
+`delEdge`：用于删除edge
+
+```go
+func (n *node) delEdge(label byte) {
+    num := len(n.edges)
+    idx := sort.Search(num, func(i int) bool {
+        return n.edges[i].label >= label
+    })
+    if idx < num && n.edges[idx].label == label {
+        // 将后面的元素前移，覆盖要删除的元素
+        copy(n.edges[idx:], n.edges[idx+1:])
+        // 清空最后一个元素（避免内存泄漏）
+        n.edges[len(n.edges)-1] = edge{}
+        // 缩容切片
+        n.edges = n.edges[:len(n.edges)-1]
+    }
+}
+```
+
+如删除`['a', 'c', 'd', 'f']`中的 `'d'`，首先找到索引`2`，将索引`3`的元素`'f'`复制到索引`2`，变为`['a', 'c', 'f', 'f']`，并清空最后一个`['a', 'c', 'f', {}]`，最后缩容`['a', 'c', 'f']`
 
 用下图可以表示 go-radix 的结构关系：
 
@@ -163,23 +277,23 @@ type leafNode struct {
 
 ##  0x02    go-radix 的主要操作解读
 
-####    查找
-查找需要按照关键字一层一层匹配即可，如果在某一层的所有 child 节点中都没有匹配到则查找失败，本库做了 [优化](https://github.com/armon/go-radix/blob/master/radix.go#L379)，返回匹配到最长的 key：
-```golang
-// LongestPrefix is like Get, but instead of an
-// exact match, it will return the longest prefix match.
-func (t *Tree) LongestPrefix(s string) (string, interface{}, bool) {
-	var last *leafNode
-	n := t.root
-	search := s
-	for {
-		// Look for a leaf node
-		if n.isLeaf() {
-			last = n.leaf
-		}
+####    精确查找
+1、支持key的前缀匹配，Radix Tree的核心优势是前缀查找，需要支持一个键是另一个键的前缀的场景，如`app`和`apple`可以共存，反映在radix中`app`节点既是有效的key（本身leaf成员不为空），也是`apple`的父节点
 
+2、查找优化：在向下遍历时，如果遇到包含数据的节点，可以立即返回，不需要到达树的末端
+
+```go
+func (t *Tree) Get(s string) (interface{}, bool) {
+	n := t.root
+	search := s //查找指针
+	for {
 		// Check for key exhaution
-		if len(search) == 0 {
+        // 重要：在任何节点都可能找到数据，不一定是"叶子节点"
+		if len(search) == 0 {   // 检查当前节点是否有数据
+            // 已经没有带匹配的字符（串）了
+			if n.isLeaf() {
+				return n.leaf.val, true
+			}
 			break
 		}
 
@@ -196,7 +310,53 @@ func (t *Tree) LongestPrefix(s string) (string, interface{}, bool) {
 			break
 		}
 	}
+	return nil, false
+}
+```
+
+####    模糊查找（匹配最长前缀）
+查找需要按照关键字一层一层匹配即可，如果在某一层的所有 child 节点中都没有匹配到则查找失败，本库做了 [优化](https://github.com/armon/go-radix/blob/master/radix.go#L379)，返回匹配到最长的 key：
+
+```golang
+// LongestPrefix is like Get, but instead of an
+// exact match, it will return the longest prefix match.
+func (t *Tree) LongestPrefix(s string) (string, interface{}, bool) {
+	var last *leafNode
+	n := t.root
+    //search：查找指针
+	search := s
+	for {
+		// Look for a leaf node
+		if n.isLeaf() {
+            //叶子节点，注意，这里并没有检查叶子上的剩余子串是否匹配
+			last = n.leaf
+		}
+
+		// Check for key exhaution
+		if len(search) == 0 {
+			break
+		}
+
+		// Look for an edge
+		n = n.getEdge(search[0])
+        // 根据当前search的第一个字符，执行label查找
+		if n == nil {
+            //没有找到，退出循环
+			break
+		}
+
+        //根据label找到了对应的下一级节点的node指针（保存在n）
+
+		// Consume the search prefix
+		if strings.HasPrefix(search, n.prefix) {
+            // 命中了下一级的公共前缀，查找指针直接跨越公共前缀
+			search = search[len(n.prefix):]
+		} else {
+			break
+		}
+	}
 	if last != nil {
+        // 返回结果（叶子），但不一定是完全匹配的
 		return last.key, last.val, true
 	}
 	return "", nil, false
@@ -217,7 +377,6 @@ func longestPrefix(k1, k2 string) int {
 	}
 	return i
 }
-
 ```
 
 ####    插入
@@ -225,7 +384,7 @@ func longestPrefix(k1, k2 string) int {
 1.  开始，从根 root 节点往下找
 2.  如果在某个 child 节点中找到相同前缀则继续往下找（需匹配完本节点的所有 prefix，看上面的 `longestPrefix` 方法）
 3.  直到查找到某个节点处停止；如果某个 child 节点部分前缀是字符串前缀，则需要将公共前缀作为新节点，原来孩子节点的孩子作为新节点的孩子（分裂的目的是确保了一个节点的孩子数目不会超过总的字符串的个数）
-
+4.  新插入的key一定会成为leaf节点
 
 ```golang
 // Insert is used to add a newentry or update
@@ -233,11 +392,13 @@ func longestPrefix(k1, k2 string) int {
 func (t *Tree) Insert(s string, v interface{}) (interface{}, bool) {
 	var parent *node
 	n := t.root
+    //查找指针
 	search := s
 	for {
 		// Handle key exhaution
 		if len(search) == 0 {
 			if n.isLeaf() {
+                // 如果key重复了，返回旧的数据
 				old := n.leaf.val
 				n.leaf.val = v
 				return old, true
@@ -252,46 +413,72 @@ func (t *Tree) Insert(s string, v interface{}) (interface{}, bool) {
 		}
 
 		// Look for the edge
+
+        //保存parent
 		parent = n
+
+        //向下查找
+
+        //注意：如果n不为nil，那么n指向下一层节点，而parent指向当前层级的节点
 		n = n.getEdge(search[0])
 
 		// No edge, create one
+        // 如果不存在edge，那么需要新建
 		if n == nil {
 			e := edge{
-				label: search[0],
+				label: search[0],   //新edge的label为search指针指向的第一个位置的字符！
 				node: &node{
-					leaf: &leafNode{
+					leaf: &leafNode{    //新的edge默认就是leafNode，合理
 						key: s,
 						val: v,
 					},
 					prefix: search,
 				},
 			}
+
+            // n的父节点parent，需要添加一个新的edge
+            // 新的edge：node为leaf，label为search[0]
+            // 即将search[0]插入到edges这个有序数组里面
 			parent.addEdge(e)
 			t.size++
 			return nil, false
 		}
 
+        //重要：如果存在edge，那么需要检查插入的字符串是否与当前的node指向的prefix成员完全一致
+        //如果一致，说明新插入的字符串可以使用这个node，然后继续向下
+        // 如果不一致，说明需要对当前的节点n进行分裂
+
 		// Determine longest prefix of the search key on match
 		commonPrefix := longestPrefix(search, n.prefix)
 		if commonPrefix == len(n.prefix) {
+            //完全一致，说明可以移动查找指针，继续向下
 			search = search[commonPrefix:]
 			continue
 		}
 
+        // 重要：不一致，需要分裂当前节点（即创建一个新的node结构，并且把n指向的node做分裂）
 		// Split the node
 		t.size++
+        //分裂步骤1：创建中间节点child
+        //此时，child节点只包含公共前缀，还没有任何边或叶子数据
 		child := &node{
-			prefix: search[:commonPrefix],
+			prefix: search[:commonPrefix],// 存储公共前缀部分
 		}
+
+        //分裂步骤2：更新父节点指向
+        //将父节点原来指向n的边，改为指向新的child节点
+        //边的label保持不变（还是search[0]）
 		parent.updateEdge(search[0], child)
 
 		// Restore the existing node
+        //分裂步骤3：将原节点调整为child的子节点
+        //关键变化：原节点n的前缀被截断，只保留公共前缀之后的部分
+        //原节点成为child的子节点
 		child.addEdge(edge{
-			label: n.prefix[commonPrefix],
-			node:  n,
+			label: n.prefix[commonPrefix],   // 原节点剩余部分的第一个字符
+			node:  n,   // 原节点
 		})
-		n.prefix = n.prefix[commonPrefix:]
+		n.prefix = n.prefix[commonPrefix:]  // 缩短原节点前缀
 
 		// Create a new leaf node
 		leaf := &leafNode{
@@ -317,6 +504,379 @@ func (t *Tree) Insert(s string, v interface{}) (interface{}, bool) {
 		return nil, false
 	}
 }
+```
+
+单独描述下插入操作中的分裂边（edge splitting）实现，当新插入的key与现有节点的前缀prefix只有部分匹配时触发分裂
+
+分裂发生的条件（同时满足）
+
+-   找到了匹配的edge（`n = n.getEdge(search[0]`返回非`nil`）
+-   前缀不完全匹配（公共前缀长度 < 当前节点前缀长度）
+
+分裂的详细步骤：
+
+```go
+// 1. 创建新的中间节点（存储公共前缀）
+child := &node{
+    prefix: search[:commonPrefix],  // 公共前缀部分
+}
+parent.updateEdge(search[0], child)  // 更新父节点指向child
+
+// 2. 将原节点调整为子节点
+child.addEdge(edge{
+    label: n.prefix[commonPrefix],  // 原节点剩余部分的第一个字符
+    node:  n,                       // 原节点（成为`child`的孩子节点）
+})
+n.prefix = n.prefix[commonPrefix:]  // 缩短原节点前缀
+
+// 3. 处理新插入的键
+search = search[commonPrefix:]  // 剩余搜索字符串
+if len(search) == 0 {
+    // 新键正好是公共前缀（罕见情况）
+    child.leaf = &leafNode{key: s, val: v}
+} else {
+    // 创建新分支（注意，这个新的分支即是node又是leaf）
+    child.addEdge(edge{
+        label: search[0],
+        node: &node{
+            leaf:   &leafNode{key: s, val: v},
+            prefix: search,
+        },
+    })
+}
+```
+
+分裂的意义是通过分裂提取公共前缀，避免重复存储，结果是原有的二层结构变换为三层结构，即代码中的`parent`、`n`的父子结构，分裂后变为`parent`、`child`（保存新的公共前缀）、`n`（缩短原节点前缀，成为`child`的edge，以及其他可能的兄弟节点），最后再处理新插入的节点。新的待插入的节点与`n`是平级关系，都是`child`的孩子节点
+
+最后再看下分裂之后，插入新的节点的部分：
+
+-   当`len(search) == 0`时：`child`节点自身成为叶子节点
+-   当`len(search) > 0`时：创建新的边edge指向一个新的叶子节点
+
+```GO
+search = search[commonPrefix:]  // 剩余搜索字符串
+if len(search) == 0 {
+    // 新键正好是公共前缀（罕见情况）
+    // 直接将叶子数据挂在中间节点child上
+    child.leaf = &leafNode{key: s, val: v}
+} else {
+    // len(search) > 0
+    // 新key有剩余部分
+    // 创建新分支
+    child.addEdge(edge{
+        label: search[0],   // 剩余部分的第一个字符
+        node: &node{        
+            // 包含实际数据
+            leaf:   &leafNode{key: s, val: v},  //新插入的key成为leaf
+            prefix: search, //重要：剩余部分作为前缀
+        },
+    })
+}
+```
+
+首先要明确一点，radix tree中，`child`节点自身存储了叶子数据（其本身也可能既是node又是leaf）
+
+-   case1：新插入的key正好等于公共前缀，直接将叶子数据挂在中间节点`child`上，此时`child`的`prefix`就是刚好匹配`s`（待插入的key）的`suffix`，这种情况下`child`节点既是中间节点也是叶子节点
+-   case2：新key有剩余部分，需要创建一个新的叶子节点来存储数据，这个新节点通过edge连接到父节点`child`，新节点的`prefix`是剩余的搜索字符串
+
+```TEXT
+//分裂前的结构
+
+parent (父节点)
+  └── 边[label] -> n (原节点，包含完整前缀和数据)
+
+//分裂后的结构
+
+parent (父节点)
+  └── 边[label] -> child (新创建的中间节点，存储公共前缀)
+        ├── 边[新label1] -> n (原节点调整，前缀缩短)
+        └── 边[新label2] -> 新节点 (如果需要，存储新插入的数据)
+```
+
+例如，插入`romanus`到已有`romane`的radix树中，分裂前（两层结构）如下：
+
+```TEXT
+父节点
+  └── 边 'r' -> 节点n: prefix="romane", leaf="romane"
+```
+
+插入`romanus`时，因为前缀非完全匹配，有公共前缀`roman`（前`4`个字符）， 剩余差异为`e`与`us`，所以涉及到分裂过程如下：
+
+1、提取公共前缀
+
+```TEXT
+// 分裂前
+节点n: prefix = "romane"
+
+// 分裂后  
+child: prefix = "roman"  // 公共部分提取到父节点
+节点n: prefix = "e"       // 差异部分留在原节点
+```
+
+2、支持多个分支，通过创建中间节点child，可以挂载多个子节点（后续可以挂载其他分支）
+
+```TEXT
+原节点n（对应"romane"）
+新节点（对应"romanus"）
+```
+
+3、保持树结构平衡，目的避免创建过深的树结构，通过中间节点合理组织分支，需要处理几种特殊情况：
+
+3.1：新键是公共前缀的完全匹配
+
+```go
+search = search[commonPrefix:]  // 剩余部分为空
+if len(search) == 0 {
+    child.leaf = &leafNode{key: s, val: v}  // child自身存储数据
+}
+```
+
+这时结构变为：父节点 -> `child` (既有前缀`roman`，又有叶子数据) -> `n` (原节点)
+
+3.2：需要继续分裂，如果新插入的键与现有结构仍有冲突，可能触发进一步分裂，形成更多层级
+
+最终形成了下面的三层结构：
+
+```TEXT
+父节点
+  └── 边 'r' -> 节点child: prefix="roman" (新中间节点)
+        ├── 边 'e' -> 节点n: prefix="e", leaf="romane" (调整后的原节点)
+        └── 边 'u' -> 新节点: prefix="us", leaf="romanus" (新插入的节点)
+```
+
+
+
+####    删除字符串
+`Delete`用于删除指定的key，注意删除了叶子节点之后，要检查被删除节点的关联节点已经父节点，如果只剩一条edge，那么需要做节点合并，目的是降低radix tree的高度，压缩中间节点，消除不必要的单链结构
+
+```go
+func (t *Tree) Delete(s string) (interface{}, bool) {
+	var parent *node
+	var label byte
+	n := t.root
+    //搜索指针
+	search := s
+	for {
+		// Check for key exhaution
+        // 1. 找到要删除的叶子节点
+		if len(search) == 0 {
+			if !n.isLeaf() {
+                //没找到
+				break
+			}
+            // 找到了，执行删除操作
+			goto DELETE
+		}
+
+		// Look for an edge
+        // 沿着子树查找
+		parent = n
+		label = search[0]
+		n = n.getEdge(label)
+		if n == nil {
+            //没找到
+			break
+		}
+
+		// Consume the search prefix
+		if strings.HasPrefix(search, n.prefix) {
+			search = search[len(n.prefix):]
+		} else {
+			break
+		}
+	}
+	return nil, false
+
+DELETE:
+    //找到了，执行删除操作
+    // 重要：n指向当前包含被删除leaf的那个node节点
+    // parent指向n的parent节点
+    // label保存了最新一次搜索用的字符label
+	// Delete the leaf
+
+    //删除step 1：删除叶子节点
+	leaf := n.leaf
+	n.leaf = nil    //n.leaf，这个节点会被回收
+	t.size--
+
+    //删除step2：清理空节点
+    //在删除时，需要检查删除完之后这个n变成了空子树
+    //如果是空树，那么需要从parent删除这个label
+	// Check if we should delete this node from the parent
+	if parent != nil && len(n.edges) == 0 {
+        //如果满足，则从parent删除该label（该label已经没有节点了）
+		parent.delEdge(label)
+	}
+
+	// Check if we should merge this node
+    // 删除step3：合并单子节点
+    // 即如果n不是root 且 n只有一条边的时候（n.edges长度为1），需要将n与其唯一的child进行合并
+	if n != t.root && len(n.edges) == 1 {
+		n.mergeChild()
+	}
+
+	// Check if we should merge the parent's other child
+    // 删除step4：祖父节点需要合并
+
+    //TODO
+    // 同样还要检查parent这一级，如果parent仅剩一条边，那么也需要把parent和其唯一的child合并
+	if parent != nil && parent != t.root && len(parent.edges) == 1 && !parent.isLeaf() {
+		parent.mergeChild()
+	}
+
+	return leaf.val, true
+}
+
+// mergeChild：将n指向的node与其唯一的child合并
+func (n *node) mergeChild() {
+	e := n.edges[0] //获取唯一的child
+	child := e.node
+	n.prefix = n.prefix + child.prefix  //合并n与child的前缀字符串（有趣）
+	n.leaf = child.leaf //（child的leaf变成n的leaf）
+	n.edges = child.edges   //child的edges变成n的edges
+}
+```
+
+####    删除指定前缀
+```GO
+func (t *Tree) DeletePrefix(s string) int {
+	return t.deletePrefix(nil, t.root, s)
+}
+
+// delete does a recursive deletion
+func (t *Tree) deletePrefix(parent, n *node, prefix string) int {
+	// Check for key exhaustion
+	if len(prefix) == 0 {
+		// Remove the leaf node
+		subTreeSize := 0
+		//recursively walk from all edges of the node to be deleted
+		recursiveWalk(n, func(s string, v interface{}) bool {
+			subTreeSize++
+			return false
+		})
+		if n.isLeaf() {
+			n.leaf = nil
+		}
+		n.edges = nil // deletes the entire subtree
+
+		// Check if we should merge the parent's other child
+		if parent != nil && parent != t.root && len(parent.edges) == 1 && !parent.isLeaf() {
+			parent.mergeChild()
+		}
+		t.size -= subTreeSize
+		return subTreeSize
+	}
+
+	// Look for an edge
+	label := prefix[0]
+	child := n.getEdge(label)
+	if child == nil || (!strings.HasPrefix(child.prefix, prefix) && !strings.HasPrefix(prefix, child.prefix)) {
+		return 0
+	}
+
+	// Consume the search prefix
+	if len(child.prefix) > len(prefix) {
+		prefix = prefix[len(prefix):]
+	} else {
+		prefix = prefix[len(child.prefix):]
+	}
+	return t.deletePrefix(n, child, prefix)
+}
+```
+
+####    遍历
+
+```GO
+// Walk is used to walk the tree
+func (t *Tree) Walk(fn WalkFn) {
+	recursiveWalk(t.root, fn)
+}
+
+// recursiveWalk is used to do a pre-order walk of a node
+// recursively. Returns true if the walk should be aborted
+func recursiveWalk(n *node, fn WalkFn) bool {
+	// Visit the leaf values if any
+	if n.leaf != nil && fn(n.leaf.key, n.leaf.val) {
+		return true
+	}
+
+	// Recurse on the children
+	i := 0
+	k := len(n.edges) // keeps track of number of edges in previous iteration
+	for i < k {
+		e := n.edges[i]
+		if recursiveWalk(e.node, fn) {
+			return true
+		}
+		// It is a possibility that the WalkFn modified the node we are
+		// iterating on. If there are no more edges, mergeChild happened,
+		// so the last edge became the current node n, on which we'll
+		// iterate one last time.
+		if len(n.edges) == 0 {
+			return recursiveWalk(n, fn)
+		}
+		// If there are now less edges than in the previous iteration,
+		// then do not increment the loop index, since the current index
+		// points to a new edge. Otherwise, get to the next index.
+		if len(n.edges) >= k {
+			i++
+		}
+		k = len(n.edges)
+	}
+	return false
+}
+```
+
+####    小结
+1、对radix tree的理解，没有纯粹的叶子节点。在Radix Tree中，每个节点都可以同时包含数据和子节点（与传统的树结构有些区别），节点可以有四种状态：
+
+case1：纯中间节点（只有前缀和子节点）
+
+```go
+&node{
+    prefix: "roman",  // 共享前缀
+    leaf:   nil,      // 无数据
+    edges:  [{'e', 'u'}]  // 有子节点
+}
+```
+
+case2：叶子节点（只有数据）
+
+```go
+&node{
+    prefix: "e",      // 剩余部分
+    leaf:   &leafNode{key: "romane", val: ...},  // 有数据
+    edges:  []        // 无子节点
+}
+```
+
+case3：既是中间节点又是叶子节点
+
+```go
+&node{
+    prefix: "app",    // 共享前缀
+    leaf:   &leafNode{key: "app", val: ...},  // 自身有数据
+    edges:  [{'l'}]   // 也有子节点
+}
+```
+
+case4：空节点（理论上不应该存在）
+
+```go
+&node{
+    prefix: "",
+    leaf:   nil,
+    edges:  []
+}
+```
+
+比如，对于如下字符串集合构成的radix树`["app", "apple", "application"]`，构建的Radix Tree如下，其中节点A既是中间节点又是叶子节点，节点B是纯中间节点，节点C、D是传统意义上的叶子节点
+
+```TEXT
+节点A: prefix="app", leaf="app"（有数据）
+    └── 边 'l' -> 节点B: prefix="l"（纯中间节点）
+        ├── 边 'e' -> 节点C: prefix="e", leaf="apple"（叶子节点）
+        └── 边 'i' -> 节点D: prefix="ication", leaf="application"（叶子节点）
 ```
 
 ## 0x03 重点：HTTPROUTER 分析
@@ -466,7 +1026,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
         // 如果路由匹配上了，从基数树中将路由取出
         if handle, ps, tsr := root.getValue(path); handle != nil {
             // 获取的是一个函数，签名 func(http.ResponseWriter, *http.Request, Params)
-            // 这个就是我们向 httprouter 注册的函数
+            // 这个就是向 httprouter 注册的函数
             handle(w, req, ps)
             // 处理完成后 return ，此次生命周期就结束了
             return
@@ -656,7 +1216,7 @@ type node struct {
 // 官方给的建议是： 在批量加载或使用非标准的自定义方法时候使用。
 // 
 // 它有三个参数，第一个是请求方式（GET，POST……）， 第二个是路由的路径， 前两个参数都是字符串类型
-// 第三个参数就是我们要注册的函数，比如上面的 Index 函数，可以追踪一下，在这个文件的最上面
+// 第三个参数就是要注册的函数，比如上面的 Index 函数，可以追踪一下，在这个文件的最上面
 // 有 Handle 的定义，它是一个函数类型，只要和这个 Handle 的签名一直的都可以作为参数
 func (r *Router) Handle(method, path string, handle Handle) {
 
@@ -1044,7 +1604,7 @@ router.Handle(http.MethodGet, "/user/query/:name", func(w http.ResponseWriter, r
 `incrementChildPrio`方法主要处理节点之前的关系，添加或者修改已经存在的，拼接出树的结构，真正写入插入节点的数据是在方法`子方法1：incrementChildPrio`处理完关系后，调用 `insertChild` 方法完成。
 ```golang
 // increments priority of the given child and reorders if necessary
-// 通过之前两次的调用，我们知道，这个 pos 都是 n.indices 中指定字符的索引，也就是位置
+// 通过之前两次的调用，这个 pos 都是 n.indices 中指定字符的索引，也就是位置
 func (n *node) incrementChildPrio(pos int) int {
     // 因为 children 和 indices 是同时添加的，所以索引是相同的
     // 可以通过 pos 代表的位置找到， 将对应的子节点的优先级 + 1
