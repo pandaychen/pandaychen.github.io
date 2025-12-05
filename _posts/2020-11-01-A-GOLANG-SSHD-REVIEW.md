@@ -2213,6 +2213,197 @@ func (f *File) readAt(b []byte, off int64) (int, error) {
 }
 ```
 
+对于sftp请求协议`sshFxpReadPacket`的处理代码位于[`handlePacket`](https://github.com/pkg/sftp/blob/master/server.go#L219C1-L370C1)，可以看到所有sftp协议支持的远程文件操作类型：
+
+
+```go
+func handlePacket(s *Server, p orderedRequest) error {
+	var rpkt responsePacket
+	orderID := p.orderID()
+	switch p := p.requestPacket.(type) {
+	case *sshFxInitPacket:
+		rpkt = &sshFxVersionPacket{
+			Version:    sftpProtocolVersion,
+			Extensions: sftpExtensions,
+		}
+	case *sshFxpStatPacket:
+		// stat the requested file
+		info, err := os.Stat(s.toLocalPath(p.Path))
+		rpkt = &sshFxpStatResponse{
+			ID:   p.ID,
+			info: info,
+		}
+		if err != nil {
+			rpkt = statusFromError(p.ID, err)
+		}
+	case *sshFxpLstatPacket:
+		// stat the requested file
+		info, err := s.lstat(s.toLocalPath(p.Path))
+		rpkt = &sshFxpStatResponse{
+			ID:   p.ID,
+			info: info,
+		}
+		if err != nil {
+			rpkt = statusFromError(p.ID, err)
+		}
+	case *sshFxpFstatPacket:
+		f, ok := s.getHandle(p.Handle)
+		var err error = EBADF
+		var info os.FileInfo
+		if ok {
+			info, err = f.Stat()
+			rpkt = &sshFxpStatResponse{
+				ID:   p.ID,
+				info: info,
+			}
+		}
+		if err != nil {
+			rpkt = statusFromError(p.ID, err)
+		}
+	case *sshFxpMkdirPacket:
+		// TODO FIXME: ignore flags field
+		err := os.Mkdir(s.toLocalPath(p.Path), 0o755)
+		rpkt = statusFromError(p.ID, err)
+	case *sshFxpRmdirPacket:
+		err := os.Remove(s.toLocalPath(p.Path))
+		rpkt = statusFromError(p.ID, err)
+	case *sshFxpRemovePacket:
+		err := os.Remove(s.toLocalPath(p.Filename))
+		rpkt = statusFromError(p.ID, err)
+	case *sshFxpRenamePacket:
+		err := os.Rename(s.toLocalPath(p.Oldpath), s.toLocalPath(p.Newpath))
+		rpkt = statusFromError(p.ID, err)
+	case *sshFxpSymlinkPacket:
+		err := os.Symlink(s.toLocalPath(p.Targetpath), s.toLocalPath(p.Linkpath))
+		rpkt = statusFromError(p.ID, err)
+	case *sshFxpClosePacket:
+		rpkt = statusFromError(p.ID, s.closeHandle(p.Handle))
+	case *sshFxpReadlinkPacket:
+		f, err := os.Readlink(s.toLocalPath(p.Path))
+		rpkt = &sshFxpNamePacket{
+			ID: p.ID,
+			NameAttrs: []*sshFxpNameAttr{
+				{
+					Name:     f,
+					LongName: f,
+					Attrs:    emptyFileStat,
+				},
+			},
+		}
+		if err != nil {
+			rpkt = statusFromError(p.ID, err)
+		}
+	case *sshFxpRealpathPacket:
+		f, err := filepath.Abs(s.toLocalPath(p.Path))
+		f = cleanPath(f)
+		rpkt = &sshFxpNamePacket{
+			ID: p.ID,
+			NameAttrs: []*sshFxpNameAttr{
+				{
+					Name:     f,
+					LongName: f,
+					Attrs:    emptyFileStat,
+				},
+			},
+		}
+		if err != nil {
+			rpkt = statusFromError(p.ID, err)
+		}
+	case *sshFxpOpendirPacket:
+		lp := s.toLocalPath(p.Path)
+
+		if stat, err := s.stat(lp); err != nil {
+			rpkt = statusFromError(p.ID, err)
+		} else if !stat.IsDir() {
+			rpkt = statusFromError(p.ID, &os.PathError{
+				Path: lp, Err: syscall.ENOTDIR,
+			})
+		} else {
+			rpkt = (&sshFxpOpenPacket{
+				ID:     p.ID,
+				Path:   p.Path,
+				Pflags: sshFxfRead,
+			}).respond(s)
+		}
+	case *sshFxpReadPacket:
+		var err error = EBADF
+
+		// 重要：在 SFTP 服务器端的作用是通过客户端提供的句柄查找对应的文件对象
+		f, ok := s.getHandle(p.Handle)
+		if ok {
+			err = nil
+			data := p.getDataSlice(s.pktMgr.alloc, orderID, s.maxTxPacket)
+
+			//f是对应的文件句柄，这里真正执行文件打开读取的操作
+			n, _err := f.ReadAt(data, int64(p.Offset))
+			if _err != nil && (_err != io.EOF || n == 0) {
+				err = _err
+			}
+			rpkt = &sshFxpDataPacket{
+				ID:     p.ID,
+				Length: uint32(n),
+				Data:   data[:n],
+				// do not use data[:n:n] here to clamp the capacity, we allocated extra capacity above to avoid reallocations
+			}
+		}
+		if err != nil {
+			rpkt = statusFromError(p.ID, err)
+		}
+
+	case *sshFxpWritePacket:
+		f, ok := s.getHandle(p.Handle)
+		var err error = EBADF
+		if ok {
+			_, err = f.WriteAt(p.Data, int64(p.Offset))
+		}
+		rpkt = statusFromError(p.ID, err)
+	case *sshFxpExtendedPacket:
+		if p.SpecificPacket == nil {
+			rpkt = statusFromError(p.ID, ErrSSHFxOpUnsupported)
+		} else {
+			rpkt = p.respond(s)
+		}
+	case serverRespondablePacket:
+		rpkt = p.respond(s)
+	default:
+		return fmt.Errorf("unexpected packet type %T", p)
+	}
+
+	s.pktMgr.readyPacket(s.pktMgr.newOrderedResponse(rpkt, orderID))
+	return nil
+}
+```
+
+在sftp的服务端`Server`实现中，`openFiles`保存了打开的文件对象的映射，这里主要是复用已经打开的文件句柄（优化），其中`openFiles`的key是递增计数器
+
+```go
+type Server struct {
+	*serverConn
+	debugStream   io.Writer
+	readOnly      bool
+	pktMgr        *packetManager
+	openFiles     map[string]file
+	openFilesLock sync.RWMutex
+	......
+}
+
+func (svr *Server) getHandle(handle string) (file, bool) {
+	svr.openFilesLock.RLock()
+	defer svr.openFilesLock.RUnlock()
+	f, ok := svr.openFiles[handle]
+	return f, ok
+}
+
+func (svr *Server) nextHandle(f file) string {
+    svr.openFilesLock.Lock()
+    defer svr.openFilesLock.Unlock()
+    svr.handleCount++  // 递增计数器
+    handle := strconv.Itoa(svr.handleCount)  // 转换为字符串
+    svr.openFiles[handle] = f
+    return handle
+}
+```
+
 ## 0x06 参考
 -	[ssh 包](https://pkg.go.dev/golang.org/x/crypto/ssh)
 -	[gliderlabs-ssh 包](https://pkg.go.dev/github.com/gliderlabs/ssh)
