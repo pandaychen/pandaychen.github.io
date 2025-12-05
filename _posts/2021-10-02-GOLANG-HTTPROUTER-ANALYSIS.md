@@ -648,6 +648,7 @@ if len(search) == 0 {
 
 ####    删除字符串
 `Delete`用于删除指定的key，注意删除了叶子节点之后，要检查被删除节点的关联节点已经父节点，如果只剩一条edge，那么需要做节点合并，目的是降低radix tree的高度，压缩中间节点，消除不必要的单链结构
+即删除的时候，需要检查两次（上一条edge与下面一条edge），如果存在单edge的情况，那么需要合并
 
 ```go
 func (t *Tree) Delete(s string) (interface{}, bool) {
@@ -747,19 +748,28 @@ func (t *Tree) DeletePrefix(s string) int {
 func (t *Tree) deletePrefix(parent, n *node, prefix string) int {
 	// Check for key exhaustion
 	if len(prefix) == 0 {
+        // 到达要删除的子树根节点
 		// Remove the leaf node
 		subTreeSize := 0
 		//recursively walk from all edges of the node to be deleted
+
+        // 递归遍历要删除的子树，统计键数量（不涉及到修改树的结构）
 		recursiveWalk(n, func(s string, v interface{}) bool {
+
+            // 统计子树中的键数量
 			subTreeSize++
 			return false
 		})
 		if n.isLeaf() {
+            //删除case1：叶子命中了规则，清空当前节点的叶子数据
 			n.leaf = nil
 		}
+
+        // 删除case2：删除整个子树
 		n.edges = nil // deletes the entire subtree
 
 		// Check if we should merge the parent's other child
+        // 检查父节点是否需要合并
 		if parent != nil && parent != t.root && len(parent.edges) == 1 && !parent.isLeaf() {
 			parent.mergeChild()
 		}
@@ -767,17 +777,32 @@ func (t *Tree) deletePrefix(parent, n *node, prefix string) int {
 		return subTreeSize
 	}
 
+    //len(prefix)!=0时
+
 	// Look for an edge
+    // 查找匹配的边
 	label := prefix[0]
 	child := n.getEdge(label)
+
+    // 检查前缀匹配关系
 	if child == nil || (!strings.HasPrefix(child.prefix, prefix) && !strings.HasPrefix(prefix, child.prefix)) {
+        // 不匹配，退出递归
 		return 0
 	}
 
+    /*
+    到达这里说明两种匹配情况：
+    1.  子节点前缀以搜索前缀开头：strings.HasPrefix(child.prefix, prefix)，如子节点前缀"apple"，搜索前缀"app"，整个子树需要被删除
+    2.  搜索前缀以子节点前缀开头：strings.HasPrefix(prefix, child.prefix)，如搜索前缀"application"，子节点前缀"app"，需要继续向下搜索
+    */
+
 	// Consume the search prefix
+    // 因为有上面的两种情况，所以这里消耗搜索前缀
 	if len(child.prefix) > len(prefix) {
+        // 子节点前缀更长，搜索前缀耗尽
 		prefix = prefix[len(prefix):]
 	} else {
+        // 消耗子节点前缀的长度
 		prefix = prefix[len(child.prefix):]
 	}
 	return t.deletePrefix(n, child, prefix)
@@ -785,6 +810,62 @@ func (t *Tree) deletePrefix(parent, n *node, prefix string) int {
 ```
 
 ####    遍历
+`recursiveWalk`提供了前序遍历树的方法，包含处理遍历过程中树结构变化的特殊逻辑。这个实现和普通的遍历有点区别，这个提供了回调函数`fn`，可以在遍历的时候对radix 树进行修改操作，如：
+
+```GO
+//case1：在遍历中删除元素
+tree.Walk(func(key string, val interface{}) bool {
+    if val == "key_to_delete" {
+        tree.Delete(key)  // 在遍历回调中删除当前key
+    }
+    return false
+})
+
+//case2：在遍历中插入新元素
+tree.Walk(func(key string, val interface{}) bool {
+    if strings.HasPrefix(key, "old_") {
+        newKey := strings.Replace(key, "old_", "new_", 1)
+        tree.Insert(newKey, val)  // 在遍历中插入新key
+    }
+    return false
+})
+```
+
+而上述操作，会引起树的变化，分为下面几种情况：
+
+1、情况1，edge数变为`0`，关联如下代码
+
+```GO
+if len(n.edges) == 0 {
+    return recursiveWalk(n, fn)
+}
+```
+
+可能的情况：
+
+-   遍历子节点时，回调函数修改导致合并
+-   当前节点`n`的edge数变为`0`
+-   但当前节点可能变成了叶子节点（包含数据）
+-   需要重新访问当前节点，检查是否有叶子数据
+
+
+2、情况2，edge数减少，关联如下代码
+
+```GO
+i := 0
+k := len(n.edges)  // 记录初始边数
+for i < k {
+    // 遍历当前edge
+    
+    // 处理边数量变化
+    if len(n.edges) >= k {
+        i++  // 边数没减少，继续下一个
+    }
+    k = len(n.edges)  // 更新k，但是i指针未更新，重新遍历
+}
+```
+
+递归实现如下：
 
 ```GO
 // Walk is used to walk the tree
@@ -796,12 +877,16 @@ func (t *Tree) Walk(fn WalkFn) {
 // recursively. Returns true if the walk should be aborted
 func recursiveWalk(n *node, fn WalkFn) bool {
 	// Visit the leaf values if any
+    // 1. 先访问当前节点的叶子（前序遍历）
 	if n.leaf != nil && fn(n.leaf.key, n.leaf.val) {
 		return true
 	}
 
 	// Recurse on the children
+    // 2. 递归遍历子节点
 	i := 0
+
+    // 记录当前edge的数量
 	k := len(n.edges) // keeps track of number of edges in previous iteration
 	for i < k {
 		e := n.edges[i]
@@ -812,12 +897,15 @@ func recursiveWalk(n *node, fn WalkFn) bool {
 		// iterating on. If there are no more edges, mergeChild happened,
 		// so the last edge became the current node n, on which we'll
 		// iterate one last time.
+
+        // 3. 处理遍历过程中树结构变化的情况
 		if len(n.edges) == 0 {
 			return recursiveWalk(n, fn)
 		}
 		// If there are now less edges than in the previous iteration,
 		// then do not increment the loop index, since the current index
 		// points to a new edge. Otherwise, get to the next index.
+        // 4. 处理边数量变化的情况
 		if len(n.edges) >= k {
 			i++
 		}
