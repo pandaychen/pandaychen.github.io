@@ -23,7 +23,7 @@ tags:
 - Http client：pkg/net/http/blademaster
 
 ##	0x01	全局变量
-在 [`breaker.go`](https://github.com/go-kratos/kratos/blob/master/pkg/net/netutil/breaker/breaker.go)) 中定义了 `3` 个全局变量：
+在 [`breaker.go`](https://github.com/go-kratos/kratos/blob/master/pkg/net/netutil/breaker/breaker.go) 中定义了 `3` 个全局变量：
 -	`_mu`
 -	`_conf`
 -	`_group`

@@ -270,7 +270,7 @@ func (sc *subConn) cost() uint64 {
 
 从上面的公式易知，`health`和`weight`为提权用，而`load`值（Node负载）为降权用，所以用`load`值除以`health`和`weight`的乘积，计算出的值越大，越不容易被pick
 
-```CPP
+```go
 if nodeA.load()*nodeB.health()*nodeB.meta.Weight > nodeB.load()*nodeA.health()*nodeA.meta.Weight {
 	//pc 为本次算法选择的节点
 	pc, upc = nodeB, nodeA

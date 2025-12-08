@@ -739,7 +739,8 @@ func (n *node) mergeChild() {
 ```
 
 ####    删除指定前缀
-```GO
+
+```go
 func (t *Tree) DeletePrefix(s string) int {
 	return t.deletePrefix(nil, t.root, s)
 }
@@ -812,7 +813,7 @@ func (t *Tree) deletePrefix(parent, n *node, prefix string) int {
 ####    遍历
 `recursiveWalk`提供了前序遍历树的方法，包含处理遍历过程中树结构变化的特殊逻辑。这个实现和普通的遍历有点区别，这个提供了回调函数`fn`，可以在遍历的时候对radix 树进行修改操作，如：
 
-```GO
+```go
 //case1：在遍历中删除元素
 tree.Walk(func(key string, val interface{}) bool {
     if val == "key_to_delete" {

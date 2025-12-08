@@ -730,9 +730,9 @@ dup2(4, 1)                          = 1
 #shell 关闭 fd 4（可选，但常见）：
 close(4)                            = 0
 #shell 执行 echo命令（通过 execve）：
-execve("/usr/bin/echo", ["echo", "asasasas"], ...)
+execve("/usr/bin/echo", ["echo", "abcdefg"], ...)
 #echo进程写入 fd 1：
-write(1, "asasasas\n", 9)           = 9
+write(1, "abcdefg\n", 9)           = 9
 ```
 
 ##  0x04    参考
