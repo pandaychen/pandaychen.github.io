@@ -2136,7 +2136,8 @@ func (f *File) readAt(b []byte, off int64) (int, error) {
 			for packet := range workCh {
 				var n int
 
-				// 重要：阻塞等待服务端响应结果
+				// 重要：阻塞等待服务端响应结果（网络IO）
+				// 当packet.res这个channel有返回的时候，说明网络IO完成了（可能成功OR失败）
 				s := <-packet.res
 				resPool.Put(packet.res)
 
