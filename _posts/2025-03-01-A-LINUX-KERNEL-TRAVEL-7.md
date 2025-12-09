@@ -25,7 +25,7 @@ tags:
 -	`/boot/System.map-$(uname -r)`：包含整个内核镜像的符号表，是磁盘上真实文件
 -	`/proc/kallsyms`：不仅包含内核镜像符号表，还包含所有动态加载模块的符号表（若函数被编译器内联inline或优化掉，则可能不存在于`/proc/kallsyms`），读取时内核动态生成
 
-```CPP
+```cpp
 [root@VM-X-X-centos ~]# ll -rth /boot/System.map-$(uname -r)
 -rw-r--r-- 1 root root 4.6M Nov 26  2021 /boot/System.map-5.4.119-1-tlinux4-0008
 [root@VM-X-X-centos ~]# ll -rth /proc/kallsyms

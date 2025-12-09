@@ -35,7 +35,7 @@ rootkit是一种恶意程序，能够隐藏自身及相关活动（如模块、�
 ####    LD_PRELOAD劫持
 通过设置`LD_PRELOAD`加载自定义动态库，覆盖标准库函数。例如，劫持`readdir`隐藏特定文件或目录：
 
-```CPP
+```cpp
 struct dirent *readdir(DIR *dir) {
     static struct dirent *(*real_readdir)(DIR *) = NULL;
     if (!real_readdir) {
@@ -54,7 +54,7 @@ struct dirent *readdir(DIR *dir) {
 ####    进程注入
 通过将恶意代码注入合法进程（如`systemd`）用以隐藏行为。例如使用`ptrace`注入代码：
 
-```CPP
+```cpp
 void inject_code(pid_t pid, unsigned char *code, size_t len) {
     //1、首先通过mmap分配一块可读、可写、可执行的内存，将shellcode复制进去
     void *mem = mmap(NULL, len, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -100,7 +100,7 @@ int main() {
 ####    系统调用表劫持
 通过修改`sys_call_table`替换系统调用函数。[`sys_call_table`机制](https://pandaychen.github.io/2025/03/01/A-LINUX-KERNEL-TRAVEL-7/#kallsyms)，如替换`sys_getdents`隐藏文件的代码，一般采用LKM技术实现（LKM是唯一支持运行时动态修改内核系统调用表的实用方案）
 
-```CPP
+```cpp
 asmlinkage long (*orig_getdents)(unsigned int, struct linux_dirent *, unsigned int);
 asmlinkage long hooked_getdents(unsigned int fd, struct linux_dirent *dirp, unsigned int count) {
     long ret = orig_getdents(fd, dirp, count);
@@ -189,7 +189,7 @@ is_invisible(pid_t pid)
 -   [文件隐藏]()：通过修改VFS中的`file_operations`的实现来完成的，主要是`f_op->readdir`、`f_op->iterate`这两个方法
 -   [进程隐藏](https://github.com/yaoyumeng/adore-ng/blob/master/adore-ng.c#L193)：同上，也通过修改VFS的`procfs`类型的上述方法来实现
 
-```CPP
+```cpp
 /*
 patch_vfs(proc_fs, &orig_proc_readdir, adore_proc_readdir);
 patch_vfs(root_fs, &orig_root_readdir, adore_root_readdir);
@@ -244,7 +244,7 @@ int patch_vfs(const char *p,
 -   `adore_proc_iterate`
 -   `adore_root_iterate`
 
-```CPP
+```cpp
 int adore_proc_readdir(struct file *fp, void *buf, filldir_t filldir)
 {
 	int r = 0;
@@ -278,7 +278,7 @@ int adore_proc_filldir(void *buf, const char *name, int nlen, loff_t off, u64 in
 ####    内核模块加载
 大部分内核rootkit都是以可加载内核模块（LKM）形式运行，注册恶意逻辑，如下面的代码，其工作原理是通过LKM加载rootkit，隐藏自身模块，调用`hide_process`隐藏进程
 
-```CPP
+```cpp
 static int __init rootkit_init(void) {
     printk(KERN_INFO "rootkit mount\n");
     hide_process(1234); // 隐藏PID 1234

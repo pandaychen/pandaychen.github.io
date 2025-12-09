@@ -67,7 +67,7 @@ hashtable 是一种非常高效的数据结构，它通过散列函数将 key �
 
 整个存储由 `header` + `nodes` + `blocks` 三部分构成，其中 `nodes` 由所有的 `mem_node` 节点组成，`blocks` 由所有的 `mem_block` 元素构成；核心这是一个顺序结构，初始化的代码 `TotalSizeInit` 对应上图：
 
-```CPP
+```cpp
 void MemHash::TotalSizeInit()
 {
 	//---|barrier|head|barrier|node zone|barrier|block zone|barrier|---
@@ -128,7 +128,7 @@ struct mem_block {
 - `InitNewMemHash`：新建共享内存
 - `InitOldMemHash`：已存在 mmap 文件
 
-```CPP
+```cpp
 int MemHash::Init(const char* name,
 		  time_t    data_store_time,
 		  int       mlock_open_flag,
@@ -177,7 +177,7 @@ int MemHash::Init(const char* name,
 
 ####  插入
 
-```CPP
+```cpp
 int MemHash::Set(uint64_t key, const char* data, int len)
 {
 	// 防止 key 为 0 的情况
@@ -268,7 +268,7 @@ int MemHash::Set(uint64_t key, const char* data, int len)
 
 
 ####  删除
-```CPP
+```cpp
 int MemHash::Del(uint64_t key)
 {
 	struct mem_node *tmp_node = GetNode(key);
@@ -313,7 +313,7 @@ int MemHash::Del(uint64_t key)
 ```
 
 ####  查找
-```CPP
+```cpp
 int MemHash::Get(uint64_t key, char* data, int max_len, int& data_len)
 {
 	// 防止 key 为 0 的情况
@@ -367,7 +367,7 @@ int MemHash::Get(uint64_t key, char* data, int max_len, int& data_len)
 
 ####  Append 方法
 
-```CPP
+```cpp
 int MemHash::Append(uint64_t key, const char* data, int len)
 {
 	// 防止 key 为 0 的情况
