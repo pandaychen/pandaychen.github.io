@@ -384,7 +384,7 @@ int main()
 ####  linux无文件渗透执行elf：共享内存
 `fexecve`函数能执行一个程序（同`execve`），但是传递给这个函数的是文件描述符，而不是文件的绝对路径，样例代码如下。将代码编译后运行运行（可看到执行了`ls`），当然也可以直接运行`/dev/shm/badshmfile`得到`ls`一样的功能（同`memfd`工具类似），实现了对原始程序的隐藏效果
 
-```CPP
+```cpp
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>

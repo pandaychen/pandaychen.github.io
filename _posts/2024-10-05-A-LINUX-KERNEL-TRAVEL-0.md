@@ -36,7 +36,7 @@ tags:
 
 ####    container_of 机制
 
-```CPP
+```cpp
 // 说明：根据结构体 (type) 变量中的域成员变量 (member) 的指针 (ptr) 来获取指向整个结构体变量的指针
 #define container_of(ptr, type, member) ({          \
     const typeof(((type *)0)->member ) *__mptr = (ptr);    \
@@ -59,7 +59,7 @@ tags:
 
 内核 linklist 中的最大问题是怎样通过链表的节点来取得用户数据？linux 的 linklist 节点 (node) 中没有包含用户的用户如 `data1`，`data2` 等，所以 Linux 中双向链表的使用思想也变成了将双向链表节点嵌套在其它的结构体（比如 linux 进程管理的 `struct task_struct`[结构](https://github.com/torvalds/linux/blob/master/include/linux/sched.h#L1055)）中；在遍历链表的时候，根据双链表节点的指针获取 **它所在结构体的指针**（使用 `container_of` 宏），从而再获取数据或者该结构体的其他成员
 
-```CPP
+```cpp
 struct list_head {
 	struct list_head *next, *prev;
 };
@@ -72,7 +72,7 @@ struct list_head {
 
 普通 linklist：
 
-```CPP
+```cpp
 struct student{// 结构体 student 本身就是一个链表节点
 	struct student *prev;
 	struct student *next;
@@ -83,7 +83,7 @@ struct student{// 结构体 student 本身就是一个链表节点
 
 内核 linklist：
 
-```CPP
+```cpp
 struct student{
 	struct list_head list_node;// 链表节点
 	char name[64];
@@ -101,7 +101,7 @@ struct student{
 ##  0x02    hash 链表
 `hlist_head` 和 `hlist_node` 用于内核 hash 表，分别表示列表头（数组中的一项）和列表头所在双向链表中的某项，结构定义及示意图如下:
 
-```CPP
+```cpp
 struct hlist_head {
 	struct hlist_node *first;
 };
@@ -117,7 +117,7 @@ struct hlist_node {
 
 此外，注意到 `hlist_node.pprev` 是一个指向指针的指针（保存前一个节点的 `next` 成员地址），目的是在删除链表头结点的时候，`pprev` 这个设计无需判断删除的节点是否为头结点（如果是普通双向 linklist 的设计，那么删除头结点之后，`hlist_head` 中的 `first` 指针需要指向新的头结点），参考 `__hlist_del` 的实现
 
-```CPP
+```cpp
 static inline void hlist_add_head(struct hlist_node *n, struct hlist_head *h)
 {
 	struct hlist_node *first = h->first;
@@ -141,7 +141,7 @@ static inline void __hlist_del(struct hlist_node *n)
 
 和 `list_head` 一样，`hlist_node` 通常也是嵌套在其他结构中的，即 `hlist_entry` 函数用于根据 `hlist_node` 找到其外层结构体
 
-```CPP
+```cpp
 #define hlist_entry(ptr, type, member) container_of(ptr,type,member)
 ```
 
@@ -170,7 +170,7 @@ static inline void __hlist_del(struct hlist_node *n)
 ####	进程管理：upid hash table
 回想下，在 linux 进程管理 `struct pid/upid`[结构](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/pid.h#L50) 中就使用了 hash linklist
 
-```CPP
+```cpp
 struct upid {
 	/* Try to keep pid_chain in the same cacheline as nr for find_vpid */
 	int nr;
@@ -197,7 +197,7 @@ struct pid
 
 上图展示了，`struct pid`结构体中的`struct hlist_head tasks[PIDTYPE_MAX]`成员，这是一个hash list 头节点，其冲突链上的每个`struct hlist_node`节点，对应着`struct task_struct`结构体中的`struct pid_link pids[PIDTYPE_MAX]`成员，而`pid_link`定义为如下：
 
-```CPP
+```cpp
 struct pid_link
 {
 	struct hlist_node node;
@@ -235,7 +235,7 @@ struct pid_link
 
 `find_pid_ns`，用于遍历全局upid hashtable，第一个参数`pnr`表示 upid hashtable中每个hash链表桶元素（类型为`struct upid *`）；第二个参数`&pid_hash[pid_hashfn(nr, ns)]`，直接定位到upid hashtable的bucket 头指针，类型为`struct hlist_head *`；第三个参数为`pid_chain`，对应于`upid`结构体的node成员`pid_chain`，类型为`struct hlist_node`
 
-```CPP
+```cpp
 static struct hlist_head *pid_hash;	//全局hashtable
 
 struct upid {
@@ -272,7 +272,7 @@ struct pid *find_pid_ns(int nr, struct pid_namespace *ns)
 
 调用`do_each_pid_task`的代码：
 
-```CPP
+```cpp
 static bool has_stopped_jobs(struct pid *pgrp)
 {
 	struct task_struct *p;
@@ -338,7 +338,7 @@ hlist_for_each_entry_rcu(task, head, pids[type].node) {
 
 ![rb-node](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/datastructure/rb_node.jpg)
 
-```CPP
+```cpp
 struct rb_node {
     unsigned long  __rb_parent_color;
     struct rb_node *rb_right;
@@ -369,7 +369,7 @@ TODO
 ####	等待队列结构
 和linklist类似，waitqueue 本质上是一个链表，waitqueue包含了`wait_queue_head_t`（头）以及`__wait_queue`（节点）两个基础结构
 
-```CPP
+```cpp
 struct __wait_queue_head {
     spinlock_t lock;	//lock 字段用于保护等待队列在多核环境下数据被破坏
     struct list_head task_list;	//task_list 字段用于保存等待资源的进程列表
@@ -393,7 +393,7 @@ struct __wait_queue {
 
 1、waitqueue 初始化：通过调用 `init_waitqueue_head()` 函数来初始化 `wait_queue_head_t` 结构，首先调用 `spin_lock_init()` 来初始化自旋锁 lock，然后调用 `INIT_LIST_HEAD()` 来初始化进程链表
 
-```CPP
+```cpp
 void init_waitqueue_head(wait_queue_head_t *q)
 {
     spin_lock_init(&q->lock);
@@ -403,7 +403,7 @@ void init_waitqueue_head(wait_queue_head_t *q)
 
 2、向waitqueue添加等待进程，要向 waitqueue 添加等待进程，首先要声明一个 `wait_queue_t` 结构的变量即等待队列成员，通过`init_waitqueue_entry`实现。初始化完 `wait_queue_t` 结构变量后，可以通过调用 `add_wait_queue()` 函数把等待进程添加到等待队列，其中`add_wait_queue()` 函数的实现逻辑为首先通过调用 `spin_lock_irqsave()` 上锁，然后调用 `list_add()` 函数把节点添加到等待队列链表即可
 
-```CPP
+```cpp
 // init_waitqueue_entry 初始化为系统默认的等待唤醒函数
 static inline void init_waitqueue_entry(wait_queue_t *q, struct task_struct *p)
 {
@@ -438,14 +438,14 @@ static inline void __add_wait_queue(wait_queue_head_t *head, wait_queue_t *new)
 
 3、休眠等待进程，当把进程添加到等待队列后，就可以休眠当前进程，让出CPU给其他进程运行。通常按照下面的代码可以完成**休眠当前进程->让出当前CPU的操作**：
 
-```CPP
+```cpp
 set_current_state(TASK_INTERRUPTIBLE);	//把当前进程运行状态设置为可中断休眠状态`TASK_INTERRUPTIBLE`
 schedule();	//调用 schedule() 函数可以使当前进程让出CPU，切换到其他进程执行
 ```
 
 关联的函数有如下：
 
-```CPP
+```cpp
 wait_event(wq_head, condition)
 wait_event_timeout(wq_head, condition, timeout) 
 wait_event_interruptible(wq_head, condition)
@@ -456,7 +456,7 @@ wait_event_interruptible_timeout(wq_head, condition, timeout)
 
 关联的函数有如下：
 
-```CPP
+```cpp
 wake_up(&wq_head)
 wake_up_interruptible(&wq_head)
 wake_up_nr(&wq_head, nr)
@@ -464,7 +464,7 @@ wake_up_interruptible_nr(&wq_head, nr)
 wake_up_interruptible_all(&wq_head)
 ```
 
-```CPP
+```cpp
 static void __wake_up_common(wait_queue_head_t *q, 
     unsigned int mode, int nr_exclusive, int sync, void *key)
 {
@@ -485,7 +485,7 @@ static void __wake_up_common(wait_queue_head_t *q,
 
 Linux 内核的 `___wait_event` 宏通过**循环检查条件（`condition`）+ 主动让出 CPU（`cmd`） + 唤醒后重新检查条件**的机制实现了等待队列的核心逻辑
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/wait.h#L266
 #define ___wait_event(wq, condition, state, exclusive, ret, cmd)	\
 ({									\
@@ -546,7 +546,7 @@ TODO
 
 如果一个 page 正在经历 I/O 换出，为了避免同时访问造成的数据不一致，需要上锁，之后试图使用这个 page 的任务将调用 `wait_on_page_locked()` 排队。当 I/O 操作完成，page 解锁，等待任务被唤醒
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/pagemap.h#L497
 static inline void wait_on_page_locked(struct page *page)
 {
@@ -557,7 +557,7 @@ static inline void wait_on_page_locked(struct page *page)
 
 直觉上应该每个 page 有一个 waitqueue，但这样开销太大了，内核的做法是将 page 按照一定的 hash 规则分组（一共 `256` 个分组），等待同一组内的 page 的任务都将被挂接在同一个 waitqueue 上。当分组内的某一个 page 解锁时，通过 hash 比对，查找 waitqueue 中等待该 page 的所有任务并唤醒
 
-```CPP
+```cpp
 #define PAGE_WAIT_TABLE_SIZE (1 << 8)
 wait_queue_head_t page_wait_table[PAGE_WAIT_TABLE_SIZE];
 
@@ -584,7 +584,7 @@ EXPORT_SYMBOL_GPL(add_page_wait_queue);
 
 I/O 多路复用场景下，一个任务可以同时等待多个事件，这里的同时等待就利用了等待队列的机制来实现。以`epoll`机制为例，通过accept获取的fd关联的`eppoll_entry` 结构体就包含了等待队列的相关数据结构，如下
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L230
 struct eppoll_entry {
 	/* List header used to link this structure to the "struct epitem" */
