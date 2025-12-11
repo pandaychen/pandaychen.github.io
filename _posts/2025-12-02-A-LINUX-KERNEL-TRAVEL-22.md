@@ -60,6 +60,8 @@ out:
 4.	数据拷贝到用户空间
 5.	预读机制：优化顺序读取性能
 
+在调用`do_generic_file_read`之前，主要注意`iov_iter`中保存了用户期望copy的长度以及分段`iovec`（缓冲区）
+
 ```cpp
 //filp：要读取的文件对象
 //ppos： 指向当前文件偏移量的指针
@@ -68,13 +70,13 @@ out:
 static ssize_t do_generic_file_read(struct file *filp, loff_t *ppos,
 		struct iov_iter *iter, ssize_t written)
 {
-	struct address_space *mapping = filp->f_mapping;
-	struct inode *inode = mapping->host;
-	struct file_ra_state *ra = &filp->f_ra;
-	pgoff_t index;
-	pgoff_t last_index;
-	pgoff_t prev_index;
-	unsigned long offset;      /* offset into pagecache page */
+	struct address_space *mapping = filp->f_mapping;	// 文件的页缓存映射
+	struct inode *inode = mapping->host;				// 文件的 inode（反向）
+	struct file_ra_state *ra = &filp->f_ra;				// 预读状态
+	pgoff_t index;			// 当前页索引
+	pgoff_t last_index;		// 最后页索引
+	pgoff_t prev_index;		
+	unsigned long offset;    // 页内偏移  /* offset into pagecache page */	
 	unsigned int prev_offset;
 	int error = 0;
 
@@ -82,12 +84,14 @@ static ssize_t do_generic_file_read(struct file *filp, loff_t *ppos,
 		return 0;
 	iov_iter_truncate(iter, inode->i_sb->s_maxbytes);
 
-	index = *ppos >> PAGE_SHIFT;
-	prev_index = ra->prev_pos >> PAGE_SHIFT;
+	// 重要：偏移量转换计算
+	index = *ppos >> PAGE_SHIFT;		 // 计算当前页索引（注意：是当前文件对象）
+	prev_index = ra->prev_pos >> PAGE_SHIFT;	
 	prev_offset = ra->prev_pos & (PAGE_SIZE-1);
-	last_index = (*ppos + iter->count + PAGE_SIZE-1) >> PAGE_SHIFT;
-	offset = *ppos & ~PAGE_MASK;
+	last_index = (*ppos + iter->count + PAGE_SIZE-1) >> PAGE_SHIFT;	// 计算最后一页索引
+	offset = *ppos & ~PAGE_MASK;		//计算页内偏移
 
+	// 重要：page操作的核心循环流程
 	for (;;) {
 		struct page *page;
 		pgoff_t end_index;
@@ -101,21 +105,30 @@ find_page:
 			goto out;
 		}
 
+		// find_get_page：从页缓存查找
+		// step1：查找页缓存
 		page = find_get_page(mapping, index);
 		if (!page) {
+			// 页不在缓存中，触发同步预读
 			page_cache_sync_readahead(mapping,
 					ra, filp,
 					index, last_index - index);
+			// 再次尝试查找
 			page = find_get_page(mapping, index);
 			if (unlikely(page == NULL))
-				goto no_cached_page;
+				goto no_cached_page;	// 分配新页
 		}
+
+		// 重要：预读机制（step2）
 		if (PageReadahead(page)) {
+			// 异步预读：当读取到标记为预读的页面时触发
 			page_cache_async_readahead(mapping,
 					ra, filp, page,
 					index, last_index - index);
 		}
-		if (!PageUptodate(page)) {
+
+		//step3：页面状态检查
+		if (!PageUptodate(page)) {	// 页面数据不是最新的
 			/*
 			 * See comment in do_read_cache_page on why
 			 * wait_on_page_locked is used to avoid unnecessarily
@@ -124,25 +137,30 @@ find_page:
 			error = wait_on_page_locked_killable(page);
 			if (unlikely(error))
 				goto readpage_error;
-			if (PageUptodate(page))
+			if (PageUptodate(page))	// 等待后，页面已更新
 				goto page_ok;
 
+			// 检查是否为部分更新页（某些文件系统支持）
 			if (inode->i_blkbits == PAGE_SHIFT ||
 					!mapping->a_ops->is_partially_uptodate)
 				goto page_not_up_to_date;
 			/* pipes can't handle partially uptodate pages */
+			// 管道不支持部分更新页
 			if (unlikely(iter->type & ITER_PIPE))
 				goto page_not_up_to_date;
+			// 检查部分更新的具体状态
 			if (!trylock_page(page))
 				goto page_not_up_to_date;
 			/* Did it get truncated before we got the lock? */
-			if (!page->mapping)
+			if (!page->mapping)	// 页面已被截断
 				goto page_not_up_to_date_locked;
 			if (!mapping->a_ops->is_partially_uptodate(page,
 							offset, iter->count))
 				goto page_not_up_to_date_locked;
 			unlock_page(page);
 		}
+
+		//step5：重要，page已经准备好，数据拷贝到用户空间
 page_ok:
 		/*
 		 * i_size must be checked after we know the page is Uptodate.
@@ -153,28 +171,31 @@ page_ok:
 		 * another truncate extends the file - this is desired though).
 		 */
 
+		//检查文件大小边界
 		isize = i_size_read(inode);
 		end_index = (isize - 1) >> PAGE_SHIFT;
 		if (unlikely(!isize || index > end_index)) {
 			put_page(page);
-			goto out;
+			goto out;	// 已经读到文件末尾
 		}
 
 		/* nr is the maximum number of bytes to copy from this page */
+		// 计算本页可拷贝的字节数
 		nr = PAGE_SIZE;
-		if (index == end_index) {
-			nr = ((isize - 1) & ~PAGE_MASK) + 1;
-			if (nr <= offset) {
+		if (index == end_index) {	// 最后一页
+			nr = ((isize - 1) & ~PAGE_MASK) + 1;	 // 计算文件在最后一页的字节数
+			if (nr <= offset) {	// 偏移已超过文件末尾
 				put_page(page);
 				goto out;
 			}
 		}
-		nr = nr - offset;
+		nr = nr - offset;	// 减去页内偏移
 
 		/* If users can be writing to this page using arbitrary
 		 * virtual addresses, take care about potential aliasing
 		 * before reading the page on the kernel side.
 		 */
+		// 处理缓存一致性（写时拷贝等情况）
 		if (mapping_writably_mapped(mapping))
 			flush_dcache_page(page);
 
@@ -182,6 +203,7 @@ page_ok:
 		 * When a sequential read accesses a page several times,
 		 * only mark it as accessed the first time.
 		 */
+		// 标记页面访问（用于页面回收算法）
 		if (prev_index != index || offset != prev_offset)
 			mark_page_accessed(page);
 		prev_index = index;
@@ -191,6 +213,8 @@ page_ok:
 		 * now we can copy it to user space...
 		 */
 
+		// copy_page_to_iter：拷贝数据到用户空间
+		//负责从内核页拷贝数据到用户空间缓冲区，处理页边界、部分拷贝等情况，返回实际拷贝的字节数
 		ret = copy_page_to_iter(page, offset, nr, iter);
 		offset += ret;
 		index += offset >> PAGE_SHIFT;
@@ -207,6 +231,8 @@ page_ok:
 		}
 		continue;
 
+
+		//step4：从磁盘读取页面的过程
 page_not_up_to_date:
 		/* Get exclusive access to the page ... */
 		error = lock_page_killable(page);
@@ -215,14 +241,14 @@ page_not_up_to_date:
 
 page_not_up_to_date_locked:
 		/* Did it get truncated before we got the lock? */
-		if (!page->mapping) {
+		if (!page->mapping) {	// 页面已被截断
 			unlock_page(page);
 			put_page(page);
-			continue;
+			continue;	// 重新开始
 		}
 
 		/* Did somebody else fill it already? */
-		if (PageUptodate(page)) {
+		if (PageUptodate(page)) {	 // 其他进程已更新页面
 			unlock_page(page);
 			goto page_ok;
 		}
@@ -233,8 +259,13 @@ readpage:
 		 * failures, eg. multipath errors.
 		 * PG_error will be set again if readpage fails.
 		 */
-		ClearPageError(page);
+		ClearPageError(page);	// 清除之前的错误
 		/* Start the actual read. The read will unlock the page. */
+
+		//重要：调用文件系统的 readpage 方法（实际磁盘读取）
+		//比如对于ext4系统：调用ext4_readpage
+		//此调用会提交 BIO 请求到底层块设备
+		//https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/inode.c#L3224
 		error = mapping->a_ops->readpage(filp, page);
 
 		if (unlikely(error)) {
@@ -269,17 +300,21 @@ readpage:
 
 		goto page_ok;
 
+		//step7：错误处理
 readpage_error:
 		/* UHHUH! A synchronous read error occurred. Report it */
 		put_page(page);
 		goto out;
 
+
+		//step 6：页面分配（缓存未命中）
 no_cached_page:
 		/*
 		 * Ok, it wasn't cached, so we need to create a new
 		 * page..
 		 */
-		page = page_cache_alloc_cold(mapping);
+		// 分配cold页面，cold页面更适合一次性的读取操作，同时加入到页面缓存和 LRU 列表
+		page = page_cache_alloc_cold(mapping);	
 		if (!page) {
 			error = -ENOMEM;
 			goto out;
@@ -288,22 +323,23 @@ no_cached_page:
 				mapping_gfp_constraint(mapping, GFP_KERNEL));
 		if (error) {
 			put_page(page);
-			if (error == -EEXIST) {
+			if (error == -EEXIST) {	 // 其他进程已添加
 				error = 0;
 				goto find_page;
 			}
 			goto out;
 		}
-		goto readpage;
+		goto readpage;	// 读取新分配的页面
 	}
 
-out:
+	//step8：完成
+out:	
 	ra->prev_pos = prev_index;
 	ra->prev_pos <<= PAGE_SHIFT;
 	ra->prev_pos |= prev_offset;
 
 	*ppos = ((loff_t)index << PAGE_SHIFT) + offset;
-	file_accessed(filp);
+	file_accessed(filp);	 // 更新文件访问时间
 	return written ? written : error;
 }
 ```
