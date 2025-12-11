@@ -15,7 +15,7 @@ tags:
 ##  0x00    前言
 先回顾一下，调用read系统调用之后，内核的调用路径是什么？
 
-![]()
+![read-syscall-kernel-trace]()
 
 ##  0x01    generic_file_read_iter的实现细节
 通常大部分文件系统的读取read实现，都是将`read_iter`置为`generic_file_read_iter`，如本文分析的ext4系统
@@ -49,6 +49,19 @@ generic_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 	retval = do_generic_file_read(file, &iocb->ki_pos, iter, retval);
 out:
 	return retval;
+}
+```
+
+上面函数中`iov_iter_count`函数，就是用户请求读取的字节数，也就是用户缓冲区的剩余容量，回顾下前文的内容，`iov_iter`本质是一个迭代器，它的特点是：
+
+1.	初始化时，`count`被设置为用户调用 `read(fd, buf, count)`时的 `count`参数
+2.	随着数据拷贝（`page` copy到`iovec`），`count`逐渐减少（变化）
+3.	当 `i->count`变为 `0` 时，表示用户缓冲区已满
+
+```cpp
+static inline size_t iov_iter_count(const struct iov_iter *i)
+{
+	return i->count;
 }
 ```
 
@@ -92,12 +105,13 @@ static ssize_t do_generic_file_read(struct file *filp, loff_t *ppos,
 	offset = *ppos & ~PAGE_MASK;		//计算页内偏移
 
 	// 重要：page操作的核心循环流程
-	for (;;) {
+	for (;;) {	// 无限循环，处理多个页面
 		struct page *page;
 		pgoff_t end_index;
 		loff_t isize;
 		unsigned long nr, ret;
 
+		// 条件调度：允许调度器中断
 		cond_resched();
 find_page:
 		if (fatal_signal_pending(current)) {
@@ -109,7 +123,7 @@ find_page:
 		// step1：查找页缓存
 		page = find_get_page(mapping, index);
 		if (!page) {
-			// 页不在缓存中，触发同步预读
+			// 页不在缓存（radix树）中，触发同步预读
 			page_cache_sync_readahead(mapping,
 					ra, filp,
 					index, last_index - index);
@@ -216,6 +230,10 @@ page_ok:
 		// copy_page_to_iter：拷贝数据到用户空间
 		//负责从内核页拷贝数据到用户空间缓冲区，处理页边界、部分拷贝等情况，返回实际拷贝的字节数
 		ret = copy_page_to_iter(page, offset, nr, iter);
+		//offset：页面内的字节偏移
+		//index：当前处理的页面索引
+		//prev_offset：上一次访问的偏移（用于顺序性检测）
+		//written：总共已读取的字节数
 		offset += ret;
 		index += offset >> PAGE_SHIFT;
 		offset &= ~PAGE_MASK;
@@ -229,8 +247,9 @@ page_ok:
 			error = -EFAULT;
 			goto out;
 		}
-		continue;
 
+		//继续下一页处理
+		continue;
 
 		//step4：从磁盘读取页面的过程
 page_not_up_to_date:
@@ -344,17 +363,184 @@ out:
 }
 ```
 
+####	offset的意义
+关于参数`pgoff_t offset`，`offset`是页索引（page index），表示文件被划分为页面大小的块后，从`0`开始计数的页面序号，来自文件偏移量。如在文件读取/写入操作中，`offset`从用户的文件偏移量计算而来（注意`offset`	代表页面个数，非字节）
+
+```cpp
+// 用户系统调用：read(fd, buf, count)
+// 内核处理时：
+loff_t pos = file->f_pos;  // 当前文件偏移（字节）
+pgoff_t index = pos >> PAGE_SHIFT;  // 转换为页索引
+unsigned int page_offset = pos & ~PAGE_MASK;  // 页内偏移
+
+//对于类型pgoff_t
+
+// offset 是 pgoff_t 类型，通常定义为 unsigned long
+typedef unsigned long pgoff_t;
+
+// 对于大于 4GB 的文件：
+loff_t file_size = 10LL * 1024 * 1024 * 1024;  // 10GB
+pgoff_t max_index = file_size >> PAGE_SHIFT;    // 2621440 个页面
+
+// 在32位系统上：
+// pgoff_t 是 32 位
+// 最大文件大小 = 2^32 * 4096 = 16TB（实际上受文件系统和其他限制）
+```
+
+此外，在回顾一下，在IDR树中，key就是`offset`（页索引），而value 就是`struct page*`即页面指针
+
+
+####	page_ok标签
+`page_ok`标签处表示当前页面已准备就绪，可以进行用户空间拷贝。这个标签处理单个页面的读取完成，包括：
+
+1.	检查文件边界
+2.	计算可拷贝字节数
+3.	处理缓存一致性
+4.	执行实际拷贝
+5.	更新状态并决定是否继续（检查退出状态）
+
+```cpp
+{
+	......
+page_ok:
+		//检查文件大小边界
+		isize = i_size_read(inode);
+		end_index = (isize - 1) >> PAGE_SHIFT;
+		if (unlikely(!isize || index > end_index)) {
+			put_page(page);
+			goto out;	// 已经读到文件末尾
+		}
+
+		/* nr is the maximum number of bytes to copy from this page */
+		// 计算本页可拷贝的字节数
+		nr = PAGE_SIZE;
+		if (index == end_index) {	// 最后一页
+			nr = ((isize - 1) & ~PAGE_MASK) + 1;	 // 计算文件在最后一页的字节数
+			if (nr <= offset) {	// 偏移已超过文件末尾
+				put_page(page);
+				goto out;
+			}
+		}
+		nr = nr - offset;	// 减去页内偏移
+
+		// 处理缓存一致性（写时拷贝等情况）
+		if (mapping_writably_mapped(mapping))
+			flush_dcache_page(page);
+
+		/*
+		 * When a sequential read accesses a page several times,
+		 * only mark it as accessed the first time.
+		 */
+		// 标记页面访问（用于页面回收算法）
+		// 这里是执行page的顺序访问检测，只有第一次访问时才标记页面为"已访问"，这里影响页面回收算法的决策
+		if (prev_index != index || offset != prev_offset)
+			mark_page_accessed(page);
+		prev_index = index;
+
+		/*
+		 * Ok, we have the page, and it's up-to-date, so
+		 * now we can copy it to user space...
+		 */
+
+		// copy_page_to_iter：拷贝数据到用户空间
+		//负责从内核页拷贝数据到用户空间缓冲区，处理页边界、部分拷贝等情况，返回实际拷贝的字节数
+		ret = copy_page_to_iter(page, offset, nr, iter);
+		offset += ret;					// 更新页内偏移
+		index += offset >> PAGE_SHIFT;	// 如果offset跨页，index增加（下一次需要访问后面的page了）
+		offset &= ~PAGE_MASK;			// 将offset限制在当前页内
+		prev_offset = offset;			// 记录偏移用于下次访问检测
+
+		put_page(page);	// 在每次循环结束时释放页面引用
+		/*
+		引用计数管理机制， 确保页面在使用期间不会被回收
+		1、find_get_page()增加引用计数
+		2、使用完毕后必须 put_page()
+		*/
+		written += ret;	// 累计已读取字节数
+		if (!iov_iter_count(iter))	// 用户缓冲区用完了，退出
+			goto out;
+		if (ret < nr) {		// 拷贝失败，退出
+			error = -EFAULT;
+			goto out;
+		}
+
+		// 继续下一个循环，处理下一个页面
+		continue;
+	......
+}
+```
+
+细节一：如何检测copy完成（退出）
+
+从上面代码分析可知在`copy_page_to_iter`执行完对本page的copy动作完成之后，会依次检查这些（退出）条件是否满足：
+
+-	通常情况下，用户缓冲区的size等于本次要copy的文件page的总字节大小，但实际跨越的page页数，需要由offset来决定，可能跨越多页
+-	copy大文件，本次copy未到达文件的尾部，用户缓冲区已经耗尽
+-	copy小文件，本次copy到达了文件尾部（到达了文件最后一页，但未占满最后一页），用户缓冲区还有剩余空间
+
+1、检查用户缓冲区是否已满，代码片段：
+
+```cpp
+if (!iov_iter_count(iter))  // 用户缓冲区已空
+    goto out;               // 退出循环，返回
+```
+
+2、检查`copy_page_to_iter`（参数`nr`为希望copy的字节数、返回值为实际copy的字节数）是否拷贝失败，代码片段：
+
+```cpp
+if (ret < nr) {             // 实际拷贝字节数小于预期拷贝字节数
+    error = -EFAULT;        // 设置错误
+    goto out;               // 退出循环
+}
+```
+
+细节二：对边界条件处理，片段如下：
+
+1、在copy前发现已经到达了文件的末尾，如下：
+
+```cpp
+isize = i_size_read(inode);
+end_index = (isize - 1) >> PAGE_SHIFT;
+
+if (unlikely(!isize || index > end_index)) {
+    put_page(page);
+    goto out;  // 说明到达了文件末尾
+}
+```
+
+2、对最后一页的特殊处理，片段如下：
+
+```cpp
+nr = PAGE_SIZE;
+if (index == end_index) {	 // 当前页面是最后一页
+	nr = ((isize - 1) & ~PAGE_MASK) + 1;	 
+	if (nr <= offset) {	// 如果要读取的偏移已超过有效数据，说明已经读取完成了，可以退出
+		put_page(page);
+		goto out;
+	}
+}
+```
+
+####	
+几个问题：
+
 ##	0x0	计算页索引和偏移
+本节主要分析下`find_get_page`的实现过程，注意到其入参`pgoff_t offset`，来源于`index = *ppos >> PAGE_SHIFT`， 即page在文件中的索引index，这让人很容易联想到内核IDR结构的key
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/pagemap.h#L245
 static inline struct page *find_get_page(struct address_space *mapping,
 					pgoff_t offset)
-{
+{	
+	//用于从页缓存中获取页面，支持多种获取模式
 	return pagecache_get_page(mapping, offset, 0, 0);
 }
 
 //https://elixir.bootlin.com/linux/v4.11.6/source/mm/filemap.c#L1269
+//mapping：	页缓存所属的地址空间（文件映射）
+//offset：	页面在文件中的页索引
+//fgp_flags：获取页面的标志位，控制函数行为
+//gfp_mask：内存分配的 GFP 标志
 struct page *pagecache_get_page(struct address_space *mapping, pgoff_t offset,
 	int fgp_flags, gfp_t gfp_mask)
 {
@@ -386,17 +572,18 @@ repeat:
 		VM_BUG_ON_PAGE(page->index != offset, page);
 	}
 
-	if (page && (fgp_flags & FGP_ACCESSED))
+	if (page && (fgp_flags & FGP_ACCESSED)){
+		//标记页面访问
+		//将页面标记为活跃，避免被快速回收，同时更新页面在 LRU 链表中的位置
 		mark_page_accessed(page);
+	}
 
+	// 未在radix树中查找到相关的文件页，需要新建
 no_page:
 	if (!page && (fgp_flags & FGP_CREAT)) {
-		int err;
-		if ((fgp_flags & FGP_WRITE) && mapping_cap_account_dirty(mapping))
-			gfp_mask |= __GFP_WRITE;
-		if (fgp_flags & FGP_NOFS)
-			gfp_mask &= ~__GFP_FS;
+		......
 
+		// 分配页面
 		page = __page_cache_alloc(gfp_mask);
 		if (!page)
 			return NULL;
@@ -407,13 +594,13 @@ no_page:
 		/* Init accessed so avoid atomic mark_page_accessed later */
 		if (fgp_flags & FGP_ACCESSED)
 			__SetPageReferenced(page);
-
+		// 重要：添加到page cache和全局LRU链表
 		err = add_to_page_cache_lru(page, mapping, offset,
 				gfp_mask & GFP_RECLAIM_MASK);
 		if (unlikely(err)) {
 			put_page(page);
 			page = NULL;
-			if (err == -EEXIST)
+			if (err == -EEXIST)	// 竞争条件：其他线程已添加
 				goto repeat;
 		}
 	}
@@ -422,14 +609,114 @@ no_page:
 }
 ```
 
+`find_get_entry`函数用于从页缓存中查找页面，它无锁查找页缓存，并使用 RCU 机制确保并发安全，这里会调用`radix_tree_lookup_slot`在文件的IDR树中进行查找
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/filemap.c#L1169
+//mapping：文件的页缓存地址空间
+//offset：页面在文件中的索引
+struct page *find_get_entry(struct address_space *mapping, pgoff_t offset)
+{
+	void **pagep;
+	struct page *head, *page;
+
+	rcu_read_lock();
+repeat:
+	page = NULL;
+	/*
+	radix_tree_lookup_slot：返回指向存储页面指针的槽位的指针，槽位存储的是 void *，可能是 struct page *；如果没有对应的条目，返回 NULL
+	*/
+	pagep = radix_tree_lookup_slot(&mapping->page_tree, offset);
+	if (pagep) {
+		page = radix_tree_deref_slot(pagep);
+		if (unlikely(!page))
+			goto out;
+		if (radix_tree_exception(page)) {
+			if (radix_tree_deref_retry(page))
+				goto repeat;
+			/*
+			 * A shadow entry of a recently evicted page,
+			 * or a swap entry from shmem/tmpfs.  Return
+			 * it without attempting to raise page count.
+			 */
+			goto out;
+		}
+
+		head = compound_head(page);
+		if (!page_cache_get_speculative(head))
+			goto repeat;
+
+		/* The page was split under us? */
+		if (compound_head(page) != head) {
+			put_page(head);
+			goto repeat;
+		}
+
+		/*
+		 * Has the page moved?
+		 * This is part of the lockless pagecache protocol. See
+		 * include/linux/pagemap.h for details.
+		 */
+		if (unlikely(page != *pagep)) {
+			put_page(head);
+			goto repeat;
+		}
+	}
+out:
+	rcu_read_unlock();
+
+	return page;
+}
+```
+
+`add_to_page_cache_lru`函数
+
+```cpp
+int add_to_page_cache_lru(struct page *page, struct address_space *mapping,
+				pgoff_t offset, gfp_t gfp_mask)
+{
+	void *shadow = NULL;
+	int ret;
+
+	__SetPageLocked(page);
+	// __add_to_page_cache_locked：像page cache增加radix节点（page）
+	ret = __add_to_page_cache_locked(page, mapping, offset,
+					 gfp_mask, &shadow);
+	if (unlikely(ret))
+		__ClearPageLocked(page);
+	else {
+		if (!(gfp_mask & __GFP_WRITE) &&
+		    shadow && workingset_refault(shadow)) {
+			SetPageActive(page);
+			workingset_activation(page);
+		} else
+			ClearPageActive(page);
+
+		// 向全局的page链表中增加节点
+		lru_cache_add(page);
+	}
+	return ret;
+}
+```
+
+所以，这里有个细节是，虽然每个文件（inode）对应的`address_space`有自己的私有radix树，但所有的页面page都会链接到全局的LRU链表中，使得内核可以进行全局回收
+
 ##	0x0	循环处理每一页
 
 ##	0x0	页缓存命中/未命中处理
 
 ##	0x0	预读机制
 
-##	0x0	数据拷贝到用户空间
+####	readahead 状态
 
+####	page_cache_sync_readahead VS page_cache_async_readahead
+
+####	page_cache_sync_readahead的实现原理
+
+####	page_cache_async_readahead的实现原理
+[`page_cache_async_readahead`](https://elixir.bootlin.com/linux/v4.11.6/source/mm/readahead.c#L530)
+
+##	0x0	数据拷贝到用户空间
 [`iov_iter`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/uio.h#L30)结构的作用：
 
 ```cpp
@@ -741,6 +1028,8 @@ done:
 
 在上面实现中，`__copy_to_user_inatomic`用于原子拷贝，而`__copy_to_user`是非原子的，此外前者原子操作，不处理缺页；而后者可能休眠，可处理缺页
 
+##	0x0	read系统调用到
+
 ##	0x0	总结
 
 ####	零拷贝splice
@@ -792,3 +1081,6 @@ out:
 -   [read 文件一个字节实际会发生多大的磁盘IO？](https://cloud.tencent.com/developer/article/1964473)
 -   [Linux内核中跟踪文件PageCache预读](https://mp.weixin.qq.com/s/8GIeK8C3bz8nbLcwmk1vcA?from=singlemessage&isappinstalled=0&scene=1&clicktime=1646449253&enterid=1646449253)
 -   [The iov_iter interface](https://lwn.net/Articles/625077/)
+-	[Linux readahead文件预读分析](https://zhuanlan.zhihu.com/p/690066876)
+-	<<Linux 内核文件 Cache 机制>>
+-	[Linux 内核的 IO 预读算法](https://www.bluepuni.com/archives/kernel-readahead/)
