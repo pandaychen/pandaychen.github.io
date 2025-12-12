@@ -522,9 +522,76 @@ if (index == end_index) {	 // 当前页面是最后一页
 ```
 
 ####	如何计算本次处理的页面数目
-注意到`do_generic_file_read`中，使用到了`for(;;)`，那么这个循环的退出条件是什么？或者说本次`do_generic_file_read`处理了多少页是如何计算出来的？
+注意到`do_generic_file_read`中，使用到了`for(;;)`，那么这个循环的退出条件是什么？或者说本次`do_generic_file_read`处理（读取）了多少页是如何计算出来的？考虑下面几个关键因子：
 
-这里内核使用`for(;;)`，主要考虑到一个 `read` 系统调用可能跨越多个page内存页面（处理跨页读取），其中每个page都需要完成下面的操作：
+```cpp
+//参数ppos：对应要读取的文件偏移（指向当前文件偏移量的指针）
+
+//用户请求的数据量
+// 原始请求来自用户空间的 read() 调用
+// 在 __vfs_read -> generic_file_read_iter -> do_generic_file_read
+size_t count = iov_iter_count(iter);  // 用户请求的字节数
+
+//	实际读取边界计算
+//  计算要读取的页面范围
+index = *ppos >> PAGE_SHIFT;                      // 起始页索引
+offset = *ppos & ~PAGE_MASK;                      // 页内偏移
+last_index = (*ppos + iter->count/*待读的总数*/ + PAGE_SIZE-1) >> PAGE_SHIFT;  // 最后一页索引
+```
+
+上面的片段中，使用了 `iter->count`（用户请求的字节数）来计算需要读取的页面范围，但这个计算只是估算，不是限制。此外，对于系统调用`read`而言，参数`ppos`来自于`struct file`结构体中的`f_pos`字段：
+
+```cpp
+SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+{
+	struct fd f = fdget_pos(fd);
+	ssize_t ret = -EBADF;
+
+	if (f.file) {
+		// 获取文件偏移
+		loff_t pos = file_pos_read(f.file);
+		ret = vfs_read(f.file, buf, count, &pos);
+		if (ret >= 0)
+			file_pos_write(f.file, pos);
+		fdput_pos(f);
+	}
+	return ret;
+}
+
+static inline loff_t file_pos_read(struct file *file)
+{
+	return file->f_pos;
+}
+```
+
+所以，这里了解到如下几个关键信息：
+-	（要读取）文件page的起始页面位置
+-	起始页面从哪个offset开始读
+-	最后一页的位置`last_index`
+-	估算的读取页数（`[last_index,index]`）
+
+实际读取中，还需要考虑当前文件的大小（即当前读指针指向的page内容实质已经不满一页），关联如下代码：
+
+```cpp
+......
+// 在 page_ok 标签处：
+// 1. 根据文件大小计算当前页可用的字节数 (nr)
+if (index == end_index) {
+    nr = ((isize - 1) & ~PAGE_MASK) + 1;  // 最后一页的有效字节
+    if (nr <= offset) {
+        put_page(page);
+        goto out;  // 文件结束
+    }
+}
+nr = nr - offset;  // 页内从 offset 开始的有效字节
+
+// 2. copy_page_to_iter 会读取 min(nr, iov_iter_count(iter))
+ret = copy_page_to_iter(page, offset, nr, iter);
+
+......
+```
+
+此外，这里内核使用`for(;;)`，主要考虑到一个 `read` 系统调用可能跨越多个page内存页面（处理跨页读取），其中每个page都需要完成下面的操作：
 
 1.	单独查找/分配
 2.	单独从磁盘读取（如果不在page cache中）
@@ -736,6 +803,18 @@ int add_to_page_cache_lru(struct page *page, struct address_space *mapping,
 ##	0x0	页缓存命中/未命中处理
 
 ##	0x0	预读机制
+预读状态结构体如下：
+
+```cpp
+struct file_ra_state {
+    pgoff_t start;                  // 预读窗口起始页
+    unsigned int size;               // 当前预读窗口大小（页面数）
+    unsigned int async_size;         // 异步预读大小
+    unsigned int ra_pages;           // 最大预读页面数
+    unsigned int mmap_miss;          // mmap 缓存未命中
+    loff_t prev_pos;                 // 上次读取位置
+};
+```
 
 ####	readahead 状态
 
@@ -1059,6 +1138,8 @@ done:
 在上面实现中，`__copy_to_user_inatomic`用于原子拷贝，而`__copy_to_user`是非原子的，此外前者原子操作，不处理缺页；而后者可能休眠，可处理缺页
 
 ##	0x0	read系统调用到
+
+TODO
 
 ##	0x0	总结
 
