@@ -15,8 +15,8 @@ tags:
 测试机内核版本`5.4.119-1-tlinux4-0008`，python版本`3.6.8`
 
 代码来源：
--   [BCC](https://github.com/iovisor/bcc/tree/master/libbpf-tools)的实现
--   [](https://github.com/eunomia-bpf/bpf-developer-tutorial/tree/main/src)
+-   [BCC-tools](https://github.com/iovisor/bcc/tree/master/libbpf-tools)的实现
+-   [eunomia-tools](https://github.com/eunomia-bpf/bpf-developer-tutorial/tree/main/src)
 
 ##  0x01    基础
 
@@ -51,7 +51,7 @@ TID     COMM             READS  WRITES R_Kb    W_Kb    T FILE
 
 和python版本的类似，仅记录文件读写类型，读写失败时也将被记录。追踪`kprobe/vfs_read`、`kprobe/vfs_write`，记录文件操作类型、读写大小、文件名等信息
 
-```CPP
+```cpp
 SEC("kprobe/vfs_read")
 int BPF_KPROBE(vfs_read_entry, struct file *file, char *buf, size_t count, loff_t *pos)
 {
@@ -67,7 +67,7 @@ int BPF_KPROBE(vfs_write_entry, struct file *file, const char *buf, size_t count
 
 bpf hash表`entries`的key/value都是结构体：
 
-```CPP
+```cpp
 struct {
         __uint(type, BPF_MAP_TYPE_HASH);
         __uint(max_entries, MAX_ENTRIES);
@@ -298,5 +298,30 @@ int BPF_KRETPROBE(vfs_unlink_ret)
 ####    syncsnoop
 [`syncsnoop`](https://github.com/iovisor/bcc/blob/master/libbpf-tools/syncsnoop.bpf.c)
 
+##      0x0    内核的兼容性思考 
+在bcc基于libbpf实现功能的时候，采用了如下方式来解决兼容性的问题，参考[`core_fixes.bpf.h`](https://github.com/iovisor/bcc/blob/master/libbpf-tools/core_fixes.bpf.h)
+
+```cpp
+struct renamedata___x {
+	struct user_namespace *old_mnt_userns;
+	struct new_mnt_idmap *new_mnt_idmap;
+} __attribute__((preserve_access_index));
+
+static __always_inline bool renamedata_has_old_mnt_userns_field(void)
+{
+	if (bpf_core_field_exists(struct renamedata___x, old_mnt_userns))
+		return true;
+	return false;
+}
+
+static __always_inline bool renamedata_has_new_mnt_idmap_field(void)
+{
+	if (bpf_core_field_exists(struct renamedata___x, new_mnt_idmap))
+		return true;
+	return false;
+}
+```
+
 ##  0x08 参考
 -   [BCC-文件系统组件分析](https://share.note.youdao.com/ynoteshare/index.html?id=18c1e114f98401ca3b2ececc67980726&type=note&_time=1760355931322)
+-   [libbpf-core_fixes](https://github.com/iovisor/bcc/blob/master/libbpf-tools/core_fixes.bpf.h)
