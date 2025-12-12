@@ -11,7 +11,6 @@ tags:
     - Kernel
 ---
 
-
 ##  0x00    前言
 先回顾一下，调用read系统调用之后，内核的调用路径是什么？
 
@@ -19,6 +18,7 @@ tags:
 
 ##  0x01    generic_file_read_iter的实现细节
 通常大部分文件系统的读取read实现，都是将`read_iter`置为`generic_file_read_iter`，如本文分析的ext4系统
+![generic_file_read_iter-flow]()
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/mm/filemap.c#L2015
@@ -521,10 +521,39 @@ if (index == end_index) {	 // 当前页面是最后一页
 }
 ```
 
-####	
+####	如何计算本次处理的页面数目
+注意到`do_generic_file_read`中，使用到了`for(;;)`，那么这个循环的退出条件是什么？或者说本次`do_generic_file_read`处理了多少页是如何计算出来的？
+
+这里内核使用`for(;;)`，主要考虑到一个 `read` 系统调用可能跨越多个page内存页面（处理跨页读取），其中每个page都需要完成下面的操作：
+
+1.	单独查找/分配
+2.	单独从磁盘读取（如果不在page cache中）
+3.	单独拷贝到用户空间
+
+```cpp
+for (;;) {
+	......
+	cond_resched();	// 允许调度器中断（防止无限循环）
+find_page:	//提供直接跳转的标签
+    ......
+	// 处理某一页（page）
+	copy_page_to_iter(......)
+    // 在 page_ok 标签后：
+    if (!iov_iter_count(iter))  // 用户缓冲区已满
+        goto out;
+    if (ret < nr) {  // copy_page_to_iter 拷贝不完整
+        error = -EFAULT;
+        goto out;
+    }
+    continue;  // 继续处理下一页
+}
+```
+
 几个问题：
 
-##	0x0	计算页索引和偏移
+接下来继续将`do_generic_file_read`的实现拆解分析，首先看下对单个页page的处理逻辑
+
+##	0x02	do_generic_file_read：计算页索引和偏移
 本节主要分析下`find_get_page`的实现过程，注意到其入参`pgoff_t offset`，来源于`index = *ppos >> PAGE_SHIFT`， 即page在文件中的索引index，这让人很容易联想到内核IDR结构的key
 
 ```cpp
@@ -595,6 +624,7 @@ no_page:
 		if (fgp_flags & FGP_ACCESSED)
 			__SetPageReferenced(page);
 		// 重要：添加到page cache和全局LRU链表
+		// 将这个新申请的page根据index插入到普通文件的address_space对应的radix树中
 		err = add_to_page_cache_lru(page, mapping, offset,
 				gfp_mask & GFP_RECLAIM_MASK);
 		if (unlikely(err)) {
@@ -1032,7 +1062,7 @@ done:
 
 ##	0x0	总结
 
-####	零拷贝splice
+####	零拷贝splice中的page读
 `copy_page_to_iter_pipe`用于`splice`函数即零拷贝技术的底层实现，用于从管道读出数据。`splice`直接将页面从一个文件描述符的页缓存"移动"到另一个文件描述符的缓冲区，不经过用户空间，也不复制页面数据
 
 ```cpp
@@ -1074,6 +1104,8 @@ out:
 	return bytes;
 }
 ```
+
+####	do_generic_file_read中的页表转换
 
 
 ##  0x0 参考
