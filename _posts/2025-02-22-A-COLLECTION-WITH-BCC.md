@@ -81,7 +81,7 @@ if BPF.get_kprobe_functions(b'__blk_account_io_start'):
 ####    对多内核版本的兼容
 以[`filegone`](https://github.com/iovisor/bcc/blob/master/tools/filegone.py)工具为例，因为内核5.x之上`vfs_rename`函数的入参发生了变化，所以代码中需要调用`kernel_struct_has_field`进行检测
 
-```C
+```cpp
 //版本https://elixir.bootlin.com/linux/v6.17.1/source/fs/namei.c#L5007
 int vfs_rename(struct renamedata *rd)
 
@@ -109,7 +109,7 @@ else:
 ####    kernel_struct_has_field的实现
 BCC中的[`kernel_struct_has_field`](https://github.com/iovisor/bcc/blob/master/src/python/bcc/__init__.py#L1283)方法，最终会调用到libbpf的`kernel_struct_has_field`函数：
 
-```CPP
+```cpp
 int kernel_struct_has_field(const char *struct_name, const char *field_name)
 {
   const struct btf_type *btf_type;
@@ -143,14 +143,14 @@ cleanup:
 ####    BCC的rewrite
 1、内核态代码中，比如对`pid_t pid = task->pid`，BCC会将其改写为如下代码：
 
-```CPP
+```cpp
 pid_t pid;
 bpf_probe_read(&pid, sizeof(pid), &task->pid);
 ```
 
 2、获取通过指针连在一起的结构体时，BCC可以方便的使用指针形式，如下：
 
-```CPP
+```cpp
 //获取当前进程的可执行文件的inode号
 u64 inode = task->mm->exe_file->f_inode->i_ino;
 
@@ -447,7 +447,7 @@ TODO
 
 3、系统调用`open`时，如果需要创建文件并不通过`vfs_create`，`vfs_create`通常用于创建其他特殊类型文件（如设备文件、命名管道、套接字），创建普通文件会在namei层直接调用文件系统的`create`接口
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L3168
 // 当前在namei层，根据建立文件的路径找到应该插入的位置
 static int lookup_open(struct nameidata *nd, struct path *path,
@@ -523,7 +523,7 @@ static int lookup_open(struct nameidata *nd, struct path *path,
 `lookup_fast`函数仅在内核namei相关的地方使用到（namei的含义是从name转换到inode），也就是从路径字符串转换到内核中描述文件位置的结构体。`lookup_fast`函数的作用是将字符串表示路径的结构`nd`查找对应为inode结构
 `lookup_fast`函数中，具体查找的函数是`__d_lookup_rcu`和`__d_lookup`，两者的区别是`__d_lookup_rcu`性能开销更小。在内核VFS层的设计中，使用过的目录项对象有对应的hashtable缓存，hashtable中按照hash一致的为一个hash桶，在`__d_lookup*`查找过程中，计算name的hash值，找到对应的hash桶，在这个hash桶内查找是否有缓存的`struct dentry`目录项对象
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1537
 static struct dentry *lookup_fast(struct nameidata *nd,
 				  struct inode **inode,
@@ -562,7 +562,7 @@ struct dentry *__d_lookup(const struct dentry *parent, const struct qstr *name)
 
 `d_lookup`函数的作用是在目录`parent`中查找文件名为`name`的文件。`d_lookup`只会调用`__d_lookup`，有一定的锁（spinlock）开销，对应`dcstat`工具统计结果中对应`SLOW`状态的条目（见下面）
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c#L2188
 struct dentry *d_lookup(const struct dentry *parent, const struct qstr *name)
 {
@@ -581,7 +581,7 @@ struct dentry *d_lookup(const struct dentry *parent, const struct qstr *name)
 
 在内核实现中，namei层在查找路径位置时通常会先尝试使用RCU快速模式在dcache中查找缓存，找不到则使用ref即普通锁方式查找缓存，如果上面两种查找模式下在dcache缓存中再找不到就需要读取硬盘设备查找了，查找顺序对应[`do_filp_open`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L3515)
 
-```CPP
+```cpp
 struct file *do_filp_open(int dfd, struct filename *pathname,
 		const struct open_flags *op)
 {
@@ -604,7 +604,7 @@ struct file *do_filp_open(int dfd, struct filename *pathname,
 
 inode：inode代表文件的元数据、属性。如文件的创建时间、修改时间、大小等，内核中也会在此数据结构中添加对inode指向文件操作的接口，接口由文件系统层提供
 
-```CPP
+```cpp
 struct inode {
 	kuid_t			i_uid;
 	kgid_t			i_gid;
@@ -617,7 +617,7 @@ struct inode {
 
 dentry：用于追溯文件路径的结构体，在eBPF程序中通常使用该结构体解析文件路径，不过需要注意仅使用dentry不能完整取出文件的绝对路径，文件路径中可能存在挂载点，需要挂载点结构体共同配合才能解析此类文件的绝对路径
 
-```CPP
+```cpp
 struct dentry {
     struct dentry *d_parent;	// parent directory 指向父层级 父层级的d_name是父层目录的名称
     struct qstr d_name;         // 文件名，当前层级
@@ -753,7 +753,7 @@ if not is_support_kfunc:
 ####    filelife（文件存活时长跟踪）
 本工具通过跟踪`vsf_create/vfs_open/security_inode_create/vfs_unlink`内核函数，来检测文件从创建到删除的存活时间（在`filelife`运行期间创建/打开后又被删除的文件），可以观测到哪些线程在频繁创建和删除文件，需要处理上述函数在内核版本的兼容性，思考下，为何对于文件创建要选择上述三个hook点？根据前文的分析，可以了解创建文件有两种方式，第一种是通过系统调用如`creat`创建文件，第二种是在`open/openat`中指定参数，打开不存在文件时进行创建
 
-```CPP
+```cpp
 SYSCALL_DEFINE3(open, const char __user *, filename, int, flags, umode_t, mode)
 {
 	if (force_o_largefile())
@@ -965,7 +965,7 @@ fileslower计算的写延迟不代表写入到硬盘的延迟，仅仅是内核�
 
 注意到上述关联的代码在读写中的实现：
 
-```CPP
+```cpp
 //trace_read_entry
 {
     // skip non-sync I/O; see kernel code for __vfs_read()
@@ -985,7 +985,7 @@ fileslower计算的写延迟不代表写入到硬盘的延迟，仅仅是内核�
 
 以read为例，这里的 non-sync I/O 指的是非同步 I/O，在此上下文中特指未命中页面缓存（Page Cache）的读取操作。当应用程序发起读请求时，内核的会优先在页面缓存里找，如果在缓存中找到了需要的数据（Cache Hit），内核就直接将这份内存中的数据拷贝给应用程序。该操作极其快速，不涉及任何对慢速物理磁盘的访问；如果在缓存中没有找到需要的数据（Cache Miss），内核才会真正地发起一次磁盘 I/O，从硬盘上读取数据。被读取的数据也会同时放入页面缓存，以备后续使用
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/read_write.c#L446
 ssize_t __vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos){
     // 1. 首先检查文件操作是否定义了自己的读取函数
@@ -2041,7 +2041,7 @@ while (1):
 
 以ext4文件系统为例，介绍下这里涉及到VFS的原理，`struct file_operations`成员中的函数指针指向文件系统具体如何实现对应的操作，如`read_iter`函数指针指向的`ext4_file_read_iter`是ext4文件系统实现读取文件的具体实现，对于写操作而言，ext4文件系统等普遍使用`write_iter`，`write_iter`具有更强的功能性能
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/file.c#L720
 const struct file_operations ext4_file_operations = {
 	.read_iter	= ext4_file_read_iter,      //for READ

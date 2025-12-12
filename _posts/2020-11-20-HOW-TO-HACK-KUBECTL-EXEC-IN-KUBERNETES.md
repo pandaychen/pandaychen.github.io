@@ -53,7 +53,7 @@ root@nginx:/#
 
 子资源（subresource）隶属于某个 K8S 资源，表示为父资源下方的子路径，例如 /logs、/status、/scale、/exec 等。其中每个子资源支持的操作根据对象的不同而改变
 
-2、API Server 返回了 101 Ugrade 响应，向客户端表示已切换到 SPDY 协议
+2、APIServer 返回了 101 Ugrade 响应，向客户端表示已切换到 SPDY 协议
 
 ps：SPDY 允许在单个 TCP 连接上复用独立的 Stdin/Stdout/Stderr/Spdy-error 流
 

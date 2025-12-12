@@ -2405,6 +2405,8 @@ func (svr *Server) nextHandle(f file) string {
 }
 ```
 
+![sftp-dowload](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/openssh/sftp/sftp-download-block-parallel.png)
+
 ## 0x06 参考
 -	[ssh 包](https://pkg.go.dev/golang.org/x/crypto/ssh)
 -	[gliderlabs-ssh 包](https://pkg.go.dev/github.com/gliderlabs/ssh)
