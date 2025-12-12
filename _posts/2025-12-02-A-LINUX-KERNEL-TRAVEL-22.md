@@ -52,7 +52,7 @@ out:
 }
 ```
 
-上面函数中`iov_iter_count`函数，就是用户请求读取的字节数，也就是用户缓冲区的剩余容量，回顾下前文的内容，`iov_iter`本质是一个迭代器，它的特点是：
+上面函数中`iov_iter_count`函数，就是**用户请求读取的字节数，也就是用户缓冲区的剩余容量**，回顾下前文的内容，`iov_iter`本质是一个迭代器，它的特点是：
 
 1.	初始化时，`count`被设置为用户调用 `read(fd, buf, count)`时的 `count`参数
 2.	随着数据拷贝（`page` copy到`iovec`），`count`逐渐减少（变化）
@@ -586,10 +586,13 @@ if (index == end_index) {
 nr = nr - offset;  // 页内从 offset 开始的有效字节
 
 // 2. copy_page_to_iter 会读取 min(nr, iov_iter_count(iter))
+// 即会取 nr和 iov_iter_count(iter)的较小值进行拷贝
 ret = copy_page_to_iter(page, offset, nr, iter);
 
 ......
 ```
+
+当然针对大文件，最普遍的情况还是一直copy pages到用户缓冲区已经耗尽
 
 此外，这里内核使用`for(;;)`，主要考虑到一个 `read` 系统调用可能跨越多个page内存页面（处理跨页读取），其中每个page都需要完成下面的操作：
 

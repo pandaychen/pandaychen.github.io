@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:  Linux 内核之旅（二十）：page cache
+title:  Linux 内核之旅（二十一）：page cache
 subtitle:   内核中的page cache管理
 date:       2025-09-02
 author:     pandaychen
@@ -14,7 +14,11 @@ tags:
 ##  0x00    前言
 本文主要梳理下page cache与管理的若干知识，本文基于[v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include)的源码
 
-页高速缓存（page cache），它是一种对完整的数据页进行操作的磁盘高速缓存，即把磁盘的数据块缓存在页高速缓存中
+页高速缓存（page cache），它是一种对完整的数据页进行操作的磁盘高速缓存，即把磁盘的数据块缓存在页高速缓存中。page cache是内核为文件创建的内存缓存，用以加速相关的文件操作。当应用程序需要读取文件中的数据时，操作系统先分配一些内存，将数据从存储设备读入到这些内存中，然后再将数据分发给应用程序；当需要往文件中写数据时，操作系统先分配内存接收用户数据，然后再将数据从内存写到磁盘上
+
+![linux_page_cache]()
+
+本文涉及到read/write讨论，不考虑`O_DIRECT`的情况（如MySQL）
 
 ##  0x01    基础数据结构
 前面在介绍VFS的时候提到了`struct inode`中的一个重要成员：`address_space`，`address_space`对象是文件系统中管理内存页page cache的核心数据结构
@@ -122,7 +126,107 @@ struct radix_tree_node {
 
 ![radix-tree](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/21/radix-tree-with-page-cache-1.jpg)
 
+如图，radix树的叶子节点对应的就是`struct page`
+
+再回顾下radix树的查询过程，[]()
+
+##  0x0    struct page的本质
+前文已经描述了内核中虚拟内存主要分为两种类型的页，即匿名页与文件页，此外还介绍了虚拟内存地址到物理内存地址的翻译过程、页表体系等
+
+-   [Linux 内核之旅（三）：虚拟内存管理（上）](https://pandaychen.github.io/2024/11/05/A-LINUX-KERNEL-TRAVEL-2/)
+-   [Linux 内核之旅（十四）：Linux内核的页表体系](https://pandaychen.github.io/2025/04/25/A-LINUX-KERNEL-TRAVEL-14/)
+
+
+####    基础结构
+```cpp
+
+```
+
+需要注意的一点是：**`struct page`中是不包含存储数据的，其成员仅包含元数据，每个page对应的实际的页面内容放在物理内存中，需要通过虚拟地址访问**
+
+
+####    文件页与匿名页
+
+| 类别 | 内存来源 | 常用场景 |
+| :-----:| :----: | :----: |
+| 匿名页 | 从伙伴系统分配的新页面 | 进程堆、栈、通过`brk/sbrk`分配的内存，mmap匿名映射如`mmap(MAP_ANONYMOUS)`等 |
+| 文件页 | Page Cache中的页面 | mmap文件映射，文件读写缓存等 |
+
+如何区分`struct page`是哪种类型？
+
+```cpp
+struct page {
+    union {
+        struct address_space *mapping;  // 文件页：指向address_space
+        //void *s_mem;
+        void *anon_vma;                  // 匿名页：反向映射
+    };
+    pgoff_t index;  // 偏移量
+    // ...
+};
+```
+
+####    文件页（File-backed Pages）
+TODO
+
+####    匿名页
+
+####    struct page 存储的位置
+`struct page`结构体本身也需要内存存储，这些内存位于内核的虚拟地址空间，即直接映射区域（线性映射）。`mem_map`是全局数组，该存储在内核的虚拟地址空间中，位于直接映射区域（Direct Map）
+
+```cpp
+struct page *mem_map;  // 全局数组，指向所有struct page
+
+// 系统启动时，内核计算需要多少内存来存储struct page
+unsigned long nr_pages = total_physical_pages;
+size_t page_struct_size = sizeof(struct page) * nr_pages;
+
+// 为struct page数组分配内存
+// 注意：这个内存本身也是物理内存，也需要用struct page描述！
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/page_alloc.c#L6094
+TODO
+```
+
+以x86_64为例，虚拟内存地址布局如下，这里**直接映射区域是物理地址 + 固定偏移 = 虚拟地址**，偏移量是`PAGE_OFFSET`（x86_64通常是`0xffff880000000000`），这种`1:1`映射使得物理地址和虚拟地址可以快速转换
+
+```text
+0xffff 8000 0000 0000 ┬───────────────────┐
+                      │  vmalloc区域      │
+0xffff 8800 0000 0000 ┼───────────────────┤ <- 这里是struct page数组所在
+                      │  直接映射区域      │   (PAGE_OFFSET = 0xffff880000000000)
+                      │  1:1映射物理内存   │
+0xffff 8800 0000 0000 ┼───────────────────┤
+                      │  struct page数组  │
+                      │  物理页描述符      │
+0xffff 8800 0010 0000 ┼───────────────────┤
+                      │  其他内核数据      │
+0xffff c900 0000 0000 ┴───────────────────┘
+```
+
+####    page cache相关的操作函数
+
+
+##  0x0 内核的预读机制
+
+##  0x0 文件读与page cache
+
+
+##  0x0 文件写与page cache
+
+##  0x0 总结
+
+####    page cache
+
+-   page cache的内存在内核中是匿名的物理页（不与用户进程的逻辑地址进行映射），由`struct page`表示，在内核中page cache使用 LRU 管理，当用户进行mmap映射文件时，内核创建对应的vma，在访问到mmap的内存区域时，触发page fault，在page fault回调中page cache内存所属的物理页与用户进程的虚拟地址vma进行映射
+-   每个文件的page cache元数据存储于对应的`struct inode->address_space`中，因此进程之间可以共享同一个文件的page cache，同一个文件多次open不会影响其page cache
+-   文件的page cache是延时分配的，当有读写命令时，才会按需创建缓存页
+-   page cache的脏页是单线程回写的，因此当一个文件大量写入时，写入的性能与单 CPU 的性能有相当的关系
+-   对于`struct page`结构体，其存储在直接映射区域，虚拟地址=物理地址+固定偏移，而`struct page`数组占用的（物理）物理页，也用`struct page`描述。通过简单的加减运算就能在`struct page`和物理地址间转换
+
 ##  0x0  参考
 -   [Linux中的Page Cache [一]](https://zhuanlan.zhihu.com/p/68071761)
 -   [Linux中的Page Cache [二]](https://zhuanlan.zhihu.com/p/71217136)
 -   [Linux 内核源码分析-Page Cache 刷脏源码分析](https://www.leviathan.vip/2019/06/01/Linux%E5%86%85%E6%A0%B8%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90-Page-Cache%E5%8E%9F%E7%90%86%E5%88%86%E6%9E%90/)
+-   [文件IO系统调用内幕](https://lrita.github.io/2019/03/13/the-internal-of-file-syscall/)
+-   [Linux Kernel：物理内存模型](https://zhuanlan.zhihu.com/p/704170214)
+-   [图解匿名反向映射](https://richardweiyang-2.gitbook.io/kernel-exploring/nei-cun-guan-li/00-index/01-anon_rmap_history/06-anon_rmap_usage)
