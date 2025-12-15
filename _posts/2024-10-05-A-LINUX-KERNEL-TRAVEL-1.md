@@ -96,7 +96,7 @@ CPU 提供了专门的入口，用来从用户态进入内核态（CPU 使用权
 
 本文只讨论内核态的进（线）程，本质上Linux 内核中进程/线程都是用 [`task_struct`](https://elixir.free-electrons.com/linux/v4.11.6/source/include/linux/sched.h#L483)（任务） 来表示的，结构如下：**在用户态调用`getpid`实际上返回的是`task_struct`的`tgid`字段**，而`pid`每个线程都是不同的（就同一个进程生成的不同线程而言），`task_struct`也是CPU调度的实体，是进程 process 是最小的调度单位
 
-```CPP
+```cpp
 //file:include/linux/sched.h
 struct task_struct {
  //2.1 进程状态 
@@ -142,7 +142,7 @@ struct task_struct {
 
 `task_struct` 是 linux 内核中最重要的概念之一，与 `pid` 有关的成员结构定义如下：
 
-```CPP
+```cpp
 struct task_struct {
 	//···
 	pid_t                 pid;
@@ -180,7 +180,7 @@ struct nsproxy {
 
 此外，在ebpf中常用的函数[`bpf_get_current_pid_tgid`](https://elixir.bootlin.com/linux/v4.15.18/source/kernel/bpf/helpers.c#L119)实现也是获取了`tgid`和`pid`（通过`bpf_get_current_pid_tgid() >> 32`获取用户空间可见的pid字段）
 
-```CPP
+```cpp
 BPF_CALL_0(bpf_get_current_pid_tgid)
 {
 	struct task_struct *task = current;
@@ -227,7 +227,7 @@ BPF_CALL_0(bpf_get_current_pid_tgid)
 
 `pid_chain`这个概念是有点绕的，下文详细说明
 
-```CPP
+```cpp
 struct pid
 {
 	atomic_t count;
@@ -265,7 +265,7 @@ enum pid_type
 
 `struct pid`与`struct task_struct`之间是什么关系？答案是一对多，由于`struct pid`本身就是轻量级进程的抽象结构，一个进程可以有多个线程（轻量级进程），每个线程也有一个对应的`task_struct`实例，多个`task_struct`通过`task_struct->pids[x]->pid`指向其对应的`struct pid`结构（参考下图，`pids`一共有`PIDTYPE_MAX`种类型）
 
-```CPP
+```cpp
 struct task_struct{
  /* PID/PID hash table linkage. */
  struct pid_link pids[PIDTYPE_MAX];
@@ -287,7 +287,7 @@ struct pid_link
 
 不过，在较新版本内核如[6.15.1](https://elixir.bootlin.com/linux/v6.15.1/source/include/linux/sched.h#L1090)中，这里的成员略有调整（更简洁了，参考下图的指向关系）：
 
-```CPP
+```cpp
 struct task_struct{
 	//......
 	/* PID/PID hash table linkage. */
@@ -325,7 +325,7 @@ struct pid
 ####    pid_namespace：进程命名空间
 `pid` 命名空间 `pid_namespace` 的[定义](https://elixir.free-electrons.com/linux/v4.11.6/source/include/linux/pid_namespace.h#L30)如下，关联`upid`的`ns`成员：
 
-```CPP
+```cpp
 struct pid_namespace {
 	struct kref kref;
 	struct pidmap pidmap[PIDMAP_ENTRIES];
@@ -417,7 +417,7 @@ struct pidmap {
 
 注意到**pid_hash是全局唯一的，它包含所有命名空间中的PID实例（即`struct upid`），所有PID namespace共享同一个全局哈希表**
 
-```CPP
+```cpp
 // 1.	内核中的定义
 
 // 全局唯一的 PID 哈希表，所有命名空间共享
@@ -447,7 +447,7 @@ void __init pidhash_init(void)
 
 1、支持**高效的跨namespace命名空间查找**，如`find_pid_ns`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid.c#L365)，传入参数为`ns`与该namespace中的pid值（`nr`），这样无论从哪个namespace进行查找，都使用同一个hashtable结构
 
-```CPP
+```cpp
 struct pid *find_pid_ns(int nr, struct pid_namespace *ns)
 {
 	struct upid *pnr;
@@ -470,7 +470,7 @@ struct pid *find_pid_ns(int nr, struct pid_namespace *ns)
 
 hash值由 **(PID数值 + 命名空间层级)**计算得出，确保同一进程在不同命名空间中的不同 PID 值映射到不同的hash bucket，不同进程在不同命名空间中的相同 PID 值也映射到不同的hash bucket
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid.c#L43
 #define pid_hashfn(nr, ns)	\
 	hash_long((unsigned long)nr + (unsigned long)ns, pidhash_shift)
@@ -525,7 +525,7 @@ static inline struct pid_namespace *ns_of_pid(struct pid *pid)
 -   `pid`：指向 struct pid 结构体的指针，代表了一个进程的PID
 -   `ns`：指向 struct pid_namespace 结构体的指针，代表了一个PID命名空间
 
-```CPP
+```cpp
 pid_t pid_nr_ns(struct pid *pid, struct pid_namespace *ns)
 {
  	struct upid *upid;
@@ -549,7 +549,7 @@ pid_t pid_nr_ns(struct pid *pid, struct pid_namespace *ns)
 
 4、直接获取初始命名空间
 
-```CPP
+```cpp
 static inline pid_t pid_nr(struct pid *pid)
 {
  	pid_t nr = 0;
@@ -561,7 +561,7 @@ static inline pid_t pid_nr(struct pid *pid)
 
 5、当前命名空间对应 PID
 
-```CPP
+```cpp
 pid_t pid_vnr(struct pid *pid)
 {
  	return pid_nr_ns(pid, task_active_pid_ns(current));
@@ -614,7 +614,7 @@ __latent_entropy struct task_struct *copy_process(
 
 所以这里也说明了，在pid namespace场景中，针对指定的微线程，其`struct pid`和`struct task_struct`都是唯一的，而不同namespace上的局部性差异则是由结构`upid`体现
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid.c#L296
 // 参数传递的是新进程的 pid namespace
 struct pid *alloc_pid(struct pid_namespace *ns)
@@ -692,7 +692,7 @@ struct pid *alloc_pid(struct pid_namespace *ns)
 
 2、从指定命名空间中分配唯一PID
 
-```CPP
+```cpp
 //alloc_pidmap： 在 pid 命名空间中申请一个 pid 号
 static int alloc_pidmap(struct pid_namespace *pid_ns)
  {
@@ -764,7 +764,7 @@ static int alloc_pidmap(struct pid_namespace *pid_ns)
 
 3、回收PID
 
-```CPP
+```cpp
  static void free_pidmap(struct upid *upid)
  {
  	int nr = upid->nr;
@@ -779,7 +779,7 @@ static int alloc_pidmap(struct pid_namespace *pid_ns)
 ####	进程号 pid 的管理
 在`4.11.6`版本中，每个pid namespace（不同的level级别）都会有自己独立的bitmap来保存这个空间中的pid号，其中每一个 bit 位的 `0`或`1` 的状态来表示当前序号的 pid 是否被占用。在上面介绍的 `alloc_pidmap` 函数中就是以 bit 的方式来遍历整个 bitmap，找到合适的未使用的 bit，将其设置为已使用，然后返回
 
-```CPP
+```cpp
 #define BITS_PER_PAGE  (PAGE_SIZE * 8)
 #define PIDMAP_ENTRIES  ((PID_MAX_LIMIT+BITS_PER_PAGE-1)/BITS_PER_PAGE)
 
@@ -795,7 +795,7 @@ struct pid_namespace {
 
 大致过程是，根据 PID（参数`nr`） 以及指定命名空间（参数`ns`）计算在 `pid_hash` 数组中的索引，然后遍历散列表找到所要的 `upid`， 再根据内核的 `container_of` 机制找到 pid 实例
 
-```CPP
+```cpp
  struct pid *find_pid_ns(int nr, struct pid_namespace *ns)
  {
  	  struct upid *pnr;
@@ -812,7 +812,7 @@ struct pid_namespace {
 
 2、根据当前命名空间下的局部 PID 获取对应的 pid实例（方法二）
 
-```CPP
+```cpp
 struct pid *find_vpid(int nr)
 {
   	return find_pid_ns(nr, task_active_pid_ns(current));
@@ -821,7 +821,7 @@ struct pid *find_vpid(int nr)
 
 3、根据 `pid` 及 PID 类型获取 `task_struct`
 
-```CPP
+```cpp
 struct task_struct *pid_task(struct pid *pid, enum pid_type type)
  {
  	struct task_struct *result = NULL;
@@ -895,7 +895,7 @@ process 的 `struct task_struct` 和 `struct pid` 之间的双向查询关系如
 ##  0x03    Linux进程虚拟地址空间
 `task_struct`成员，内存描述符 `mm_struct`（memory descriptor）表示了整个进程的虚拟地址空间部分。进程运行时，在用户态其所需要的代码、全局变量以及 mmap 内存映射等全部都是通过 `mm_struct` 来进行内存查找和寻址的， `mm_struct` 关联的地址空间、页表、物理内存的关系如下图：
 
-```CPP
+```cpp
 struct mm_struct {
  struct vm_area_struct * mmap;  /* list of VMAs */
  struct rb_root mm_rb;
@@ -922,7 +922,7 @@ struct mm_struct {
 
 ####    进程权限凭证（credential）
 在内核结构`task_struct`中有下面的字段标识了进程权限凭证，`real_cred`是指可以操作本任务的对象，而`cred`是指本任务可以操作的对象
-```CPP
+```cpp
 struct task_struct {
     // ...
     /* Process credentials: */
@@ -945,7 +945,7 @@ struct task_struct {
 -   有效用户 ID（effective UID）：标识一个进程正在运行时所属的用户 ID，一个进程在运行途中是可以改变自己所属用户的，因而权限机制也是通过有效用户 ID 进行认证的，内核通过 `euid` 来进行特权判断；为了防止用户一直使用高权限，当任务完成之后，`euid` 会与 `suid` 进行交换，恢复进程的有效权限
 -   文件系统用户 ID（UID for VFS ops）：标识一个进程创建文件时进行标识的用户 ID
 
-```CPP
+```cpp
 /*
  * The security context of a task
  *
@@ -1017,7 +1017,7 @@ struct cred {
 ##  0x05 关联文件系统
 `task_struct`亦关联了进程文件系统信息（如：当前目录等）以及当前进程打开文件的信息
 
-```CPP
+```cpp
 struct task_struct{
 	// ...
     struct fs_struct *fs; 　　　　//文件系统信息，fs保存了进程本身与VFS（虚拟文件系统）的关系信息
@@ -1030,7 +1030,7 @@ struct task_struct{
 
 #### 进程文件系统信息（fs_struct）
 
-```CPP
+```cpp
 //file:include/linux/fs_struct.h
 struct fs_struct {
  //...
@@ -1051,7 +1051,7 @@ struct path {
 ####  进程打开的文件信息（files）
 每个进程用一个 `files_struct` 结构（用户打开文件表）来记录文件描述符的使用情况
 
-```CPP
+```cpp
 //file:include/linux/fdtable.h
 struct files_struct {
   //......
@@ -1082,7 +1082,7 @@ struct fdtable {
 ##	0x06	namespaces
 `task_struct`中成员`struct nsproxy *nsproxy;`指向命名空间namespaces的指针（通过 namespace 可以让一些进程只能看到与自己相关的一部分资源，而另外一些进程也只能看到与它们自己相关的资源，这两类进程无法感知对方的存在）。实现方式是把一个或多个进程的相关资源指定在同一个 namespace 中，而进程究竟是属于哪个 namespace 由 `*nsproxy` 指针表明了归属关系
 
-```CPP
+```cpp
 struct nsproxy {
  atomic_t count;
  struct uts_namespace *uts_ns;
@@ -1100,7 +1100,7 @@ struct nsproxy {
 
 进程描述符中的`state`成员描述了进程的当前状态：
 
-```CPP
+```cpp
 struct task_struct {
 	volatile long state;	/* -1 unrunnable, 0 runnable, >0 stopped */
     /*...*/
@@ -1109,7 +1109,7 @@ struct task_struct {
 
 内核中主要的状态字段定义如下（注释已经说明了应用在`task_struct`的字段）：
 
-```CPP
+```cpp
 /* Used in tsk->state: */
 #define TASK_RUNNING			0x0000
 #define TASK_INTERRUPTIBLE		0x0001
@@ -1174,7 +1174,7 @@ struct task_struct {
 
 ##	0x08	进程亲缘关系
 全部进程构成了一颗进程树（`0`号进程是根节点）
-```CPP
+```cpp
 struct task_struct {
 	struct task_struct __rcu *real_parent; /* real parent process */
 	struct task_struct __rcu *parent; /* recipient of SIGCHLD, wait4() reports */
@@ -1212,7 +1212,7 @@ TODO
 ####	示例应用：kill的实现
 比如，在容器中执行`kill xxx`（ `kill` 系统调用只在当前的namespace中生效），这里涉及到哪些process相关的操作？从kill的内核[实现](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/signal.c#L2865)：
 
-```CPP
+```cpp
 SYSCALL_DEFINE2(kill, pid_t, pid, int, sig)
 {
 	struct siginfo info;
@@ -1291,7 +1291,7 @@ static int kill_something_info(int sig, struct siginfo *info, pid_t pid)
 -	`find_vpid->find_pid_ns->task_active_pid_ns`与`task_pgrp`
 -	`for_each_process`
 
-```CPP
+```cpp
 struct pid *find_vpid(int nr)
 {
 	// 熟悉的find_pid_ns
@@ -1304,7 +1304,7 @@ struct pid *find_vpid(int nr)
 
 链表遍历1：基于`struct pid`的链表头开始的遍历，在进程组发送信号的情况下（`pid < 0` 且 `pid!=-1`）：
 
-```CPP
+```cpp
 ......
 if (pid != -1) {
     ret = __kill_pgrp_info(sig, info,
@@ -1390,7 +1390,7 @@ pid_t pid_nr_ns(struct pid *pid, struct pid_namespace *ns)
 
 上面代码有几处细节，首先是`__task_pid_nr_ns`中的`nr = pid_nr_ns(rcu_dereference(task->pids[type].pid), ns)`，其中的`type`为`PIDTYPE_PID`，`task->pids[PIDTYPE_PID].pid`即获取该`task_struct`以`PIDTYPE_PID`身份对应的`struct pid`对象，然后在函数`pid_nr_ns`中，使用对应的`struct pid`对象与namespace命名空间对象，确认该pid是否在这个namespace中：
 
-```CPP
+```cpp
 pid_t pid_nr_ns(struct pid *pid, struct pid_namespace *ns)
 {
 	struct upid *upid;
@@ -1457,7 +1457,7 @@ pid_t pid_nr_ns(struct pid *pid, struct pid_namespace *ns)
 -	`trace_sched_process_fork`
 -	`wake_up_new_task`：子任务加入到CPU就绪队列（runqueue）中去，等待调度器调度
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/kernel/fork.c#L1491
 long _do_fork(unsigned long clone_flags,
 	      unsigned long stack_start,
@@ -1525,7 +1525,7 @@ long _do_fork(unsigned long clone_flags,
 
 多说一句，这里的fork场景还有一个经典的地方使用到，那就是网络编程中通过`SO_REUSEPORT`技术解决惊群问题
 
-```CPP
+```cpp
 static __latent_entropy struct task_struct *copy_process(
 					unsigned long clone_flags,
 					unsigned long stack_start,
@@ -1582,7 +1582,7 @@ static __latent_entropy struct task_struct *copy_process(
 
 3、`wake_up_new_task`：当 `copy_process` 执行完毕的时候，表示新进程的一个新的 `task_struct` 对象创建完成，接下来内核会调用此方法将这个新创建出来的子进程添加到就绪队列中等待调度
 
-```CPP
+```cpp
 void wake_up_new_task(struct task_struct *p)
 {
 	struct rq_flags rf;
@@ -1652,7 +1652,7 @@ TODO
 
 1、每个PID namespace独立的结构
 
-```CPP
+```cpp
 // 每个PID命名空间独立拥有的结构
 struct pid_namespace;              // 每个命名空间一个独立实例
 struct pidmap pidmap[PIDMAP_ENTRIES]; // 每个命名空间独立的位图（进程）
@@ -1663,7 +1663,7 @@ struct upid;                        // 进程在特定命名空间中的PID实�
 
 2、全局唯一的结构与全局变量
 
-```CPP
+```cpp
 //1. 真正的全局单例（系统级）
 // 整个系统只有一个实例
 pid_hash;                          // 全局PID查找哈希表
@@ -1680,7 +1680,7 @@ struct pid;                        // 每个进程一个，全局哈希表管理
 
 3、每个进程一个，但被全局（结构）管理
 
-```CPP
+```cpp
 // 每个进程都有独立的实例，但所有实例在全局数据结构中管理
 struct task_struct;                // 通过init_task.tasks全局链表管理
 struct pid;                        // 通过pid_hash全局哈希表管理
@@ -1689,7 +1689,7 @@ struct nsproxy;                    // 每个进程的命名空间代理
 
 4、进程-namespace映射关系
 
-```CPP
+```cpp
 // 描述进程在特定命名空间中的身份（多对多关系）
 struct upid;                        // 一个进程在多个命名空间有多个upid
 ```
@@ -1721,7 +1721,7 @@ struct pid_namespace init_pid_ns = {
 
 每个 PID namespace在创建时都会分配自己独立的位图（PID在不同namespace中的独立性/进程隔离），这样每个namespace都可以独立维护自己的PID 分配状态，`pid_namespace`自身会形成树状结构（上图）
 
-```CPP
+```cpp
 struct pid_namespace {
     ......
     struct pidmap pidmap[PIDMAP_ENTRIES];  // 独立的 PID 位图（数组）
@@ -1742,7 +1742,7 @@ struct pidmap {
 
 在`create_pid_namespace`函数中可以观察到上述行为：
 
-```CPP
+```cpp
 // 创建新的 PID 命名空间
 // https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid_namespace.c#L95
 static struct pid_namespace *create_pid_namespace(struct user_namespace *user_ns,
@@ -1769,7 +1769,7 @@ static struct pid_namespace *create_pid_namespace(struct user_namespace *user_ns
 
 在每次创建新进程（假设在容器中创建）的时候，该容器所在的namespace level以及在此之上的所有层级都会使用本层级的进行位图用来分配pid，参考上面的`alloc_pid`函数
 
-```CPP
+```cpp
 struct pid *alloc_pid(struct pid_namespace *ns)
  {
  	struct pid *pid;
@@ -1806,7 +1806,7 @@ struct pid *alloc_pid(struct pid_namespace *ns)
 
 跨命名空间的 PID 映射：**注意到`alloc_pid`传入的参数是`struct pid_namespace *ns`，说明创建进程时一定要指定该进程位于哪个PID namespace中，对于该进程对应的`struct pid`结构，其`level`成员是一个固定的值**，那么前文也描述了，一个进程在不同PID namespace下的表示，主要依赖`struct pid`中的`struct upid numbers[1]`这个柔性数组成员：
 
-```CPP
+```cpp
 struct pid {
     ......
     unsigned int level;
@@ -1824,7 +1824,7 @@ struct upid {
 
 这样，一个进程在`level=3`的namespace中的可能表示如下：
 
-```CPP
+```cpp
 // 进程在三个命名空间中的 PID（实例化）
 struct pid {
     .level = 2,  // 三级命名空间（0,1,2）
@@ -1838,7 +1838,7 @@ struct pid {
 
 关于PID 进程位图的操作，简单描述下查找`find_ge_pid`及遍历`next_pidmap`函数：
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid.c#L555
 struct pid *find_ge_pid(int nr, struct pid_namespace *ns)
 {
@@ -1882,7 +1882,7 @@ int next_pidmap(struct pid_namespace *pid_ns, unsigned int last)
 
 6、全局的`task_struct`结构
 
-```CPP
+```cpp
 struct task_struct {
 	......
 	struct pid_link pids[PIDTYPE_MAX]; // 链接到不同类型的 PID 结构
@@ -1895,7 +1895,7 @@ struct task_struct {
 
 -	`task_struct->nsproxy`成员：标识了这个`task_struct`是属于哪个namespace的
 
-```CPP
+```cpp
 //1. 内核中的定义和分配
 
 static __latent_entropy struct task_struct *copy_process(
@@ -1944,7 +1944,7 @@ static __latent_entropy struct task_struct *copy_process(
 
 内核为全局`task_struct`维护了全局任务列表即`init_task`，可通过 `init_task` 遍历
 
-```CPP
+```cpp
 // 内核维护全局的任务列表（可通过 init_task 遍历）
 struct task_struct init_task = INIT_TASK(init_task);
 
@@ -1961,7 +1961,7 @@ struct task_struct {
 
 为什么内核要将`task_struct`定义为全局的？从本质上来说，由于CPU的最小调度单元就是`task_struct`，**内核需要使用全局视图进行调度，调度器可以公平调度（调度算法）所有任务，无论其所属于的namespace是哪个**
 
-```CPP
+```cpp
 // 调度器需要看到所有任务，无论它们属于哪个命名空间
 void schedule(void)
 {
@@ -1973,7 +1973,7 @@ void schedule(void)
 
 那么再说明下`task_struct`与namespace命名空间的关系
 
-```CPP
+```cpp
 // 1. 通过 nsproxy 关联命名空间
 struct task_struct {
     // ...
@@ -2011,7 +2011,7 @@ struct nsproxy container_nsproxy = { isValid := re.MatchString(domain)
 
 上文已经提到过，`upid`中的 `pid_chain`这个成员是挂载在全局的 `pid_hash`哈希表上的，梳理下这个过程
 
-```CPP
+```cpp
 //全局哈希表定义
 static struct hlist_head *pid_hash;  // 全局PID哈希表数组
 
@@ -2024,7 +2024,7 @@ struct upid {
 
 那么，`upid`创建及插入哈希表的过程，在`alloc_pid`函数中，当创建新的 `struct pid` 时，将 `upid` 插入全局哈希表：
 
-```CPP
+```cpp
 struct pid *alloc_pid(struct pid_namespace *ns)
 {
 	struct pid *pid;
@@ -2081,7 +2081,7 @@ struct pid *alloc_pid(struct pid_namespace *ns)
 
 `find_pid_ns`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid.c#L365)用于根据`upid`对象获取到其对应的`struct pid`结构：
 
-```CPP
+```cpp
 //查找特定命名空间中的PID
 struct pid *find_pid_ns(int nr, struct pid_namespace *ns)
 {
@@ -2102,7 +2102,7 @@ struct pid *find_pid_ns(int nr, struct pid_namespace *ns)
 
 所以，可以利用`find_pid_ns`在容器内遍历查找所有的进程（如在容器内执行 `ps aux` 时），抽象代码如下：
 
-```CPP
+```cpp
 // 1. 获取当前任务的 PID 命名空间
 struct pid_namespace *ns = current->nsproxy->pid_ns;
 
@@ -2119,7 +2119,7 @@ for (pid_num = 1; pid_num < PID_MAX; pid_num++) {
 
 8、`init_task`：全局`task_struct`链表
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/kernel/fork.c#L1856
 static __latent_entropy struct task_struct *copy_process(
 					unsigned long clone_flags,
@@ -2179,7 +2179,7 @@ static __latent_entropy struct task_struct *copy_process(
 1.	一个`task_struct`有多个不同类型的进程标识符（PID、TGID、PGID、SID），用于不同的管理目的（线程控制、进程组控制、会话控制）
 2.	一个PID关联多个进程（`task_struct`），如一个TGID（线程组ID）关联多个线程，实现了多线程进程的模型，所有线程共享相同的TGID
 
-```CPP
+```cpp
 enum pid_type {
     PIDTYPE_PID,    // 进程的PID（每个任务唯一）
     PIDTYPE_TGID,   // 线程组ID
@@ -2228,7 +2228,7 @@ struct task_struct {
 
 所以，本质上`struct pid`中的 `tasks[PIDTYPE_MAX]`链表头用于实现反向映射，即通过 PID 值快速找到所有关联的`task_struct`
 
-```CPP
+```cpp
 void attach_pid(struct task_struct *task, enum pid_type type)
 {
 	struct pid_link *link = &task->pids[type];
@@ -2244,7 +2244,7 @@ void attach_pid(struct task_struct *task, enum pid_type type)
 
 2、`task_struct.pids`的作用，`pid_link`的`node`成员的作用上面已经介绍（作为链表的节点），而`task_struct`中的 `pid_link`的 `pid`指针成员的作用，指向的正是该`task_struct`在不同场景下所表现的特定 PID 身份，即一个有着多重身份的执行实体
 
-```CPP
+```cpp
 struct task_struct {
     // ...
     struct pid_link pids[PIDTYPE_MAX];  // 4个不同的身份标识
@@ -2266,7 +2266,7 @@ struct task_struct {
 
 内核提供了`task_struct`的身份查询函数：
 
-```CPP
+```cpp
 // 获取任务在不同场景下的 PID 值
 pid_t task_pid(struct task_struct *task) {
     return pid_nr(task->pids[PIDTYPE_PID].pid);    // 个体身份
@@ -2298,7 +2298,7 @@ pid_t task_session(struct task_struct *task) {
 
 先看`kill_pgrp`的实现，`kill_pgrp`传入的参数`pid`，就是`PIDTYPE_PGID`类型对应的`struct pid`对象，其实现也很明显，遍历`PIDTYPE_PGID`链表（`tasks`），对每个链表上的`task_struct`都执行`group_send_sig_info`操作
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/kernel/signal.c#L1470
 // 向整个进程组发送信号
 int kill_pgrp(struct pid *pid, int sig, int priv)
@@ -2359,7 +2359,7 @@ int __kill_pgrp_info(int sig, struct siginfo *info, struct pid *pgrp)
 
 再看下`disassociate_ctty`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/tty/tty_io.c#L864)，终端会话管理
 
-```CPP
+```cpp
 //// 当终端断开时，向整个会话发送 SIGHUP
 void disassociate_ctty(int on_exit)
 {
