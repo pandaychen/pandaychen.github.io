@@ -20,7 +20,85 @@ tags:
 
 本文涉及到read/write讨论，不考虑`O_DIRECT`的情况（如MySQL）
 
-##  0x01    基础数据结构
+
+##	0x01	内核如何描述物理内存页
+
+####	内核物理内存管理（从 CPU 角度看FLATMEM物理内存模型）
+以内核默认的平坦内存模型（FLATMEM ）为例，来解释下物理内存与虚拟内存（地址）之间的映射关系：
+
+-	内核以页（page）为基本单位对物理内存进行管理，通过将物理内存划分为一页一页的内存块，每页大小为 `4K`。一页大小的内存块在内核中用 `struct page` 来进行管理，`struct page` 中封装了每页内存块的状态信息，比如组织结构、使用信息、统计信息以及与其他结构的关联映射信息等
+-	为了快速索引到具体的物理内存页，内核为每个物理页 `struct page` 结构体定义了一个索引编号，即PFN（Page Frame Number），其中PFN 与 `struct page` 是一一对应的关系
+-	内核提供了两个宏来完成 PFN 与 物理页结构体 `struct page` 之间的相互转换，分别是 `page_to_pfn` 与 `pfn_to_page`
+
+内核中如何组织管理这些物理内存页 `struct page` 的方式称之为做物理内存模型，不同的物理内存模型，应对的场景以及 `page_to_pfn` 与 `pfn_to_page` 的计算逻辑都是不一样的，介绍下最简单的FLATMEM模型：
+
+![flat-mem]()
+
+平坦内存模型 FLATMEM的架构如下：先把物理内存想象成一片地址连续的存储空间，在这一大片地址连续的内存空间中，内核将这块内存空间分为一页一页的内存块 `struct page`，由于这块物理内存是连续的，物理地址也是连续的，划分出来的这一页一页的物理页必然也是连续的，并且每页的大小都是固定的，所以很容易想到用一个数组来组织这些连续的物理内存页 `struct page` 结构，其在数组中对应的下标即为 PFN
+
+-	mem_map是数组（虚拟内存地址）：是虚拟地址空间中 `struct page`结构体的连续数组，此数组在内核的虚拟地址空间中连续存放，数组的每个元素对应一个物理页的元数据（状态信息）
+-	PFN 是物理概念：代表物理页的编号
+
+相关的代码如下，在FLATMEM模型下 ，`page_to_pfn` 与 `pfn_to_page` 本质就是基于 `mem_map` 数组进行偏移操作，其中 `mem_map` 是全局数组，用来组织所有划分出来的物理内存页。`mem_map` 全局数组的下标就是相应物理页对应的 PFN
+
+```cpp
+struct page *mem_map;  // 全局数组，指向 struct page结构体数组的指针
+
+#if defined(CONFIG_FLATMEM)
+#define __pfn_to_page(pfn) (mem_map + ((pfn)-ARCH_PFN_OFFSET))	//ARCH_PFN_OFFSET 是 PFN 的起始偏移量
+#define __page_to_pfn(page) ((unsigned long)((page)-mem_map) + ARCH_PFN_OFFSET)
+#endif
+
+/*
+__page_to_pfn(page)：
+((unsigned long)((page) - mem_map) + ARCH_PFN_OFFSET)
+
+(page) - mem_map：计算给定 struct page指针在数组中的索引位置
+加上 ARCH_PFN_OFFSET：得到实际的物理页帧号（因为物理内存可能不是从0开始）
+
+__pfn_to_page(pfn)：
+(mem_map + ((pfn) - ARCH_PFN_OFFSET))
+(pfn) - ARCH_PFN_OFFSET：从PFN中减去偏移得到数组索引
+mem_map + index：通过数组索引找到对应的 struct page指针
+*/
+```
+
+关于`__pfn_to_page`与`__page_to_pfn`，需要注意的一点是，这两个操作不直接操作物理内存地址，而是在虚拟地址空间中完成 `struct page`指针 与 PFN 之间的转换，本质是**在虚拟地址空间的 `mem_map` 数组和物理页帧号 PFN 之间建立转换关系**，如下：
+
+```text
+虚拟地址空间中的 mem_map 数组：
++-----+-----+-----+-----+-----+
+| pg0 | pg1 | pg2 | pg3 | ... |  <- struct page 结构体数组
++-----+-----+-----+-----+-----+
+  ^     ^     ^     ^
+  |     |     |     |
+物理页：
++-----+-----+-----+-----+-----+
+| PFN0| PFN1| PFN2| PFN3| ... |  <- 实际的物理内存页
++-----+-----+-----+-----+-----+
+```
+
+为什么说是虚拟地址空间中的转换呢？`mem_map`数组本身存在于内核的虚拟地址空间，每个 `struct page`是虚拟地址空间中的一个对象，PFN 代表的是物理地址的页帧号，上面两个宏实际上是建立了**虚拟地址（`struct page`指针）<-> 物理页编号（PFN）的映射关系**
+
+实际使用时的地址转换流程如下：
+
+```cpp
+// 从 struct page 获取物理地址
+struct page *page = ...;
+unsigned long pfn = page_to_pfn(page);     // 1. 得到 PFN
+phys_addr_t phys = pfn << PAGE_SHIFT;      // 2. PFN 转为物理地址
+void *virt = phys_to_virt(phys);           // 3. 物理地址转虚拟地址
+
+// 从虚拟内存地址转struct page
+pfn = virt_to_pfn(virt);                   // 虚拟地址转 PFN
+page = pfn_to_page(pfn);                   // PFN 转 struct page
+```
+
+####	内核对物理内存页的描述
+
+TODO
+
+##  0x02    基础数据结构
 前面在介绍VFS的时候提到了`struct inode`中的一个重要成员：`address_space`，`address_space`对象是文件系统中管理内存页page cache的核心数据结构
 
 ```cpp
@@ -230,3 +308,4 @@ TODO
 -   [文件IO系统调用内幕](https://lrita.github.io/2019/03/13/the-internal-of-file-syscall/)
 -   [Linux Kernel：物理内存模型](https://zhuanlan.zhihu.com/p/704170214)
 -   [图解匿名反向映射](https://richardweiyang-2.gitbook.io/kernel-exploring/nei-cun-guan-li/00-index/01-anon_rmap_history/06-anon_rmap_usage)
+-	[一步一图带你深入理解 Linux 物理内存管理](https://mp.weixin.qq.com/s?__biz=Mzg2MzU3Mjc3Ng==&mid=2247486879&idx=1&sn=0bcc59a306d59e5199a11d1ca5313743&chksm=ce77cbd8f90042ce06f5086b1c976d1d2daa57bc5b768bac15f10ee3dc85874bbeddcd649d88&scene=21#wechat_redirect)
