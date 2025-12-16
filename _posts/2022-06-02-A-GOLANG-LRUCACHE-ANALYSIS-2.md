@@ -303,7 +303,7 @@ func (klru *keyLru) removeElement(e *list.Element) {
 
 这个实现就是利用了list与map的优势，组合实现支持LRU的特性，缺点是，CRUD时需要加锁，同时锁住list和map，不太适合并发高的场景
 
-```CPP
+```go
 // LRUExpireCache 实现一个带过期时间的LRU Cache
 type LRUExpireCache struct {
 	// clock is used to obtain the current time
@@ -335,7 +335,7 @@ type cacheEntry struct {
 
 `Add`与`Get`的实现：
 
-```CPP
+```go
 // Add adds the value to the cache at key with the specified maximum duration.
 func (c *LRUExpireCache) Add(key interface{}, value interface{}, ttl time.Duration) {
 	c.lock.Lock()
