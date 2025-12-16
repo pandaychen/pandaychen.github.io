@@ -180,7 +180,7 @@ Tracepoint是静态插桩，会和内核源码一起编译。默认情况下 Tra
 
 以`sched_process_exec`为例，对应的内核[定义](https://github.com/torvalds/linux/blob/v6.13/include/trace/events/sched.h#L400)如下：
 
-```CPP
+```cpp
 /*
  * Tracepoint for exec:
  */
@@ -226,7 +226,7 @@ format:
 
 当`sched_process_exec`发生时，代码中也会执行到对应的Tracepoint语句`trace_sched_process_exec`：
 
-```CPP
+```cpp
 static int exec_binprm(struct linux_binprm *bprm)
 {
     // ...
@@ -244,7 +244,7 @@ static int exec_binprm(struct linux_binprm *bprm)
 
 根据上一小节可知，静态跟踪点的入口是在每个要跟踪的位置埋下`trace_xxx`函数，比如`tracepoint:sched:sched_switch`这个tracepoint静态跟踪点对应的hook[位置](https://github.com/torvalds/linux/blob/v6.13/kernel/sched/core.c#L6753)就在CFS的周期性调度核心函数`__schedule`中：
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/core.c#L3436
 static void __schedule notrace __schedule(bool preempt){
 	struct task_struct *prev, *next;
@@ -303,7 +303,7 @@ CFS 的调度过程主要由 `__schedule` 函数完成的，主要步骤如下�
 
 这里的`trace_sched_switch`是宏定义，关联`TRACE_EVENT`，对应的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/include/trace/events/sched.h#L107)如下：
 
-```CPP
+```cpp
 TRACE_EVENT(sched_switch,
     TP_PROTO(bool preempt, struct task_struct *prev, struct task_struct *next),	//重要
     TP_ARGS(preempt, prev, next),		//重要
@@ -345,7 +345,7 @@ TRACE_EVENT(sched_switch,
 -	`preempt==false`时：返回`p->state`，通常关联Voluntary Switch场景，即进程等待事件主动释放CPU（也有例外）
 -	`preempt==true`时：返回`TASK_RUNNING | TASK_STATE_MAX`，该场景通常为Involuntary Switch，即被切换的进程仍然还在runqueue队列中
 
-```CPP
+```cpp
 static inline long __trace_sched_switch_state(bool preempt, struct task_struct *p)
 {
 #ifdef CONFIG_SCHED_DEBUG
@@ -464,7 +464,7 @@ __schedule() --> trace_sched_switch --> tracepoint:sched:sched_switch
 下面以bcc的[实现](https://github.com/iovisor/bcc/blob/master/libbpf-tools/runqlat.bpf.c)源码进行分析
 ####	MAP定义
 
-```CPP
+```cpp
 //通过 cgroup_map 实现 cgroup 级别的监控隔
 struct {
 	__uint(type, BPF_MAP_TYPE_CGROUP_ARRAY);
@@ -524,7 +524,7 @@ if (env.cg) {
 ####	核心逻辑：内核态
 1、新进程创建并加入调度队列
 
-```CPP
+```cpp
 //关联raw_tracepoint事件类型
 SEC("raw_tp/sched_wakeup_new")
 int BPF_PROG(handle_sched_wakeup_new, struct task_struct *p)
@@ -548,7 +548,7 @@ int BPF_PROG(sched_wakeup_new, struct task_struct *p)
 
 2、已存在进程被唤醒加入调度队列
 
-```CPP
+```cpp
 SEC("raw_tp/sched_wakeup")
 int BPF_PROG(handle_sched_wakeup, struct task_struct *p)
 {
@@ -570,7 +570,7 @@ int BPF_PROG(sched_wakeup, struct task_struct *p)
 
 3、进程切换流程，一个正在占用CPU的进程主动/被动释放CPU给下一个进程使用
 
-```CPP
+```cpp
 SEC("raw_tp/sched_switch")
 int BPF_PROG(handle_sched_switch, bool preempt, struct task_struct *prev, struct task_struct *next)
 {
@@ -586,7 +586,7 @@ int BPF_PROG(sched_switch, bool preempt, struct task_struct *prev, struct task_s
 
 4、核心函数：`trace_enqueue`，用于记录`task_struct`唤醒（入调度队列）的开始时间
 
-```CPP
+```cpp
 static int trace_enqueue(u32 tgid, u32 pid)
 {
 	u64 ts;
@@ -604,7 +604,7 @@ static int trace_enqueue(u32 tgid, u32 pid)
 
 5、核心函数`handle_switch`，处理上下文切换
 
-```CPP
+```cpp
 static int handle_switch(bool preempt, struct task_struct *prev, struct task_struct *next)
 {
 	struct hist *histp;
@@ -669,7 +669,7 @@ cleanup:
 
 2、获取pid_namespace的方法，基础概念可参考[Linux 内核之旅（一）：进程](https://pandaychen.github.io/2024/10/02/A-LINUX-KERNEL-TRAVEL-1/#pid_namespace进程命名空间)
 
-```CPP
+```cpp
 //通过遍历 PID 结构体，获取任务所属的 PID 命名空间 ID，支持容器环境监控
 static unsigned int pid_namespace(struct task_struct *task)
 {
@@ -696,7 +696,7 @@ static unsigned int pid_namespace(struct task_struct *task)
 
 3、`get_task_state`的[实现](https://github.com/iovisor/bcc/blob/master/libbpf-tools/core_fixes.bpf.h#L24)，获取`task_struct`结构中的`state`字段
 
-```CPP
+```cpp
 static __always_inline __s64 get_task_state(void *task)
 {
 	struct task_struct___x *t = task;
@@ -723,7 +723,7 @@ static __always_inline __s64 get_task_state(void *task)
 
 runqlen主要采用了`SEC("perf_event")`采样机制来获取CPU的运行队列长度
 
-```CPP
+```cpp
 //关联perf_event事件类型
 SEC("perf_event")
 int do_sample(struct bpf_perf_event_data *ctx)
@@ -767,7 +767,7 @@ int do_sample(struct bpf_perf_event_data *ctx)
 ##	0x04	runslower 实现分析
 [实现](https://github.com/iovisor/bcc/blob/master/libbpf-tools/runqslower.bpf.c)，和runqlat实现思路一样，不同点在于在`handle_switch`方法中，计算出调度延迟超限会通过`BPF_MAP_TYPE_PERF_EVENT_ARRAY`输出事件到用户态
 
-```CPP
+```cpp
 static int handle_switch(void *ctx, struct task_struct *prev, struct task_struct *next)
 {
 	//....
