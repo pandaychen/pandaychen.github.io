@@ -1258,7 +1258,7 @@ whoami           68338  68337    0 /usr/bin/whoami
 
 2、采用 Aqua Security 开源的 btfhub ，为目标机器匹配的内核版本下载独立的 BTF 信息库，最后再通过如下的方法借助 libbpf 进行加载：
 
-```CPP
+```cpp
 struct bpf_object_open_opts openopts = {
     .sz = sizeof(struct bpf_object_open_opts),
     // 从BPF_CUSTOM_BTF环境变量读取BTF文件路径

@@ -135,7 +135,7 @@ echo 1234 > /sys/fs/cgroup/memory/climits/cgroup.procs #当进程 1234 使用内
 
 当修改`cpu.cfs_period_us`时，内核会调用 `cpu_cfs_period_write_u64()` 函数来修改对应 task_group 的 CPU 带宽，该值的修改最终会导致 `cfs_rq.runtime_enabled` 和 `cfs_rq.runtime_remaining` 两个值发生变化，从而直接影响 CFS 的调度。当一个 CGroup 的 `runtime_remaining<=0` 时，CFS 直接对其进行限流（对应内核函数`check_enqueue_throttle`）
 
-```CPP
+```cpp
 static int tg_set_cfs_period(struct task_group *tg, long cfs_period_us)
 {
 	u64 quota, period, burst;
