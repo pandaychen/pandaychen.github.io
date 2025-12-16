@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:  Linux 内核之旅（二十）：内核视角下的共享内存（TODO）
+title:  Linux 内核之旅（二十）：内核视角下的共享内存
 subtitle:   mmap与shm在内核的实现分析
 date:       2025-09-02
 author:     pandaychen
@@ -87,6 +87,8 @@ struct vm_area_struct {
 ![mmap-file-share-mapping-3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/mmap-file-share-mapping-3.png)
 
 如果文件页不在 page cache 中，内核则会在物理内存中分配一个内存页，然后将新分配的内存页加入到 page cache 中，并增加页引用计数。随后会通过 `address_space_operations` 重定义的 `readpage` （如`ext4_readpage`）激活块设备驱动从磁盘中读取映射的文件内容，然后将读取到的内容填充新分配的内存页
+
+这里CPU访问虚拟内存，送到MMU翻译，继而发现页表中无PTE导致缺页中断的逻辑，对应于内核函数[`do_page_fault`](https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/mm/fault.c#L1446)，见下文分析
 
 ```cpp
 struct vm_area_struct {
@@ -631,8 +633,490 @@ static int ext4_file_mmap(struct file *file, struct vm_area_struct *vma)
 ```
 
 
+
 ##  0x0 mmap匿名映射实现
 
+##	0x0	缺页中断的主要处理
+缺页中断的核心逻辑中，涉及到的主要内核结构及成员如下：
+
+```cpp
+// vma
+struct vm_area_struct {
+    unsigned long vm_pgoff;        // 重要：在映射文件中的偏移（页为单位）
+    struct file * vm_file;         // 映射的文件指针
+    const struct vm_operations_struct *vm_ops;  // 操作集，包含fault函数
+    ......
+};
+
+// vm_fault
+struct vm_fault {
+    pgoff_t pgoff;                 // 缺页地址在文件中的页偏移
+    unsigned long address;         // 缺页的虚拟地址
+    struct vm_area_struct *vma;    // 对应的VMA
+    ......
+};
+```
+
+当MMU触发缺页异常时，内核会进入缺页处理流程，缺页异常处理入口函数如下：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/mm/fault.c#L1446
+dotraplinkage void notrace
+do_page_fault(struct pt_regs *regs, unsigned long error_code)
+{
+	unsigned long address = read_cr2(); /* Get the faulting address */
+	enum ctx_state prev_state;
+
+	prev_state = exception_enter();
+	__do_page_fault(regs, error_code, address);
+	exception_exit(prev_state);
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/mm/fault.c#L1215
+static noinline void
+__do_page_fault(struct pt_regs *regs, unsigned long error_code,
+		unsigned long address)
+{
+	struct vm_area_struct *vma;
+	struct task_struct *tsk;
+	struct mm_struct *mm;
+	int fault, major = 0;
+	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
+
+	tsk = current;
+	mm = tsk->mm;
+	......
+	
+	// 根据虚拟内存地址找到vma
+	vma = find_vma(mm, address);
+	if (unlikely(!vma)) {
+		bad_area(regs, error_code, address);
+		return;
+	}
+
+	// 合法的vma校验
+	if (likely(vma->vm_start <= address))
+		goto good_area;
+	if (unlikely(!(vma->vm_flags & VM_GROWSDOWN))) {
+		bad_area(regs, error_code, address);
+		return;
+	}
+	......
+	/*
+	 * Ok, we have a good vm_area for this memory access, so
+	 * we can handle it..
+	 */
+good_area:
+	if (unlikely(access_error(error_code, vma))) {
+		bad_area_access_error(regs, error_code, address, vma);
+		return;
+	}
+
+	// 核心：处理缺页中断的函数
+	fault = handle_mm_fault(vma, address, flags);
+	major |= fault & VM_FAULT_MAJOR;
+
+	......
+	check_v8086_mode(regs, address, tsk);
+}
+```
+
+而对于文件映射的缺页处理，调用链如下：
+
+```text
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/memory.c#L3870
+handle_mm_fault
+	//https://elixir.bootlin.com/linux/v4.11.6/source/mm/memory.c#L3787
+    -> __handle_mm_fault
+		//https://elixir.bootlin.com/linux/v4.11.6/source/mm/memory.c#L3699
+        -> handle_pte_fault
+			//https://elixir.bootlin.com/linux/v4.11.6/source/mm/memory.c#L3504
+            -> do_fault
+                -> do_shared_fault
+                -> do_read_fault
+```
+
+上面流程对应的主要内核函数如下：
+
+-	[`do_anonymous_page`](https://elixir.bootlin.com/linux/v4.11.6/source/mm/memory.c#L2896)：处理匿名映射的缺页
+-	[`do_fault`](https://elixir.bootlin.com/linux/v4.11.6/source/mm/memory.c#L3504)：处理文件映射的缺页
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/pagemap.h#L423
+static inline pgoff_t linear_page_index(struct vm_area_struct *vma,
+					unsigned long address)
+{
+	pgoff_t pgoff;
+	......
+	pgoff = (address - vma->vm_start) >> PAGE_SHIFT;
+	pgoff += vma->vm_pgoff;
+	return pgoff;
+}
+
+static int __handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
+		unsigned int flags)
+{
+	struct vm_fault vmf = {
+		.vma = vma,
+		.address = address & PAGE_MASK,
+		.flags = flags,
+		.pgoff = linear_page_index(vma, address),	//重要：计算文件页偏移
+		.gfp_mask = __get_fault_gfp_mask(vma),
+	};
+	struct mm_struct *mm = vma->vm_mm;
+	pgd_t *pgd;
+	p4d_t *p4d;
+	int ret;
+
+	pgd = pgd_offset(mm, address);
+	p4d = p4d_alloc(mm, pgd, address);
+	if (!p4d)
+		return VM_FAULT_OOM;
+
+	vmf.pud = pud_alloc(mm, p4d, address);
+	if (!vmf.pud)
+		return VM_FAULT_OOM;
+	if (pud_none(*vmf.pud) && transparent_hugepage_enabled(vma)) {
+		ret = create_huge_pud(&vmf);
+		if (!(ret & VM_FAULT_FALLBACK))
+			return ret;
+	} else {
+		pud_t orig_pud = *vmf.pud;
+
+		barrier();
+		if (pud_trans_huge(orig_pud) || pud_devmap(orig_pud)) {
+			unsigned int dirty = flags & FAULT_FLAG_WRITE;
+
+			/* NUMA case for anonymous PUDs would go here */
+
+			if (dirty && !pud_write(orig_pud)) {
+				ret = wp_huge_pud(&vmf, orig_pud);
+				if (!(ret & VM_FAULT_FALLBACK))
+					return ret;
+			} else {
+				huge_pud_set_accessed(&vmf, orig_pud);
+				return 0;
+			}
+		}
+	}
+
+	vmf.pmd = pmd_alloc(mm, vmf.pud, address);
+	if (!vmf.pmd)
+		return VM_FAULT_OOM;
+	if (pmd_none(*vmf.pmd) && transparent_hugepage_enabled(vma)) {
+		ret = create_huge_pmd(&vmf);
+		if (!(ret & VM_FAULT_FALLBACK))
+			return ret;
+	} else {
+		pmd_t orig_pmd = *vmf.pmd;
+
+		barrier();
+		if (pmd_trans_huge(orig_pmd) || pmd_devmap(orig_pmd)) {
+			if (pmd_protnone(orig_pmd) && vma_is_accessible(vma))
+				return do_huge_pmd_numa_page(&vmf, orig_pmd);
+
+			if ((vmf.flags & FAULT_FLAG_WRITE) &&
+					!pmd_write(orig_pmd)) {
+				ret = wp_huge_pmd(&vmf, orig_pmd);
+				if (!(ret & VM_FAULT_FALLBACK))
+					return ret;
+			} else {
+				huge_pmd_set_accessed(&vmf, orig_pmd);
+				return 0;
+			}
+		}
+	}
+
+	return handle_pte_fault(&vmf);
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/memory.c#L3699
+static int handle_pte_fault(struct vm_fault *vmf)
+{
+	......
+	if (!vmf->pte) {
+		if (vma_is_anonymous(vmf->vma)){
+			// 匿名映射的缺页
+			return do_anonymous_page(vmf);
+		}
+		else{
+			// 文件映射的缺页
+			return do_fault(vmf);
+		}
+	}
+	......
+}
+
+static int do_fault(struct vm_fault *vmf)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	int ret;
+
+	/* The VMA was not fully populated on mmap() or missing VM_DONTEXPAND */
+	if (!vma->vm_ops->fault)
+		ret = VM_FAULT_SIGBUS;
+	else if (!(vmf->flags & FAULT_FLAG_WRITE))	//只读
+		ret = do_read_fault(vmf);
+	else if (!(vma->vm_flags & VM_SHARED))
+		ret = do_cow_fault(vmf);
+	else
+		ret = do_shared_fault(vmf);	// 共享+读写
+
+	/* preallocated pagetable is unused: free it */
+	if (vmf->prealloc_pte) {
+		pte_free(vma->vm_mm, vmf->prealloc_pte);
+		vmf->prealloc_pte = NULL;
+	}
+	return ret;
+}
+```
+
+继续，以`do_read_fault->__do_fault`调用链路，`__do_fault`中的`vma->vm_ops->fault`，这里的`fault`在ext4文件系统中就对应着`ext4_file_vm_ops`的`fault`成员，即`ext4_filemap_fault`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/inode.c#L5959)
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/memory.c#L3397
+static int do_read_fault(struct vm_fault *vmf)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	int ret = 0;
+
+	......
+	//
+	ret = __do_fault(vmf);
+	if (unlikely(ret & (VM_FAULT_ERROR | VM_FAULT_NOPAGE | VM_FAULT_RETRY)))
+		return ret;
+
+	ret |= finish_fault(vmf);
+	unlock_page(vmf->page);
+	if (unlikely(ret & (VM_FAULT_ERROR | VM_FAULT_NOPAGE | VM_FAULT_RETRY)))
+		put_page(vmf->page);
+	return ret;
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/memory.c#L3006
+static int __do_fault(struct vm_fault *vmf)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	int ret;
+
+	//CALL ext4_filemap_fault
+	ret = vma->vm_ops->fault(vmf);
+	......
+
+	return ret;
+}
+
+
+int ext4_filemap_fault(struct vm_fault *vmf)
+{
+	struct inode *inode = file_inode(vmf->vma->vm_file);
+	int err;
+
+	down_read(&EXT4_I(inode)->i_mmap_sem);
+	// 最终调用filemap_fault实现
+	err = filemap_fault(vmf);
+	up_read(&EXT4_I(inode)->i_mmap_sem);
+
+	return err;
+}
+```
+
+最终`ext4_filemap_fault`还是会调用`filemap_fault`完成缺页中断最后的部分，`filemap_fault`是通用文件系统缺页处理函数，主要任务是在page cache中查找或加载文件页，以满足文件内存映射的缺页需求
+
+注意在`filemap_fault`中会调用`find_get_page`函数对文件页进行查找操作，本质上是调用page cache IDR的查找[方法](https://elixir.bootlin.com/linux/v4.11.6/source/mm/filemap.c#L1190)`radix_tree_lookup_slot`
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/filemap.c#L2174
+int filemap_fault(struct vm_fault *vmf)
+{
+	int error;
+	struct file *file = vmf->vma->vm_file;		// 获取mmap映射的文件
+	struct address_space *mapping = file->f_mapping;	// 文件对应的地址空间（找到radix树即page cache管理入口）
+	struct file_ra_state *ra = &file->f_ra;	 	// 预读状态
+	struct inode *inode = mapping->host;		// 文件inode
+	pgoff_t offset = vmf->pgoff;	// 这就是从vm_area_struct获取的偏移
+	struct page *page;
+	loff_t size;
+	int ret = 0;
+
+	// 边界检查，检查请求的页偏移是否超出文件大小
+	size = round_up(i_size_read(inode), PAGE_SIZE);
+	if (offset >= size >> PAGE_SHIFT)
+		return VM_FAULT_SIGBUS;
+
+	/*
+	 * Do we have something in the page cache already?
+	 */
+	// 1. 首先在page cache中查找（第一次查找），首先尝试在page cache中查找指定偏移的页
+	page = find_get_page(mapping, offset);
+	if (likely(page) && !(vmf->flags & FAULT_FLAG_TRIED)) {
+		/*
+		 * We found the page, so try async readahead before
+		 * waiting for the lock.
+		 */
+		// 页面在cache中找到，页面命中处理
+		// 执行异步预读，预读后续页面
+		do_async_mmap_readahead(vmf->vma, ra, file, page, offset);
+	} else if (!page) {
+		// 2. 页面不在cache中，进行同步预读（页面未命中处理）
+		/* No page in the page cache at all */
+		do_sync_mmap_readahead(vmf->vma, ra, file, offset);
+
+		//记录主要缺页事件（PGMAJFAULT）
+		count_vm_event(PGMAJFAULT);
+		mem_cgroup_count_vm_event(vmf->vma->vm_mm, PGMAJFAULT);
+		
+		//设置返回码为VM_FAULT_MAJOR（表示需要磁盘I/O）
+		ret = VM_FAULT_MAJOR;
+retry_find:
+		// 3. 再次查找（重新尝试查找页面）
+		page = find_get_page(mapping, offset);
+		if (!page){
+			// 4. 如果仍然没有，从磁盘读取
+			goto no_cached_page;
+		}
+	}
+
+	// 5. 等待页面就绪（尝试锁定页面），防止并发修改
+	if (!lock_page_or_retry(page, vmf->vma->vm_mm, vmf->flags)) {
+		put_page(page);
+		return ret | VM_FAULT_RETRY;
+	}
+
+	// 6. 页面一致性检查
+	//检查页面是否仍然属于同一个address_space，验证页面索引是否匹配请求的偏移
+	if (unlikely(page->mapping != mapping)) {
+		unlock_page(page);
+		put_page(page);
+		goto retry_find;	//如果不匹配，回退跳转到重新查找
+	}
+	VM_BUG_ON_PAGE(page->index != offset, page);
+
+	// 7. 检查页面是否最新（是否与磁盘同步），如果不是最新，跳转到重新读取逻辑
+	if (unlikely(!PageUptodate(page)))
+		goto page_not_uptodate;
+
+	/*
+	 * Found the page and have a reference on it.
+	 * We must recheck i_size under page lock.
+	 */
+
+	// 8. 再次边界检查，在获取页面锁后再次检查文件大小，防止在锁定期间文件被截断
+	size = round_up(i_size_read(inode), PAGE_SIZE);
+	if (unlikely(offset >= size >> PAGE_SHIFT)) {
+		unlock_page(page);
+		put_page(page);
+		return VM_FAULT_SIGBUS;
+	}
+
+	// 成功情况下返回，将找到的页面存入vmf->page，另外返回VM_FAULT_LOCKED表示页面已锁定
+	vmf->page = page;
+	return ret | VM_FAULT_LOCKED;
+
+	//下面是缺页处理的错误路径：
+	//1、页面不在缓存中
+	//2、页面非最新
+no_cached_page:
+	/*
+	 * We're only likely to ever get here if MADV_RANDOM is in
+	 * effect.
+	 */
+	// 如果页面不在page cache，调用page_cache_read分配新页并触发读取
+	// 如果成功，跳回retry_find重新查找
+	// page_cache_read的主要功能是申请page，并把page加入全局链表
+	error = page_cache_read(file, offset, vmf->gfp_mask);
+
+	/*
+	 * The page we want has now been added to the page cache.
+	 * In the unlikely event that someone removed it in the
+	 * meantime, we'll just come back here and read it again.
+	 */
+	if (error >= 0)
+		goto retry_find;
+
+	/*
+	 * An error return from page_cache_read can result if the
+	 * system is low on memory, or a problem occurs while trying
+	 * to schedule I/O.
+	 */
+	if (error == -ENOMEM)
+		return VM_FAULT_OOM;
+	return VM_FAULT_SIGBUS;
+
+page_not_uptodate:
+	/*
+	 * Umm, take care of errors if the page isn't up-to-date.
+	 * Try to re-read it _once_. We do this synchronously,
+	 * because there really aren't any performance issues here
+	 * and we need to check for errors.
+	 */
+	//如果页面不是最新，需要调用文件系统的readpage方法重新读取
+	ClearPageError(page);
+	error = mapping->a_ops->readpage(file, page);
+	if (!error) {
+		//等待读取完成
+		//如果读取成功，重新查找页面（retry_find的部分）
+		wait_on_page_locked(page);
+		if (!PageUptodate(page))
+			error = -EIO;
+	}
+	put_page(page);
+
+	if (!error || error == AOP_TRUNCATED_PAGE)
+		goto retry_find;
+
+	/* Things didn't work out. Return zero to tell the mm layer so. */
+	shrink_readahead_size_eio(file, ra);
+	return VM_FAULT_SIGBUS;
+}
+```
+
+整体的缺页流程处理基本结束，这里再说明下两个细节：
+
+1、当页面不在page cache时，`page_cache_read`的逻辑是什么？`page_cache_read`的主要功能是于页缓存page cache中分配、插入和读取文件页
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/filemap.c#L2074
+/*
+file: 指向打开的文件结构体指针
+offset: 文件中的页偏移（页为单位）
+gfp_mask: 内存分配标志
+*/
+static int page_cache_read(struct file *file, pgoff_t offset, gfp_t gfp_mask)
+{
+	struct address_space *mapping = file->f_mapping;
+	struct page *page;
+	int ret;
+
+	do {
+		//使用__page_cache_alloc分配一个页面
+		page = __page_cache_alloc(gfp_mask|__GFP_COLD);
+		if (!page)
+			return -ENOMEM;
+
+		//1. 将页面插入页缓存的radix树
+		//2. 同时将页面添加到LRU链表中
+		ret = add_to_page_cache_lru(page, mapping, offset, gfp_mask & GFP_KERNEL);
+		if (ret == 0){
+			//情况1：插入成功 (ret == 0)时，调用文件系统的readpage方法读取文件数据，这是一个异步操作，启动磁盘I/O
+			//页面在I/O完成前保持锁定状态
+			ret = mapping->a_ops->readpage(file, page);
+		}
+		else if (ret == -EEXIST)	//竞态，其他线程已成功插入同一页面
+			ret = 0; /* losing race to add is OK */
+
+		put_page(page);
+
+	} while (ret == AOP_TRUNCATED_PAGE);
+
+	return ret;
+}
+```
+
+2、`filemap_fault`中的性能优化
+
+
+TODO
 
 ##  0x01   页面类型及共享原理
 
