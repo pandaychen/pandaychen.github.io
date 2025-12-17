@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:  Linux 内核之旅（二十）：内核视角下的共享内存
-subtitle:   mmap与shm在内核的实现分析
+subtitle:   mmap与shm在内核的实现分析与区别
 date:       2025-09-02
 author:     pandaychen
 header-img:
@@ -31,7 +31,15 @@ Shared file mappings：Sharing between unrelated processes, backed by file in fi
 2.  shm的实现机制
 3.  内核是如何实现共享的？
 
+本文主要基于[v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include)版本进行分析
+
 ####    tmpfs
+tmpfs文件系统，其文件数据都在内存中，掉电会丢失，主要特点：
+
+-	内存文件系统，所有的文件数据都在内存中，掉电丢失
+-	数据在内存，数据访问速度很快
+-	内存不足，回收到swap中
+-	读的时候，不分配物理页面，读取的数据都是`0`
 
 ```BASH
 [root@X-X-01 corefile]# df -Th
@@ -55,6 +63,15 @@ POSIX共享内存是基于tmpfs来实现的，System V shared memory在内核也
 
 ####    内核提供的几种共享内存机制
 
+| 场景 | 说明 | 内核调用链（简） |
+| :-----| :---- | :---- |
+| 匿名（文件）共享映射 | 父子进程间通信 | `mmap_region->shmem_zero_setup` |
+| ipc共享内存 | 任意进程间共享内存 | `newseg->shmem_kernel_file_setup->__shmem_file_setup` |
+| tmpfs| 实现内存文件系统 | `shmem_file_operations.mmap->->shmem_mmap->vma->vm_ops = &shmem_vm_ops` |
+| memfd | 创建共享匿名文件 | `memfd_create->shmem_file_setup` | 
+
+####	共享内存页？
+前文描述了匿名页和文件页，文件页会关联文件系统中的文件，而匿名页不关联任何文件。而共享内存页同时具备文件页和匿名页的的一些特征（如会关联文件、存在page cache等，同时也具备swap功能）
 
 ##  0x01    mmap的实现原理
 `mmap`系统调用是将一个文件或者其它对象映射到进程的虚拟地址空间，实现磁盘地址和进程虚拟地址空间一段虚拟地址的一一对应关系。通过mmap系统调用可以让进程之间通过映射到同一个普通文件实现共享内存，普通文件被映射到进程虚拟地址空间当中后，进程可以像访问普通内存一样对文件进行一系列操作，而不需要通过 I/O 系统调用来读取或写入
@@ -637,7 +654,7 @@ static int ext4_file_mmap(struct file *file, struct vm_area_struct *vma)
 ##  0x0 mmap匿名映射实现
 
 ##	0x0	缺页中断的主要处理
-缺页中断的核心逻辑中，涉及到的主要内核结构及成员如下：
+本小节以ext4文件系统的mmap文件映射过程为例，分析缺页中断的处理过程。缺页中断的核心逻辑中，涉及到的主要内核结构及成员如下：
 
 ```cpp
 // vma
@@ -948,6 +965,10 @@ int filemap_fault(struct vm_fault *vmf)
 	 * Do we have something in the page cache already?
 	 */
 	// 1. 首先在page cache中查找（第一次查找），首先尝试在page cache中查找指定偏移的页
+	/*
+	参数：vmf->pgoff是单个页面的偏移，只返回这一个页面的指针
+	函数返回值vmf->page也指向单个页面
+	*/
 	page = find_get_page(mapping, offset);
 	if (likely(page) && !(vmf->flags & FAULT_FLAG_TRIED)) {
 		/*
@@ -1010,6 +1031,8 @@ retry_find:
 	}
 
 	// 成功情况下返回，将找到的页面存入vmf->page，另外返回VM_FAULT_LOCKED表示页面已锁定
+
+	// 注意：这里仅设置单个页面
 	vmf->page = page;
 	return ret | VM_FAULT_LOCKED;
 
@@ -1113,18 +1136,401 @@ static int page_cache_read(struct file *file, pgoff_t offset, gfp_t gfp_mask)
 }
 ```
 
-2、`filemap_fault`中的性能优化
+2、`filemap_fault`中的性能优化，虽然`filemap_fault`函数主要处理单page缺页，但会通过预读（`readahead`）机制连续加载多页。从其调用入口`page = find_get_page(mapping, offset)`来看，这里只查找指定偏移的一页，但通过预读机制实际上在优化连续的内存访问模式。即**预读后续页面，减少未来缺页**
 
 
-TODO
+##  0x0   shmem基础知识
 
-##  0x01   页面类型及共享原理
+####	页面类型
+对shmem类型的页面而言，其既有匿名页的特点（如`page->flags`设置`PG_swapbacked`，具有swap功能），也有文件页的特点（如`inode->i_mapping->a_ops = &shmem_aops`关联文件inode，有page cache）
+
+![shm-page-type](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/shm-page-type.png)
 
 ####  共享内存框架
-![shm-arch]()
+shmem的整体框架如下：
+
+![shm-arch](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/shm-arch.png)
+
+####	LRU with shmem
+内核中，用户态进程使用的物理页面会放入LRU链表中进行老化/回收，其中匿名页面会加入匿名LRU，而文件页会加入文件LRU。虽然shmem页面既有匿名页和文件页的特点，但是由于它有swap特性，它会加入到匿名页LRU
+
+![shm-lru-type](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/shm-lru-type.png)
+
+##	0x0	共享内存原理（shmem）及操作梳理
 
 ####  共享内存原理
-![shm-principle]()
+基于shmem的内存共享原理如下，可以看到和上文描述的mmap共享机制非常类似：
+
+![shm-principle](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/shm-principle.png)
+
+以memfd为例，实现共享内存的步骤：
+
+1.	通过`memfd`系统调用等方式创建文件描述符（fd），如本例子send进程会通过`memfd`系统调用来获得一个unused fd，并将fd关联文件实例（file），这个file就会关联一片共享内存
+2.	将文件描述符传递给其他进程来实现共享，如可通过unix socket传递文件描述符，实际上传递文件描述符是在接收方申请一个unused fd，然后关联共享内存对应的`struct file`对象，如图所示send进程的文件描述符`fd=4`会关联共享内存对应的file，recv进程的文件描述符`fd=5`也会关联共享内存对应的file
+3.	send/recv进程通过mmap映射共享内存到进程虚拟地址空间
+4.	send进程首次写访问数据，此时会发生缺页异常，page cache查询不到物理页面PAGE1，会申请物理页面（`__page_cache_alloc`）并加入文件实例（`struct inode`）对应的page cache（`add_to_page_cache_lru`），并通过页表映射PAGE1到send进程的虚拟地址空间，缺页返回后，将数据写入PAGE1（这里都是`'a'`），注意，**这里写入不会切态，因为用户态的函数如`memcpy`可以直接操作本进程的虚拟内存地址（本质上是直接操作page）**
+5.	recv进程首次读访问数据时，同样也会发生缺页异常，但是会首先查询page cache，发现PAGE1，然后通过页表映射物理页PAGE1到recv进程的虚拟地址空间，如此缺页返回后，从PAGE1读出数据（都是`'a'`），于是实现了内存共享
+
+####	缺页中断的处理流程
+缺页中断的内核调用链基本如下图：
+
+![shm-page-fault-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/shm-page-fault-flow.png)
+
+缺页处理步骤框图如下：
+
+![shm-page-fault-flow-arch.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/shm-page-fault-flow-arch.png)
+
+shmem共享内存页面的缺页处理步骤如下，当缺页发生时
+
+1.	查找或分配物理页面
+	-	先从page cache中查找，相关的物理页面可能已经被其他线程加入了page cache，所以首先从page cache查找   
+	-	若找不到从swap cache中查找，页面有可能在回收等场景被加入了swap cache，所以在这里也查找下
+	-	找不到如果之前有swap out 则swap in，之前如果由于内存回收等场景相关页面被swap out到swap device，那么相关的swap cache对应的位置会被替换为swap entry, 这个时候根据swap entry从swap device中读取物理页面内容
+	-	否则分配新的folio：上面都尝试了查找但是没有找到，那么有可能是第一次访问这个页面，这个时候需要分配新的物理页面，既是folio
+2.	新的page加入全局lru，shmem会被加入匿名的lru中，以便内存回收都场景回收到swap device
+3.	页表映射，将相关的物理页面通过页表映射到进程的虚拟地址空间，这样后面进程就可以正常访问页面数据了
+
+####	回收shmem页
+
+![shm-recycle-kernel-function-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/shm-recycle-kernel-function-flow.png)
+
+shmem页面回收逻辑如下：
+
+1、从页面从lru中隔离
+
+![shm-recycle-flow-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/shm-recycle-flow-1.png)
+
+2、申请页面的page lock
+
+![shm-recycle-flow-2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/shm-recycle-flow-2.png)
+
+3、rmap反向映射查找解除这个页面的所有页表映射，如send/recv进程
+
+![shm-recycle-flow-3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/shm-recycle-flow-3.png)
+
+4、分配swap entry,页面加入swap cache
+
+![shm-recycle-flow-4](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/shm-recycle-flow-4.png)
+
+5、替换页面的page cache为swap entry
+
+![shm-recycle-flow-5](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/shm-recycle-flow-5.png)
+
+6、页面从swap cache中删除
+
+![shm-recycle-flow-6](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/shm-recycle-flow-6.png)
+
+7、页面内容写入swap device
+
+![shm-recycle-flow-7](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/shm-recycle-flow-7.png)
+
+8、释放页面的page lock
+
+![shm-recycle-flow-8](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/shm-recycle-flow-8.png)
+
+9、页面还给buddy
+
+![shm-recycle-flow-9](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/shm-recycle-flow-9.png)
+
+这里需要注意一点的是：shmem页面回收时保存swap entry的方式跟匿名页完全不一样，匿名页在回收时，会将相应的swap entry替换为原来的页表项，而shmem页面会直接清掉原来的页表项，会将swap entry替换为对应的swap cache的位置
+
+##	0x0	tmpfs的读写实现跟踪
+
+####	基于tmpfs的读过程
+主要涉及的内核调用链如下：
+
+![shm-tmpfs-read-kernel-function-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/shm-tmpfs-read-kernel-function-flow.png)
+
+
+1.	按照page cache -> swap cache -> swap device顺序查找文件页面
+2.	查找并拷贝页面内容到用户空间缓冲区
+	-	如果找到，则拷贝文件页面数据到用户空间缓冲区
+	-	如果没有找到，则直接往用户空间缓冲区拷贝`0`
+3.	更新文件读写位置
+
+这里需要注意的是：对于tmpfs文件系统中的文件的读操作来说，按照page cache -> swap cache -> swap device顺序如果查找不到页面，则不会分配新的页面，只会往用户空间缓冲区拷贝0（这有点类似匿名页的第一次读，一般会映射到`0`页），这种情况也说明了相关文件偏移的页面从来没有被人写访问过
+
+####	基于tmpfs的写过程
+主要涉及的内核调用链如下：
+
+![shm-tmpfs-write-kernel-function-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/shm-tmpfs-write-kernel-function-flow.png)
+
+写tmpfs文件的主要步骤如下：
+
+1.	查找或分配文件页面，按照page cache -> swap cache -> swap device顺序查找，如果找到，继续下一步；如果没找到，则分配新的页面
+2.	从用户空间缓冲区拷贝数据到文件页面
+3.	标记页面为脏
+
+##	0x0	System V共享内存实现分析
+
+####	shmget：创建共享内存
+
+```text
+shmget() 系统调用
+  -> newseg()          
+    -> shmem_kernel_file_setup() 
+        -> __shmem_file_setup()
+            -> shmem_get_inode()  // 创建 inode
+```
+
+从调用链的实现跟踪，最终会生成一个inode（因此具有page cache的功能），该inode对应的`address_space_operations`如下：
+
+```cpp
+static const struct address_space_operations shmem_aops = {
+	.writepage	= shmem_writepage,
+	.set_page_dirty	= __set_page_dirty_no_writeback,
+#ifdef CONFIG_TMPFS
+	.write_begin	= shmem_write_begin,
+	.write_end	= shmem_write_end,
+#endif
+#ifdef CONFIG_MIGRATION
+	.migratepage	= migrate_page,
+#endif
+	.error_remove_page = generic_error_remove_page,
+};
+```
+
+####	shmget：内核实现跟踪
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/ipc/shm.c#L657
+SYSCALL_DEFINE3(shmget, key_t, key, size_t, size, int, shmflg)
+{
+	struct ipc_namespace *ns;
+	static const struct ipc_ops shm_ops = {
+		.getnew = newseg,	//newseg
+		.associate = shm_security,
+		.more_checks = shm_more_checks,
+	};
+	struct ipc_params shm_params;
+
+	ns = current->nsproxy->ipc_ns;
+
+	shm_params.key = key;
+	shm_params.flg = shmflg;
+	shm_params.u.size = size;
+
+	return ipcget(ns, &shm_ids(ns), &shm_ops, &shm_params);
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/ipc/shm.c#L522
+static int newseg(struct ip c_namespace *ns, struct ipc_params *params)
+{
+	key_t key = params->key;
+	int shmflg = params->flg;
+	size_t size = params->u.size;
+	int error;
+	struct shmid_kernel *shp;
+	size_t numpages = (size + PAGE_SIZE - 1) >> PAGE_SHIFT;
+	struct file *file;
+	char name[13];
+	int id;
+	vm_flags_t acctflag = 0;
+
+	if (size < SHMMIN || size > ns->shm_ctlmax)
+		return -EINVAL;
+
+	if (numpages << PAGE_SHIFT < size)
+		return -ENOSPC;
+
+	if (ns->shm_tot + numpages < ns->shm_tot ||
+			ns->shm_tot + numpages > ns->shm_ctlall)
+		return -ENOSPC;
+
+	shp = ipc_rcu_alloc(sizeof(*shp));
+	if (!shp)
+		return -ENOMEM;
+
+	shp->shm_perm.key = key;
+	shp->shm_perm.mode = (shmflg & S_IRWXUGO);
+	shp->mlock_user = NULL;
+
+	shp->shm_perm.security = NULL;
+	error = security_shm_alloc(shp);
+	if (error) {
+		ipc_rcu_putref(shp, ipc_rcu_free);
+		return error;
+	}
+
+	sprintf(name, "SYSV%08x", key);
+	if (shmflg & SHM_HUGETLB) {
+		......
+	} else {
+		/*
+		 * Do not allow no accounting for OVERCOMMIT_NEVER, even
+		 * if it's asked for.
+		 */
+		if  ((shmflg & SHM_NORESERVE) &&
+				sysctl_overcommit_memory != OVERCOMMIT_NEVER)
+			acctflag = VM_NORESERVE;
+		file = shmem_kernel_file_setup(name, size, acctflag);
+	}
+	error = PTR_ERR(file);
+	if (IS_ERR(file))
+		goto no_file;
+
+	shp->shm_cprid = task_tgid_vnr(current);
+	shp->shm_lprid = 0;
+	shp->shm_atim = shp->shm_dtim = 0;
+	shp->shm_ctim = get_seconds();
+	shp->shm_segsz = size;
+	shp->shm_nattch = 0;
+	shp->shm_file = file;
+	shp->shm_creator = current;
+
+	id = ipc_addid(&shm_ids(ns), &shp->shm_perm, ns->shm_ctlmni);
+	if (id < 0) {
+		error = id;
+		goto no_id;
+	}
+
+	list_add(&shp->shm_clist, &current->sysvshm.shm_clist);
+
+	/*
+	 * shmid gets reported as "inode#" in /proc/pid/maps.
+	 * proc-ps tools use this. Changing this will break them.
+	 */
+	file_inode(file)->i_ino = shp->shm_perm.id;
+
+	ns->shm_tot += numpages;
+	error = shp->shm_perm.id;
+
+	ipc_unlock_object(&shp->shm_perm);
+	rcu_read_unlock();
+	return error;
+	......
+}
+
+struct file *shmem_kernel_file_setup(const char *name, loff_t size, unsigned long flags)
+{
+	return __shmem_file_setup(name, size, flags, S_PRIVATE);
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/shmem.c#L4133
+static struct file *__shmem_file_setup(const char *name, loff_t size,
+				       unsigned long flags, unsigned int i_flags)
+{
+	struct file *res;
+	struct inode *inode;
+	struct path path;
+	struct super_block *sb;
+	struct qstr this;
+
+	if (IS_ERR(shm_mnt))
+		return ERR_CAST(shm_mnt);
+
+	if (size < 0 || size > MAX_LFS_FILESIZE)
+		return ERR_PTR(-EINVAL);
+
+	if (shmem_acct_size(flags, size))
+		return ERR_PTR(-ENOMEM);
+
+	res = ERR_PTR(-ENOMEM);
+	this.name = name;
+	this.len = strlen(name);
+	this.hash = 0; /* will go */
+	sb = shm_mnt->mnt_sb;
+	path.mnt = mntget(shm_mnt);
+	path.dentry = d_alloc_pseudo(sb, &this);
+	if (!path.dentry)
+		goto put_memory;
+	d_set_d_op(path.dentry, &anon_ops);
+
+	res = ERR_PTR(-ENOSPC);
+	// shmem_get_inode：核心
+	inode = shmem_get_inode(sb, NULL, S_IFREG | S_IRWXUGO, 0, flags);
+	if (!inode)
+		goto put_memory;
+
+	inode->i_flags |= i_flags;
+	d_instantiate(path.dentry, inode);
+	inode->i_size = size;
+	clear_nlink(inode);	/* It is unlinked */
+	res = ERR_PTR(ramfs_nommu_expand_for_mapping(inode, size));
+	if (IS_ERR(res))
+		goto put_path;
+
+	res = alloc_file(&path, FMODE_WRITE | FMODE_READ,
+		  &shmem_file_operations);
+	if (IS_ERR(res))
+		goto put_path;
+
+	return res;
+
+put_memory:
+	shmem_unacct_size(flags, size);
+put_path:
+	path_put(&path);
+	return res;
+}
+```
+
+`shmem_get_inode`：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/shmem.c#L2135
+static struct inode *shmem_get_inode(struct super_block *sb, const struct inode *dir,
+				     umode_t mode, dev_t dev, unsigned long flags)
+{
+	struct inode *inode;
+	struct shmem_inode_info *info;
+	struct shmem_sb_info *sbinfo = SHMEM_SB(sb);
+
+	if (shmem_reserve_inode(sb))
+		return NULL;
+
+	inode = new_inode(sb);
+	if (inode) {
+		inode->i_ino = get_next_ino();
+		inode_init_owner(inode, dir, mode);
+		inode->i_blocks = 0;
+		inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode);
+		inode->i_generation = get_seconds();
+		info = SHMEM_I(inode);
+		memset(info, 0, (char *)inode - (char *)info);
+		spin_lock_init(&info->lock);
+		info->seals = F_SEAL_SEAL;
+		info->flags = flags & VM_NORESERVE;
+		INIT_LIST_HEAD(&info->shrinklist);
+		INIT_LIST_HEAD(&info->swaplist);
+		simple_xattrs_init(&info->xattrs);
+		cache_no_acl(inode);
+
+		switch (mode & S_IFMT) {
+		default:
+			inode->i_op = &shmem_special_inode_operations;
+			init_special_inode(inode, mode, dev);
+			break;
+		case S_IFREG:
+			inode->i_mapping->a_ops = &shmem_aops;	//核心：关联shmem_aops
+			inode->i_op = &shmem_inode_operations;
+			inode->i_fop = &shmem_file_operations;
+			mpol_shared_policy_init(&info->policy,
+						 shmem_get_sbmpol(sbinfo));
+			break;
+		case S_IFDIR:
+			inc_nlink(inode);
+			/* Some things misbehave if size == 0 on a directory */
+			inode->i_size = 2 * BOGO_DIRENT_SIZE;
+			inode->i_op = &shmem_dir_inode_operations;
+			inode->i_fop = &simple_dir_operations;
+			break;
+		case S_IFLNK:
+			/*
+			 * Must not load anything in the rbtree,
+			 * mpol_free_shared_policy will not be called.
+			 */
+			mpol_shared_policy_init(&info->policy, NULL);
+			break;
+		}
+	} else
+		shmem_free_inode(sb);
+	return inode;
+}
+```
+
+##	0x0	总结
+
 
 ##  0x0  参考
 -   [深入理解Linux内核共享内存机制- shmem&tmpfs](https://aijishu.com/a/1060000000451498)
