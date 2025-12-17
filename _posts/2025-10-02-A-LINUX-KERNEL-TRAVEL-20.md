@@ -78,8 +78,6 @@ POSIX共享内存是基于tmpfs来实现的，System V shared memory在内核也
 
 `mmap`系统调用会将一个文件或其他对象映射到进程的地址空间中，并返回一个指向映射区域的指针，进程可以使用指针来访问映射区域的数据，就像访问内存一样
 
-![mmap-flow]()
-
 ####	mmap文件共享的原理（回顾）
 先回顾下，mmap实现文件共享映射的过程
 
@@ -154,7 +152,27 @@ static inline struct page *find_get_page(struct address_space *mapping,
 
 注意：修改过的脏页面并不会立即更新回文件中，而是有一段时间的延迟，可以调用`msync`来强制同步, 将修改过的内容立即保存到文件里
 
-从`mmap`系统调用开始：
+从`mmap`系统调用开始，核心参数如下：
+
+-	`addr`：待映射的虚拟内存区域在进程虚拟内存空间中的起始地址（**虚拟内存地址**），通常设置成 `NULL`，意思就是完全交由内核来决定虚拟映射区的起始地址（要按照 PAGE_SIZE（`4K`） 对齐）
+-	`length`：待申请映射的内存区域的大小，如果是匿名映射，则是要映射的匿名物理内存有多大，如果是文件映射，则是要映射的文件区域有多大（要按照 PAGE_SIZE（`4K`） 对齐）
+-	`prot`：映射区域的保护模式，有 `PROT_READ`、`PROT_WRITE`、`PROT_EXEC`等
+-	`flags`：标志位，可以控制映射区域的特性。常见的有 `MAP_SHARED` 和 `MAP_PRIVATE` 等
+-	`fd`：文件描述符，用于指定映射的文件 
+-	`offset`：映射的起始位置，表示被映射对象 (即文件) 从那里开始对映，通常设置为 `0`，该值应该为大小为PAGE_SIZE（`4K`）的整数倍
+
+其中常用的`flags`取值：
+
+-	`MAP_SHARED`：共享映射（用于多进程之间的通信），对映射区域的写入操作直接反映到文件当中
+-	`MAP_PRIVATE`：私有映射，对映射区域的写入操作只反映到缓冲区当中不会写入到真正的文件
+-	`MAP_ANONYMOUS`：匿名映射将虚拟地址映射到物理内存而不是文件（忽略fd、offset）
+
+![mmap-result]()
+
+####	虚拟内存地址与vma
+
+
+![mmap-kernel-function-flow]()
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/kernel/sys_x86_64.c#L87
@@ -180,8 +198,10 @@ SYSCALL_DEFINE6(mmap_pgoff, unsigned long, addr, unsigned long, len,
 	struct file *file = NULL;
 	unsigned long retval;
 
-	if (!(flags & MAP_ANONYMOUS)) {
+	if (!(flags & MAP_ANONYMOUS)) {	// 预处理文件映射
 		audit_mmap_fd(fd, flags);
+		// 通过文件 fd 获取映射文件的 struct file 结构
+		// 从而获取 inode 信息，关联磁盘文件，后面关闭 fd，仍然可以用 mmap 操作
 		file = fget(fd);
 		if (!file)
 			return -EBADF;
@@ -191,13 +211,15 @@ SYSCALL_DEFINE6(mmap_pgoff, unsigned long, addr, unsigned long, len,
 		if (unlikely(flags & MAP_HUGETLB && !is_file_hugepages(file)))
 			goto out_fput;
 	} else if (flags & MAP_HUGETLB) {
+		//MAP_HUGETLB 只能支持 MAP_ANONYMOUS 匿名映射的方式使用 HugePage
 		struct user_struct *user = NULL;
-		struct hstate *hs;
-
+		struct hstate *hs;	// 内核中的大页池（预先创建）
+		// 选取指定大页尺寸的大页池（内核中存在不同尺寸的大页池）
 		hs = hstate_sizelog((flags >> MAP_HUGE_SHIFT) & SHM_HUGE_MASK);
 		if (!hs)
 			return -EINVAL;
-
+		
+		// 映射长度 len 必须与大页尺寸对齐
 		len = ALIGN(len, huge_page_size(hs));
 		/*
 		 * VM_NORESERVE is used because the reservations will be
@@ -205,6 +227,7 @@ SYSCALL_DEFINE6(mmap_pgoff, unsigned long, addr, unsigned long, len,
 		 * A dummy user value is used because we are not locking
 		 * memory so no accounting is necessary
 		 */
+		// 在 hugetlbfs 中创建 anon_hugepage 文件，并预留大页内存（禁止其他进程申请）
 		file = hugetlb_file_setup(HUGETLB_ANON_FILE, len,
 				VM_NORESERVE,
 				&user, HUGETLB_ANONHUGE_INODE,
@@ -214,7 +237,7 @@ SYSCALL_DEFINE6(mmap_pgoff, unsigned long, addr, unsigned long, len,
 	}
 
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
-
+	//核心：开始内存映射
 	retval = vm_mmap_pgoff(file, addr, len, prot, flags, pgoff);
 out_fput:
 	if (file)
@@ -223,7 +246,11 @@ out_fput:
 }
 ```
 
-`vm_mmap_pgoff`
+`vm_mmap_pgoff`函数的核心流程如下：
+
+1.	获取进程虚拟内存空间 mm_struct，用于在开始 mmap 内存映射之前，对进程虚拟内存空间加写锁保护，防止多线程并发修改，映射完成后，再释放写锁。
+2.	调用 do_mmap_pgoff 函数开始 mmap 内存映射，在进程虚拟内存空间中分配一段 vma，并建立相关映射关系。
+3.	如果设置了 MAP_POPULATE 或者 MAP_LOCKED 属性，则调用 mm_populate 函数，提前为 [ret , ret + populate] 这段虚拟内存立即分配物理内存页面，后续访问不会发生缺页中断异常
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/mm/util.c#L296
@@ -232,20 +259,31 @@ unsigned long vm_mmap_pgoff(struct file *file, unsigned long addr,
 	unsigned long flag, unsigned long pgoff)
 {
 	unsigned long ret;
+	// 获取进程虚拟内存空间
 	struct mm_struct *mm = current->mm;
+	// 是否需要为映射的 vma，提前分配物理内存页，避免后续的缺页
+	// 取决于 flag 是否设置了 MAP_POPULATE 或者 MAP_LOCKED
+	// 这里的 populate 表示需要分配物理内存的大小
 	unsigned long populate;
+	// 初始化 userfaultfd 链表
 	LIST_HEAD(uf);
 
+	// security钩子
 	ret = security_mmap_file(file, prot, flag);
 	if (!ret) {
+		// 对进程虚拟内存空间加写锁保护，防止多线程并发修改
 		if (down_write_killable(&mm->mmap_sem))
 			return -EINTR;
-        // 
+        // 开始 mmap 内存映射，在进程虚拟内存空间中分配一段 vma，并建立相关映射关系
+        // 返回值 ret 为映射虚拟内存区域的起始地址
 		ret = do_mmap_pgoff(file, addr, len, prot, flag, pgoff,
 				    &populate, &uf);
+		
+		// 释放写锁
 		up_write(&mm->mmap_sem);
+		// 等待 userfaultfd 处理完成
 		userfaultfd_unmap_complete(mm, &uf);
-		if (populate)
+		if (populate)	// 提前分配物理内存页面，后续访问不会缺页，为 [ret , ret + populate] 这段虚拟内存立即分配物理内存
 			mm_populate(ret, populate);
 	}
 	return ret;
@@ -262,8 +300,13 @@ do_mmap_pgoff(struct file *file, unsigned long addr,
 }
 ```
 
-####    do_mmap
+####    do_mmap：映射的核心实现
+`do_mmap`核心功能如下：
 
+1.	调用 `get_unmapped_area` 函数用于在进程地址空间中寻找出一段长度为 `len`，并且还未映射的虚拟内存区域 vma 出来，返回值 `addr` 表示这段虚拟内存区域的起始地址。之后根据不同的文件打开方式设置不同的 vm 标志位 `flag`
+2.	调用 `mmap_region` 函数，首先会为刚才选取出来的映射虚拟内存区域分配 vma 结构，并根据映射信息进行初始化，以及建立 vma 与相关映射文件的关系，最后将这段 vma 插入到进程的虚拟内存空间中（链表或红黑树进行管理）
+
+TODO
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/mm/mmap.c#L1306
 unsigned long do_mmap(struct file *file, unsigned long addr,
@@ -421,6 +464,331 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 	return addr;
 }
 ```
+
+####	追踪get_unmapped_area：寻找VMA
+
+这里先看下`get_unmapped_area`函数的实现，即如何寻找到合适长度的虚拟内存区域
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/mmap.c#L2053
+
+unsigned long
+get_unmapped_area(struct file *file, unsigned long addr, unsigned long len,
+		unsigned long pgoff, unsigned long flags)
+{
+	// 在进程虚拟空间中寻找还未被映射的 VMA 这段核心逻辑是被内核实现在特定于体系结构的函数中
+    // 该函数指针用于指向真正的 get_unmapped_area 函数，在经典布局下，真正的实现函数为 arch_get_unmapped_area
+	unsigned long (*get_area)(struct file *, unsigned long,
+				  unsigned long, unsigned long, unsigned long);
+
+	unsigned long error = arch_mmap_check(addr, len, flags);
+	if (error)
+		return error;
+
+	/* Careful about overflows.. */
+	// 映射的虚拟内存区域长度不能超过进程的地址空间
+	if (len > TASK_SIZE)
+		return -ENOMEM;
+	
+	// 如果是匿名映射，则采用 mm_struct 中保存的特定于体系结构的 arch_get_unmapped_area 函数
+	get_area = current->mm->get_unmapped_area;
+	if (file) {
+		// 如果是文件映射，则需要使用 file->f_op 中的 get_unmapped_area 指向的函数来为文件映射申请虚拟内存
+		// file->f_op 保存的是特定于文件系统中文件的相关操作，如 ext4 文件系统下的 thp_get_unmapped_area 函数
+		if (file->f_op->get_unmapped_area)
+			get_area = file->f_op->get_unmapped_area;
+	} else if (flags & MAP_SHARED) {
+		/*
+		 * mmap_region() will call shmem_zero_setup() to create a file,
+		 * so use shmem's get_unmapped_area in case it can be huge.
+		 * do_mmap_pgoff() will clear pgoff, so match alignment.
+		 */
+		pgoff = 0;
+		// 共享匿名映射是通过在 tmpfs 中创建的匿名文件实现的，所以这里也有其专有的 get_unmapped_area 函数
+		// 共享匿名映射的情况下 get_unmapped_area 指向 shmem_get_unmapped_area 函数
+		get_area = shmem_get_unmapped_area;
+	}
+
+	// 在进程虚拟内存空间中，根据指定的 addr，len 查找合适的 vma
+	addr = get_area(file, addr, len, pgoff, flags);
+	if (IS_ERR_VALUE(addr))
+		return addr;
+	
+	// vma 区域不能超过进程地址空间
+	if (addr > TASK_SIZE - len)
+		return -ENOMEM;
+	// addr 需要与 page size 对齐
+	if (offset_in_page(addr))
+		return -EINVAL;
+
+	error = security_mmap_addr(addr);
+	return error ? error : addr;
+}
+```
+
+文件页与内存页映射的函数调用如下：
+
+![get_unmapped_area]()
+
+arch_get_unmapped_area 函数的核心作用如下：
+
+1.	调用 `find_vma` 函数，根据指定的映射起始地址 addr，在进程地址空间中查找出符合 addr < vma->vm_end 条件的第一个 vma，然后在进程地址空间 mm_struct 中 mmap 指向的 vma 链表中，找出它的前驱节点 pprev。
+2.	如果明确指定起始地址 addr ，但是指定的虚拟内存范围有一段无效的区域或者已经存在映射关系，内核就不能按照指定的addr开始映射，此时调用vm_unmapped_area函数，内核会自动在文件映射与匿名映射区中按照地址的增长方向寻找一段len大小的虚拟内存范围出来。注意：此时找到的虚拟内存范围的起始地址就不是指定的addr
+
+unmapped_area函数的核心任务就是在管理进程地址空间这些vma的红黑树mm_struct-> mm_rb中查找出一个满足条件的地址间隙gap用于内存映射。如果能够找到符合条件的地址间隙 gap 则直接返回，否者就从进程地址空间中最后一个 vma->vm_end 开始映射
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/mmap.c#L1966
+unsigned long
+arch_get_unmapped_area(struct file *filp, unsigned long addr,
+		unsigned long len, unsigned long pgoff, unsigned long flags)
+{
+	struct mm_struct *mm = current->mm;
+	struct vm_area_struct *vma;
+	struct vm_unmapped_area_info info;
+
+	// 进程虚拟内存空间的末尾 TASK_SIZE
+
+	// 映射区域长度是否超过进程虚拟内存空间
+	if (len > TASK_SIZE - mmap_min_addr)
+		return -ENOMEM;
+	
+	// 如果指定了 MAP_FIXED 表示必须要从指定的 addr 开始映射 len 长度的区域
+    // 如果这块区域已经存在映射关系，那么后续内核会把旧的映射关系覆盖掉
+	if (flags & MAP_FIXED)
+		return addr;
+	
+	// 没有指定 MAP_FIXED，但指定了 addr，内核从指定的 addr 地址开始映射，内核这里会检查指定的这块虚拟内存范围是否有效
+	if (addr) {
+		// addr 先保证与 page size 对齐
+		addr = PAGE_ALIGN(addr);
+		// 内核这里需要确认一下指定的 [addr, addr+len] 这段虚拟内存区域是否存在已有的映射关系
+		// 若[addr, addr+len] 地址范围内已经存在映射关系，则不能按照指定的 addr 作为映射起始地址
+		// 在进程地址空间中查找第一个符合 addr < vma->vm_end  条件的 vma
+		// 如果不存在这样一个 vma（!vma）, 则表示 [addr, addr+len] 这段范围的虚拟内存是可以使用的，内核将会从指定的 addr 开始映射
+        // 如果存在这样一个 vma ，则表示  [addr, addr+len] 这段范围的虚拟内存区域目前已经存在映射关系了，不能采用 addr 作为映射起始地址
+        // 这里还有一种情况是 addr 落在 prev 和 vma 之间的一块未映射区域
+        // 如果这块未映射区域的长度满足 len 大小，那么这段未映射区域可以被本次使用，内核也会从指定的 addr 开始映射
+		vma = find_vma(mm, addr);
+		if (TASK_SIZE - len >= addr && addr >= mmap_min_addr &&
+		    (!vma || addr + len <= vma->vm_start))
+			return addr;
+	}
+	// 如果明确指定 addr 但是指定的虚拟内存范围是一段无效的区域或者已经存在映射关系
+    // 那么内核会自动在地址空间中寻找一段合适的虚拟内存范围出来，这段虚拟内存范围的起始地址就不是指定的 addr
+	info.flags = 0;
+	// vma 区域长度
+	info.length = len;
+	// 定义从哪里开始查找 vma, mmap_base 表示从文件映射与匿名映射区开始查找
+	info.low_limit = mm->mmap_base;
+	// 查找结束位置为进程地址空间的末尾 TASK_SIZE
+	info.high_limit = TASK_SIZE;
+	info.align_mask = 0;
+
+	//见下
+	return vm_unmapped_area(&info);
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/mmap.c#L2097
+struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)
+{
+	struct rb_node *rb_node;
+	struct vm_area_struct *vma;
+
+	/* Check the cache first. */
+	// 进程地址空间中缓存了最近访问过的 vma，首先从进程地址空间中 vma 缓存中开始查找，缓存命中率通常大约为 35%
+    // 查找条件为：vma->vm_start <= addr && vma->vm_end > addr
+	vma = vmacache_find(mm, addr);
+	if (likely(vma))
+		return vma;
+	
+	// 进程地址空间中的所有 vma 被组织在一颗红黑树中，为了方便内核在进程地址空间中快速查找特定的 vma
+    // 这里首先需要获取红黑树的根节点，内核会从根节点开始查找
+	rb_node = mm->mm_rb.rb_node;
+
+	while (rb_node) {
+		struct vm_area_struct *tmp;
+		// 获取位于根节点的 vma
+		tmp = rb_entry(rb_node, struct vm_area_struct, vm_rb);
+		
+		if (tmp->vm_end > addr) {
+			vma = tmp;
+			// 判断 addr 是否恰好落在根节点 vma 中： vm_start <= addr < vm_end
+			if (tmp->vm_start <= addr)
+				break;
+			rb_node = rb_node->rb_left;	// 如果不存在，则继续到左子树中查找
+		} else{
+			// 如果根节点的 vm_end <= addr，说明 addr 在根节点 vma 的后边，这种情况则到右子树中继续查找
+			rb_node = rb_node->rb_right;
+		}
+	}
+
+	if (vma)	// 更新 vma 缓存
+		vmacache_update(addr, vma);
+	// 返回查找到的 vma，如果没有查找到，则返回 null，表示进程空间中目前还没有这样一个 vma，后续需要新建
+	return vma;
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/mm.h#L2169
+static inline unsigned long
+vm_unmapped_area(struct vm_unmapped_area_info *info)
+{	
+	// 按照进程虚拟内存空间中文件映射与匿名映射区的地址增长方向分为两个函数，用来在进程地址空间中查找未映射的 vma
+	if (info->flags & VM_UNMAPPED_AREA_TOPDOWN)
+		// 当文件映射与匿名映射区的地址增长方向是从上到下逆向增长时（新式布局），采用 topdown 查找
+		return unmapped_area_topdown(info);
+	else
+		// 地址增长方向为从下倒上正向增长（经典布局），采用该函数查找
+		return unmapped_area(info);
+}
+
+unsigned long unmapped_area(struct vm_unmapped_area_info *info)
+{
+	/*
+	 * We implement the search by looking for an rbtree node that
+	 * immediately follows a suitable gap. That is,
+	 * - gap_start = vma->vm_prev->vm_end <= info->high_limit - length;
+	 * - gap_end   = vma->vm_start        >= info->low_limit  + length;
+	 * - gap_end - gap_start >= length
+	 */
+
+	struct mm_struct *mm = current->mm;
+	// 寻找未映射区域的参考 vma (该区域已存在映射关系)
+	struct vm_area_struct *vma;
+	// 未映射区域产生在 vma->vm_prev 与 vma 这两个虚拟内存区域中的间隙 gap 中，length 表示本次映射区域的长度
+    // low_limit ，high_limit 表示在进程地址空间中哪段地址范围内查找，一个地址下限（mm->mmap_base），另一个标识地址上限（TASK_SIZE）
+    // gap_start, gap_end 表示 vma->vm_prev 与 vma 之间的 gap 范围，unmapped_area 将会在这里产生
+	unsigned long length, low_limit, high_limit, gap_start, gap_end;
+
+	/* Adjust search length to account for worst case alignment overhead */
+	// 调整搜索长度以考虑最坏情况下的对齐开销
+	length = info->length + info->align_mask;
+	if (length < info->length)
+		return -ENOMEM;
+
+	/* Adjust search limits by the desired length */
+	// 根据需要的长度调整搜索限制
+	if (info->high_limit < length)
+		return -ENOMEM;
+
+	// gap_start 需要满足的条件：gap_start =  vma->vm_prev->vm_end <= info->high_limit - length
+    // 否则 unmapped_area 将会超出 high_limit 的限制
+	high_limit = info->high_limit - length;
+
+	if (info->low_limit > high_limit)
+		return -ENOMEM;
+
+	// gap_end 需要满足的条件：gap_end = vma->vm_start >= info->low_limit + length
+    // 否则 unmapped_area 将会超出 low_limit 的限制
+	low_limit = info->low_limit + length;
+
+	/* Check if rbtree root looks promising */
+	// 首先将 vma 红黑树的根节点作为 gap 的参考 vma，检查根节点是否符合
+	if (RB_EMPTY_ROOT(&mm->mm_rb))
+		goto check_highest;
+	
+	// 获取红黑树根节点的 vma
+	vma = rb_entry(mm->mm_rb.rb_node, struct vm_area_struct, vm_rb);
+
+	// rb_subtree_gap 为当前 vma 及其左右子树中所有 vma 与其对应 vm_prev 之间最大的虚拟内存地址 gap
+    // 最大的 gap 如果都不能满足映射长度 length 则跳转到 check_highest 处理
+	if (vma->rb_subtree_gap < length)
+		goto check_highest;	// 从进程地址空间最后一个 vma->vm_end 地址处开始映射
+
+	while (true) {
+		/* Visit left subtree if it looks promising */
+		// 左子树，获取当前 vma 的 vm_start 起始虚拟内存地址作为 gap_end
+		gap_end = vma->vm_start;
+		// gap_end 需要满足：gap_end >= low_limit，否则 unmapped_area 将会超出 low_limit 的限制
+        // 如果存在左子树，则需要继续到左子树中去查找，因为需要按照地址从低到高的优先级来查看合适的未映射区域
+		if (gap_end >= low_limit && vma->vm_rb.rb_left) {
+			struct vm_area_struct *left =
+				rb_entry(vma->vm_rb.rb_left,
+					 struct vm_area_struct, vm_rb);
+			// 如果左子树中存在合适的 gap，则继续左子树的查找
+            // 否则查找结束，gap 为当前 vma 与其 vm_prev 之间的间隙
+			if (left->rb_subtree_gap >= length) {
+				vma = left;
+				continue;
+			}
+		}
+
+		// 获取当前 vma->vm_prev 的 vm_end 作为 gap_start
+		gap_start = vma->vm_prev ? vma->vm_prev->vm_end : 0;
+check_current:
+		/* Check if current node has a suitable gap */
+		// gap_start 需要满足：gap_start <= high_limit，否则 unmapped_area 将会超出 high_limit 的限制
+		if (gap_start > high_limit)
+			return -ENOMEM;
+		if (gap_end >= low_limit && gap_end - gap_start >= length)
+			goto found;	// 找到了合适的 unmapped_area 跳转到 found 处理
+
+		/* Visit right subtree if it looks promising */
+		// 当前 vma 与其左子树中的所有 vma 均不存在一个合理的 gap，那么从 vma 的右子树中继续查找
+		if (vma->vm_rb.rb_right) {
+			struct vm_area_struct *right =
+				rb_entry(vma->vm_rb.rb_right,
+					 struct vm_area_struct, vm_rb);
+			if (right->rb_subtree_gap >= length) {
+				vma = right;
+				continue;
+			}
+		}
+
+		/* Go back up the rbtree to find next candidate node */
+		// 如果在当前 vma 以及它的左右子树中均无法找到一个合适的 gap
+        // 那么这里会从当前 vma 节点向上回溯整颗红黑树，在它的父节点中尝试查找是否有合适的 gap
+        // 因为这时候有可能会有新的 vma 插入到红黑树中，可能会产生新的 gap
+		while (true) {
+			struct rb_node *prev = &vma->vm_rb;
+			if (!rb_parent(prev))
+				goto check_highest;
+			vma = rb_entry(rb_parent(prev),
+				       struct vm_area_struct, vm_rb);
+			if (prev == vma->vm_rb.rb_left) {
+				gap_start = vma->vm_prev->vm_end;
+				gap_end = vma->vm_start;
+				goto check_current;
+			}
+		}
+	}
+
+check_highest:
+	/* Check highest gap, which does not precede any rbtree node */
+	// 流程走到这里表示在当前进程虚拟内存空间的所有 vma 中都无法找到一个合适的 gap 来作为 unmapped_area
+    // 那么就从进程地址空间中最后一个 vma->vm_end 开始映射
+    // mm->highest_vm_end 表示当前进程虚拟内存空间中，地址最高的一个 vma 的结束地址位置
+	gap_start = mm->highest_vm_end;
+	gap_end = ULONG_MAX;  /* Only for VM_BUG_ON below */
+	if (gap_start > high_limit)	// 这里最后需要检查剩余虚拟内存空间是否满足映射长度
+		return -ENOMEM;
+
+found:
+	/* We found a suitable gap. Clip it with the original low_limit. */
+	// 流程走到这里表示已经找到了一个合适的 gap 来作为 unmapped_area，直接返回 gap_start（需要与 4K 对齐）作为映射的起始地址
+	if (gap_start < info->low_limit)
+		gap_start = info->low_limit;
+
+	/* Adjust gap address to the desired alignment */
+	// 调整间隙地址到所需的对齐方式
+	gap_start += (info->align_offset - gap_start) & info->align_mask;
+
+	VM_BUG_ON(gap_start + info->length > info->high_limit);
+	VM_BUG_ON(gap_start + info->length > gap_end);
+	return gap_start;	// 返回找到的地址间隙 gap 
+}
+```
+
+####	do_mmap->mmap_region：创建虚拟内存区域
+在上一节`get_unmapped_area`函数结束时，内核已在进程地址空间中找出一段地址范围为`[addr,addr + len]`的虚拟内存区域供mmap进行映射。接下来追踪下`mmap_region`及后续函数具体是如何初始化vma并建立映射关系的,`mmap_region`负责创建虚拟内存区域，其核心流程如下：
+
+1.	调用 `may_expand_vm` 函数以检查进程在本次 mmap 映射之后申请的虚拟内存是否超过限制，检查（进程的虚拟内存总数+申请的页数）是否超过地址空间限制，如果是私有的可写映射，并且不是栈，则检查（进程的虚拟内存总数+申请的页数）是否超过最大数据长度
+2.	调用 `find_vma_links` 函数查找当前进程地址空间中是否存在与指定映射区域 `[addr, addr+len]` 重叠的部分，如果有重叠则需调用 `do_munmap` 函数将这段重叠的映射部分解除掉，后续会重新映射这部分
+3.	调用`vma_merge`函数，内核先尝试看能不能将待映射的vma和地址空间中已有的vma进行合并，如果可以合并，则不用创建新的vma结构，节省内存的开销。如果不能合并，则从 slab 中取出一个新的 vma 结构，并根据要映射的虚拟内存区域属性初始化 vma 结构中的相关字段
+4.	调用 `vma_link` 函数把虚拟内存区域 vma 插入到链表和红黑树中。如果 vma 关联文件，那么把虚拟内存区域添加到文件的区间树中，文件的区间树用来跟踪文件被映射到哪些虚拟内存区域
+5.	调用 `vma_set_page_prot` 函数更新地址空间 `mm_struct` 中的相关统计变量，根据虚拟内存标志（`vma->vm_flags`）计算页保护位（`vma->vm_page_prot`），如果共享的可写映射想要把页标记为只读，其目的是跟踪写事件，那么从页保护位删除可写位
+
+![do_mmap-mmap_region-flow]()
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/mm/mmap.c#L1588

@@ -28,7 +28,7 @@ tags:
 ##  0x01   getdents64 的实现
 `getdents64`系统调用，用于扫描并读取指定目录的目录项信息。它的功能是从指定的目录中读取目录项的详细信息，包括文件名、文件类型、文件的 `inode` 号等，`64` 表示支持大文件（`64` 位文件偏移），每次调用该函数时，它会读取尽可能多的目录项，直到 `dirent` 缓冲区填满或者目录已经读取完毕
 
-```CPP
+```cpp
 //fd：文件描述符，通常是一个已经打开的目录文件的文件描述符
 //dirent：一个用于存储目录项信息的缓冲区，格式化后的，也可以理解为一个 long unsigned int*
 //count：dirent 缓冲区的大小，以字节为单位
@@ -44,7 +44,7 @@ int getdents64(unsigned int fd, struct linux_dirent64 *dirp, unsigned int count)
 
 其中，`struct linux_dirent64`（目录项）的定义如下，结构体包含了目录项的各种属性，如文件名、文件类型、inode 号等
 
-```CPP
+```cpp
 //因为有"柔性数组"d_name，所以用d_reclen记录了大小，这样就可以在"目录条目"buffer中定位到下一个"目录条目"
 struct linux_dirent64 {
      u64        d_ino;    /* 64-bit inode number */
@@ -64,7 +64,7 @@ struct linux_dirent64 {
 
 ####    MAPS 定义
 
-```CPP
+```cpp
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -129,7 +129,7 @@ struct {
 
 1、`sys_enter_getdents64`
 
-```CPP
+```cpp
 SEC("tp/syscalls/sys_enter_getdents64")
 int handle_getdents_enter(struct trace_event_raw_sys_enter *ctx)
 {
@@ -166,7 +166,7 @@ int handle_getdents_enter(struct trace_event_raw_sys_enter *ctx)
 -   如果在有限次数中未搜索到，则使用tail call的方式跳转回`handle_getdents_exit`继续本流程（因为verifier的限制不可以无限循环），但是需要保存当前已经读取到的`dirp`指针的偏移`bpos`（理解这里很重要）
 -   除此之外，由于隐藏进程目录需要知道该目录的前一个`struct linux_dirent64`的地址，所以每遍历一个都要保存前一个目录项的地址`dirp`，保存在`map_to_patch`中
 
-```CPP
+```cpp
 SEC("tp/syscalls/sys_exit_getdents64")
 int handle_getdents_exit(struct trace_event_raw_sys_exit *ctx)
 {
@@ -274,7 +274,7 @@ int handle_getdents_exit(struct trace_event_raw_sys_exit *ctx)
 -   使用了 `bpf_probe_read_user`、`bpf_probe_read_user_str`、`bpf_probe_write_user` 这几个函数来读取和写入用户空间的数据。因为在内核空间不能直接访问用户空间的数据，必须使用helper提供的函数
 -   覆盖逻辑见图，比较清晰了
 
-```CPP
+```cpp
 SEC("tp/syscalls/sys_exit_getdents64")
 int handle_getdents_patch(struct trace_event_raw_sys_exit *ctx)
 {
@@ -332,7 +332,7 @@ int handle_getdents_patch(struct trace_event_raw_sys_exit *ctx)
 ####    用户态实现
 这里主要列举一下tail_call的注册：
 
-```CPP
+```cpp
 int main(){
     //...
     // Setup Maps for tail calls
