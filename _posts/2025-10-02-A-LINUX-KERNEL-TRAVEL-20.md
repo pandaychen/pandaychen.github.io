@@ -167,12 +167,12 @@ static inline struct page *find_get_page(struct address_space *mapping,
 -	`MAP_PRIVATE`：私有映射，对映射区域的写入操作只反映到缓冲区当中不会写入到真正的文件
 -	`MAP_ANONYMOUS`：匿名映射将虚拟地址映射到物理内存而不是文件（忽略fd、offset）
 
-![mmap-result]()
+![mmap-result](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/mmap-result.jpg)
 
 ####	虚拟内存地址与vma
+`mmap`系统调用在内核的主要调用链如下：
 
-
-![mmap-kernel-function-flow]()
+![mmap-kernel-function-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/mmap-kernel-function-flow.jpg)
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/kernel/sys_x86_64.c#L87
@@ -248,9 +248,9 @@ out_fput:
 
 `vm_mmap_pgoff`函数的核心流程如下：
 
-1.	获取进程虚拟内存空间 mm_struct，用于在开始 mmap 内存映射之前，对进程虚拟内存空间加写锁保护，防止多线程并发修改，映射完成后，再释放写锁。
-2.	调用 do_mmap_pgoff 函数开始 mmap 内存映射，在进程虚拟内存空间中分配一段 vma，并建立相关映射关系。
-3.	如果设置了 MAP_POPULATE 或者 MAP_LOCKED 属性，则调用 mm_populate 函数，提前为 [ret , ret + populate] 这段虚拟内存立即分配物理内存页面，后续访问不会发生缺页中断异常
+1.	获取进程虚拟内存空间 `mm_struct`，用于在开始 `mmap` 内存映射之前，对进程虚拟内存空间加写锁保护，防止多线程并发修改，映射完成后，再释放写锁
+2.	调用 `do_mmap_pgoff` 函数开始 mmap 内存映射，在进程虚拟内存空间中分配一段 vma，并建立相关映射关系
+3.	如果设置了 `MAP_POPULATE` 或 `MAP_LOCKED` 属性，则调用 `mm_populate` 函数，提前为 `[ret , ret + populate]` 这段虚拟内存立即分配物理内存页面，后续访问不会发生缺页中断异常
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/mm/util.c#L296
@@ -329,31 +329,40 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 	 * (the exception is when the underlying filesystem is noexec
 	 *  mounted, in which case we dont add PROT_EXEC.)
 	 */
+	// 如果进程带有 READ_IMPLIES_EXEC 标记且文件系统是可执行的，则这段内存空间使用 READ 的属性会附带增加 EXEC 属性
 	if ((prot & PROT_READ) && (current->personality & READ_IMPLIES_EXEC))
 		if (!(file && path_noexec(&file->f_path)))
 			prot |= PROT_EXEC;
-
+		
+	// 合理：如果不是使用固定地址，则使用的 addr 会进行向下页对齐
 	if (!(flags & MAP_FIXED))
 		addr = round_hint_to_min(addr);
 
 	/* Careful about overflows.. */
+	// 申请内存大小页对齐，注意不要溢出
 	len = PAGE_ALIGN(len);
 	if (!len)
 		return -ENOMEM;
 
 	/* offset overflow? */
+	// 判断申请的内存是否溢出
 	if ((pgoff + (len >> PAGE_SHIFT)) < pgoff)
 		return -EOVERFLOW;
 
 	/* Too many mappings? */
+	// 一个进程虚拟内存空间内所能包含的虚拟内存区域 vma 是有数量限制的
+    // sysctl_max_map_count 规定了进程虚拟内存空间所能包含 vma 的最大个数
+    // 可以通过 /proc/sys/vm/max_map_count 内核参数调整 sysctl_max_map_count
+    // mmap 需要在进程虚拟内存空间中创建映射的 vma，这里需要检查已有 vma 的个数是否超过最大限制
 	if (mm->map_count > sysctl_max_map_count)
 		return -ENOMEM;
 
 	/* Obtain the address to map to. we verify (or select) it and ensure
 	 * that it represents a valid section of the address space.
 	 */
+	// 在进程虚拟内存空间中寻找一块未映射的虚拟内存区域，这段虚拟内存区域后续将会用于 mmap 内存映射
 	addr = get_unmapped_area(file, addr, len, pgoff, flags);
-	if (offset_in_page(addr))
+	if (offset_in_page(addr))	// 如果返回的地址不是按照page对齐的，则直接返回
 		return addr;
 
 	if (prot == PROT_EXEC) {
@@ -366,21 +375,25 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 	 * to. we assume access permissions have been handled by the open
 	 * of the memory object, so we don't do any here.
 	 */
+	// 简单的检查，通过 calc_vm_prot_bits 和 calc_vm_flag_bits 将 mmap 参数 prot , flag 中   
+    // 设置的访问权限以及映射方式等枚举值转换为统一的 vm_flags，后续一起映射进 VMA 的相应属性中，相应前缀转换为 VM_
 	vm_flags |= calc_vm_prot_bits(prot, pkey) | calc_vm_flag_bits(flags) |
 			mm->def_flags | VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC;
 
+	// 设置了 MAP_LOCKED，表示用户期望 mmap 背后映射的物理内存锁定在内存中，不允许 swap
 	if (flags & MAP_LOCKED)
-		if (!can_do_mlock())
+		if (!can_do_mlock())	// 检查是否可以将本次映射的物理内存锁定
 			return -EPERM;
-
+	// 进一步检查锁定的内存页数是否超过了内核限制
 	if (mlock_future_check(mm, vm_flags, len))
 		return -EAGAIN;
 
 	if (file) {
+		// 分支一：文件映射
 		struct inode *inode = file_inode(file);
 
 		switch (flags & MAP_TYPE) {
-		case MAP_SHARED:
+		case MAP_SHARED:	// 共享映射
 			if ((prot&PROT_WRITE) && !(file->f_mode&FMODE_WRITE))
 				return -EACCES;
 
@@ -388,12 +401,14 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 			 * Make sure we don't allow writing to an append-only
 			 * file..
 			 */
+			// 确保不向只追加的文件进行写入
 			if (IS_APPEND(inode) && (file->f_mode & FMODE_WRITE))
 				return -EACCES;
 
 			/*
 			 * Make sure there are no mandatory locks on the file.
 			 */
+			// 确保文件上没有强制锁
 			if (locks_verify_locked(file))
 				return -EAGAIN;
 
@@ -402,8 +417,8 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 				vm_flags &= ~(VM_MAYWRITE | VM_SHARED);
 
 			/* fall through */
-		case MAP_PRIVATE:
-			if (!(file->f_mode & FMODE_READ))
+		case MAP_PRIVATE:	// 私有文件映射
+			if (!(file->f_mode & FMODE_READ))	// 文件如果不可读会报错
 				return -EACCES;
 			if (path_noexec(&file->f_path)) {
 				if (vm_flags & VM_EXEC)
@@ -421,6 +436,7 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 			return -EINVAL;
 		}
 	} else {
+		// 分支二：匿名映射
 		switch (flags & MAP_TYPE) {
 		case MAP_SHARED:
 			if (vm_flags & (VM_GROWSDOWN|VM_GROWSUP))
@@ -428,13 +444,14 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 			/*
 			 * Ignore pgoff.
 			 */
-			pgoff = 0;
+			pgoff = 0;	 // 忽略 pgoff
 			vm_flags |= VM_SHARED | VM_MAYSHARE;
 			break;
 		case MAP_PRIVATE:
 			/*
 			 * Set pgoff according to addr for anon_vma.
 			 */
+			// 根据匿名 vma 的 addr 设置 pgoff
 			pgoff = addr >> PAGE_SHIFT;
 			break;
 		default:
@@ -446,21 +463,32 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 	 * Set 'VM_NORESERVE' if we should not account for the
 	 * memory use of this mapping.
 	 */
+	// 通常内核会为 mmap 申请虚拟内存的时候会综合考虑 ram 以及 swap space 的总体大小。当映射的虚拟内存过大
+	// 而没有足够的 swap space 的时候， mmap 就会失败,设置 MAP_NORESERVE，内核将不会考虑上面的限制因素
+    // 这样当通过 mmap 申请大量的虚拟内存，并且当前系统没有足够的 swap space 的时候，mmap 系统调用依然能够成功
 	if (flags & MAP_NORESERVE) {
+		// 设置 MAP_NORESERVE 的目的是为了应用可以申请过量的虚拟内存，如果内核本身是禁止 overcommit 的
+		// 那么设置 MAP_NORESERVE 是无意义的，如果内核允许过量申请虚拟内存时（overcommit 为 0 或者 1）
+        // 无论映射多大的虚拟内存，mmap 将会始终成功，但缺页的时候会容易导致 oom
 		/* We honor MAP_NORESERVE if allowed to overcommit */
 		if (sysctl_overcommit_memory != OVERCOMMIT_NEVER)
-			vm_flags |= VM_NORESERVE;
+			vm_flags |= VM_NORESERVE;	// 设置 VM_NORESERVE 表示无论申请多大的虚拟内存，内核总会答应
 
 		/* hugetlb applies strict overcommit unless MAP_NORESERVE */
+		// 大页内存是提前预留出来的，并且本身就不会被 swap，所以不需要像普通内存页那样考虑 swap space 的限制因素
 		if (file && is_file_hugepages(file))
 			vm_flags |= VM_NORESERVE;
 	}
 
+	//重要：内存映射的核心，创建和初始化虚拟内存区域，并加入红黑树管理
 	addr = mmap_region(file, addr, len, vm_flags, pgoff, uf);
+
+	// 假如没有设置 MAP_POPULATE 标志位内核并不在调用 mmap 时就为进程分配物理内存空间，而是直到下次真正访问
+	// 地址空间时发现数据不存在于物理内存空间时才触发 Page Fault 将缺失的 Page 换入内存空间 
 	if (!IS_ERR_VALUE(addr) &&
 	    ((vm_flags & VM_LOCKED) ||
 	     (flags & (MAP_POPULATE | MAP_NONBLOCK)) == MAP_POPULATE))
-		*populate = len;
+		*populate = len; // 设置需要分配的物理内存大小
 	return addr;
 }
 ```
@@ -528,14 +556,16 @@ get_unmapped_area(struct file *file, unsigned long addr, unsigned long len,
 
 文件页与内存页映射的函数调用如下：
 
-![get_unmapped_area]()
+![get_unmapped_area](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/get_unmapped_area.jpg)
 
-arch_get_unmapped_area 函数的核心作用如下：
+`arch_get_unmapped_area` 函数的核心作用如下：
 
-1.	调用 `find_vma` 函数，根据指定的映射起始地址 addr，在进程地址空间中查找出符合 addr < vma->vm_end 条件的第一个 vma，然后在进程地址空间 mm_struct 中 mmap 指向的 vma 链表中，找出它的前驱节点 pprev。
-2.	如果明确指定起始地址 addr ，但是指定的虚拟内存范围有一段无效的区域或者已经存在映射关系，内核就不能按照指定的addr开始映射，此时调用vm_unmapped_area函数，内核会自动在文件映射与匿名映射区中按照地址的增长方向寻找一段len大小的虚拟内存范围出来。注意：此时找到的虚拟内存范围的起始地址就不是指定的addr
+TODO
 
-unmapped_area函数的核心任务就是在管理进程地址空间这些vma的红黑树mm_struct-> mm_rb中查找出一个满足条件的地址间隙gap用于内存映射。如果能够找到符合条件的地址间隙 gap 则直接返回，否者就从进程地址空间中最后一个 vma->vm_end 开始映射
+1.	调用 `find_vma` 函数，根据指定的映射起始地址 addr，在进程地址空间中查找出符合 `addr < vma->vm_end` 条件的第一个 vma，然后在进程地址空间 `mm_struct` 中 mmap 指向的 vma 链表中，找出它的前驱节点 `pprev`
+2.	如果明确指定起始地址 `addr` ，但是指定的虚拟内存范围有一段无效的区域或者已经存在映射关系，内核就不能按照指定的addr开始映射，此时调用`vm_unmapped_area`函数，内核会自动在文件映射与匿名映射区中按照地址的增长方向寻找一段`len`大小的虚拟内存范围出来。注意：此时找到的虚拟内存范围的起始地址就不是指定的addr
+
+`unmapped_area`函数的核心任务就是在管理进程地址空间这些vma的红黑树`mm_struct->mm_rb`中查找出一个满足条件的地址间隙gap用于内存映射。如果能够找到符合条件的地址间隙 `gap` 则直接返回，否者就从进程地址空间中最后一个 `vma->vm_end` 开始映射
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/mm/mmap.c#L1966
@@ -788,7 +818,7 @@ found:
 4.	调用 `vma_link` 函数把虚拟内存区域 vma 插入到链表和红黑树中。如果 vma 关联文件，那么把虚拟内存区域添加到文件的区间树中，文件的区间树用来跟踪文件被映射到哪些虚拟内存区域
 5.	调用 `vma_set_page_prot` 函数更新地址空间 `mm_struct` 中的相关统计变量，根据虚拟内存标志（`vma->vm_flags`）计算页保护位（`vma->vm_page_prot`），如果共享的可写映射想要把页标记为只读，其目的是跟踪写事件，那么从页保护位删除可写位
 
-![do_mmap-mmap_region-flow]()
+![do_mmap-mmap_region-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/do_mmap-mmap_region-flow.jpg)
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/mm/mmap.c#L1588
@@ -1312,7 +1342,7 @@ static const struct vm_operations_struct ext4_file_vm_ops = {
 
 先回想下linux的四级页表模型，以及进程的`mm_struct`仅保存了CR3寄存器的基地址：
 
-![page-table]()
+![page-table](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/page-table.jpg)
 
 **`remap_pfn_range`函数的核心功能是将物理页帧号`pfn`对应的物理内存映射到用户空间中要映射的虚拟内存地址的起始地址处**。首先调用`pgd_offset`函数查找`addr`在页全局目录表中对应的页表项地址`pgd`，之后刷新TLB缓存，然后从待映射虚拟地址的起始地址`addr`开始，按照`addr`和页帧号`pfn`同步增长的顺序，循环遍历并调用`remap_p4d_range`函数逐页完成虚拟内存页和物理内存页之间的映射，补齐`CR3`指向的页表
 
