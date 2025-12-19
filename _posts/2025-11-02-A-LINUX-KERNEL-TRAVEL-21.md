@@ -16,10 +16,9 @@ tags:
 
 页高速缓存（page cache），它是一种对完整的数据页进行操作的磁盘高速缓存，即把磁盘的数据块缓存在页高速缓存中。page cache是内核为文件创建的内存缓存，用以加速相关的文件操作。当应用程序需要读取文件中的数据时，操作系统先分配一些内存，将数据从存储设备读入到这些内存中，然后再将数据分发给应用程序；当需要往文件中写数据时，操作系统先分配内存接收用户数据，然后再将数据从内存写到磁盘上
 
-![linux_page_cache]()
+![linux_page_cache](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/21/linux_page_cache.jpg)
 
 本文涉及到read/write讨论，不考虑`O_DIRECT`的情况（如MySQL）
-
 
 ##	0x01	内核如何描述物理内存页
 
@@ -32,7 +31,7 @@ tags:
 
 内核中如何组织管理这些物理内存页 `struct page` 的方式称之为做物理内存模型，不同的物理内存模型，应对的场景以及 `page_to_pfn` 与 `pfn_to_page` 的计算逻辑都是不一样的，介绍下最简单的FLATMEM模型：
 
-![flat-mem]()
+![flat-mem](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/21/flatmem_model.png)
 
 平坦内存模型 FLATMEM的架构如下：先把物理内存想象成一片地址连续的存储空间，在这一大片地址连续的内存空间中，内核将这块内存空间分为一页一页的内存块 `struct page`，由于这块物理内存是连续的，物理地址也是连续的，划分出来的这一页一页的物理页必然也是连续的，并且每页的大小都是固定的，所以很容易想到用一个数组来组织这些连续的物理内存页 `struct page` 结构，其在数组中对应的下标即为 PFN
 
@@ -95,8 +94,14 @@ page = pfn_to_page(pfn);                   // PFN 转 struct page
 ```
 
 ####	内核对物理内存页的描述
+![linux-mem]()
 
-TODO
+`struct page` 分为两种：
+
+内核中的物理内存页有两种类型，分别用于不同的场景：
+
+-	匿名页：匿名页背后并没有一个磁盘中的文件作为数据来源，匿名页中的数据都是通过进程运行过程中产生的，匿名页直接和进程虚拟地址空间建立映射供进程使用
+-	文件页（内存文件映射）：文件页中的数据来自于磁盘中的文件，文件页需要先关联一个磁盘中的文件，然后再和进程虚拟地址空间建立映射供进程使用，使得进程可以通过操作虚拟内存实现对文件的操作
 
 ##  0x02    基础数据结构
 前面在介绍VFS的时候提到了`struct inode`中的一个重要成员：`address_space`，`address_space`对象是文件系统中管理内存页page cache的核心数据结构

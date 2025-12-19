@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:  VFS hooks
-subtitle:   文件相关的
+subtitle:   文件相关的监控点梳理
 date:       2025-10-22
 author:     pandaychen
 header-img:
@@ -17,7 +17,7 @@ tags:
 -	内核[v5.4.241]()
 -	内核[v6.6]()
 
-##  0x01    
+##  0x01	文件操作函数
 
 ####	`chmod`相关
 
@@ -133,4 +133,12 @@ retry_deleg:
 }
 ```
 
-##  0x0  参考
+##	0x02	inode操作函数
+
+TODO
+
+##	0x03	dentry操作函数
+
+TODO
+
+##  0x04  参考

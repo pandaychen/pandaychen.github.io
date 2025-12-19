@@ -72,7 +72,13 @@ struct idr_layer {
 +-----------+-----------+-----------+
 ```
 
-##  0x01    radix tree(4.11.6)
+##  0x01    radix tree（4.11.6）
+先看下4.11.6版本的IDR实现：
+
+![idr-simple-1]()
+
+####	数据结构
+
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/radix-tree.h#L112
 struct radix_tree_root {
@@ -108,7 +114,7 @@ struct address_space {
 }
 ```
 
-##  0x02    radix tree(6.18)
+##  0x02    radix tree（6.18）
 从 Linux 4.15 开始，内核将 bitmap 换为了radix tree来实现进程id分配（用于管理 `32` bit 位的 整数 ID），结构如下：
 
 ```cpp
@@ -202,12 +208,14 @@ struct xa_node {
 
 假设对`0B 10 111111 001100 111110 011000 100001`，寻址如下：
 
+```text
 1. 第一层寻址：ary2=ary1[0b10]，得到下一级地址ary2
 2. 第二层ary3 = ary2[0b111111]
 3. 第三层ary4 = ary3[0b001100]
 4. 第四层ary5 = ary4[0b111110]
 5. 第五层ary6 = ary5[0b011000]
 6. page节点地址（IDR指针） = ary6[0b100001]
+```
 
 ##  0x04	应用场景
 
