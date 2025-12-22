@@ -127,6 +127,24 @@ static inline struct page *find_get_page(struct address_space *mapping,
 
 现在进程 1 和进程 2 各自虚拟内存空间中的这段虚拟内存区域 VMA，已经共同映射到了文件的 page cache 中，由于文件的 page cache 在内核中只有一份，它是和进程无关的，page cache 中的内容发生的任何变化，进程 1 和进程 2 都是可以看到的
 
+####	虚拟内存的分配流程（不同架构）
+
+![mmap-alloc-buju-1]()
+
+1、文件映射与匿名映射区的布局（`/proc/sys/vm/legacy_va_layout`）
+
+在经典布局（旧）下，文件映射与匿名映射区的地址增长方向是从低地址到高地址，也就是说映射区是从下往上增长，这也就导致了 mmap 在分配虚拟内存的时候需要从下往上搜索空闲 vma。经典布局下，文件映射与匿名映射区的起始地址 `mm_struct->mmap_base` 被设置在 `task_size` 的三分之一处，`task_size` 为进程虚拟内存空间与内核空间的分界线，也就说 `task_size` 是进程虚拟内存空间的末尾，大小为 `3G`。这表明了文件映射与匿名映射区起始于进程虚拟内存空间开始的 `1G` 位置处，而映射区恰好位于整个进程虚拟内存空间的中间，其下方就是堆了，由于代码段，数据段的存在，可供堆进行扩展的空间是小于 `1G` 的，否则就会与映射区冲突了。这种布局对于虚拟内存空间非常大的体系结构，比如 AMD64 , 是合适的而且会工作的非常好，因为虚拟内存空间足够的大（`128T`），堆与映射区都有足够的空间来扩展，不会发生冲突。但是对于虚拟内存空间比较小的体系结构，比如 IA-32，只能提供 `3G` 大小的进程虚拟内存空间，就会出现上述冲突问题
+
+![mmap-alloc-buju-classic]()
+
+在新式布局下，文件映射与匿名映射区的地址增长方向是从高地址到低地址，也就是说映射区是从上往下增长，这也就导致了 mmap 在分配虚拟内存的时候需要从上往下搜索空闲 vma。在新式布局中，栈的空间大小会被限制，栈最大空间大小保存在 `task_struct->signal_struct->rlimp[RLIMIT_STACK]` 中。由于栈变为有界的了，所以文件映射与匿名映射区可以在栈的下方立即开始，为确保栈与映射区不会冲突，它们中间还设置了 `1M` 大小的安全间隙 `stack_guard_gap`，这样一来堆在进程地址空间中较低的地址处开始向上增长，而映射区位于进程空间较高的地址处向下增长，因此堆区和映射区在新式布局下都可以较好的扩展，直到耗尽剩余的虚拟内存区域
+
+![mmap-alloc-buju-new]()
+
+2、内核具体如何对文件映射与匿名映射区进行布局
+
+TODO
+
 ####    mmap内存映射
 核心分为三个步骤：
 
@@ -174,8 +192,14 @@ static inline struct page *find_get_page(struct address_space *mapping,
 
 ![mmap-kernel-function-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/mmap-kernel-function-flow.jpg)
 
+内存映射的整个流程，最核心的过程两步：
+
+1.	`get_unmapped_area` 函数用于在进程地址空间中寻找出一段长度为 `len`，并且还未映射的虚拟内存区域 vma 出来。返回值 `addr` 表示这段虚拟内存区域的起始地址
+2.	`mmap_region` 函数是整个内存映射的核心，它首先会为这段选取出来的映射虚拟内存区域分配 vma 结构，并根据映射信息进行初始化，以及建立 vma 与相关映射文件的关系，最后将这段 vma 插入到进程的虚拟内存空间中
+
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/kernel/sys_x86_64.c#L87
+//mmap 系统调用的本质其实就是在进程虚拟内存空间中划分出一段未映射的虚拟内存区域，随后内核会为这段映射出来的虚拟内存区域创建 vma 结构，并初始化 vma 结构的相关属性
 SYSCALL_DEFINE6(mmap, unsigned long, addr, unsigned long, len,
 		unsigned long, prot, unsigned long, flags,
 		unsigned long, fd, unsigned long, off)
@@ -283,8 +307,11 @@ unsigned long vm_mmap_pgoff(struct file *file, unsigned long addr,
 		up_write(&mm->mmap_sem);
 		// 等待 userfaultfd 处理完成
 		userfaultfd_unmap_complete(mm, &uf);
-		if (populate)	// 提前分配物理内存页面，后续访问不会缺页，为 [ret , ret + populate] 这段虚拟内存立即分配物理内存
+		if (populate){	
+			// 提前分配物理内存页面，后续访问不会缺页，为 [ret , ret + populate] 这段虚拟内存立即分配物理内存
+			// 分析见下文
 			mm_populate(ret, populate);
+		}
 	}
 	return ret;
 }
@@ -306,7 +333,8 @@ do_mmap_pgoff(struct file *file, unsigned long addr,
 1.	调用 `get_unmapped_area` 函数用于在进程地址空间中寻找出一段长度为 `len`，并且还未映射的虚拟内存区域 vma 出来，返回值 `addr` 表示这段虚拟内存区域的起始地址。之后根据不同的文件打开方式设置不同的 vm 标志位 `flag`
 2.	调用 `mmap_region` 函数，首先会为刚才选取出来的映射虚拟内存区域分配 vma 结构，并根据映射信息进行初始化，以及建立 vma 与相关映射文件的关系，最后将这段 vma 插入到进程的虚拟内存空间中（链表或红黑树进行管理）
 
-TODO
+**本小节基于AMD64（X86_64）体系下的经典布局为背景介绍**
+
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/mm/mmap.c#L1306
 unsigned long do_mmap(struct file *file, unsigned long addr,
@@ -493,9 +521,15 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 }
 ```
 
+这里`do_mmap` 函数还承担了对一些内存映射约束条件的检查，详细可以[参考](https://www.cnblogs.com/binlovetech/p/17754173.html)
+
 ####	追踪get_unmapped_area：寻找VMA
 
-这里先看下`get_unmapped_area`函数的实现，即如何寻找到合适长度的虚拟内存区域
+这里先看下`get_unmapped_area`函数的实现，即如何寻找到合适长度的虚拟内存区域，在经典布局下，`mm->get_unmapped_area` 指向的函数为 `arch_get_unmapped_area`：
+
+-	如果 mmap 进行的是私有匿名映射，那么内核会通过 `mm->get_unmapped_area` 函数进行虚拟内存的分配
+-	如果 mmap 进行的是文件映射，那么内核则采用的是特定于文件系统的 `file->f_op->get_unmapped_area` 函数，若通过 mmap 映射的是 ext4 文件系统下的文件，那么 `file->f_op->get_unmapped_area` 指向的是 `thp_get_unmapped_area` 函数（专门为 ext4 文件映射申请虚拟内存）
+-	如果 mmap 进行的是共享匿名映射，由于共享匿名映射的本质其实是基于 tmpfs 的虚拟文件系统中的匿名文件进行的共享文件映射，所以这种情况下 `get_unmapped_area` 函数是需要基于 tmpfs 的虚拟文件系统的，在共享匿名映射的情况下 `get_unmapped_area` 指向 `shmem_get_unmapped_area` 函数
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/mm/mmap.c#L2053
@@ -504,7 +538,7 @@ unsigned long
 get_unmapped_area(struct file *file, unsigned long addr, unsigned long len,
 		unsigned long pgoff, unsigned long flags)
 {
-	// 在进程虚拟空间中寻找还未被映射的 VMA 这段核心逻辑是被内核实现在特定于体系结构的函数中
+		// 在进程虚拟空间中寻找还未被映射的 VMA 这段核心逻辑是被内核实现在特定于体系结构的函数中
     // 该函数指针用于指向真正的 get_unmapped_area 函数，在经典布局下，真正的实现函数为 arch_get_unmapped_area
 	unsigned long (*get_area)(struct file *, unsigned long,
 				  unsigned long, unsigned long, unsigned long);
@@ -560,7 +594,22 @@ get_unmapped_area(struct file *file, unsigned long addr, unsigned long len,
 
 `arch_get_unmapped_area` 函数的核心作用如下：
 
-TODO
+![arch_get_unmapped_area-BUJU]()
+
+如上图，在经典布局下，mmap 可以映射的虚拟内存范围必须在进程虚拟内存空间 `mmap_min_addr` 到 `mmap_end` 这段地址范围内，`mmap_min_addr` 为 `TASK_SIZE` 的`1/3`，`mmap_end` 为 `TASK_SIZE`
+内核需要检查本次 mmap 映射的虚拟内存长度 `len` 是否超过了规定的映射范围，如果超过了则返回 `ENOMEM` 错误，并停止映射流程。如果映射长度 `len` 在规定的映射地址范围内，内核则会根据指定的映射起始地址 `addr`，以及映射长度 `len`，开始在文件映射与匿名映射区，为本次 mmap 映射寻找一段空闲的虚拟内存区域 vma 出来
+
+![mmap-vma-start]()
+
+-	如果在 `flags` 参数中指定了 `MAP_FIXED` 标志，则意味着强制要求内核在指定的起始地址 `addr` 处开始映射 `len` 长度的虚拟内存区域，无论这段虚拟内存区域 `[addr , addr + len]` 是否已经存在映射关系，内核都会强行进行映射，如果这块区域已经存在映射关系，那么后续内核会把旧的映射关系覆盖（解除）掉
+-	如果指定了 `addr`，但是并没有指定 `MAP_FIXED`，则意味着只是建议内核优先考虑从指定的 `addr` 地址处开始映射，但是如果 `[addr , addr+len]` 这段虚拟内存区域已经存在映射关系，内核则不会按照指定的 `addr` 开始映射，而是会自动查找一段空闲的 `len` 长度的虚拟内存区域（关联 `vm_unmapped_area` 函数）
+-	如果通过查找发现 `[addr , addr+len]` 这段虚拟内存地址范围并未存在任何映射关系，那么 addr 就会作为 mmap 映射的起始地址。这里面会分为两种情况：
+	-	第一种是指定的 `addr` 比较大，`addr` 位于文件映射与匿名映射区中所有映射区域 vma 的最后面，这样一来`[addr , addr + len]` 这段地址范围当然是空闲可用的
+	-	第二种情况是指定的 `addr` 恰好位于一个 vma 和另一个 vma 中间的地址间隙中，并且这个地址间隙刚好大于或者等于指定的映射长度 `len`。内核就可以将这个地址间隙映射起来
+ 
+![mmap-vma-start-1]()
+
+继续分析`arch_get_unmapped_area`函数的实现：
 
 1.	调用 `find_vma` 函数，根据指定的映射起始地址 addr，在进程地址空间中查找出符合 `addr < vma->vm_end` 条件的第一个 vma，然后在进程地址空间 `mm_struct` 中 mmap 指向的 vma 链表中，找出它的前驱节点 `pprev`
 2.	如果明确指定起始地址 `addr` ，但是指定的虚拟内存范围有一段无效的区域或者已经存在映射关系，内核就不能按照指定的addr开始映射，此时调用`vm_unmapped_area`函数，内核会自动在文件映射与匿名映射区中按照地址的增长方向寻找一段`len`大小的虚拟内存范围出来。注意：此时找到的虚拟内存范围的起始地址就不是指定的addr
@@ -585,8 +634,10 @@ arch_get_unmapped_area(struct file *filp, unsigned long addr,
 	
 	// 如果指定了 MAP_FIXED 表示必须要从指定的 addr 开始映射 len 长度的区域
     // 如果这块区域已经存在映射关系，那么后续内核会把旧的映射关系覆盖掉
-	if (flags & MAP_FIXED)
+	if (flags & MAP_FIXED){
+		//直接返回addr
 		return addr;
+	}
 	
 	// 没有指定 MAP_FIXED，但指定了 addr，内核从指定的 addr 地址开始映射，内核这里会检查指定的这块虚拟内存范围是否有效
 	if (addr) {
@@ -619,6 +670,11 @@ arch_get_unmapped_area(struct file *filp, unsigned long addr,
 	return vm_unmapped_area(&info);
 }
 
+```
+
+在`arch_get_unmapped_area`函数中，**`find_vma`用于对指定的 addr，在该`mm_struct`对应的红黑树中查找第一个符合 `addr < vma->vm_end` 条件的 vma**
+
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/mm/mmap.c#L2097
 struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)
 {
@@ -653,12 +709,33 @@ struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)
 		}
 	}
 
-	if (vma)	// 更新 vma 缓存
+	if (vma){	
+		// 更新 vma 缓存
 		vmacache_update(addr, vma);
+	}
 	// 返回查找到的 vma，如果没有查找到，则返回 null，表示进程空间中目前还没有这样一个 vma，后续需要新建
 	return vma;
 }
+```
 
+在非`MAP_FIXED`模式下，如果通过`find_vma`找到的这个 vma 与 `[addr,addr +len]` 这段虚拟地址范围有重叠的部分，那么内核就不能按照指定的 `addr`开始映射，内核需要重新在文件映射与匿名映射区中按照地址的增长方向，找到一段 `len` 大小的空闲虚拟内存区域
+
+![unmapped_area-1]()
+
+如上图，在这种场景下，有如下限制条件：
+
+-	gap 的长度必须大于等于映射参数 `length`，且gap区间为`[gap_start，gap_end]`，其中`gap_start = vma->vm_prev->vm_end`、`gap_end = vma->vm_start`
+-	gap 的起始地址 `gap_start` 不能高于 `high_limit - length`，否则从 `gap_start` 地址处开始映射长度 `length` 的区域就会超出 `high_limit` 的限制；而gap 的结束地址 `gap_end` 不能低于 `low_limit + length`，否则映射区域的起始地址就会低于 `low_limit` 的限制，这里的`low_limit` 即`mm->mmap_base`、 `high_limit`即`TASK_SIZE`
+
+由于在经典布局下，红黑树是按照 vma 的地址增长方向（从低地址到高地址）来组织的，左子树中的所有 vma 地址都低于根节点 vma 的地址，右子树的所有 vma 地址均高于根节点 vma 的地址。假设在左子树中找到了一个地址最低的 vma，并且这个 vma 与其前驱节点`vma->vm_prev` 之间的地址间隙 gap 满足如下条件：
+
+1.	gap 的长度大于等于映射长度 `length`：`gap_end - gap_start >= length`
+2.	`gap_end >= low_limit + length`
+3.	`gap_start <= high_limit - length`
+
+为了加速上面这一遍历搜索，内核提供了`rb_subtree_gap`的优化机制（每个vma中的成员），当遍历 vma 节点的时候发现`vma->rb_subtree_gap < length`时，那么整棵红黑树都不需要看了，直接从进程地址空间中最后一个 `vma->vm_end` 处开始映射
+
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/mm.h#L2169
 static inline unsigned long
 vm_unmapped_area(struct vm_unmapped_area_info *info)
@@ -668,7 +745,8 @@ vm_unmapped_area(struct vm_unmapped_area_info *info)
 		// 当文件映射与匿名映射区的地址增长方向是从上到下逆向增长时（新式布局），采用 topdown 查找
 		return unmapped_area_topdown(info);
 	else
-		// 地址增长方向为从下倒上正向增长（经典布局），采用该函数查找
+		// 地址增长方向为从下倒上正向增长（经典布局），采用该函数查找，本文主要分析此函数的实现
+		// 在 AMD64 体系结构下，文件映射与匿名映射区的布局采用的是经典布局，地址的增长方向从低地址到高地址增长
 		return unmapped_area(info);
 }
 
@@ -809,8 +887,9 @@ found:
 }
 ```
 
-####	do_mmap->mmap_region：创建虚拟内存区域
-在上一节`get_unmapped_area`函数结束时，内核已在进程地址空间中找出一段地址范围为`[addr,addr + len]`的虚拟内存区域供mmap进行映射。接下来追踪下`mmap_region`及后续函数具体是如何初始化vma并建立映射关系的,`mmap_region`负责创建虚拟内存区域，其核心流程如下：
+
+####	do_mmap->mmap_region：创建虚拟内存区域（内存映射的本质）
+在上一节`get_unmapped_area`函数结束时，内核已在进程地址空间中找出一段地址范围为`[addr,addr + len]`的虚拟内存区域供mmap进行映射。接下来追踪下`mmap_region`及后续函数具体是如何初始化vma并建立映射关系的，`mmap_region`负责创建虚拟内存区域，其核心流程如下：
 
 1.	调用 `may_expand_vm` 函数以检查进程在本次 mmap 映射之后申请的虚拟内存是否超过限制，检查（进程的虚拟内存总数+申请的页数）是否超过地址空间限制，如果是私有的可写映射，并且不是栈，则检查（进程的虚拟内存总数+申请的页数）是否超过最大数据长度
 2.	调用 `find_vma_links` 函数查找当前进程地址空间中是否存在与指定映射区域 `[addr, addr+len]` 重叠的部分，如果有重叠则需调用 `do_munmap` 函数将这段重叠的映射部分解除掉，后续会重新映射这部分
@@ -819,6 +898,14 @@ found:
 5.	调用 `vma_set_page_prot` 函数更新地址空间 `mm_struct` 中的相关统计变量，根据虚拟内存标志（`vma->vm_flags`）计算页保护位（`vma->vm_page_prot`），如果共享的可写映射想要把页标记为只读，其目的是跟踪写事件，那么从页保护位删除可写位
 
 ![do_mmap-mmap_region-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/do_mmap-mmap_region-flow.jpg)
+
+![mmap_region-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/mmap_region-1.png)
+
+目前只是确定了 `[addr , addr + len]` 这段虚拟内存区域是可以映射的，这段区域只是被内核先划分出来了，但是还未分配出去，在 `mmap_region` 函数中需要为这段虚拟内存区域分配 vma 结构，并根据映射方式对 vma 进行初始化，这样这段虚拟内存才算真正的被分配给了进程
+
+此外，内核要需要检查与审计分配资源，并且尽可能的**复用vma**，即在创建新的 vma 之前，按照最大程度合并的原则，内核会尝试看能不能将当前寻找出来的空闲虚拟内存区域 `[addr , addr + len]` 与其前一个 vma 以及后一个 vma 进行合并，然后重新调整合并后的 vma 相关属性，如`vm_start/vm_end/vm_pgoff`等，以及涉及到相关数据结构的改变（见下文描述）
+
+如果不能合并，内核则只能从 slab 缓存中拿出一个 vma 结构来描述这段虚拟内存地址范围 `[addr , addr + len]`，并根据 mmap 映射的这段虚拟内存区域属性初始化 vma 结构中的相关字段
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/mm/mmap.c#L1588
@@ -1034,7 +1121,7 @@ unacct_error:
 
 接着分析下，`mmap_region`中主要调用到的几个函数：
 
--	`may_expand_vm`
+-	`may_expand_vm`：检查映射的虚拟内存是否超过了内核限制
 -	`find_vma_links`
 -	`vma_merge`
 -	`vma_link`
@@ -1044,6 +1131,20 @@ unacct_error:
 `may_expand_vm`函数用于检查本次映射是否超过了进程虚拟内存空间中的虚拟内存总量的限制，超过则返回 `false`，核心逻辑是判断经过本次mmap映射之后，`mm->total_vm + npages`是否超过了`rlimit(RLIMIT_AS)`中的限制，`mm->data_vm + npages`是否超过了`rlimit(RLIMIT_DATA)`中的限制。如果超过，那么本次mmap内存映射流程在这里就会停止进行
 
 注意：`npages`是指`mmap`需要映射的虚拟内存页数
+
+当前进程地址空间中已经映射的虚拟内存页数保存在 `mm_struct->total_vm` 中，数据区（私有，可写）已经映射的虚拟内存页数保存在 `mm_struct->data_vm` 中
+
+```cpp
+struct mm_struct {
+	......
+    // 进程地址空间中所有已经映射的虚拟内存页总数
+    unsigned long total_vm;    /* Total pages mapped */
+    // 进程地址空间中所有私有，可写的虚拟内存页总数
+    unsigned long data_vm;     /* VM_WRITE & ~VM_SHARED & ~VM_STACK */
+	......
+}
+```
+
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/mm/mmap.c#L3102
@@ -1266,7 +1367,62 @@ struct vm_area_struct *vma_merge(struct mm_struct *mm,
 }
 ```
 
-`vma_link`函数的主要作用如下：
+在`vma_merge`中的几处代码细节如下：
+
+-	`prev->vm_end == addr`：`area` 的前一个 `prev` vma 的结束地址与 `area` 的起始地址 `addr` 重合
+-	`end == next->vm_start`： `area` 的后一个 `next` vma 的起始地址与 `area` 的结束地址 `end` 重合
+-	`can_vma_merge_after`：判断其参数中指定的 vma 能否与其后一个 vma 进行合并
+-	`can_vma_merge_before`：用于判断参数指定的 vma 能否与其前一个 vma 合并
+-	`is_mergeable_vma`：判断两个 vma 是否能够合并
+
+这里对`vma_merge`执行合并的实现做一个说明，通过 mmap 在进程地址空间中映射出的这个 `area` 一般是在两个 vma 中产生的，内核源码中使用 `prev` 指向 `area` 的前一个 vma，使用 `next` 指向 `area` 的后一个 vma，一般有两种基础布局：
+
+1、未指定`MAP_FIXED`，普通布局
+
+![merge_case1]()
+
+2、指定了`MAP_FIXED`（强制映射），`area` 区域有可能会与 `prev` 区域和 `next` 区域有部分重合。如果 `area` 区域的结束地址 `end` 与 `next` 区域的结束地址重合，内核会将 `next` 指针继续向后移动，指向 `next->vm_next` 区域。保证 `area` 始终处于 `prev` 和 `next` 之间的 gap 中（如下图）
+
+![merge_case2]()
+
+1、case1，在基本布局 1 中，`area` 的起始地址 `addr` 与 `prev` vma 的结束地址重合，同时 `area` 的结束地址 `end` 与 `next` vma 的起始地址重合，内核将会删除 `next` 区域，扩充 `prev` 区域，也就是说将这三个区域统一合并到 `prev` 区域中
+
+![merge-case-1]()
+
+2、case6，在基本布局2的结果，内核会将中间重叠的蓝色区域覆盖掉，然后统一合并到 prev 区域中
+
+![merge-case-6]()
+
+case2、case5、case7 属于（ `area` 的起始地址 `addr` 与 `prev` vma 的结束地址重合，但是 `area` 的结束地址 `end` 不与 `next` vma 的起始地址重合）
+
+3、case2，`area` 的结束地址 `end` 小于 `next` vma 的起始地址，内核会扩充 `prev` 区域，将 `area` 合并进去，`next` 区域保持不变
+
+![merge-case-2]()
+
+4、case5， `area` 的结束地址 `end` 大于 `next` vma 的起始地址，内核会扩充 `prev` 区域，将 `area` 以及与 `next` 重叠的部分合并到 `prev` 区域中，剩下的继续留在 `next` 区域保持不变
+
+![merge-case-5]()
+
+5、case7，对应布局2的情况，内核会并扩充 `prev` 区域。`next` 区域保持不变
+
+![merge-case-7]()
+
+case 3、 case 4 、 case 8属于（ `area` 的结束地址 `end` 与 `next` vma 的起始地址重合，但是 `area` 的起始地址 `addr` 不与 `prev` vma 的结束地址重合）
+
+6、case3，当`area` 的起始地址 `addr` 大于 `prev` 区域的结束地址的话，内核会扩充 `next` 区域，并将 `area` 合并到 `next` 中，`prev` 区域保持不变
+
+![merge-case-3]()
+
+7、case4，`area` 的起始地址 `addr` 小于 `prev` 区域的结束地址，那么内核会缩小 `prev` 区域，然后扩充 `next` 区域，将重叠的部分合并到 `next` 区域中
+
+![merge-case-4]()
+
+8、case8，也是对应于布局2的情况，内核继续保持 `prev` 区域不变，然后扩充 `next` 区域并覆盖下图中蓝色部分，将 `area` 合并到 `next` 区域中
+
+![merge-case-8]()
+
+
+最后，`vma_link`函数会按照虚拟内存地址的增长方向，将本次映射产生的 vma 结构插入到进程地址空间的三类数据结构（`mm_struct->mmap` 链表结构、`mm_struct->mm_rb`红黑树结构）：
 
 - 调用`__vma_link`函数将vma插入到链表和红黑树中，其内部调用`__vma_link_list`函数将vma插入到`mm->mmap`双向链表中，调用`__vma_link_rb`函数将vma插入到`mm->rb`红黑树中
 - 调用`__vma_link_file`函数将vma添加到文件树中
@@ -1298,6 +1454,45 @@ static void vma_link(struct mm_struct *mm, struct vm_area_struct *vma,
 	// map_count 表示进程地址空间中 vma 的个数
 	mm->map_count++;
 	validate_mm(mm);
+}
+```
+
+在`vma_link`中，还有一个非常重要的操作`__vma_link_file`，即通过 `__vma_link_file` 函数建立文件与虚拟内存区域 vma （所有进程）的反向映射关系，这里以文件页的反向映射为例，结构关系如下：
+
+![mmap-file-mmaping-reverse-immap]()
+
+一个文件可以被多个进程一起映射，如此在每个进程的地址空间 `mm_struct` 结构中都会有一个 vma 结构来与这个文件进行映射，与该文件产生映射关系的所有进程地址空间中的 vma 就挂在 `address_space->i_mmap` 指向的这棵红黑树中，通过该结构可以找到所有与该文件进行映射的进程。`__vma_link_file` 函数建立文件页反向映射的核心其实就是将 mmap 映射出的这个 vma 插入到这颗红黑树中：
+
+```cpp
+//i_mmap指向的是一颗红黑树，这颗红黑树正是文件页反向映射的核心数据结构，反向映射关系就保存在这里
+struct address_space {
+	......
+    struct inode        *host;      /* owner: inode, block_device */
+    // page cache
+    struct radix_tree_root  i_pages;    /* cached pages */
+    atomic_t        i_mmap_writable;/* count VM_SHARED mappings */
+    // 文件与 vma 反向映射的核心数据结构，i_mmap 也是一颗红黑树
+    // 在所有进程的地址空间中，只要与该文件发生映射的 vma 均挂在 i_mmap 中
+    struct rb_root_cached   i_mmap;     /* tree of private and shared mappings */
+	......
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/mmap.c#L561
+static void __vma_link_file(struct vm_area_struct *vma)
+{
+	struct file *file;
+
+	file = vma->vm_file;
+	if (file) {
+		struct address_space *mapping = file->f_mapping;
+		......
+
+		flush_dcache_mmap_lock(mapping);
+		// address_space->i_mmap 也是一颗红黑树，上面挂着的是与该文件映射的所有 vma（所有进程地址空间）
+        // 这里将 vma 插入到 i_mmap 中，实现文件与 vma 的反向映射
+		vma_interval_tree_insert(vma, &mapping->i_mmap);
+		flush_dcache_mmap_unlock(mapping);
+	}
 }
 ```
 
@@ -1336,6 +1531,8 @@ static const struct vm_operations_struct ext4_file_vm_ops = {
 -	`ext4_filemap_fault`：缺页异常处理，当进程访问文件映射区域但对应的页面不在内存中时，内核会调用此函数加载数据
 -	`filemap_map_pages`：批量映射页面，预读和批量映射多个连续页面，减少缺页异常次数，提高性能
 -	`ext4_page_mkwrite`：写时缺页处理，当进程第一次写入一个只读页面时，进行写时复制（Copy-on-Write）处理
+
+![ext4_mmap]()
 
 ####	四级页表的建立过程
 内核在执行文件映射时，此文件所属的文件系统会注册虚拟内存区域的虚拟内存操作集合，其中也包括内核驱动函数mmap，在不同的文件系统中内核驱动函数mmap的实现方式有所不同，但其内部都是通过 `remap_pfn_range` 函数来建立页表，即实现文件地址和虚拟地址区域的映射关系
@@ -1598,7 +1795,42 @@ static int ext4_file_mmap(struct file *file, struct vm_area_struct *vma)
 }
 ```
 
-##  0x0 mmap匿名映射实现
+##  0x0 mmap匿名共享映射实现
+若使用mmap进行共享匿名映射，父子进程之间需要依赖 tmpfs 文件系统中的匿名文件对共享内存进行访问，当进行共享匿名映射时，内核会在 `shmem_zero_setup` 函数中，使用 tmpfs 文件系统里为映射创建一个匿名文件（`shmem_kernel_file_setup`），随后将 tmpfs 文件系统中的这个匿名文件与虚拟映射区 vma 中的 `vm_file` 关联映射起来，当父进程调用 fork 创建子进程的时候，内核会将父进程的虚拟内存空间全部拷贝给子进程，包括这里创建的共享匿名映射区域 vma，这样一来，父子进程就可以通过共同的 vma->vm_file 来实现共享内存的通信了（mmap 的共享匿名映射其实本质上还是共享文件映射）
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/shmem.c#L4216
+int shmem_zero_setup(struct vm_area_struct *vma)
+{
+    struct file *file;
+    loff_t size = vma->vm_end - vma->vm_start;
+    // tmpfs 中获取一个匿名文件
+    file = shmem_kernel_file_setup("dev/zero", size, vma->vm_flags);
+    if (IS_ERR(file))
+        return PTR_ERR(file);
+
+    if (vma->vm_file)
+        // 如果 vma 中已存在其他文件，则解除与其他文件的映射关系
+        fput(vma->vm_file);
+    
+    // 将 tmpfs 中的匿名文件映射进虚拟内存区域 vma 中
+    // 后续 fork 子进程的时候，父子进程就可以通过这个匿名文件实现共享匿名映射 
+    vma->vm_file = file;
+    // 对这块共享匿名映射区相关操作这里直接映射成 shmem_vm_ops
+    vma->vm_ops = &shmem_vm_ops;
+
+    return 0;
+}
+
+static const struct vm_operations_struct shmem_vm_ops = {
+	.fault		= shmem_fault,
+	.map_pages	= filemap_map_pages,
+#ifdef CONFIG_NUMA
+	.set_policy     = shmem_set_policy,
+	.get_policy     = shmem_get_policy,
+#endif
+};
+```
 
 ##	0x0	缺页中断的主要处理
 本小节以ext4文件系统的mmap文件映射过程为例，分析缺页中断的处理过程。缺页中断的核心逻辑中，涉及到的主要内核结构及成员如下：
@@ -2086,6 +2318,189 @@ static int page_cache_read(struct file *file, pgoff_t offset, gfp_t gfp_mask)
 2、`filemap_fault`中的性能优化，虽然`filemap_fault`函数主要处理单page缺页，但会通过预读（`readahead`）机制连续加载多页。从其调用入口`page = find_get_page(mapping, offset)`来看，这里只查找指定偏移的一页，但通过预读机制实际上在优化连续的内存访问模式。即**预读后续页面，减少未来缺页**
 
 
+####	vm_mmap_pgoff->mm_populate：立即为映射分配物理内存
+上面讨论了通常调用 mmap 进行内存映射的时，内核只是会在进程的虚拟内存空间中为这次映射分配一段虚拟内存，然后建立好这段虚拟内存与相关文件之间的映射关系就结束了，内核并不会为映射分配物理内存。而物理内存的分配工作需要延后到这段虚拟内存被 CPU 访问的时候，通过缺页中断来进入内核，分配物理内存，并在页表中建立好映射关系。但如果在 `flags` 参数中设置了 `MAP_POPULATE`、`MAP_LOCKED` 标志位之后，物理内存的分配动作会提前发生。首先会通过 `do_mmap_pgoff` 函数在进程虚拟内存空间中分配出一段未映射的虚拟内存区域，返回值 `ret` 表示映射的这段虚拟内存区域的起始地址，紧接着就会调用 `mm_populate`，**内核会在 mmap 刚刚映射出来的这段虚拟内存区域上，依次扫描这段 vma 中的每一个虚拟页，并对每一个虚拟页触发缺页异常，从而为其立即分配物理内存**
+
+那么回到上面mmap调用最初的`mmap_pgoff->mm_populate`函数的实现：此函数作用是在进程虚拟内存空间中，找出 `[ret , ret + populate]` 这段虚拟地址范围内的所有 vma，并为每一个 vma 填充物理内存
+
+```cpp
+unsigned long vm_mmap_pgoff(struct file *file, unsigned long addr,
+    unsigned long len, unsigned long prot,
+    unsigned long flag, unsigned long pgoff)
+{
+    unsigned long ret;
+    // 获取进程虚拟内存空间
+    struct mm_struct *mm = current->mm;
+    // 是否需要为映射的 VMA，提前分配物理内存页，避免后续的缺页
+    // 取决于 flag 是否设置了 MAP_POPULATE 或者 MAP_LOCKED，这里的 populate 表示需要分配物理内存的大小
+    unsigned long populate;
+
+    ret = security_mmap_file(file, prot, flag);
+    if (!ret) {
+        // 对进程虚拟内存空间加写锁保护，防止多线程并发修改
+        if (down_write_killable(&mm->mmap_sem))
+            return -EINTR;
+        // 开始 mmap 内存映射，在进程虚拟内存空间中分配一段 vma，并建立相关映射关系
+        // ret 为映射虚拟内存区域的起始地址
+        ret = do_mmap_pgoff(file, addr, len, prot, flag, pgoff,
+                    &populate, &uf);
+        // 释放写锁
+        up_write(&mm->mmap_sem);
+        if (populate)
+            // 提前分配物理内存页面，后续访问不会缺页
+            // 为 [ret , ret + populate] 这段虚拟内存立即分配物理内存
+            mm_populate(ret, populate);
+    }
+    return ret;
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/gup.c#L1069
+int __mm_populate(unsigned long start, unsigned long len, int ignore_errors)
+{
+	struct mm_struct *mm = current->mm;
+	unsigned long end, nstart, nend;
+	struct vm_area_struct *vma = NULL;
+	int locked = 0;
+	long ret = 0;
+
+	VM_BUG_ON(start & ~PAGE_MASK);
+	VM_BUG_ON(len != PAGE_ALIGN(len));
+	end = start + len;
+	// 依次遍历进程地址空间中 [start , end] 这段虚拟内存范围的所有 vma
+	for (nstart = start; nstart < end; nstart = nend) {
+		/*
+		 * We want to fault in pages for [nstart; end) address range.
+		 * Find first corresponding VMA.
+		 */
+		if (!locked) {
+			locked = 1;
+			down_read(&mm->mmap_sem);
+			vma = find_vma(mm, nstart);
+		} else if (nstart >= vma->vm_end)
+			vma = vma->vm_next;
+		if (!vma || vma->vm_start >= end)
+			break;
+		/*
+		 * Set [nstart; nend) to intersection of desired address
+		 * range with the first VMA. Also, skip undesirable VMA types.
+		 */
+		nend = min(end, vma->vm_end);
+		if (vma->vm_flags & (VM_IO | VM_PFNMAP))
+			continue;
+		if (nstart < vma->vm_start)
+			nstart = vma->vm_start;
+		/*
+		 * Now fault in a range of pages. populate_vma_page_range()
+		 * double checks the vma flags, so that it won't mlock pages
+		 * if the vma was already munlocked.
+		 */
+
+		//上面是查找指定地址范围内 vma 
+
+		// 为这段地址范围内的所有 vma 分配物理内存
+		ret = populate_vma_page_range(vma, nstart, nend, &locked);
+		if (ret < 0) {
+			if (ignore_errors) {
+				ret = 0;
+				continue;	/* continue at next VMA */
+			}
+			break;
+		}
+		// 继续为下一个 vma （如果有的话）分配物理内存
+		nend = nstart + ret * PAGE_SIZE;
+		ret = 0;
+	}
+	if (locked)
+		up_read(&mm->mmap_sem);
+	return ret;	/* 0 or negative error code */
+}
+```
+
+`populate_vma_page_range` 函数则是在 `__mm_populate` 的处理基础上，为指定地址范围 `[start , end]` 内的每一个虚拟内存页，通过 `__get_user_pages` 函数为其分配物理内存，而`__get_user_pages` 会循环遍历 vma 中的每一个虚拟内存页，首先会通过 `follow_page_mask` 在进程页表中查找该虚拟内存页背后是否有物理内存页与之映射，如果没有则调用 `faultin_page`，其底层会调用到 `handle_mm_fault` 进入缺页处理流程，内核在这里会为其分配物理内存页，并在进程页表中建立好映射关系（前面已经分析）
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/gup.c#L1004
+long populate_vma_page_range(struct vm_area_struct *vma,
+		unsigned long start, unsigned long end, int *nonblocking)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	// 计算 vma 中包含的虚拟内存页个数，后续会按照 nr_pages 分配物理内存
+	unsigned long nr_pages = (end - start) / PAGE_SIZE;
+	int gup_flags;
+
+	VM_BUG_ON(start & ~PAGE_MASK);
+	VM_BUG_ON(end   & ~PAGE_MASK);
+	VM_BUG_ON_VMA(start < vma->vm_start, vma);
+	VM_BUG_ON_VMA(end > vma->vm_end, vma);
+	VM_BUG_ON_MM(!rwsem_is_locked(&mm->mmap_sem), mm);
+
+	......
+
+	// 循环遍历 vma 中的每一个虚拟内存页，依次为其分配物理内存页
+	return __get_user_pages(current, mm, start, nr_pages, gup_flags,
+				NULL, NULL, nonblocking);
+}
+
+static long __get_user_pages(struct task_struct *tsk, struct mm_struct *mm,
+		unsigned long start, unsigned long nr_pages,
+		unsigned int gup_flags, struct page **pages,
+		struct vm_area_struct **vmas, int *nonblocking)
+{
+	long i = 0;
+	unsigned int page_mask;
+	struct vm_area_struct *vma = NULL;
+	......
+	
+	// 循环遍历 vma 中的每一个虚拟内存页
+	do {
+		struct page *page;
+		unsigned int foll_flags = gup_flags;
+		unsigned int page_increm;
+
+		......
+retry:
+		......
+		cond_resched();
+		// 在进程页表中检查该虚拟内存页背后是否有物理内存页映射
+		page = follow_page_mask(vma, start, foll_flags, &page_mask);
+		if (!page) {
+			int ret;
+			// 如果虚拟内存页在页表中并没有物理内存页映射，那么这里调用 faultin_page
+            // 底层会调用到 handle_mm_fault 进入缺页处理流程，分配物理内存，在页表中建立好映射关系
+			ret = faultin_page(tsk, vma, start, &foll_flags,
+					nonblocking);
+			......
+		} else if (PTR_ERR(page) == -EEXIST) {
+			/*
+			 * Proper page table entry exists, but no corresponding
+			 * struct page.
+			 */
+			goto next_page;
+		} else if (IS_ERR(page)) {
+			return i ? i : PTR_ERR(page);
+		}
+		if (pages) {
+			pages[i] = page;
+			flush_anon_page(vma, page, start);
+			flush_dcache_page(page);
+			page_mask = 0;
+		}
+next_page:
+		if (vmas) {
+			vmas[i] = vma;
+			page_mask = 0;
+		}
+		page_increm = 1 + (~(start >> PAGE_SHIFT) & page_mask);
+		if (page_increm > nr_pages)
+			page_increm = nr_pages;
+		i += page_increm;
+		start += page_increm * PAGE_SIZE;
+		nr_pages -= page_increm;
+	} while (nr_pages);
+	return i;
+}
+```
+
 ##  0x0   shmem基础知识
 
 ####	页面类型
@@ -2477,6 +2892,14 @@ static struct inode *shmem_get_inode(struct super_block *sb, const struct inode 
 ```
 
 ##	0x0	总结
+
+1、mmap 系统调用分配虚拟内存的本质其实就是在进程的虚拟内存空间中的文件映射与匿名映射区，找出一段未被映射过的空闲虚拟内存区域 vma，这个 vma 就是申请到的虚拟内存
+
+![]()
+
+####	overcommit_memory策略
+
+TODO
 
 
 ##  0x0  参考
