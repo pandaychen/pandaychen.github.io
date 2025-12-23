@@ -17,7 +17,7 @@ Linux的IO 多路复用机制（I/O Multiplexing）是一种通过单个线程�
 本文代码基于 [v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include) 版本
 
 ####    epoll 简单服务端示例
-```CPP
+```cpp
 void epoll_server_run(){   
     //....
 	char buf[BUF_SIZE];
@@ -130,7 +130,7 @@ void epoll_server_run(){
 
 `struct sock`结构关联的等待队列`socket_wq`，包含了内核等待队列的头节点：
 
-```CPP
+```cpp
 struct socket_wq {
 	/* Note: wait MUST be first field of socket_wq */
 	wait_queue_head_t	wait;
@@ -148,7 +148,7 @@ struct socket_wq {
 ##  0x02    epoll_create实现
 在用户进程调用 `epoll_create` 函数时，内核会创建一个 `struct eventpoll` 的[内核结构](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L185)对象，注意`epoll_create`成功时会返回一个`fd`，内核也会把它关联到当前进程的已打开文件列表`fdtable`中
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L1793
 SYSCALL_DEFINE1(epoll_create1, int, flags)
 {
@@ -188,7 +188,7 @@ SYSCALL_DEFINE1(epoll_create1, int, flags)
 -   `struct list_head rdllist`：接收就绪的描述符都会放到这里，即存放就绪的描述符的链表。当有连接就绪的时候，内核会把就绪的连接放到 `rdllist` 链表里。这样应用进程只需要遍历`rdllist`链表就能找出就绪进程，而不用去遍历整棵树
 -   `struct rb_root rbr`：每个epoll对象中都有一颗红黑树，为了支持对海量连接的高效查找、插入和删除，`eventpoll` 内部使用了一棵红黑树并通过这棵树来管理用户进程下添加进来的所有 socket 连接（红黑树的key为`fd`）
 
-```CPP
+```cpp
 struct eventpoll {
 	/* Protect the access to this structure */
 	spinlock_t lock;
@@ -237,7 +237,7 @@ struct eventpoll {
 ####    ep_alloc的实现
 [`ep_alloc`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L940)的实现如下，其中包含了上面列出的重要成员的初始化工作
 
-```CPP
+```cpp
 static int ep_alloc(struct eventpoll **pep)
 {
 	int error;
@@ -290,7 +290,7 @@ free_uid:
 4.	调用`sock->ops->accept`（即`inet_accept`）接收新连接
 5.	调用`fd_install`将`accept`返回的新连接`fd`加到当前进程打开文件列表`fdtable`
 
-```CPP
+```cpp
 SYSCALL_DEFINE4(accept4, int, fd, struct sockaddr __user *, upeer_sockaddr,
         int __user *, upeer_addrlen, int, flags)
 {
@@ -324,7 +324,7 @@ SYSCALL_DEFINE4(accept4, int, fd, struct sockaddr __user *, upeer_sockaddr,
 
 上文说到，在`accept`里创建的新 `struct socket` 成员`file`，即`struct file`的`f_op`成员（类型为`struct file_operations`），被赋值为下面`socket_file_ops`的[方法](https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L140)：
 
-```CPP
+```cpp
 static const struct file_operations socket_file_ops = {
 	.llseek =	no_llseek,
 	.read_iter =	sock_read_iter,
@@ -349,7 +349,7 @@ static const struct file_operations socket_file_ops = {
 
 还需要记住的一个细节，内核创建`struct sock`结构时同样是调用[`sock_init_data`](https://elixir.bootlin.com/linux/v4.11.6/source/net/core/sock.c#L2460)完成，注意其中的`sk->sk_data_ready = sock_def_readable;`这段代码，这段代码的意义是告诉内核，当前的`sk`上有数据了，该怎么处理（调用`sock_def_readable`回调函数）
 
-```CPP
+```cpp
 struct sock *inet_csk_accept(struct sock *sk, int flags, int *err, bool kern)
 {
     struct inet_connection_sock *icsk = inet_csk(sk);
@@ -373,7 +373,7 @@ struct sock *inet_csk_accept(struct sock *sk, int flags, int *err, bool kern)
 }
 ```
 
-```CPP
+```cpp
 void sock_init_data(struct socket *sock, struct sock *sk)
 {
     sk->sk_wq   =   NULL;
@@ -446,7 +446,7 @@ struct epitem {
 
 2、`eppoll_entry`
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L230
 struct eppoll_entry {
 	/* List header used to link this structure to the "struct epitem" */
@@ -468,7 +468,7 @@ struct eppoll_entry {
 
 3、`poll_table`
 
-```CPP
+```cpp
 typedef struct poll_table_struct {
 	poll_queue_proc _qproc;
 	unsigned long _key;
@@ -477,7 +477,7 @@ typedef struct poll_table_struct {
 
 4、`ep_pqueue`
 
-```CPP
+```cpp
 /* Wrapper struct used by poll queueing */
 struct ep_pqueue {
 	poll_table pt;
@@ -494,7 +494,7 @@ struct ep_pqueue {
 
 对于`EPOLL_CTL_ADD`选项而言，主要调用函数链为`epoll_ctl()->ep_insert()`
 
-```CPP
+```cpp
 // epoll_ctl的参数包括两个fd
 SYSCALL_DEFINE4(epoll_ctl, int, epfd, int, op, int, fd,
         struct epoll_event __user *, event)
@@ -532,7 +532,7 @@ SYSCALL_DEFINE4(epoll_ctl, int, epfd, int, op, int, fd,
 3.	根据上面的描述，所以`ep_insert`就会利用内核的机制（如waitqueue）把上面的工作完成
 4.	内核还需要考虑，如何在海量fd的集合中快速的定位到`fd`节点（`epoll_ctl`针对fd的CRUD操作）
 
-```CPP
+```cpp
 static int ep_insert(struct eventpoll *ep, 
                 struct epoll_event *event,
                 struct file *tfile, int fd)
@@ -573,7 +573,7 @@ static int ep_insert(struct eventpoll *ep,
 
 1、**初始化`epitem`，建立成员关系**
 
-```CPP
+```cpp
 // 参数ffd为 新建的epitem成员
 // 参数file/fd为 要添加监听的socket成员（epoll_ctl的操作对象）
 static inline void ep_set_ffd(struct epoll_filefd *ffd,
@@ -593,7 +593,7 @@ static inline void ep_set_ffd(struct epoll_filefd *ffd,
 -	`ep_ptable_queue_proc`是什么？
 -	内核设计`struct ep_pqueue epq`这个结构的意义是什么？
 
-```CPP
+```cpp
 static int ep_insert(...)
 {
     ...
@@ -628,7 +628,7 @@ static inline void init_poll_funcptr(poll_table *pt,
 -	`sock_poll`中，走到`sock->ops->poll`调用，对应的函数是`tcp_poll`
 -	`tcp_poll`中，走到`sock_poll_wait`调用
 
-```CPP
+```cpp
 static inline unsigned int ep_item_poll(struct epitem *epi, poll_table *pt)
 {
 	//......
@@ -662,7 +662,7 @@ unsigned int tcp_poll(struct file *file, struct socket *sock, poll_table *wait)
 -	这个`struct sock`是`epoll_ctl`函数操作的目标fd（listenfd或acceptfd）
 -	这个等待队列是 socket/sock 的等待队列，非 epoll 对象的等待队列，二者的作用完全不同（见附录说明）
 
-```CPP
+```cpp
 static inline wait_queue_head_t *sk_sleep(struct sock *sk)
 {
     BUILD_BUG_ON(offsetof(struct socket_wq, wait) != 0);
@@ -678,7 +678,7 @@ static inline wait_queue_head_t *sk_sleep(struct sock *sk)
 
 终于在`poll_wait`中看到调用了前面在`init_poll_funcptr`函数中注册的回调函数`ep_ptable_queue_proc`
 
-```CPP
+```cpp
 static inline void sock_poll_wait(struct file *filp,
         wait_queue_head_t *wait_address, poll_table *p)
 {	
@@ -700,7 +700,7 @@ static inline void poll_wait(struct file * filp, wait_queue_head_t * wait_addres
 
 继续分析，回调函数`ep_ptable_queue_proc`真正完成了socket等待队列的初始化及添加等工作，注意到参数`whead`是socket等待队列的头结点，等待队列项最终会通过`whead`插入
 
-```CPP
+```cpp
 static void ep_ptable_queue_proc(struct file *file, wait_queue_head_t *whead,
                  poll_table *pt)
 {
@@ -725,7 +725,7 @@ static void ep_ptable_queue_proc(struct file *file, wait_queue_head_t *whead,
 
 此外，这里思考下为何在epoll机制下的`init_waitqqueue_func_entry`中`q->private`要设置为`NULL`？首先这个`private`的意义是的内核实现等待队列机制中，当等待条件可能就绪时内核要唤醒的进程结构`task_struct`，但是**在epoll机制中，socket是由epoll统一管理的，不需要在一个 socket 就绪的时候就唤醒进程（这样效率也极低），所以这里的 `q->private` 没意义就设置成了 NULL**
 
-```CPP
+```cpp
 static inline void init_waitqqueue_func_entry(
     wait_queue_t *q, wait_queue_func_t func)
 {
@@ -779,7 +779,7 @@ static void ep_rbtree_insert(struct eventpoll *ep, struct epitem *epi)
 
 `epoll_wait`的主要工作流程是它会检查 `eventpoll->rdllist` 链表里有无数据，有数据就返回，没有数据就创建一个等待队列项，将其添加到 `eventpoll` 的等待队列上，然后把自己阻塞掉（让出CPU），等待唤醒重复上述过程
 
-```CPP
+```cpp
 SYSCALL_DEFINE4(epoll_wait, int, epfd, struct epoll_event __user *, events,
 		int, maxevents, int, timeout)
 {
@@ -815,7 +815,7 @@ SYSCALL_DEFINE4(epoll_wait, int, epfd, struct epoll_event __user *, events,
 
 epoll_wait的核心工作都在[`ep_poll`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L1597)中完成，`ep_poll`的实现亦是一个典型的等待-唤醒模式
 
-```CPP
+```cpp
 static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
 		   int maxevents, long timeout)
 {
@@ -891,7 +891,7 @@ check_events:
 1、判断就绪队列上有没有事件就绪
 
 在`ep_poll`中首先调用 `ep_events_available` 来判断就绪链表`eventpoll.rdllist`中是否有可处理（已就绪）IO的事件
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L374
 static inline int ep_events_available(struct eventpoll *ep)
 {
@@ -902,7 +902,7 @@ static inline int ep_events_available(struct eventpoll *ep)
 2、初始化定义等待队列事件（`wait_queue_t`结构）并关联当前进程`current`
 
 当检测`rdllist`上没有已就绪的连接时，那就使用内核的等待队列把当前进程`current`挂到等待队列waitqueue上，此时epoll进程也会被阻塞
-```CPP
+```cpp
 static inline void init_waitqueue_entry(wait_queue_t *q, struct task_struct *p)
 {
     q->flags = 0;
@@ -920,7 +920,7 @@ int default_wake_function(wait_queue_t *curr, unsigned mode, int wake_flags,
 
 3、添加等待队列结构`wait_queue_t`到`eventpoll`的等待队列`wq`中，注意这里的`wait->flags`是被强行加上了一个`WQ_FLAG_EXCLUSIVE`参数的，`WQ_FLAG_EXCLUSIVE`的作用见下文
 
-```CPP
+```cpp
 static inline void __add_wait_queue_exclusive(wait_queue_head_t *q,
                                 wait_queue_t *wait)
 {
@@ -933,7 +933,7 @@ static inline void __add_wait_queue_exclusive(wait_queue_head_t *q,
 
 6、当前进程主动调用`schedule`让出CPU（`schedule_hrtimeout_range`），主动进入睡眠状态，调度流程可以参考前文[]()
 
-```CPP
+```cpp
 int __sched schedule_hrtimeout_range(ktime_t *expires, 
     unsigned long delta, const enum hrtimer_mode mode)
 {
@@ -970,7 +970,7 @@ static void __sched __schedule(void)
 ####	如何根据sk（有数据）找到epitem/eventpoll结构？
 [`ep_item_from_wait`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L350)
 
-```CPP
+```cpp
 /* Get the "struct epitem" from a wait queue pointer */
 static inline struct epitem *ep_item_from_wait(wait_queue_t *p)
 {
@@ -993,7 +993,7 @@ static inline struct epitem *ep_item_from_wait(wait_queue_t *p)
 -	`tcp_queue_rcv`：将 `sk_buff` 加入套接字（sock）的 `sk_receive_queue`，供应用读取
 -	`tcp_data_queue`：在慢速路径中处理乱序、窗口外数据等复杂场景
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_ipv4.c#L1605
 int tcp_v4_rcv(struct sk_buff *skb)
 {
@@ -1069,7 +1069,7 @@ static int __must_check tcp_queue_rcv(struct sock *sk, struct sk_buff *skb, int 
 
 在`ep_ptable_queue_proc`中会把一个fd关联的`eppoll_entry`对象，挂到该fd关联的sock结构的等待队列里面（简单理解`eppoll_entry`对象就是一个sock等待队列waitqueue的一个表项，其回调函数为`ep_poll_callback`）
 
-```CPP
+```cpp
 // 参数whead 来自于fd关联的sock对象的等待队列头： (sk->sk_wq)->wait
 // 在ep_ptable_queue_proc会把新建的eppoll_entry对象挂到上面这个等待队列链表里面
 static void ep_ptable_queue_proc(struct file *file, wait_queue_head_t *whead, poll_table *pt)
@@ -1103,7 +1103,7 @@ static inline void __add_wait_queue(wait_queue_head_t *head, wait_queue_t *new)
 
 当内核调用 `tcp_queue_rcv` 完成数据接收后，接着再调用 `sk->sk_data_ready` 来唤醒在 `sock.sk_wq` 等待队列上等待的用户进程。前面已经介绍过在`sock_init_data`函数中的这段代码`sk->sk_data_ready = sock_def_readable`，先看下`sock_def_readable`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/net/core/sock.c#L2397)：
 
-```CPP
+```cpp
 static void sock_def_readable(struct sock *sk, int len)
 {
     struct socket_wq *wq;
@@ -1128,7 +1128,7 @@ static void sock_def_readable(struct sock *sk, int len)
 -	对于同步+阻塞fd场景下，`recvfrom` 系统调用在内核的实现，如何无数据可读时，是会把当前进程挂在sock等待队列上（相关内核函数[`sk_wait_data`](https://elixir.bootlin.com/linux/v4.11.6/source/net/core/sock.c#L2086)的实现）；唤醒时会唤醒睡眠的进程
 -	对于epoll+非阻塞fd 场景下，从`ep_ptable_queue_proc`函数实现可知并不会把`current`挂到sock的等待队列上去（`q->private	= NULL`），那么唤醒的逻辑也只是检查 sock 等待队列是否为空，并不一定有进程阻塞。所以当判断sock等待队列不为空，在唤醒操作`wake_up_interruptible_sync_poll`中只是会进入到 sock 等待队列项上设置的回调函数，并没有唤醒进程的操作，相对第一种情况是非常高效的
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/wait.h#L106
 static inline int waitqueue_active(wait_queue_head_t *q)
 {
@@ -1149,7 +1149,7 @@ static inline bool skwq_has_sleeper(struct socket_wq *wq)
 
 继续分析下`sock_def_readable`函数中，当检测到等待队列不为空时，`wake_up_interruptible_sync_poll`的实现，核心调用链为`wake_up_interruptible_sync_poll->__wake_up_sync_key->__wake_up_common`，在 `__wake_up_common` 中，会遍历等待队列项`task_list`选出等待队列里注册的每个元素 `curr`， 调用回调函数 `curr->func`（注意在`ep_insert` 调用时会设置 `func`为 `ep_poll_callback`）
 
-```CPP
+```cpp
 #define wake_up_interruptible_sync_poll(x, m)       \
     __wake_up_sync_key((x), TASK_INTERRUPTIBLE, 1, (void *) (m))
 
@@ -1189,7 +1189,7 @@ static void __wake_up_common(wait_queue_head_t *q, unsigned int mode,
 2.	查看 `eventpoll` 对象上的等待队列里是否有等待项（`epoll_wait` 执行的时候会设置）
 3.	如果有等待项，那就查找到等待项里设置的回调函数
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L1004
 static int ep_poll_callback(wait_queue_t *wait, unsigned mode, int sync, void *key)
 {
@@ -1237,7 +1237,7 @@ static int ep_poll_callback(wait_queue_t *wait, unsigned mode, int sync, void *k
 
 `wake_up_locked`的调用链为`wake_up_locked->__wake_up_locked->__wake_up_common`，其中在 `__wake_up_common`调用 `curr->func`，该`func`是在 `epoll_wait` 中传入的 `default_wake_function` 函数，此外**需要格外注意`wake_up_locked`传入的参数是eventpoll的wq等待队列**，`__wake_up_common`的主要工作也是和`eventpoll`有关的
 
-```CPP
+```cpp
 static void __wake_up_common(wait_queue_head_t *q, unsigned int mode,
             int nr_exclusive, int wake_flags, void *key)
 {
@@ -1259,7 +1259,7 @@ static void __wake_up_common(wait_queue_head_t *q, unsigned int mode,
 
 在`default_wake_function` 中找到等待队列项里的进程描述符，然后唤醒它，这里等待队列项 `curr->private` 指针是在 epoll 对象上等待而被阻塞掉的进程。上一小节提出的问题的答案就在这里，经过两步唤醒后，内核将`epoll_wait`进程推入CPU 可运行队列runqueue，等待内核重新调度进程，继而当`epoll_wait`对应的这个进程重新运行后，就从 `schedule` 恢复，继续执行下面的代码
 
-```CPP
+```cpp
 int default_wake_function(wait_queue_t *curr, unsigned mode, int wake_flags, void *key)
 {
     return try_to_wake_up(curr->private, mode, wake_flags);
@@ -1268,7 +1268,7 @@ int default_wake_function(wait_queue_t *curr, unsigned mode, int wake_flags, voi
 
 当因`epoll_wait`阻塞进程醒来后，继续从 `epoll_wait` 时暂停（`schedule_hrtimeout_range(......)`之后）的代码继续执行，把 `rdlist` 中就绪的事件返回给用户进程，
 
-```CPP
+```cpp
 static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
              int maxevents, long timeout)
 {
@@ -1296,7 +1296,7 @@ check_events:
 
 最后看下`ep_send_events->ep_scan_ready_list`的实现，其中在`ep_scan_ready_list`中遍历事件就绪列表，发送就绪事件到用户空间，注意到该函数的参数为函数指针`ep_send_events_proc`，这二者协作完成事件从内核到用户态的传递，同时确保并发安全和高效率
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L584
 static int ep_send_events(struct eventpoll *ep,
 			  struct epoll_event __user *events, int maxevents)
@@ -1318,7 +1318,7 @@ static int ep_send_events(struct eventpoll *ep,
 4.	处理新事件与回滚：遍历 `ovflist`，将未处理的就绪事件重新加入 `rdllist`（如在回调执行期间新到达的事件），然后恢复 `ovflist` 为初始状态（`EP_UNACTIVE_PTR`），解自旋锁
 5.	唤醒等待进程，若回调处理后仍有事件未完成（如 LT 模式重入），唤醒阻塞在 `epoll_wait` 的进程
 
-```CPP
+```cpp
 static __poll_t ep_scan_ready_list(struct eventpoll *ep,
                   __poll_t (*sproc)(struct eventpoll *,
                        struct list_head *, void *),
@@ -1357,7 +1357,7 @@ static __poll_t ep_scan_ready_list(struct eventpoll *ep,
 4.	针对触发模式处理（`ET/LT`），对于`ET`边缘触发模式，事件处理后不重新加入 `rdllist`，仅当文件状态再次变化时重新触发；而`LT` 水平触发模式，事件处理后重新加入 `rdllist`，确保下次 `epoll_wait` 会再次检查（即使数据未读完）
 5.	额外对`EPOLLONESHOT` 处理，若设置单次触发，事件处理后禁用后续监听（需重新注册）
 
-```CPP
+```cpp
 static int ep_send_events_proc(struct eventpoll *ep, struct list_head *head,
 			       void *priv)
 {
@@ -1411,7 +1411,7 @@ static int ep_send_events_proc(struct eventpoll *ep, struct list_head *head,
 `EPOLL_CTL_DEL`关联实现为`ep_remove()`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L697)，主要流程围绕解绑事件关联、清理数据结构、释放资源等
 
 
-```CPP
+```cpp
 static int ep_remove(struct eventpoll *ep, struct epitem *epi)
 {
 	unsigned long flags;
@@ -1454,7 +1454,7 @@ static int ep_remove(struct eventpoll *ep, struct epitem *epi)
 ####    epoll机制中的等待队列
 1、`epoll_wait`中的等待队列机制实现：`epoll_wait->ep_poll`，在`ep_poll`函数的实现中发现了经典的等待->唤醒机制的模式，类似于`wait_event`内核调用中的`condition`参数，这里可以看到`condition`为`ep_events_available`函数的实现，即检查`eventpoll`的就绪队列`rdllist`是否不为空`!list_empty(&ep->rdllist)`，具体流程请看注释
 
-```CPP
+```cpp
 // 检查就绪队列是否可用（不为空）
 static inline int ep_events_available(struct eventpoll *ep)
 {
@@ -1602,7 +1602,7 @@ epoll机制中，红黑树的作用主要是在`epoll_ctl`操作海量fd时能�
 
 2、初始化 `ep_pqueue.pt`（即 `poll_table`），将其回调函数 `poll_table._qproc` 设为 `ep_ptable_queue_proc`
 
-```CPP
+```cpp
 struct ep_pqueue {
     poll_table pt;          // 内含 _qproc 回调函数指针
     struct epitem *epi;     // 指向监听的 epitem
@@ -1618,7 +1618,7 @@ init_poll_funcptr(&epq.pt, ep_ptable_queue_proc); // 关键初始化
 
 3、`ep_ptable_queue_proc` 创建 `eppoll_entry` 对象并初始化
 
-```CPP
+```cpp
 struct eppoll_entry {
     struct epitem *base;        // 指向 epitem（来自 ep_pqueue.epi）
     wait_queue_entry_t wait;     // 等待队列项，回调函数设为 ep_poll_callback
