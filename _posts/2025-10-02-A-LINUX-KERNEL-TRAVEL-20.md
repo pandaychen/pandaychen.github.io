@@ -101,7 +101,7 @@ struct vm_area_struct {
 
 ![mmap-file-share-mapping-3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/mmap-file-share-mapping-3.png)
 
-如果文件页不在 page cache 中，内核则会在物理内存中分配一个内存页，然后将新分配的内存页加入到 page cache 中，并增加页引用计数。随后会通过 `address_space_operations` 重定义的 `readpage` （如`ext4_readpage`）激活块设备驱动从磁盘中读取映射的文件内容，然后将读取到的内容填充新分配的内存页
+如果文件页不在 page cache 中，内核则会在物理内存中分配一个内存页，然后将新分配的内存页加入到 page cache 中，并增加页引用计数。随后会通过 `address_space_operations` 重定义的 `readpage`（如`ext4_readpage`）激活块设备驱动从磁盘中读取映射的文件内容，然后将读取到的内容填充新分配的内存页
 
 这里CPU访问虚拟内存，送到MMU翻译，继而发现页表中无PTE导致缺页中断的逻辑，对应于内核函数[`do_page_fault`](https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/mm/fault.c#L1446)，见下文分析
 
@@ -129,19 +129,21 @@ static inline struct page *find_get_page(struct address_space *mapping,
 
 ####	虚拟内存的分配流程（不同架构）
 
-![mmap-alloc-buju-1]()
+![mmap-alloc-buju-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/mmap-alloc-buju-1.png)
 
 1、文件映射与匿名映射区的布局（`/proc/sys/vm/legacy_va_layout`）
 
 在经典布局（旧）下，文件映射与匿名映射区的地址增长方向是从低地址到高地址，也就是说映射区是从下往上增长，这也就导致了 mmap 在分配虚拟内存的时候需要从下往上搜索空闲 vma。经典布局下，文件映射与匿名映射区的起始地址 `mm_struct->mmap_base` 被设置在 `task_size` 的三分之一处，`task_size` 为进程虚拟内存空间与内核空间的分界线，也就说 `task_size` 是进程虚拟内存空间的末尾，大小为 `3G`。这表明了文件映射与匿名映射区起始于进程虚拟内存空间开始的 `1G` 位置处，而映射区恰好位于整个进程虚拟内存空间的中间，其下方就是堆了，由于代码段，数据段的存在，可供堆进行扩展的空间是小于 `1G` 的，否则就会与映射区冲突了。这种布局对于虚拟内存空间非常大的体系结构，比如 AMD64 , 是合适的而且会工作的非常好，因为虚拟内存空间足够的大（`128T`），堆与映射区都有足够的空间来扩展，不会发生冲突。但是对于虚拟内存空间比较小的体系结构，比如 IA-32，只能提供 `3G` 大小的进程虚拟内存空间，就会出现上述冲突问题
 
-![mmap-alloc-buju-classic]()
+![mmap-alloc-buju-classic](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/mmap-alloc-buju-classic.png)
 
 在新式布局下，文件映射与匿名映射区的地址增长方向是从高地址到低地址，也就是说映射区是从上往下增长，这也就导致了 mmap 在分配虚拟内存的时候需要从上往下搜索空闲 vma。在新式布局中，栈的空间大小会被限制，栈最大空间大小保存在 `task_struct->signal_struct->rlimp[RLIMIT_STACK]` 中。由于栈变为有界的了，所以文件映射与匿名映射区可以在栈的下方立即开始，为确保栈与映射区不会冲突，它们中间还设置了 `1M` 大小的安全间隙 `stack_guard_gap`，这样一来堆在进程地址空间中较低的地址处开始向上增长，而映射区位于进程空间较高的地址处向下增长，因此堆区和映射区在新式布局下都可以较好的扩展，直到耗尽剩余的虚拟内存区域
 
-![mmap-alloc-buju-new]()
+![mmap-alloc-buju-new](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/mmap-alloc-buju-new.png)
 
 2、内核具体如何对文件映射与匿名映射区进行布局
+
+[前文](https://pandaychen.github.io/2024/11/05/A-LINUX-KERNEL-TRAVEL-2/#0x02----%E8%BF%9B%E7%A8%8B%E8%99%9A%E6%8B%9F%E5%86%85%E5%AD%98%E7%AE%A1%E7%90%86elf%E5%8A%A0%E8%BD%BD)描述过新进程的创建过程：进程虚拟内存空间的创建以及初始化是由 `load_elf_binary` 函数负责的，当进程通过 `fork()` 系统调用创建出子进程之后，子进程可以通过前面介绍的 `execve` 系统调用加载并执行一个指定的二进制执行文件，进程的虚拟内存空间的初始化过程由此开始
 
 TODO
 
@@ -594,20 +596,22 @@ get_unmapped_area(struct file *file, unsigned long addr, unsigned long len,
 
 `arch_get_unmapped_area` 函数的核心作用如下：
 
-![arch_get_unmapped_area-BUJU]()
+![arch_get_unmapped_area-BUJU](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/arch_get_unmapped_area-BUJU.png)
 
 如上图，在经典布局下，mmap 可以映射的虚拟内存范围必须在进程虚拟内存空间 `mmap_min_addr` 到 `mmap_end` 这段地址范围内，`mmap_min_addr` 为 `TASK_SIZE` 的`1/3`，`mmap_end` 为 `TASK_SIZE`
 内核需要检查本次 mmap 映射的虚拟内存长度 `len` 是否超过了规定的映射范围，如果超过了则返回 `ENOMEM` 错误，并停止映射流程。如果映射长度 `len` 在规定的映射地址范围内，内核则会根据指定的映射起始地址 `addr`，以及映射长度 `len`，开始在文件映射与匿名映射区，为本次 mmap 映射寻找一段空闲的虚拟内存区域 vma 出来
 
-![mmap-vma-start]()
+内核实际找到的可用vma区域，受mmap参数控制，一般有下面几种情况：
 
 -	如果在 `flags` 参数中指定了 `MAP_FIXED` 标志，则意味着强制要求内核在指定的起始地址 `addr` 处开始映射 `len` 长度的虚拟内存区域，无论这段虚拟内存区域 `[addr , addr + len]` 是否已经存在映射关系，内核都会强行进行映射，如果这块区域已经存在映射关系，那么后续内核会把旧的映射关系覆盖（解除）掉
 -	如果指定了 `addr`，但是并没有指定 `MAP_FIXED`，则意味着只是建议内核优先考虑从指定的 `addr` 地址处开始映射，但是如果 `[addr , addr+len]` 这段虚拟内存区域已经存在映射关系，内核则不会按照指定的 `addr` 开始映射，而是会自动查找一段空闲的 `len` 长度的虚拟内存区域（关联 `vm_unmapped_area` 函数）
 -	如果通过查找发现 `[addr , addr+len]` 这段虚拟内存地址范围并未存在任何映射关系，那么 addr 就会作为 mmap 映射的起始地址。这里面会分为两种情况：
 	-	第一种是指定的 `addr` 比较大，`addr` 位于文件映射与匿名映射区中所有映射区域 vma 的最后面，这样一来`[addr , addr + len]` 这段地址范围当然是空闲可用的
 	-	第二种情况是指定的 `addr` 恰好位于一个 vma 和另一个 vma 中间的地址间隙中，并且这个地址间隙刚好大于或者等于指定的映射长度 `len`。内核就可以将这个地址间隙映射起来
- 
-![mmap-vma-start-1]()
+
+![mmap-vma-start](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/mmap-vma-start.png)
+
+![mmap-vma-start-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/mmap-vma-start-1.png)
 
 继续分析`arch_get_unmapped_area`函数的实现：
 
@@ -669,7 +673,6 @@ arch_get_unmapped_area(struct file *filp, unsigned long addr,
 	//见下
 	return vm_unmapped_area(&info);
 }
-
 ```
 
 在`arch_get_unmapped_area`函数中，**`find_vma`用于对指定的 addr，在该`mm_struct`对应的红黑树中查找第一个符合 `addr < vma->vm_end` 条件的 vma**
@@ -720,7 +723,7 @@ struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)
 
 在非`MAP_FIXED`模式下，如果通过`find_vma`找到的这个 vma 与 `[addr,addr +len]` 这段虚拟地址范围有重叠的部分，那么内核就不能按照指定的 `addr`开始映射，内核需要重新在文件映射与匿名映射区中按照地址的增长方向，找到一段 `len` 大小的空闲虚拟内存区域
 
-![unmapped_area-1]()
+![unmapped_area-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/unmapped_area-1.png)
 
 如上图，在这种场景下，有如下限制条件：
 
@@ -733,7 +736,7 @@ struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)
 2.	`gap_end >= low_limit + length`
 3.	`gap_start <= high_limit - length`
 
-为了加速上面这一遍历搜索，内核提供了`rb_subtree_gap`的优化机制（每个vma中的成员），当遍历 vma 节点的时候发现`vma->rb_subtree_gap < length`时，那么整棵红黑树都不需要看了，直接从进程地址空间中最后一个 `vma->vm_end` 处开始映射
+最差情况下，如果当前`prev`开始，之后的所有vma之间的gap都不满足映射长度`length`，那么只能从红黑树最后一个vma之后的区域（如果满足）开始分配vma了。为了加速上面这一遍历搜索，内核提供了`rb_subtree_gap`的优化机制（每个vma中的成员），当遍历 vma 节点的时候发现`vma->rb_subtree_gap < length`时，那么整棵红黑树都不需要看了，直接从进程地址空间中最后一个 `vma->vm_end` 处开始映射
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/mm.h#L2169
@@ -886,7 +889,6 @@ found:
 	return gap_start;	// 返回找到的地址间隙 gap 
 }
 ```
-
 
 ####	do_mmap->mmap_region：创建虚拟内存区域（内存映射的本质）
 在上一节`get_unmapped_area`函数结束时，内核已在进程地址空间中找出一段地址范围为`[addr,addr + len]`的虚拟内存区域供mmap进行映射。接下来追踪下`mmap_region`及后续函数具体是如何初始化vma并建立映射关系的，`mmap_region`负责创建虚拟内存区域，其核心流程如下：
@@ -1145,7 +1147,6 @@ struct mm_struct {
 }
 ```
 
-
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/mm/mmap.c#L3102
 bool may_expand_vm(struct mm_struct *mm, vm_flags_t flags, unsigned long npages)
@@ -1232,7 +1233,7 @@ static int find_vma_links(struct mm_struct *mm, unsigned long addr,
 `mmap_region`函数在创建新的vma结构之前，内核首先尝试看能不能将当前vma和地址空间中已有的vma进行合并，以避免创建新的vma结构，节省内存的开销。内核本着合并最大化的原则，检查当前映射出来的vma能否与其前后两个vma进行合并，能合并就合并，如果不能合并就从slab中申请新的vma结构。合并条件与限制如下：
 
 -	新映射 vma 的 `vm_flags` 不能设置 `VM_SPECIAL` 标志，该标志表示 vma 区域是不可以被合并的，只能重新创建 vma
--	新映射 vma 的起始地址 addr 必须要与其前一个 vma 的结束地址重合，这样 vma 才能和它的前一个 vma 进行合并，如果不重合，vma 则不能和前一个 vma 进行合并
+-	新映射 vma 的起始地址 `addr` 必须要与其前一个 vma 的结束地址重合，这样 vma 才能和它的前一个 vma 进行合并，如果不重合，vma 则不能和前一个 vma 进行合并
 -	新映射 vma 的结束地址 end 必须要与其后一个 vma 的起始地址重合，这样，vma才能和它的后一个vma进行合并，如果不重合，vma则不能和后一个vma进行合并。注意：如果前后都不能合并，则需新建vma结构
 -	新映射 vma 需要与其要合并 vma 区域的 `vm_flags` 相同，否则不能合并
 -	如果两个合并区域都是文件映射区，那么它们映射的文件必须是同一个。并且他们的文件映射偏移 `vm_pgoff` 必须是连续的
@@ -1379,48 +1380,47 @@ struct vm_area_struct *vma_merge(struct mm_struct *mm,
 
 1、未指定`MAP_FIXED`，普通布局
 
-![merge_case1]()
+![merge_case1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/vma_merge-case1.png)
 
 2、指定了`MAP_FIXED`（强制映射），`area` 区域有可能会与 `prev` 区域和 `next` 区域有部分重合。如果 `area` 区域的结束地址 `end` 与 `next` 区域的结束地址重合，内核会将 `next` 指针继续向后移动，指向 `next->vm_next` 区域。保证 `area` 始终处于 `prev` 和 `next` 之间的 gap 中（如下图）
 
-![merge_case2]()
+![merge_case2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/vma_merge-case2.png)
 
 1、case1，在基本布局 1 中，`area` 的起始地址 `addr` 与 `prev` vma 的结束地址重合，同时 `area` 的结束地址 `end` 与 `next` vma 的起始地址重合，内核将会删除 `next` 区域，扩充 `prev` 区域，也就是说将这三个区域统一合并到 `prev` 区域中
 
-![merge-case-1]()
+![merge-case-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/vma_merge-case-1.png)
 
 2、case6，在基本布局2的结果，内核会将中间重叠的蓝色区域覆盖掉，然后统一合并到 prev 区域中
 
-![merge-case-6]()
+![merge-case-6](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/vma_merge-case-6.png)
 
 case2、case5、case7 属于（ `area` 的起始地址 `addr` 与 `prev` vma 的结束地址重合，但是 `area` 的结束地址 `end` 不与 `next` vma 的起始地址重合）
 
 3、case2，`area` 的结束地址 `end` 小于 `next` vma 的起始地址，内核会扩充 `prev` 区域，将 `area` 合并进去，`next` 区域保持不变
 
-![merge-case-2]()
+![merge-case-2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/vma_merge-case-2.png)
 
 4、case5， `area` 的结束地址 `end` 大于 `next` vma 的起始地址，内核会扩充 `prev` 区域，将 `area` 以及与 `next` 重叠的部分合并到 `prev` 区域中，剩下的继续留在 `next` 区域保持不变
 
-![merge-case-5]()
+![merge-case-5](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/vma_merge-case-5.png)
 
 5、case7，对应布局2的情况，内核会并扩充 `prev` 区域。`next` 区域保持不变
 
-![merge-case-7]()
+![merge-case-7](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/vma_merge-case-7.png)
 
 case 3、 case 4 、 case 8属于（ `area` 的结束地址 `end` 与 `next` vma 的起始地址重合，但是 `area` 的起始地址 `addr` 不与 `prev` vma 的结束地址重合）
 
 6、case3，当`area` 的起始地址 `addr` 大于 `prev` 区域的结束地址的话，内核会扩充 `next` 区域，并将 `area` 合并到 `next` 中，`prev` 区域保持不变
 
-![merge-case-3]()
+![merge-case-3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/vma_merge-case-3.png)
 
 7、case4，`area` 的起始地址 `addr` 小于 `prev` 区域的结束地址，那么内核会缩小 `prev` 区域，然后扩充 `next` 区域，将重叠的部分合并到 `next` 区域中
 
-![merge-case-4]()
+![merge-case-4](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/vma_merge-case-4.png)
 
 8、case8，也是对应于布局2的情况，内核继续保持 `prev` 区域不变，然后扩充 `next` 区域并覆盖下图中蓝色部分，将 `area` 合并到 `next` 区域中
 
-![merge-case-8]()
-
+![merge-case-8](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/vma_merge-case-8.png)
 
 最后，`vma_link`函数会按照虚拟内存地址的增长方向，将本次映射产生的 vma 结构插入到进程地址空间的三类数据结构（`mm_struct->mmap` 链表结构、`mm_struct->mm_rb`红黑树结构）：
 
@@ -1459,7 +1459,7 @@ static void vma_link(struct mm_struct *mm, struct vm_area_struct *vma,
 
 在`vma_link`中，还有一个非常重要的操作`__vma_link_file`，即通过 `__vma_link_file` 函数建立文件与虚拟内存区域 vma （所有进程）的反向映射关系，这里以文件页的反向映射为例，结构关系如下：
 
-![mmap-file-mmaping-reverse-immap]()
+![mmap-file-mmaping-reverse-immap](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/mmap-file-mmaping-reverse-immap.png)
 
 一个文件可以被多个进程一起映射，如此在每个进程的地址空间 `mm_struct` 结构中都会有一个 vma 结构来与这个文件进行映射，与该文件产生映射关系的所有进程地址空间中的 vma 就挂在 `address_space->i_mmap` 指向的这棵红黑树中，通过该结构可以找到所有与该文件进行映射的进程。`__vma_link_file` 函数建立文件页反向映射的核心其实就是将 mmap 映射出的这个 vma 插入到这颗红黑树中：
 
@@ -1532,7 +1532,7 @@ static const struct vm_operations_struct ext4_file_vm_ops = {
 -	`filemap_map_pages`：批量映射页面，预读和批量映射多个连续页面，减少缺页异常次数，提高性能
 -	`ext4_page_mkwrite`：写时缺页处理，当进程第一次写入一个只读页面时，进行写时复制（Copy-on-Write）处理
 
-![ext4_mmap]()
+![ext4_mmap](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/ext4_mmap.png)
 
 ####	四级页表的建立过程
 内核在执行文件映射时，此文件所属的文件系统会注册虚拟内存区域的虚拟内存操作集合，其中也包括内核驱动函数mmap，在不同的文件系统中内核驱动函数mmap的实现方式有所不同，但其内部都是通过 `remap_pfn_range` 函数来建立页表，即实现文件地址和虚拟地址区域的映射关系
