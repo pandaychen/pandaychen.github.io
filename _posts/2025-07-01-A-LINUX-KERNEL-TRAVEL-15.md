@@ -26,9 +26,11 @@ tags:
 
 linux的pipe和FIFO都是基于pipe文件系统（pipefs）的，pipe和FIFO都是半双工，即数据流向只能是一个方向。pipe机制（匿名管道）只能在pipe的创建进程及其后代进程（后代进程fork/exec时，通过继承父进程的打开文件描述符表）之间使用，来实现通信；有名pipe FIFO，即可以通过名称查找到pipe，所以无上述匿名管道限制，可以通过名称找到pipe文件，创建相应的pipe，可以实现跨进程间的通信
 
+![pipe-basic]()
+
 管道在Linux零拷贝中也有应用，零拷贝是一种优化数据传输的技术，它可以减少数据在内核态和用户态之间的拷贝次数，提高数据传输的效率。在传统的数据传输过程中，数据需要从内核缓冲区拷贝至应用程序的缓冲区，然后再从应用程序缓冲区拷贝到网络设备的缓冲区，最后才能发送出去。而零拷贝技术通过直接在应用程序和网络设备之间传输数据，避免了中间的拷贝过程，从而提高了数据传输的效率
 
-TODO
+![splice-basic]()
 
 ##  0x01    管道实现分析：数据结构
 在内核中，管道本质一个环形缓冲区，通过管道可以将数据从一个文件拷贝另外一个文件
@@ -36,23 +38,23 @@ TODO
 ####    pipefs：文件系统
 pipe 是一个伪文件系统（pipefs），内核初始化时会注册到 Linux 系统
 
-TODO
+![pipefs-basic]()
 
 ####    内核数据结构
 1、`pipe_buffer`：管道缓存，用于暂存写入管道的数据；写进程通过管道写入端将数据写入管道缓存中，读进程通过管道读出端将数据从管道缓存中读出，成员定义如下：
 
--	`page`：页帧，用于存储pipe数据；pipe缓存与页帧是一对一的关系
+-	`page`：页帧，用于存储pipe数据；pipe缓存与页帧是一对一的关系（注意内核`struct page`定义了一个物理内存页）
 -	`offset`：页内偏移，用于记录有效数据在页帧的超始地址（只能用偏移，而不能用地址，因为高内存页帧在内核空间中没有虚拟地址与之对应）
 -	`len`：有效数据长度
 -	`ops`：缓存操作集（`pipe_buf_operations`）
 -	`flags`：缓存标识
 -	`private`：缓存操作私有数据
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/pipe_fs_i.h#L20
 struct pipe_buffer {
-	struct page *page;
-	unsigned int offset, len;
+	struct page *page;	// 存放数据的页框（物理内存页）
+	unsigned int offset, len;	// 数据的偏移和大小
 	const struct pipe_buf_operations *ops;
 	unsigned int flags;
 	unsigned long private;
@@ -74,11 +76,11 @@ struct pipe_buffer {
 -	`fasync_readers`：读端异步描述符
 -	`fasync_writers`：写端异步描述符
 -	`inode`：pipe对应的inode
--	`bufs`：`pipe_buffer`回环数据
+-	`bufs`：`pipe_buffer`回环数据（被组织为一个ringbuffer结构）
 
 注意：在高版本中（如`v5.10.240`）对pipe机制进行了改动，因此引发了有名的Dirty Pipe内核Bug：参考[`CVE-2022-0847`](https://dirtypipe.cm4all.com/)
 
-```CPP
+```cpp
 struct pipe_inode_info {
 	struct mutex mutex;
 	wait_queue_head_t wait;
@@ -111,7 +113,7 @@ struct pipe_inode_info {
 -	`release`：当`pipe_buffer`中的数据被读完后，用于释放`pipe_buffer`
 -	`get`：增加`pipe_buffer`的引用计数器
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/pipe_fs_i.h#L74
 struct pipe_buf_operations {
 	/*
@@ -160,7 +162,7 @@ struct pipe_buf_operations {
 -	`anon_pipe_buf_ops`：匿名管道，默认`can_merge`开启（支持）
 -	`packet_pipe_buf_ops`：分组化管道，默认`can_merge`关闭
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/pipe.c#L233
 static const struct pipe_buf_operations anon_pipe_buf_ops = {
 	.can_merge = 1,	//匿名管道：默认can_merge为1
@@ -186,7 +188,10 @@ pipe/FIFO VFS相关结构及操作集如下：
 
 1、文件对象（File）：`struct file`，需要区分读写端`fd[0]`为读端，`fd[1]` 为写端，操作集`file_operations`如下：
 
-```CPP
+注意`pipefifo_fops`只实现了`read_iter/write_iter`方法，没有实现`write/read`方法，这里在读写管道的内核函数调用中会涉及到，参考后文的`vfs_write`函数
+
+```cpp
+// pipefifo_fops：定义了pipe 文件支持的文件操作有哪些
 const struct file_operations pipefifo_fops = {
 	.open		= fifo_open,
 	.llseek		= no_llseek,
@@ -201,13 +206,14 @@ const struct file_operations pipefifo_fops = {
 
 在一个进程创建打开了pipe/fifo之后，在进程打开的文件描述符数组中是占据两个fd，其中对于`fd[0]`读端而言，`pipe_write`是无用的；反之对写端而言，`pipe_read`是无用的
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/pipe.c
 int do_pipe_flags(int *fd, int flags)
 {
 	struct file *files[2];
 	int error = __do_pipe_flags(fd, files, flags);
 	if (!error) {
+		//通过 fd_install 将文件描述符安装到内核中，以便用户空间可以通过这些文件描述符访问管道
 		fd_install(fd[0], files[0]);
 		fd_install(fd[1], files[1]);
 	}
@@ -217,7 +223,7 @@ int do_pipe_flags(int *fd, int flags)
 
 2、目录项对象（Dentry）：通过 `mount_pseudo()` 创建根目录项，无实际磁盘路径。操作集为`simple_dentry_operations`
 
-```CPP
+```cpp
 static const struct dentry_operations pipefs_dentry_operations = {
 	.d_dname	= pipefs_dname,	//仅需处理内存回收，无磁盘同步逻辑，终删除 dentry（内存临时对象）
 };
@@ -225,7 +231,7 @@ static const struct dentry_operations pipefs_dentry_operations = {
 
 3、 索引节点对象（Inode），关联扩展[结构](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/pipe_fs_i.h#L47) `struct pipe_inode_info`，存储管道核心数据（如环形缓冲区、等待队列），对应于`struct inode`的`struct pipe_inode_info	*i_pipe`成员
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/fs.h#L554
 struct inode {
 	......
@@ -251,7 +257,7 @@ struct inode {
 
 4、super_block，超级块对象（Superblock）
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/pipe.c#L1173
 static const struct super_operations pipefs_ops = {
 	.destroy_inode = free_inode_nonrcu,
@@ -267,7 +273,7 @@ static const struct super_operations pipefs_ops = {
 ####	管道创建
 系统调用`pipe/pipe2`，用于创建管道，函数调用链为`pipe2->__do_pipe_flags->create_pipe_files`
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/pipe.c#L839
 SYSCALL_DEFINE2(pipe2, int __user *, fildes, int, flags)
 {
@@ -275,28 +281,34 @@ SYSCALL_DEFINE2(pipe2, int __user *, fildes, int, flags)
 	struct file *files[2];
 	int fd[2];
 	int error;
-
+	//创建两个 struct file 结构体实例和两个对应的文件描述符
 	error = __do_pipe_flags(fd, files, flags);
 	if (!error) {
 		......
+		//将两个文件描述符和 struct file 结构体实例关联起来
 		fd_install(fd[0], files[0]);
 		fd_install(fd[1], files[1]);
 	}
 	return error;
 }
 
+//fd：保存创建的两个文件描述符
+//files：保存创建的两个 struct file 结构体实例
 static int __do_pipe_flags(int *fd, struct file **files, int flags)
 {
 	int error;
 	int fdw, fdr;
 
+	// 检查非法的标志位组合
 	if (flags & ~(O_CLOEXEC | O_NONBLOCK | O_DIRECT))
 		return -EINVAL;
 
+	// create_pipe_files：根据传入的标志位创建两个 struct file 结构体实例
 	error = create_pipe_files(files, flags);
 	if (error)
 		return error;
-
+	
+	// 创建两个文件描述符：用于输入、输出
 	error = get_unused_fd_flags(flags);
 	if (error < 0)
 		goto err_read_pipe;
@@ -307,6 +319,7 @@ static int __do_pipe_flags(int *fd, struct file **files, int flags)
 		goto err_fdr;
 	fdw = error;
 
+	// 处理审计相关的逻辑
 	audit_fd_pair(fdr, fdw);
 	fd[0] = fdr;
 	fd[1] = fdw;
@@ -317,18 +330,19 @@ static int __do_pipe_flags(int *fd, struct file **files, int flags)
 
 [`create_pipe_files`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/pipe.c#L736)是创建pipe的核心实现：
 
-```CPP
+```cpp
 int create_pipe_files(struct file **res, int flags)
 {
 	int err;
-	// 创建inode节点
+	// 创建inode节点（创建一个 inode 实例）
 	struct inode *inode = get_pipe_inode();
 	struct file *f;
 	struct path path;
 	static struct qstr name = { .name = "" };
 
 	......
-
+	
+	//创建dentry结构
 	path.dentry = d_alloc_pseudo(pipe_mnt->mnt_sb, &name);
 	if (!path.dentry)
 		goto err_inode;
@@ -374,15 +388,17 @@ int create_pipe_files(struct file **res, int flags)
 -	`d_alloc_pseudo/d_instantiate`：构建dentry及inode关联关系
 -	`alloc_file`：两次调用，先初始化写端的file结构、再初始化读端的file结构
 
-```CPP
+```cpp
 static struct inode * get_pipe_inode(void)
 {
+	//创建一个 inode 实例
 	struct inode *inode = new_inode_pseudo(pipe_mnt->mnt_sb);
 	struct pipe_inode_info *pipe;
 	......
 
 	inode->i_ino = get_next_ino();
 
+	//创建一个 pipe_inode_info 实例
 	pipe = alloc_pipe_info();
 	if (!pipe)
 		goto fail_iput;
@@ -393,7 +409,9 @@ static struct inode * get_pipe_inode(void)
 	pipe->readers = pipe->writers = 1;
 
 	//inode的i_fop与file的fop是一样的
-	inode->i_fop = &pipefifo_fops;
+
+	// 初始化inode各个成员的值
+	inode->i_fop = &pipefifo_fops;	//管道的操作函数指针
 
 	inode->i_state = I_DIRTY;
 	inode->i_mode = S_IFIFO | S_IRUSR | S_IWUSR;
@@ -420,14 +438,14 @@ static struct inode * get_pipe_inode(void)
 
 5、下面这段代码将把pipe放在file中是方便取值，否则给定一个files，若需要获取pipe，就需要从`file->f_path.dentry->d_inode->i_pipe`来获取，这显然不够优雅
 
-```CPP
+```cpp
 files[0]->private_data = inode->i_pipe;
 files[1]->private_data = inode->i_pipe;
 ```
 
 6、至此`pipe2`系统调用执行完毕，它创建了两个个互相关联的file，然后创建了2个fd，fd与file一一对应，其次file都指向了同一个inode，读写均操作统一inode（即pipe结构`pipe_inode_info`）;此外，由于创建父子进程时，`task_struct`关联的打开文件描述符表fdtable也要复制一份，即父子进程的文件描述符表均指向上述的pipe结构（当然需要关闭一方的读、另一方的写），这样父子进程便可以借助pipe实现单向通信了
 
-```CPP
+```cpp
 static struct inode * get_pipe_inode(void)
 {
 	struct inode *inode = new_inode_pseudo(pipe_mnt->mnt_sb);
@@ -452,6 +470,7 @@ static struct inode * get_pipe_inode(void)
 }
 
 // alloc_file：创建file结构，并关联到path
+// fop：传入的值为&pipefifo_fops
 struct file *alloc_file(const struct path *path, fmode_t mode,	const struct file_operations *fop)
 {
 	struct file *file;
@@ -471,6 +490,9 @@ struct file *alloc_file(const struct path *path, fmode_t mode,	const struct file
 	     likely(fop->write || fop->write_iter))
 		mode |= FMODE_CAN_WRITE;
 	file->f_mode = mode;
+
+	// 注意：这里会将 file 结构体实例的 f_op 字段设置成 pipefifo_fops 结构体的指针
+	// 当用户态执行pipefifo_fops支持（如管道关联的fd）的系统调用时，VFS 会调用结构体中相应的函数
 	file->f_op = fop;
 	if ((mode & (FMODE_READ | FMODE_WRITE)) == FMODE_READ)
 		i_readcount_inc(path->dentry->d_inode);
@@ -529,7 +551,7 @@ int create_pipe_files(struct file **res, int flag s)
 ```
 
 ####	alloc_pipe_info
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/pipe.c#L620
 struct pipe_inode_info *alloc_pipe_info(void)
 {
@@ -538,6 +560,7 @@ struct pipe_inode_info *alloc_pipe_info(void)
 	struct user_struct *user = get_current_user();
 	unsigned long user_bufs;
 
+	//kzalloc 函数与 kmalloc 类似，只不过会初始化分配的内存
 	pipe = kzalloc(sizeof(struct pipe_inode_info), GFP_KERNEL_ACCOUNT);
 	if (pipe == NULL)
 		goto out_free_uid;
@@ -545,6 +568,9 @@ struct pipe_inode_info *alloc_pipe_info(void)
 	......
 
 	// 初始化bufs成员
+	// 调用 kcalloc 函数为 pipe_inode_info 结构体的 bufs 字段分配内存
+	// kcalloc 与 kzalloc 类似，只不过是分配连续若干个指定大小的内存块
+	// 默认大小为 PIPE_DEF_BUFFERS （16）个内存页
 	pipe->bufs = kcalloc(pipe_bufs, sizeof(struct pipe_buffer),
 			     GFP_KERNEL_ACCOUNT);
 
@@ -552,7 +578,7 @@ struct pipe_inode_info *alloc_pipe_info(void)
 		init_waitqueue_head(&pipe->wait);
 		pipe->r_counter = pipe->w_counter = 1;
 		pipe->buffers = pipe_bufs;	//16
-		pipe->user = user;
+		pipe->user = user;		//当前用户
 		mutex_init(&pipe->mutex);
 		return pipe;
 	}
@@ -566,7 +592,7 @@ struct pipe_inode_info *alloc_pipe_info(void)
 
 1、环形存储结构，管道数据存储在内核维护的环形数组中，数组元素为 `pipe_buffer`，每个对应一个物理内存页（默认 `16` 页），通过 `curbuf`（当前读位置索引）和 `nrbufs`（有效缓冲区数量）实现环形遍历
 
-```CPP
+```cpp
 // 计算下一个缓冲区索引
 // 此操作通过位运算（&）替代取模，实现高效的环形索引
 int newbuf = (pipe->curbuf + bufs) & (pipe->buffers - 1);
@@ -606,7 +632,7 @@ int newbuf = (pipe->curbuf + bufs) & (pipe->buffers - 1);
 5.	如果当前内存页的数据已经被读取完毕，那么移动 `pipe_inode_info` 对象的 `curbuf` 指针，并且减少其 `nrbufs` 字段的值
 6.	如果读取到用户期望的数据长度，退出循环；反之，则移动`curbuf`到下一个ringbuffer位置，继续上面的操作
 
-```CPP
+```cpp
 static ssize_t
 pipe_read(struct kiocb *iocb, struct iov_iter *to)
 {
@@ -745,7 +771,7 @@ pipe_read(struct kiocb *iocb, struct iov_iter *to)
 -	`4k`情况下，大于或者小于的数据量写入管道，原子性是如何保证的？为什么说数据小于`4k`才能保证其原子性？
 -	`pipe_inode_info`的`tmp_page`的作用是什么？
 
-```CPP
+```cpp
 static ssize_t
 pipe_write(struct kiocb *iocb, struct iov_iter *from)
 {
@@ -913,7 +939,7 @@ out:
 ####	pipe_write的物理内存分配
 在上面的`pipe_write`实现中，注意这段代码：
 
-```CPP
+```cpp
 static ssize_t
 pipe_write(struct kiocb *iocb, struct iov_iter *from)
 	......
@@ -936,7 +962,7 @@ pipe_write(struct kiocb *iocb, struct iov_iter *from)
 
 内核提供了 `alloc_page` 宏用于这种单内存页分配的场景，当系统中空闲的物理内存无法满足内存分配时，就会导致内存分配失败，会返回 `NULL`，在物理内存分配成功的情况下， `alloc_page` 返回的都是指向其申请的物理内存块第一个物理内存页 `struct page` 指针（**特别强调是物理内存页，而不是虚拟内存页**），直观理解为返回的是一块物理内存，但是 CPU 可以直接访问的却是虚拟内存，那么地址转换在哪里呢？所以看下`copy_page_from_iter`的实现就清楚了，在此函数中会通过`kmap_atomic`进程地址转换
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/lib/iov_iter.c#L657
 size_t copy_page_from_iter(struct page *page, size_t offset, size_t bytes,
 			 struct iov_iter *i)
@@ -959,7 +985,7 @@ size_t copy_page_from_iter(struct page *page, size_t offset, size_t bytes,
 ####	pipe_read/pipe_write的调用方及入参（1）
 以`write/read`系统调用操作管道为例，调用链为`write->vfs_write->__vfs_write`，数据流向是用户空间 `->` 内核
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/read_write.c#L597
 SYSCALL_DEFINE3(write, unsigned int, fd, const char __user *, buf,
 		size_t, count)
@@ -1008,7 +1034,7 @@ ssize_t __vfs_write(struct file *file, const char __user *p, size_t count,
 
 最后调用到`__vfs_write`，因为对于pipefs文件系统的file[定义](https://elixir.bootlin.com/linux/v4.11.6/source/fs/pipe.c#L1008)`struct file_operations pipefifo_fops`而言，只实现了`write_iter/read_iter`方法，所以最终调用到`new_sync_write`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/fs/read_write.c#L486)：
 
-```CPP
+```cpp
 static ssize_t new_sync_write(struct file *filp, const char __user *buf, size_t len, loff_t *ppos)
 {
 	//将用户空间传递的缓冲区（`buf`）和长度（`len`）封装到 `struct iovec`
@@ -1065,7 +1091,7 @@ static inline ssize_t call_write_iter(struct file *file, struct kiocb *kio,
 ####	pipe_read/pipe_write的调用方及入参（2）
 从入口`sys_read`开始，数据流向是内核 `->` 用户空间
 
-```CPP
+```cpp
 SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
 {
 	struct fd f = fdget_pos(fd);
@@ -1089,7 +1115,7 @@ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
 
 同样，对管道的读操作，最终也会走到`new_sync_read->call_read_iter->pipe_read`函数：
 
-```CPP
+```cpp
 static inline ssize_t call_read_iter(struct file *file, struct kiocb *kio,
 				     struct iov_iter *iter)
 {
@@ -1182,7 +1208,7 @@ pipe_read(struct kiocb *iocb, struct iov_iter *to)
 
 而不满足条件的行为，若任一条件不满足（如 `can_merge=false` 或空间不足），跳过追加逻辑，直接进入 `for(;;)` 循环分配新页写入，不会拆分写入数据
 
-```CPP
+```cpp
 ......
 if (pipe->nrbufs && chars != 0) {
     int lastbuf = (pipe->curbuf + pipe->nrbufs - 1) & (pipe->buffers - 1);
@@ -1206,7 +1232,7 @@ if (pipe->nrbufs && chars != 0) {
 -	新分配的页（page）偏移量 `buf->offset` 固定为 `0`，与追加写入（`offset = buf->offset + buf->len`）完全不同
 -	数据从新页的起始位置写入，而非追加到旧页末尾
 
-```CPP
+```cpp
 ......
 for (;;) {
     if (bufs < pipe->buffers) { // 检查环形缓冲区是否有空闲槽位
@@ -1262,15 +1288,39 @@ for (;;) {
 
 ![splice_eg3](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/15/splice_eg3.jpg)
 
+####	splice 系统调用
+`splice()` 系统调用避免在内核地址空间与用户地址空间的拷贝，从而快速地在两个文件描述符之间传递数据，既然`splice` 是基于管道缓冲区 (pipe buffer) 机制实现的，所以 `splice` 的两个入参文件描述符才要求必须有一个是管道设备
+
+```cpp
+//函数原型
+ssize_t splice(int fd_in, off64_t *off_in, int fd_out, off64_t *off_out, size_t len, unsigned int flags);
+
+int pfd[2];
+
+pipe(pfd);
+
+//数据流向 file_fd->pfd[1]
+ssize_t bytes = splice(file_fd, NULL, pfd[1], NULL, 4096, SPLICE_F_MOVE);
+
+//数据流程 pfd[0]-> socket_fd
+bytes = splice(pfd[0], NULL, socket_fd, NULL, bytes, SPLICE_F_MOVE | SPLICE_F_MORE);
+```
+
+![splice-app-1]()
+
+又如CVE-2022-0847中的触发场景，其利用情况是从文件向管道传递数据，即`fd_in` 表示一个普通文件，`off_in` 表示从指定的文件偏移处开始读取，`fd_out` 表示一个 pipe 写端
+
+`splice()`系统调用的核心机制是**绑定/重定向**，本身并不执行对 Page Cache 的写操作，实现了内核空间内部的数据移动，避免了数据在用户空间和内核空间之间不必要的拷贝，即零拷贝。从上述场景来看，主要用于在​​两个文件描述符之间​​移动数据
+
 ####	splice的示例
 发送文件给客户端的示例代码如下，使用 `splice()` 发送文件时，并不需要将文件内容读取到用户态缓存中，需要借助于管道作为中转，从而避免用户态与内核态的数据拷贝
 
-```CPP
+```cpp
 ssize_t splice(int fd_in, loff_t *off_in, int fd_out,
                       loff_t *off_out, size_t len, unsigned int flags);
 ```
 
-```CPP
+```cpp
 int send_file_to_client(int client_fd, char *file)
 {
     int fd;
@@ -1309,7 +1359,7 @@ int send_file_to_client(int client_fd, char *file)
 ##	0x06	splice的内核实现
 `splice()` 系统调用的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/splice.c#L1402)，代码如下：
 
-```CPP
+```cpp
 SYSCALL_DEFINE6(splice, int, fd_in, loff_t __user *, off_in,
 		int, fd_out, loff_t __user *, off_out,
 		size_t, len, unsigned int, flags)
@@ -1345,7 +1395,7 @@ SYSCALL_DEFINE6(splice, int, fd_in, loff_t __user *, off_in,
 2.	若输出端是一个管道，关联`do_splice_to`
 3.	若输入/输出端都是管道，关联`splice_pipe_to_pipe`
 
-```CPP
+```cpp
 struct pipe_inode_info *get_pipe_info(struct file *file)
 {
 	//是否是一个pipefifo_fops类型
@@ -1457,7 +1507,7 @@ static long do_splice(struct file *in, loff_t __user *off_in,
 ####	输出端为管道：do_splice_to（splice_read）
 上文描述的示例，关联数据流从文件缓存读并写入（关联）至管道写端`pipefd[1]`，注意这里的写入不是真写入，是将参数`in`指向的物理内存页（比如在ext4文件系统就是page cache）通过管道的写端与pipe管道的内核的ringbuffer、物理内存页关联（绑定）上，这样对管道的读操作就可以直接操作`in`指向的物理内存页，避免多余的内存拷贝
 
-```CPP
+```cpp
 static long do_splice_to(struct file *in, loff_t *ppos,
 			 struct pipe_inode_info *pipe, size_t len/*len是操作长度*/,
 			 unsigned int flags)
@@ -1486,7 +1536,7 @@ static long do_splice_to(struct file *in, loff_t *ppos,
 
 这里以ext4文件系统为例，分析下其`generic_file_splice_read`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/splice.c#L388)：
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/file.c#L731
 const struct file_operations ext4_file_operations = {
 	.read_iter	= ext4_file_read_iter,			//进一步调用
@@ -1496,7 +1546,7 @@ const struct file_operations ext4_file_operations = {
 
 `generic_file_splice_read`的核心代码如下：
 
-```CPP
+```cpp
 static inline ssize_t call_read_iter(struct file *file, struct kiocb *kio,
 				     struct iov_iter *iter)
 {
@@ -1534,7 +1584,7 @@ static ssize_t ext4_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 
 所以，`do_splice_to`最核心的实现就是`generic_file_read_iter`函数：
 
-```CPP
+```cpp
 ssize_t
 generic_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 {
@@ -1551,7 +1601,7 @@ generic_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 ####	输入端为管道：do_splice_from
 当输入端是一个管道（也就是说从管道拷贝数据到输出端句柄），对应示例中的第二部分即参数`pipe`对应管道的读端，参数`out`对应客户端socket fd。`do_splice_from()` 函数的实现如下：
 
-```CPP
+```cpp
 static long do_splice_from(struct pipe_inode_info *pipe, struct file *out,
 			   loff_t *ppos, size_t len, unsigned int flags)
 {
@@ -1582,7 +1632,7 @@ static long do_splice_from(struct pipe_inode_info *pipe, struct file *out,
 -	获取管道pipe环形缓冲区的读指针
 -	调用 pipe_to_file() 函数把管道环形缓冲区的数据拷贝到输出端的文件中
 
-```CPP
+```cpp
 ssize_t
 iter_file_splice_write(struct pipe_inode_info *pipe, struct file *out,
 			  loff_t *ppos, size_t len, unsigned int flags)
@@ -1702,7 +1752,7 @@ done:
 ####	`can_merge`的作用及场景
 [`page_cache_pipe_buf_ops`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/splice.c#L140)
 
-```CPP
+```cpp
 const struct pipe_buf_operations page_cache_pipe_buf_ops = {
 	.can_merge = 0,
 	.confirm = page_cache_pipe_buf_confirm,
@@ -1725,7 +1775,7 @@ const struct pipe_buf_operations page_cache_pipe_buf_ops = {
 
 2、为什么大于`PIPE_BUF`的写操作是非原子的？由于超过`PIPE_BUF`，数据必然要写到多个page里面
 
-```CPP
+```cpp
 static ssize_t
 pipe_write(struct kiocb *iocb, struct iov_iter *from)
 {
@@ -1826,7 +1876,7 @@ out:
 
 2、唤醒后的锁重获，当本进程被唤醒后（说明缓冲区非满、可写了），在 `pipe_wait()` 返回前会重新获取 `__pipe_lock`，继续执行循环写入剩余数据
 
-```CPP
+```cpp
 void pipe_wait(struct pipe_inode_info *pipe)
 {
 	DEFINE_WAIT(wait);
@@ -1860,7 +1910,7 @@ void pipe_wait(struct pipe_inode_info *pipe)
 所以，程序中通常使用一对pipe来实现双向通信，避免pipe的这种竞争问题
 
 ####	CVE-2022-0847：Linux DirtyPipe内核提权漏洞
-TODO（新文章）
+参考[Linux 内核CVE：CVE-2022-0847](https://pandaychen.github.io/2025/08/03/A-LINUX-KERNEL-CVE-2022-0847/)
 
 ##  0x08 参考
 -	[linux pipe文件系统(pipefs)](https://blog.csdn.net/Morphad/article/details/9219843)
@@ -1870,3 +1920,4 @@ TODO（新文章）
 -	[一文读懂零拷贝技术：splice原理与实现](https://mp.weixin.qq.com/s/ANBQzhq0RDzd1sLmwKtv5w)
 -	[Linux进程通信 - 管道实现](https://mp.weixin.qq.com/s?__biz=MzA3NzYzODg1OA==&mid=2648465715&idx=1&sn=3eaa62f290c02876b412326a5ebb30a6&scene=21&poc_token=HOi_rWij0oHZNgaRVrbhZoXwDKk40jOAmMMP1JvO)
 -	[Linux内核权限提升漏洞DirtyPipe（CVE-2022-0847）分析](https://mp.weixin.qq.com/s?__biz=Mzk1NzE0ODUyOA==&mid=2247491840&idx=1&sn=9f0034872d9e0bfed46b2ff7a27cba60&source=41&poc_token=HPpesmijxdUHD9uW-7duHqNM-bQMQxIAFZ6k2ax9)
+-	[理解 Linux 中的 splice(2)](https://blog.dreamfever.me/posts/2023-05-04-li-jie-linux-zhong-de-splice-2/)
