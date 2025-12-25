@@ -26,7 +26,7 @@ tags:
 
 linux的pipe和FIFO都是基于pipe文件系统（pipefs）的，pipe和FIFO都是半双工，即数据流向只能是一个方向。pipe机制（匿名管道）只能在pipe的创建进程及其后代进程（后代进程fork/exec时，通过继承父进程的打开文件描述符表）之间使用，来实现通信；有名pipe FIFO，即可以通过名称查找到pipe，所以无上述匿名管道限制，可以通过名称找到pipe文件，创建相应的pipe，可以实现跨进程间的通信
 
-![pipe-basic]()
+![pipe-basic](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/15/pipe-basic.png)
 
 管道在Linux零拷贝中也有应用，零拷贝是一种优化数据传输的技术，它可以减少数据在内核态和用户态之间的拷贝次数，提高数据传输的效率。在传统的数据传输过程中，数据需要从内核缓冲区拷贝至应用程序的缓冲区，然后再从应用程序缓冲区拷贝到网络设备的缓冲区，最后才能发送出去。而零拷贝技术通过直接在应用程序和网络设备之间传输数据，避免了中间的拷贝过程，从而提高了数据传输的效率
 
@@ -38,9 +38,13 @@ linux的pipe和FIFO都是基于pipe文件系统（pipefs）的，pipe和FIFO都�
 ####    pipefs：文件系统
 pipe 是一个伪文件系统（pipefs），内核初始化时会注册到 Linux 系统
 
-![pipefs-basic]()
+![pipefs-basic](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/15/pipefs-basic.png)
 
 ####    内核数据结构
+管道本质上是一个内存中的文件，本质上还是基于 Linux 的 VFS，用户进程可以通过 `pipe()` 系统调用创建一个匿名管道，创建完成之后会有两个 VFS 的 `struct file` 的 `inode` 分别指向其写端和读端，并返回对应的两个文件描述符，用户进程通过这两个文件描述符读写管道；管道的容量单位是一个虚拟内存的页，也就是 `4KB`，总大小一般是 `16` 个页，基于其环形结构，管道的页可以循环使用，提高内存利用率。Linux 中以 `pipe_buffer` 结构体封装管道页，file 结构体里的 `inode` 字段里会保存一个 `pipe_inode_info` 结构体指代管道，其中会保存很多读写管道时所需的元信息，环形队列的头部指针页，读写时的同步机制如互斥锁、等待队列等
+
+![pipe_struct_basic](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/15/pipe_struct_basic.png)
+
 1、`pipe_buffer`：管道缓存，用于暂存写入管道的数据；写进程通过管道写入端将数据写入管道缓存中，读进程通过管道读出端将数据从管道缓存中读出，成员定义如下：
 
 -	`page`：页帧，用于存储pipe数据；pipe缓存与页帧是一对一的关系（注意内核`struct page`定义了一个物理内存页）
@@ -1306,11 +1310,23 @@ ssize_t bytes = splice(file_fd, NULL, pfd[1], NULL, 4096, SPLICE_F_MOVE);
 bytes = splice(pfd[0], NULL, socket_fd, NULL, bytes, SPLICE_F_MOVE | SPLICE_F_MORE);
 ```
 
-![splice-app-1]()
+![splice-app-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/15/splice-app-1.png)
+
+如上，使用 `splice()` 完成一次磁盘文件到网卡的读写过程如下：
+
+1.	用户进程调用 `pipe()`，从用户态陷入内核态，创建匿名单向管道，`pipe()` 返回，上下文从内核态切换回用户态
+2.  用户进程调用 `splice()`，从用户态陷入内核态
+3.	DMA 控制器将数据从硬盘拷贝到内核缓冲区，从管道的写入端"拷贝"进管道，`splice()` 返回，上下文从内核态回到用户态
+4.	用户进程再次调用 `splice()`，从用户态陷入内核态
+5.	内核把数据从管道的读取端"拷贝"到套接字缓冲区，DMA 控制器将数据从套接字缓冲区拷贝到网卡
+6.	`splice()` 返回，上下文从内核态切换回用户态
+
+上面描述的带引号的拷贝，本质上只是`splice`完成的绑定，并非真正由`splice`实现了读写过程
 
 又如CVE-2022-0847中的触发场景，其利用情况是从文件向管道传递数据，即`fd_in` 表示一个普通文件，`off_in` 表示从指定的文件偏移处开始读取，`fd_out` 表示一个 pipe 写端
 
-`splice()`系统调用的核心机制是**绑定/重定向**，本身并不执行对 Page Cache 的写操作，实现了内核空间内部的数据移动，避免了数据在用户空间和内核空间之间不必要的拷贝，即零拷贝。从上述场景来看，主要用于在​​两个文件描述符之间​​移动数据
+`splice()`系统调用的核心机制是**绑定/重定向，本身并不执行对 Page Cache 的写操作**，实现了内核空间内部的数据移动，避免了数据在用户空间和内核空间之间不必要的拷贝，即零拷贝。从上述场景来看，主要用于在两个文件描述符之间移动数据
+
 
 ####	splice的示例
 发送文件给客户端的示例代码如下，使用 `splice()` 发送文件时，并不需要将文件内容读取到用户态缓存中，需要借助于管道作为中转，从而避免用户态与内核态的数据拷贝
@@ -1355,6 +1371,8 @@ int send_file_to_client(int client_fd, char *file)
     return 0;
 }
 ```
+
+在上面的例子中，可以发现一个细节，整个实现中并没有`write*/read*`相关的系统调用出现，为何能完成文件zero copy呢？所以下面拆解一下`splice`的内核实现
 
 ##	0x06	splice的内核实现
 `splice()` 系统调用的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/splice.c#L1402)，代码如下：
@@ -1411,8 +1429,8 @@ static long do_splice(struct file *in, loff_t __user *off_in,
 	loff_t offset;
 	long ret;
 
-	ipipe = get_pipe_info(in);
-	opipe = get_pipe_info(out);
+	ipipe = get_pipe_info(in);	//第一个参数
+	opipe = get_pipe_info(out);	//第二个参数
 
 	......
 	//省略的代码，如果输入/输出都是一个pipe类型
@@ -1451,7 +1469,7 @@ static long do_splice(struct file *in, loff_t __user *off_in,
 		// 核心工作：调用 do_splice_from() 函数管道数据拷贝到目标文件句柄
 		// 参数 ipipe 输入（读）
 		// 参数 out  输出（写）
-		ret = do_splice_from(ipipe, out, &offset, len, flags);
+		ret = do_splice_from(ipipe/*管道读端*/, out/*写入目标file（socket、普通文件）*/, &offset, len, flags);
 		file_end_write(out);
 
 		if (!off_out)
@@ -1471,7 +1489,7 @@ static long do_splice(struct file *in, loff_t __user *off_in,
 		if (off_out)
 			return -ESPIPE;
 		if (off_in) {
-			if (!(in->f_mode & FMODE_PREAD))
+			if (!(in->f_mode & FMODE_PREAD))	//写端，必不可以读
 				return -EINVAL;
 			if (copy_from_user(&offset, off_in, sizeof(loff_t)))
 				return -EFAULT;
@@ -1532,7 +1550,7 @@ static long do_splice_to(struct file *in, loff_t *ppos,
 -	socket/[sockfs](https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L155)：`sock_splice_read`，最终调用的是`tcp_splice_read`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/af_inet.c#L945)
 
 
-默认的`default_file_splice_read`[实现]（https://elixir.bootlin.com/linux/v4.11.6/source/fs/splice.c#L388）是内核中用于实现通用管道数据读取的函数，当文件系统未提供自定义的 `splice_read`方法时被调用。其核心逻辑是通过临时内核缓冲区将文件数据拷贝至管道缓冲区，虽然实现了基本功能，但牺牲了零拷贝性能；其他文件系统如ext4则实现了`splice`方法，其提供的[`generic_file_splice_read`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/file.c#L731)用于实现从文件到管道零拷贝传输的核心函数，其设计目标是复用文件的页缓存（Page Cache），避免数据在用户空间与内核空间之间的冗余拷贝
+默认的`default_file_splice_read`[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/splice.c#L388)是内核中用于实现通用管道数据读取的函数，当文件系统未提供自定义的 `splice_read`方法时被调用。其核心逻辑是通过临时内核缓冲区将文件数据拷贝至管道缓冲区，虽然实现了基本功能，但牺牲了零拷贝性能；其他文件系统如ext4则实现了`splice`方法，其提供的[`generic_file_splice_read`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/file.c#L731)用于实现从文件到管道零拷贝传输的核心函数，其设计目标是复用文件的页缓存（Page Cache），避免数据在用户空间与内核空间之间的冗余拷贝
 
 这里以ext4文件系统为例，分析下其`generic_file_splice_read`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/splice.c#L388)：
 
@@ -1541,6 +1559,8 @@ static long do_splice_to(struct file *in, loff_t *ppos,
 const struct file_operations ext4_file_operations = {
 	.read_iter	= ext4_file_read_iter,			//进一步调用
 	.splice_read	= generic_file_splice_read,	//ext4文件系统的实现
+	.splice_write	= iter_file_splice_write,	//ext4文件系统的实现（写）
+	.write_iter	= ext4_file_write_iter,
 };
 ```
 
@@ -1582,11 +1602,11 @@ static ssize_t ext4_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 }
 ```
 
-所以，`do_splice_to`最核心的实现就是`generic_file_read_iter`函数：
+所以，`do_splice_to`最核心的实现就是`generic_file_read_iter`函数，特别注意对于本例中的`splice(fd, NULL, pipefd[1], NULL, 4096, SPLICE_F_MOVE|SPLICE_F_MORE)`而言，参数`struct kiocb *iocb`代表源类型（ext4）、读端，而`struct iov_iter *iter`则代表目标类型（`ITER_PIPE`）、写端
 
 ```cpp
 ssize_t
-generic_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
+generic_file_read_iter(struct kiocb *iocb/*源类型*/, struct iov_iter *iter/*目标类型*/)
 {
 	struct file *file = iocb->ki_filp;
 	ssize_t retval = 0;
@@ -1597,6 +1617,148 @@ generic_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 	retval = do_generic_file_read(file, &iocb->ki_pos, iter, retval);
 }
 ```
+
+`do_generic_file_read`是最核心的实现，可以解答两个问题（假设一次操作了`4k`字节，即一页）：
+
+1.	数据如何从inode关联的物理存储流向inode对应的page（page cache）
+2.	inode对应的page是如何与管道关联起来的（零拷贝）
+
+`do_generic_file_read`函数在`splice`调用下的核心流程是：
+
+1.	在本文件inode对应 page cache 页缓存里进行搜寻，看看待读取这个文件内容（fd对应的起始指针+offset）是否已经在缓存里，如果是则直接用，否则如果不存在或者只有部分数据在缓存中，则分配一些新的内存页page并进行读入数据操作，同时会增加页框的引用计数，这一步完成之后，内存页就已经包含文件inode对应的读取内容了，同时会预先计算本次需要读（预读）的page数目
+2.	上一步涉及到的可能有块设备读，page cache预读等知识（后文介绍）
+3.	`copy_page_to_iter->copy_page_to_iter->copy_page_to_iter_pipe`：对于每一页进行处理，最终会调用`copy_page_to_iter_pipe`实现所谓的zero copy动作（写入数据到管道），但是没有真正拷贝数据，这里只是内存地址指针的移动，即把物理页框、偏移量和数据长度赋值给 `pipe_buffer` 完成数据入队操作
+
+![ext4_page_cache_page_relation_to_pipebuffer]()
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/filemap.c#L1760
+static ssize_t do_generic_file_read(struct file *filp, loff_t *ppos,
+		struct iov_iter *iter, ssize_t written)
+{
+	struct address_space *mapping = filp->f_mapping;
+	struct inode *inode = mapping->host;
+	struct file_ra_state *ra = &filp->f_ra;
+	pgoff_t index;
+	pgoff_t last_index;
+	pgoff_t prev_index;
+	unsigned long offset;      /* offset into pagecache page */
+	unsigned int prev_offset;
+	int error = 0;
+
+	......
+
+	//1. 计算要复制的page数目、起始地址及偏移（预估）
+	index = *ppos >> PAGE_SHIFT;
+	prev_index = ra->prev_pos >> PAGE_SHIFT;
+	prev_offset = ra->prev_pos & (PAGE_SIZE-1);
+	last_index = (*ppos + iter->count + PAGE_SIZE-1) >> PAGE_SHIFT;
+	offset = *ppos & ~PAGE_MASK;
+
+	//2. 循环处理每一个page（按需）
+	for (;;) {
+		struct page *page;
+		pgoff_t end_index;
+		loff_t isize;
+		unsigned long nr, ret;
+
+		......
+		//3. 根据page的index，在inode对应的radix树（page Cache）
+		//搜寻对应的page是否存在，如果存在则使用
+		//不存在，则触发预读，即块设备到page，完成后再搜索page cache
+page_ok:
+		
+		......
+
+		//4. 完成radix树的page指针与管道pipe_buffer的page指针的关联（即零拷贝）
+		ret = copy_page_to_iter(page, offset, nr, iter);
+		offset += ret;
+		index += offset >> PAGE_SHIFT;
+		offset &= ~PAGE_MASK;
+		prev_offset = offset;
+
+		put_page(page);
+		......
+}
+
+// copy_page_to_iter_pipe：零拷贝的绑定实现
+static size_t copy_page_to_iter_pipe(struct page *page, size_t offset, size_t bytes,
+			 struct iov_iter *i)
+{
+	struct pipe_inode_info *pipe = i->pipe;
+	struct pipe_buffer *buf;
+	size_t off;
+	int idx;
+
+	if (unlikely(bytes > i->count))
+		bytes = i->count;
+
+	if (unlikely(!bytes))
+		return 0;
+
+	if (!sanity(i))
+		return 0;
+
+	off = i->iov_offset;
+	idx = i->idx;
+	buf = &pipe->bufs[idx];
+	if (off) {
+		if (offset == off && buf->page == page) {
+			/* merge with the last one */
+			buf->len += bytes;
+			i->iov_offset += bytes;
+			goto out;
+		}
+		idx = next_idx(idx, pipe);
+		buf = &pipe->bufs[idx];
+	}
+	if (idx == pipe->curbuf && pipe->nrbufs)
+		return 0;
+	pipe->nrbufs++;
+	// 写入数据到管道，没有真正拷贝数据，而是内存地址指针的移动，
+   	// 把物理页框、偏移量和数据长度赋值给 pipe_buffer 完成数据入队操作
+	// 所以是零拷贝：splice() 所谓的写入数据到管道其实并没有真正地拷贝数据，只进行内存地址指针的拷贝而不真正去拷贝数据
+	buf->ops = &page_cache_pipe_buf_ops;
+	get_page(buf->page = page);
+	buf->offset = offset;
+	buf->len = bytes;
+	i->iov_offset = offset + bytes;
+	i->idx = idx;
+out:
+	i->count -= bytes;
+	return bytes;
+}
+```
+
+小结下`do_splice_to`的调用链如下：
+
+```text
+do_splice_to
+  |
+in->f_op->splice_read（假设in为文件，类型为ext4）
+  |
+generic_file_splice_read（ext4对应的splice_read函数为generic_file_splice_read）
+  |
+call_read_iter
+  |
+file->f_op->read_iter（ext4对应的read_iter函数为ext4_file_read_iter）
+  |
+ext4_file_read_iter
+  |
+generic_file_read_iter
+  |
+do_generic_file_read
+  | 
+这里包含了对页缓存的相关操作，包括查找页面缓存、触发预读（miss）、检查页面状态等核心读操作（块设备）
+  |
+copy_page_to_iter
+  |
+copy_page_to_iter_pipe（这就是零拷贝的核心，将上面inode对应的页缓存的page关联到pipe buffer中的page）
+```
+
+`splice`虽然依赖于管道，但是并不会关联`pipe_write()/pipe_read()`，`pipe_buffer` 中保存了数据在内存中的页、偏移量和长度，用于定位数据，注意这里的页不是虚拟内存的页，而用的是物理内存的页框，因为这里是跨进程的管道，因此不能使用虚拟内存来表示，只能使用物理内存的页框定位数据。此外，管道的正常读写操作是通过 `pipe_write/pipe_read` 来完成的，通过把数据读取/写入环形队列的 `pipe_buffer` 来完成数据传输；虽然`splice()` 同样基于 `pipe_buffer` 实现的，但是它在通过pipe传输数据的时候却是零拷贝，因为它在写入读出时并没有使用 `pipe_write/pipe_read` 真正地在管道缓冲区写入读出数据，而是通过把数据在内存缓冲区中的物理内存页框指针、偏移量和长度赋值给`pipe_buffer` 中对应的这些字段来完成数据的"拷贝"，也就是其实只拷贝了数据的内存地址等元信息
+
+还有一点需要注意，管道的默认容量是 `16` 个内存页（`16 * 4KB = 64 KB`），一次往管道里写数据的时候最好不要超过 `64KB`，否则的话 `splice()` 会阻塞（需要设置管道为`O_NONBLOCK`模式） 
 
 ####	输入端为管道：do_splice_from
 当输入端是一个管道（也就是说从管道拷贝数据到输出端句柄），对应示例中的第二部分即参数`pipe`对应管道的读端，参数`out`对应客户端socket fd。`do_splice_from()` 函数的实现如下：
@@ -1617,7 +1779,7 @@ static long do_splice_from(struct pipe_inode_info *pipe, struct file *out,
 	}
 
 	// 调用splice_write
-	return splice_write(pipe, out, ppos, len, flags);
+	return splice_write(pipe/*管道读端*/, out/*写入目标*/, ppos, len, flags);
 }
 ```
 
@@ -1630,7 +1792,7 @@ static long do_splice_from(struct pipe_inode_info *pipe, struct file *out,
 这里以ext4文件系统的`iter_file_splice_write`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/splice.c#L825)为例，写操作相对直观一些（其实和`pipe_write`过程有点类似），主要步骤如下：
 
 -	获取管道pipe环形缓冲区的读指针
--	调用 pipe_to_file() 函数把管道环形缓冲区的数据拷贝到输出端的文件中
+-	调用 `pipe_to_file()` 函数把管道环形缓冲区的数据拷贝到输出端的文件中
 
 ```cpp
 ssize_t
@@ -1643,6 +1805,8 @@ iter_file_splice_write(struct pipe_inode_info *pipe, struct file *out,
 		.pos = *ppos,
 		.u.file = out,
 	};
+
+	// 获取管道读端的信息
 	int nbufs = pipe->buffers;
 	struct bio_vec *array = kcalloc(nbufs, sizeof(struct bio_vec),
 					GFP_KERNEL);
@@ -1693,7 +1857,7 @@ iter_file_splice_write(struct pipe_inode_info *pipe, struct file *out,
 				goto done;
 			}
 
-			// 先缓存要从读端读出来的数据
+			// 先缓存要从（管道）读端读出来的数据
 			array[n].bv_page = buf->page;
 			array[n].bv_len = this_len;
 			array[n].bv_offset = buf->offset;
@@ -1747,7 +1911,107 @@ done:
 }
 ```
 
-##	0x07	附录
+在`do_splice_from`实现中，最核心的部分是`iov_iter_bvec`加`vfs_iter_write`，二者完成了零拷贝的功能
+
+-	`iov_iter_bvec`：将管道pipe的读端（对应于参数`bvec`）封装为`struct iov_iter *i`对象（前面已经完成了管道`pipe_buffer`与`bvec`的转换）
+-	`vfs_iter_write`：将上述`iov_iter`的数据读出，写入到`file`中，对应于`ext4_file_write_iter`函数中的`iocb`参数
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/lib/iov_iter.c#L880
+void iov_iter_bvec(struct iov_iter *i, int direction,
+			const struct bio_vec *bvec, unsigned long nr_segs,
+			size_t count)
+{
+	BUG_ON(!(direction & ITER_BVEC));
+	i->type = direction;
+	i->bvec = bvec;
+	i->nr_segs = nr_segs;
+	i->iov_offset = 0;
+	i->count = count;
+}
+
+ssize_t vfs_iter_write(struct file *file, struct iov_iter *iter, loff_t *ppos)
+{
+	struct kiocb kiocb;
+	ssize_t ret;
+
+	if (!file->f_op->write_iter)
+		return -EINVAL;
+
+	init_sync_kiocb(&kiocb, file);
+	kiocb.ki_pos = *ppos;
+
+	iter->type |= WRITE;
+	// 对应file->f_op->write_iter(kio, iter);
+	// ext4文件系统对应的实现是ext4_file_write_iter
+	ret = call_write_iter(file, &kiocb, iter);
+	BUG_ON(ret == -EIOCBQUEUED);
+	if (ret > 0)
+		*ppos = kiocb.ki_pos;
+	return ret;
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/file.c#L203
+static ssize_t
+ext4_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
+{
+	struct inode *inode = file_inode(iocb->ki_filp);
+	int o_direct = iocb->ki_flags & IOCB_DIRECT;
+	int unaligned_aio = 0;
+	int overwrite = 0;
+	ssize_t ret;
+
+	if (unlikely(ext4_forced_shutdown(EXT4_SB(inode->i_sb))))
+		return -EIO;
+
+
+	inode_lock(inode);
+	ret = ext4_write_checks(iocb, from);
+	if (ret <= 0)
+		goto out;
+
+	......
+	ret = __generic_file_write_iter(iocb, from);
+	inode_unlock(inode);
+
+	if (ret > 0)
+		ret = generic_write_sync(iocb, ret);
+
+	return ret;
+
+out:
+	inode_unlock(inode);
+	return ret;
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/filemap.c#L2874
+ssize_t __generic_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
+{
+	struct file *file = iocb->ki_filp;
+	struct address_space * mapping = file->f_mapping;
+	struct inode 	*inode = mapping->host;
+	ssize_t		written = 0;
+	ssize_t		err;
+	ssize_t		status;
+
+	......
+
+	if (iocb->ki_flags & IOCB_DIRECT) {
+		......
+	} else {
+		//https://elixir.bootlin.com/linux/v4.11.6/source/mm/filemap.c#L2874
+		//TODO：这里的内容单独分析
+		written = generic_perform_write(file, from, iocb->ki_pos);
+		if (likely(written > 0))
+			iocb->ki_pos += written;
+	}
+out:
+	current->backing_dev_info = NULL;
+	return written ? written : err;
+}
+```
+
+##	0x07	总结
 
 ####	`can_merge`的作用及场景
 [`page_cache_pipe_buf_ops`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/splice.c#L140)
