@@ -333,6 +333,9 @@ hlist_for_each_entry_rcu(task, head, pids[type].node) {
 
 参考上面这棵树的创建过程，对于键值相同的节点是有时间顺序的，插入晚的默认为大值，放在后面，也就是说rbtree自动实现了按时间轴存储键值的功能。即使到期时间相等（键值Key相等），也可以根据其插入红黑树的时间顺序来取出最小到期事件去执行
 
+####	基本概念
+![rbtree-0](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/0/rbtree-0.png)
+
 ####	结构体定义
 与其他的内核数据结构相同，为了通用性，`rb_node`只保留了红黑树节点自身的必须属性，即左孩子、右孩子、节点颜色
 
@@ -347,9 +350,111 @@ struct rb_node {
     /* The alignment might seem pointless, but allegedly CRIS needs it */
 ```
 
+此结构体特点：
+-	按`sizeof(long)`字节对齐，`long`在`32`位系统下是`4`字节，`64`位为`8`字节，因为结构体中的首个字段地址就是整个结构体的地址，所以`__rb_parent_color`至少是`4`字节对齐的（即地址必须是`4`的倍数），那么分配给`__rb_parent_color`字段地址值的最后两个bits始终是`0`，可以用来存储额外的信息
+-	`__rb_parent_color`保存了父节点的地址与本节点的颜色这两个信息
+
+内核提供的相关的基础定义如下：
+
+```cpp
+#define  rb_parent(r) ((struct rb_node*)((r)->__rb_parent_color & ~3))
+
+/* 'empty' nodes are nodes that are known not be inserted in an rbtree */
+#define RB_EMPTY_NODE(node)	\
+	((node)->__rb_parent_color == (unsigned long)(node))
+
+#define RB_CLEAR_NODE(node)	\
+	((node)->__rb_parent_color = (unsigned long)(node))
+
+/* 其他一些辅助宏　*/
+
+#define RB_RED   0
+#define RB_BLACK 1
+
+#define RB_ROOT (struct rb_root){NULL,}
+
+#define rb_entry(ptr, type, member) contaier_of(ptr,type, member)
+
+#define RB_EMPTY_ROOT(root) (READ_ONCE((root)->rb_node) == NULL)
+
+/* 设置parent的相关内联函数　*/
+
+static inline void rb_set_parent(struct rb_node *rb, struct rb_node *p)
+{
+	rb->__rb_parent_color |= (unsigned long)p; /* 不影响rb节点的颜色属性　*/
+}
+
+static inline void rb_set_parent_color(struct rb_node *rb, struct rb_node *p, int color)
+{
+	rb->__rb_parent_color = (unsigned long)p | color; /* 指定rb节点的颜色属性　*/
+}
+
+/* 初始化新节点的内联函数　*/
+
+static inline void rb_link_node(struct rb_node *node, struct rb_node *parent, struct rb_node **rb_link)
+{
+	/**
+     * 设置其双亲节点的首地址(根节点的双亲节点为NULL),且颜色属性为黑色
+	 */
+	node->__rb_parent_color = (unsigned long)parent;
+
+	node->rb_left = node->rb_right = NULL;
+	/**
+	 * 指向新节点
+	 */
+	*rb_link = node;
+}
+```
+
+####	rbtree：内核的若干细节（lockless lookup）
+
+####	rbtree：内核的若干细节（augment）
+
+
+####	核心代码解析：插入
+
+####	核心代码解析：删除
 TODO
 
-####	核心代码解析
+####	查找
+
+1、`find_vma`：遍历红黑树，寻找第一个`tmp->vm_end < addr`的红黑树节点
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/mmap.c#L2097
+struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)
+{
+	struct rb_node *rb_node;
+	struct vm_area_struct *vma;
+
+	/* Check the cache first. */
+	vma = vmacache_find(mm, addr);
+	if (likely(vma))
+		return vma;
+
+	rb_node = mm->mm_rb.rb_node;
+
+	while (rb_node) {
+		struct vm_area_struct *tmp;
+
+		tmp = rb_entry(rb_node, struct vm_area_struct, vm_rb);
+
+		if (tmp->vm_end > addr) {
+			vma = tmp;
+			if (tmp->vm_start <= addr){
+				//命中条件，跳出查找过程
+				break;
+			}
+			rb_node = rb_node->rb_left;
+		} else
+			rb_node = rb_node->rb_right;
+	}
+
+	if (vma)
+		vmacache_update(addr, vma);
+	return vma;
+}
+```
 
 ####	rbtree的应用
 
@@ -362,6 +467,10 @@ TODO
 3. 支持快速获取最小节点：CFS每次调度需要选择`vruntime`最小的任务，红黑树的最左节点即为最小节点，可以在`O(logN)`时间内快速定位
 4. 动态任务管理：CFS需要频繁插入新任务和删除已完成任务，红黑树的高效动态操作能力满足了这一需求
 5. 内存效率：红黑树每个节点只需额外存储一个颜色标记，内存开销较小，适合内核这种对内存敏感的环境
+
+##	0x0	vm_area_struct：rb_subtree_gap实现分析
+
+![mm_struct_rbtree](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/0/mm_struct_rbtree.png)
 
 ##	0x04		等待队列
 **等待（waiter） - 唤醒（waker）**模型是 Linux 中的一种基础机制。当进程要获取某些资源（例如从网卡读取数据）的时候，但资源并没有准备好（例如网卡还没接收到数据），这时候内核必须切换到其他进程运行，直到资源准备好再唤醒进程。**waitqueue 机制就是内核用于管理等待资源的进程，当某个进程获取的资源没有准备好的时候，可以通过调用 `add_wait_queue()` 函数把进程添加到 waitqueue 中，然后切换到其他进程继续执行。当资源准备好，由资源提供方通过调用 `wake_up()` 函数来唤醒等待的进程**
@@ -634,3 +743,6 @@ hashtable这样设计主要是为了节省内存，哈希表的表头是一个�
 -	[Linux 中的等待队列机制](https://zhuanlan.zhihu.com/p/97107297)
 -	[等待队列原理与实现](https://github.com/liexusong/linux-source-code-analyze/blob/master/waitqueue.md)
 -	[如何阅读内核源码](https://cloud.tencent.com/developer/article/1963196)
+-	[红黑树 IN Linux （一）](https://tinylab.org/rbtree-part1/)
+-	[红黑树 IN Linux （二）](https://tinylab.org/rbtree-part2/)
+-	[红黑树 IN Linux （三）](https://tinylab.org/rbtree-part3/)
