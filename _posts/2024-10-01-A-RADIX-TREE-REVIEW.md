@@ -73,9 +73,13 @@ struct idr_layer {
 ```
 
 ##  0x01    radix tree（4.11.6）
-先看下4.11.6版本的IDR实现：
+先看下4.11.6版本的IDR实现，假设key值等于`0x2000`, 其二进制按照`6`bit一组可以写成`0010-000000 -000000`，从左到右的index值分别为`2/0/0`。那么根据key值`0x2000`找到value的过程如图：
 
-![idr-simple-1]()
+1.	在最上层的节点（A）中找到`index`为`2`的slot，其`slot[2]`指针指向第二层节点中的节点（B）
+2.	在节点（B）中找到`index`为`0`的slot，其`slot[0]`指针指向第三层节点中的节点（C）
+3.	在节点（C）中找到`index`为`0`的slot，其`slot[0]`指针指向叶子节点item
+
+![idr-simple-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/datastructure/radix-tree/idr-simple-1.png)
 
 ####	数据结构
 每一棵radix tree都必须有`struct radix_tree_root`这样一个管理结点（对象）：
@@ -204,6 +208,29 @@ struct address_space {
 -	一直持续到根节点
 
 这种设计保证了只要根节点的某个 tag 位为 `0`，其下方的整棵子树绝对不含有该状态的条目。此外，在内核中（调用侧）通过`radix_tree_tag_get`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/lib/radix-tree.c#L1534)读取`tags`的函数也被设计为基于rcu机制的无锁，从而提升了读取效率。既然是rcu机制，那么就是容忍读到过时的数据，即在并发修改下，读到一个过时的`tags`（如page被设置为clean，但是`tags`标签还未清理）通常也是安全的，内核在真正操作page之前会重新验证
+
+最后，对与root节点`struct radix_tree_root`的tags，内核使用了`gfp_mask`成员的`25~27`bit，用作root tags（对应于radix树只有一个index为0的叶子节点的特殊情况，这个叶子节点不与任何`radix_tree_node`结构关联），操作root tag的操作函数如下：
+
+```cpp
+static inline void root_tag_set(struct radix_tree_root *root, unsigned int tag)
+{
+	root->gfp_mask |= (__force gfp_t)(1 << (tag + __GFP_BITS_SHIFT));
+}
+
+static inline void root_tag_clear(struct radix_tree_root *root, unsigned tag)
+{
+	root->gfp_mask &= (__force gfp_t)~(1 << (tag + __GFP_BITS_SHIFT));
+}
+static inline void root_tag_clear_all(struct radix_tree_root *root)
+{
+	root->gfp_mask &= __GFP_BITS_MASK;
+}
+
+static inline int root_tag_get(struct radix_tree_root *root, unsigned int tag)
+{
+	return (__force int)root->gfp_mask & (1 << (tag + __GFP_BITS_SHIFT));
+}
+```
 
 ####	内核radix tree的几种形态
 
