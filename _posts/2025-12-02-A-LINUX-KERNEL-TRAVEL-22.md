@@ -16,6 +16,10 @@ tags:
 
 ![read-syscall-kernel-trace]()
 
+再回顾一下，前文介绍的`splice`实现零拷贝中的内核读操作，是怎么实现的？
+
+本文主要梳理下基于page cache的内核read实现的若干细节，基于[v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include)的源码
+
 ##  0x01    generic_file_read_iter的实现细节
 通常大部分文件系统的读取read实现，都是将`read_iter`置为`generic_file_read_iter`，如本文分析的ext4系统
 ![generic_file_read_iter-flow]()
@@ -1144,9 +1148,7 @@ done:
 
 TODO
 
-##	0x0	总结
-
-####	零拷贝splice中的page读
+##	0x0	零拷贝splice中的page读
 `copy_page_to_iter_pipe`用于`splice`函数即零拷贝技术的底层实现，用于从管道读出数据。`splice`直接将页面从一个文件描述符的页缓存"移动"到另一个文件描述符的缓冲区，不经过用户空间，也不复制页面数据
 
 ```cpp
