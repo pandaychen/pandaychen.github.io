@@ -55,7 +55,7 @@ XDP（eXpress Data Path）机制运行于 Linux 内核网络栈的最底层，�
 ####  XDP 输入参数
 XDP hook 的输入参数类型为 `struct xdp_md`（在内核头文件 `bpf.h` 中定义），是`xdp_buff`的BPF结构，对比`sk_buff`结构而言，`sk_buff`包含数据包的元数据，而`xdp_buff`创建更早，不依赖与其他内核层（因此XDP机制下可以更快的获取和处理数据包）
 
-```CPP
+```cpp
 /* user accessible metadata for XDP packet hook
  * new fields must be added to the end of this structure
  */
@@ -77,7 +77,7 @@ struct xdp_md {
 
 2、数据包访问规则：数据包内容范围为`[data, data_end)`，即从`data`到`data_end-1`的连续内存空间，而且直接解引用指针（如`*(__u32 *)ptr`）可能导致非法内存访问，需显式边界检查，常用的访问模式如下（注意频繁的边界检查可能影响性能，建议将多次检查合并，如同时检查以太网和IP头部长度）
 
-```CPP
+```cpp
 void *data_start = (void *)(long)ctx->data;
 void *data_end = (void *)(long)ctx->data_end;
 
@@ -88,7 +88,7 @@ if (data_start + sizeof(*eth) > data_end) {
 }
 ```
 
-```CPP
+```cpp
 //解析IPv4头部
 SEC("xdp")
 int xdp_parser(struct xdp_md *ctx) {
@@ -226,7 +226,7 @@ int xdp_firewall(struct xdp_md *ctx)
 ####  DROP-TCP
 通过 xdp 拦截所有系统的 packet，如果是 TCP 报文则全部丢弃
 
-```CPP
+```cpp
 /*
   check whether the packet is of TCP protocol
 */
@@ -345,7 +345,7 @@ static bool is_TCP(void *data_begin, void *data_end){
 ####  基于xdp实现syn cookies
 参考[xdp-syn-cookie](https://github.com/PlushBeaver/xdp-syn-cookie/blob/master/xdp_filter.c#L332)，核心流程`process_ether->process_ip->process_tcp`，syn-cookie的原理可以参考Linux内核协议栈的[实现](https://en.wikipedia.org/wiki/SYN_cookies)，这里略有不同。先简单看下cookies生成/校验算法：
 
-```CPP
+```cpp
 static __attribute__((always_inline))  u32
 cookie_counter() {
     return bpf_ktime_get_ns() >> (10 + 10 + 10 + 3); /* 8.6 sec */
@@ -394,7 +394,7 @@ cookie_hash_base(struct FourTuple t, u32 seqnum) {
 
 1、`process_tcp`的实现
 
-```CPP
+```cpp
 static __attribute__((always_inline)) int
 process_tcp(struct Packet* packet) {
     struct tcphdr* tcp   = packet->tcp;
@@ -423,7 +423,7 @@ process_tcp(struct Packet* packet) {
 - 伪造的序列号为SYN-ACK包中的`seq`序列号：`tcp->seq = bpf_htonl(cookie)`
 - ip以及tcp的checksum都需要重新计算，且源、目的要置反
 
-```CPP
+```cpp
 static __attribute__((always_inline)) int
 process_tcp_syn(struct Packet* packet) {
     struct xdp_md* ctx   = packet->ctx;
@@ -498,7 +498,7 @@ process_tcp_syn(struct Packet* packet) {
 
 3、`process_tcp_ack`的实现，这里主要是通过syn-cookie校验`cookie_check`算法，验证ACK包中的`ack`序列号是否符合预期
 
-```CPP
+```cpp
 static __attribute__((always_inline)) int
 process_tcp_ack(struct Packet* packet) {
     struct iphdr*  ip    = packet->ip;

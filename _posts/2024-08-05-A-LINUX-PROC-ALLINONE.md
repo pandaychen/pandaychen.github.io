@@ -197,7 +197,7 @@ dr-xr-xr-x 9 root root  0 Feb 10 10:43 ..
 3.  `/proc/`下由数字组成的进程子目录是每次读取proc内容**动态生成**，即动态遍历当前进程列表形成；以及每进程子目录下子目录/子文件的形成
 
 ####	proc下的主要目录&&文件
-TODO
+参考：[Linux Procfs (一) /proc/* 文件实例解析](https://juejin.cn/post/7055321925463048228)
 
 ##  0x02 procfs 的内核视角
 
@@ -210,7 +210,7 @@ TODO
 ####    proc_dir_entry
 `proc_dir_entry`的结构如下：
 
-```CPP
+```cpp
 struct proc_dir_entry {
 	unsigned int low_ino;
 	umode_t mode;
@@ -242,7 +242,7 @@ struct proc_dir_entry {
 TODO
 
 ####    pid_entry
-```CPP
+```cpp
 struct pid_entry {
 	const char *name;
 	unsigned int len;
@@ -255,7 +255,7 @@ struct pid_entry {
 
 `pid_entry`下面所有的文件的操作方法都定义在[`tgid_base_stuff`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/base.c#L2843)结构中
 
-```CPP
+```cpp
 static const struct pid_entry tgid_base_stuff[] = {
 	DIR("task",       S_IRUGO|S_IXUGO, proc_task_inode_operations, proc_task_operations),
 	DIR("fd",         S_IRUSR|S_IXUSR, proc_fd_inode_operations, proc_fd_operations),
@@ -356,7 +356,7 @@ static const struct pid_entry tgid_base_stuff[] = {
 
 1、`DIR`：目录条目，`DIR("task", S_IRUGO|S_IXUGO, proc_task_inode_operations, proc_task_operations)`表示创建目录`/proc/<pid>/task/`，该目录包含该进程的所有线程信息，参数分别表示目录名、权限、inode操作、文件操作
 
-```CPP
+```cpp
 static const struct file_operations proc_task_operations = {
 	.read		= generic_read_dir,
 	.iterate_shared	= proc_task_readdir,	//proc_task_readdir：对应的目录遍历方法实现
@@ -378,7 +378,7 @@ static const struct inode_operations proc_task_inode_operations = {
 0  1  2  3  4
 ```
 
-```CPP
+```cpp
 const struct inode_operations proc_fd_inode_operations = {
 	.lookup		= proc_lookupfd,	//lookup 对应的lookup方法实现
 	.permission	= proc_fd_permission,
@@ -394,7 +394,7 @@ const struct file_operations proc_fd_operations = {
 
 2、`REG`：表示常规文件条目，`REG("environ", S_IRUSR, proc_environ_operations)`，创建一个常规文件，如`/proc/<pid>/environ` 文件，显示进程的环境变量，参数分别为文件名、权限、文件操作结构体
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/base.c#L974
 static const struct file_operations proc_environ_operations = {
 	.open		= environ_open,
@@ -406,7 +406,7 @@ static const struct file_operations proc_environ_operations = {
 
 3、`ONE`：单一文件条目，`ONE("status", S_IRUGO, proc_pid_status)`，创建一个只读的常规文件，使用简化的回调函数，如`/proc/<pid>/status`文件是显示进程状态信息，参数分别是文件名、权限、数据生成函数指针。与 `REG` 的区别是`ONE` 使用简单的 `C`，而 `REG` 需要完整的文件操作结构体
 
-```CPP
+```cpp
 int proc_pid_status(struct seq_file *m, struct pid_namespace *ns,
 			struct pid *pid, struct task_struct *task)
 {
@@ -441,7 +441,7 @@ lrwxrwxrwx   1 root root 0 Nov  7 07:07 cwd -> /
 bin  boot  data  dev  etc  home  lib  lib64  lost+found  media  mnt  opt  proc  root  run  sbin  srv  sys  tmp  usr  var
 ```
 
-```CPP
+```cpp
 static int proc_cwd_link(struct dentry *dentry, struct path *path)
 {
 	struct task_struct *task = get_proc_task(d_inode(dentry));
@@ -480,7 +480,7 @@ static inline void get_fs_pwd(struct fs_struct *fs, struct path *pwd)
 
 1、内核初始化创建`/proc`目录，[代码](https://elixir.bootlin.com/linux/v4.11.6/source/init/main.c#L488)
 
-```CPP
+```cpp
 asmlinkage void __init start_kernel(void)
 {
 	//...
@@ -491,7 +491,7 @@ asmlinkage void __init start_kernel(void)
 
 2、`proc_root_init->register_filesystem->proc_sys_init`
 
-```CPP
+```cpp
 void __init proc_root_init(void)
 {
 	int err;
@@ -535,7 +535,7 @@ static struct file_system_type proc_fs_type = {
 
 3、挂载procfs入口：`proc_mount->proc_fill_super`，将procfs文件系统挂载到内核全局的VFS树中，调用`proc_fill_super`完成超级快的初始化工作
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/root.c#L88
 static struct dentry *proc_mount(struct file_system_type *fs_type,
 	int flags, const char *dev_name, void *data)
@@ -553,7 +553,7 @@ static struct dentry *proc_mount(struct file_system_type *fs_type,
 }
 ```
 
-```CPP
+```cpp
 int proc_fill_super(struct super_block *s, void *data, int silent)
 {
 	struct pid_namespace *ns = get_pid_ns(s->s_fs_info);
@@ -616,7 +616,7 @@ struct proc_dir_entry proc_root = {
 
 上面的`proc_root`节点不仅包含正常的文件及目录，还要管理进程指定的pid文件，`proc_root`必须能够处理inode和file，`proc_root_inode_operations`与`proc_root_operations`的定义如下：
 
-```CPP
+```cpp
 static struct file_operations proc_root_operations = {
     .read        = generic_read_dir,               
     .readdir     = proc_root_readdir,		//目录遍历
@@ -634,7 +634,7 @@ static struct inode_operations proc_root_inode_operations = {
 ####	proc_root_lookup：proc下的inode查找
 当用户空间访问proc文件的时候，vfs就会调用`real_lookup()`，它就会调用`inode_operations`中的`proc_root_lookup`函数，实际上就是调用`proc_root_lookup()`函数
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/root.c#L204
 static struct dentry *proc_root_lookup(struct inode * dir, struct dentry * dentry, unsigned int flags)
 {
@@ -656,7 +656,7 @@ struct dentry *proc_lookup(struct inode *dir, struct dentry *dentry,
 
 `proc_pid_lookup`与`proc_lookup`的实现：
 
-```CPP
+```cpp
 //在指定的pid文件夹中查找dentry是否存在
 struct dentry *proc_pid_lookup(struct inode *dir, struct dentry * dentry, unsigned int flags)
 {
@@ -718,7 +718,7 @@ struct dentry *proc_lookup_de(struct proc_dir_entry *de, struct inode *dir,
 ####	file_operations：proc_root_readdir
 `proc_root_operations`对应的`.readdir`实现为`proc_root_readdir`，该函数是procfs 文件系统根目录`/proc/`的目录遍历实现，它的作用是控制如何列出 `/proc` 目录下的内容
 
-```CPP
+```cpp
 #define FIRST_PROCESS_ENTRY 256
 
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/root.c#L170
@@ -751,7 +751,7 @@ static int proc_root_readdir(struct file *file, struct dir_context *ctx)
 -	特殊符号链接：`self`、`thread-self`
 -	所有进程目录：`/proc/1`、 `/proc/2`等
 
-```CPP
+```cpp
 int proc_pid_readdir(struct file *file, struct dir_context *ctx)
 {
 	struct tgid_iter iter;
@@ -803,7 +803,7 @@ int proc_pid_readdir(struct file *file, struct dir_context *ctx)
 ```
 
 
-```CPP
+```cpp
 static struct tgid_iter next_tgid(struct pid_namespace *ns, struct tgid_iter iter)
 {
 	struct pid *pid;
@@ -826,6 +826,35 @@ retry:
 	}
 	rcu_read_unlock();
 	return iter;
+}
+
+struct pid *find_ge_pid(int nr, struct pid_namespace *ns)
+{
+	struct pid *pid;
+
+	do {
+		// 在指定命名空间中查找精确的 PID
+		pid = find_pid_ns(nr, ns);
+		if (pid)
+			break;	//说明找不到或者已经寻找完成
+		// 在该命名空间的位图中查找下一个存在的 PID
+		nr = next_pidmap(ns, nr);
+	} while (nr > 0);
+
+	return pid;
+}
+
+struct pid *find_pid_ns(int nr, struct pid_namespace *ns)
+{
+	struct upid *pnr;
+
+	hlist_for_each_entry_rcu(pnr,
+			&pid_hash[pid_hashfn(nr, ns)], pid_chain)
+		if (pnr->nr == nr && pnr->ns == ns)
+			return container_of(pnr, struct pid,
+					numbers[ns->level]);
+
+	return NULL;
 }
 ```
 
@@ -900,7 +929,7 @@ sudosu-root
 
 对应的VFS read实现方法`proc_pid_cmdline`：通过该方法获取进程对应的cmdline文件的信息
 
-```CPP
+```cpp
 static int proc_pid_cmdline(struct task_struct *task, char * buffer)
 {
     int res = 0;
@@ -980,7 +1009,7 @@ out:
 
 对应的内核函数为[`do_task_stat`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/array.c#L393)，rss列的计算函数为[`get_mm_rss`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/array.c#L514)，可见`RSS`的计算包含了`MM_FILEPAGES`/`MM_ANONPAGES`/`MM_SHMEMPAGES`（单位：页）
 
-```CPP
+```cpp
 static inline unsigned long get_mm_rss(struct mm_struct *mm)
 {
 	return get_mm_counter(mm, MM_FILEPAGES) +
@@ -1029,7 +1058,7 @@ The columns are:
 
 `proc_pid_statm`函数的实现如下，注意[`get_mm_counter`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/mm.h#L1448)函数的作用是读取`mm_struct`结构体的成员数组计数`mm->rss_stat.count[index]`
 
-```CPP
+```cpp
 static inline unsigned long get_mm_counter(struct mm_struct *mm, int member)
 {
 	long val = atomic_long_read(&mm->rss_stat.count[member]);
