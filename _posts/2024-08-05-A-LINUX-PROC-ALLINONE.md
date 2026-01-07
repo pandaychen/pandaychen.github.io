@@ -1191,6 +1191,22 @@ const struct inode_operations proc_ns_dir_inode_operations = {
 TODO
 
 ##	0x05	/proc/下个几个典型实现
+在示例说明前，先简单介绍下procfs读取（输出）数据的一些范式，大部分都遵从`open then read`机制，即如下流程：
+
+1、open 阶段，主要完成：
+
+-	权限校验
+-	引用绑定：将 `mm_struct` 的指针存入 `file->private_data`（如 `proc_maps_private` 结构体）
+-	`file_operation`绑定
+-	此时不加 `mmap_sem` 锁，因为现在只是打开文件，还没有真正开始读数据
+-	对于可能较大的数据（文件），内核会采用`seq_read`进制进行多次批量`read`
+
+2、read 阶段 （`seq_read -> m_start`）：可能多次调用
+
+-	从 `file->private_data` 结构体拿出需要的结构（如 `mm`）
+-	加锁`down_read(&mm->mmap_sem)`
+-	遍历并显示（如`show_map`）
+-	释放锁：`up_read`
 
 ####	例1：ls /proc/
 `ls /proc/`输出为固定目录加上当前命名空间下可见的进程id的目录集合
@@ -1342,7 +1358,7 @@ const struct file_operations proc_pid_maps_operations = {
 
 2、open过程分析：绑定进程的 `mm_struct` 到文件句柄，定位到`task_struct`（哪个进程的内存布局）
 
-先着重跟踪下`pid_maps_open`的实现，对应于`proc_pid_maps_operations[file_operations]`中对于`open`的关联，即调用syscall open打开`/proc/[pid]/maps`时，会调用`pid_maps_open`函数。`pid_maps_open` 的目的是找到该进程对应的 `mm_struct`，并确保在接下来的读取过程中，这个 `mm` 对象不会被销毁
+先着重跟踪下`pid_maps_open`的实现，对应于`proc_pid_maps_operations[file_operations]`中对于`open`的关联，即调用syscall open打开`/proc/[pid]/maps`时，会调用`pid_maps_open`函数。`pid_maps_open` 的目的是找到该进程对应的 `mm_struct`，并确保在接下来的读取过程中，这个 `mm` 对象不会被销毁（依赖于`mmgrab`与`mmput`机制保证）
 
 ```cpp
 static int pid_maps_open(struct inode *inode, struct file *file)
@@ -1392,20 +1408,35 @@ static int proc_maps_open(struct inode *inode, struct file *file,
 	return 0;
 }
 
+//核心函数
 struct mm_struct *proc_mem_open(struct inode *inode, unsigned int mode)
 {
+	//1.身份定位：从 inode 到 task_struct
+	//在 /proc 文件系统中，每个文件（如 /proc/1234/maps）的 inode 里都记录了它所属进程的信息
 	struct task_struct *task = get_proc_task(inode);
 	struct mm_struct *mm = ERR_PTR(-ESRCH);
 
 	if (task) {
+		/*
+		2.	安全检查：mm_access 的守护
+		这是最关键的一步。内核不会随便让一个进程读取另一个进程的内存映射，因为这涉及敏感信息（如库加载地址、堆栈位置，可用于安全攻击）
+    	2.1 cred_guard_mutex: 获取互斥锁，防止在检查权限时进程执行 exec（这会导致凭据 credentials 变化）
+	    2.2 ptrace_may_access: 进行 PTRACE 权限检查。如果权限不足（比如你尝试看 root 进程的 maps），这里会返回 -EACCES
+	    2.3 get_task_mm: 如果权限通过，增加 mm_struct 的引用计数（mm_users），确保 mm 在读取期间有效
+		*/
 		mm = mm_access(task, mode | PTRACE_MODE_FSCREDS);
 		put_task_struct(task);
 
+		/*
+		3. 引用计数机制：mmgrab vs mmput
+		- mm_users (通过 mmput 操作): 对应的是页表和内存资源。如果 mm_users 降为 0，内核会释放该进程占用的所有物理内存和页表
+		- mm_count (通过 mmgrab 操作): 对应的是 mm_struct 结构体本身。只要 mm_count > 0，即使进程退出了，mm_struct 这个结构体对象在内存中就不会被 kmem_cache_free 掉
+		*/
 		if (!IS_ERR_OR_NULL(mm)) {
 			/* ensure this mm_struct can't be freed */
-			mmgrab(mm);
+			mmgrab(mm);	// 增加 mm_count
 			/* but do not pin its memory */
-			mmput(mm);
+			mmput(mm);	// 减少 mm_users
 		}
 	}
 
@@ -1439,7 +1470,65 @@ struct mm_struct *mm_access(struct task_struct *task, unsigned int mode)
 -	`struct proc_inode`加`container_of`机制：拿到`proc_inode`中的`struct pid *`成员
 -	通过`struct pid`拿到对应的`struct task_struct`
 
-TODO：查找过程说明
+
+这里简单描述下查找过程，在procfs中，每一个文件或目录（inode）实际上都关联在某个进程的 pid 结构（`struct pid`）上
+
+1、关键的数据结构`proc_inode`（前文已述），当通过 `open` 打开 `/proc/[pid]/maps` 时，内核已经通过路径查找定位到了对应的 `inode`，而 procfs 的 `inode` 在创建时（如进程启动后，用户首次访问其 proc 目录），就已经把该进程的 `struct pid` 指针存入了 `proc_inode` 的`pid`成员中
+
+```cpp
+struct proc_inode {
+	......
+    struct pid *pid;    // 这里的 pid 结构是关联的关键
+    struct inode vfs_inode;
+};
+```
+
+2、通过`proc_pid(inode)` 提取 PID 结构，利用了 `container_of` 宏，从 `vfs_inode` 的地址倒推出 `proc_inode` 的首地址，从而拿到 `pid` 指针。`struct pid *`是内核对 PID 的抽象结构（**PID 抽象层即内核引入 `struct pid` 是为了处理命名空间（Namespace）。同一个进程在不同的 PID Namespace 里有不同的数字 PID。`struct pid` 作为一个中介，可以跨 Namespace 稳定地引用进程**）
+
+```cpp
+// proc_pid：获取预存的 pid 结构体指针
+static inline struct pid *proc_pid(const struct inode *inode)
+{
+    // 从 inode 指针转换回 proc_inode，并返回其中的 pid
+    return PROC_I(inode)->pid;
+}
+```
+
+3、通过`pid`对象，调用`get_pid_task` 转换为 `task_struct`
+
+```cpp
+struct task_struct *get_pid_task(struct pid *pid, enum pid_type type)
+{
+    struct task_struct *result;
+    rcu_read_lock(); // 进入 RCU 临界区，保证 task 不会在查找期间被释放
+    
+    // 从 pid 结构中找到 task 指针
+	// 会根据 pid 结构体中的散列表或链表找到 task_struct
+    result = pid_task(pid, type); 
+    
+    if (result)
+        get_task_struct(result); //非常重要：增加 task_struct 的引用计数，防止它在后续使用中消失
+        
+    rcu_read_unlock();
+    return result;
+}
+
+// pid_task：通过内核的 PID 管理机制（hashtable查找），找到该 PID 当前对应的进程描述符 task_struct
+struct task_struct *pid_task(struct pid *pid, enum pid_type type)
+{
+	struct task_struct *result = NULL;
+	if (pid) {
+		struct hlist_node *first;
+		first = rcu_dereference_check(hlist_first_rcu(&pid->tasks[type]),
+					      lockdep_tasklist_lock_is_held());
+		if (first)
+			result = hlist_entry(first, struct task_struct, pids[(type)].node);
+	}
+	return result;
+}
+```
+
+所以，这里核心查找路径是`inode->proc_inode->[struct pid]->task_struct`
 
 ```cpp
 //https://elixir.bootlin.com/linux/v6.18.3/source/fs/proc/internal.h#L142
@@ -1451,6 +1540,8 @@ static inline struct pid *proc_pid(const struct inode *inode)
 
 static inline struct task_struct *get_proc_task(const struct inode *inode)
 {
+	//  从 inode 指针转换回 proc_inode，并返回其中的 pid
+	//  PIDTYPE_PID：指定要找的是该 PID 对应的进程实体（而不是进程组长或会话组长）
 	return get_pid_task(proc_pid(inode), PIDTYPE_PID);
 }
 
@@ -1716,7 +1807,7 @@ static void vma_stop(struct proc_maps_private *priv)
 	-	将 `m->version` 更新为当前 VMA 的地址，方便下次 `read` 进来时找回位置
 4.	最后内核将缓冲区的数据copy到用户态 buf 中，`read` 系统调用结束
 
-所以，这就保证了在一次 `read()` 返回的数据中，所有的 VMA 信息是绝对同步的（锁保护），因为有 `m_start` 拿住的读锁，`show_map` 访问这些字段时，不需要担心 vma 对象本身被销毁或者这些字段被并发修改。但是，一个有趣的边界情况是，如果一个进程有非常多的 VMA（`cat /proc/pid/maps` 运行耗时较久），为了不让写者饿死，`seq_file` 机制在读取大数据量时，可能会在多次 `read` 系统调用之间释放并重新获取锁，如此内核引入了 `m->version`（记录上一次读取到的 `vm_start` 地址）来解决，这种设计体现了数据的断点续传，同时也保证了对写着的公平竞争的特点。即内核哲学之一，内核优先保证系统不崩溃（通过重新定位指针），而不强制保证输出的绝对完美快照（除非一次性读完所有数据）
+所以，这就保证了在一次 `read()` 返回的数据中，所有的 VMA 信息是绝对同步的（锁保护），因为有 `m_start` 拿住的读锁，`show_map` 访问这些字段时，不需要担心 vma 对象本身被销毁或者这些字段被并发修改。但是，一个有趣的边界情况是，如果一个进程有非常多的 VMA（`cat /proc/pid/maps` 运行耗时较久），为了不让写者饿死，`seq_file` 机制在读取大数据量时，可能会在多次 `read` 系统调用之间释放并重新获取锁，如此内核引入了 `m->version`（记录上一次读取到的 `vm_start` 地址）来解决，这种设计体现了数据的断点续传，同时也保证了对写着的公平竞争的特点。**即内核哲学之一，内核优先保证系统不崩溃（通过重新定位指针），而不强制保证输出的绝对完美快照（除非一次性读完所有数据）**
 
 -	现场恢复：当 `m_start` 第二次被调用时，它会检查 `m->version`，此值保存了上一次读取到的最后一个 VMA 的起始地址（`vm_start`）
 -	重新定位：`m_start` 会调用 `find_vma(mm, last_addr)`来寻找下一个VMA，即便原来的 VMA 被删除了，`find_vma` 也能找到地址空间中紧接着那个位置的下一个 VMA
