@@ -13,7 +13,7 @@ tags:
 ##  0x00    前言
 前文[httprouter分析](https://pandaychen.github.io/2021/10/01/GOLANG-HTTPROUTER-ANALYSIS/)，分析了基于字符串的radix tree的实现，本文分析下内核的radix tree（ID Radix Tree）
 
--   page cache管理：如4.11.6内核版本中的[`radix_tree_root`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/radix-tree.h#L112)、[`radix_tree_node`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/radix-tree.h#L93)，被用于实现内核`task_struct`维度的page cache管理，关联结构[`address_space`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/fs.h#L381)
+-   page cache管理：如4.11.6内核版本中的[`radix_tree_root`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/radix-tree.h#L112)、[`radix_tree_node`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/radix-tree.h#L93)，被用于实现内核`struct inode`维度（文件）的page cache管理，关联结构[`address_space`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/fs.h#L381)
 -   进程pid分配管理：如内核6.18版本的[`idr`](https://elixir.bootlin.com/linux/v6.18/source/include/linux/idr.h#L20)结构、[`radix_tree_node`](https://elixir.bootlin.com/linux/v6.18/source/include/linux/radix-tree.h#L26)，不过这里的`radix_tree_root	`与`radix_tree_node	`结构已经被替换为`xarray`与`xa_node`实现
 
 旧版本的radix tree实现，在4.20内核之后，被`xarray`结构所替换
@@ -122,10 +122,6 @@ struct radix_tree_node {
 -	`tags`：这里的`tags`是二维数组，在64bit系统中，这个数组的定义`tag[3][1]`相当于一维数组
 -	`slots`：指针数组slot[64]， 每个元素指向一个下一级的radix_tree_node结构，或者是叶子节点，注意其定义是带了`__rcu`标志的
 
-除此之外：`union`中的两个成员的作用如下：
-
-TODO
-
 关于`void __rcu	*slots[RADIX_TREE_MAP_SIZE]`，这里隐藏了几个细节：
 
 1、`__rcu`的作用
@@ -172,6 +168,31 @@ struct address_space {
 每个有效的slot对应一个page指针；而空的slot存储`NULL`
 
 2、radix树的中间节点存储下级节点指针，非叶子节点的`slots`数组中存储的是指向下级`radix_tree_node`的指针，实际类型为`struct radix_tree_node *`
+
+####	`union`成员的作用
+`union`中的两个成员的作用如下：
+
+```cpp
+union {
+		struct list_head private_list;	/* For tree user */
+		struct rcu_head	rcu_head;	/* Used when freeing node */
+};
+
+//内存重采样：
+//当节点进入释放流程时，原来的 private_list.next 和 private_list.prev 所在的位置
+//会被重新解释为 rcu_head.next 和 rcu_head.func
+struct callback_head {
+    struct callback_head *next;
+    void (*func)(struct callback_head *head);
+};
+typedef struct callback_head rcu_head;
+```
+
+这是个非常经典的内核设计，这两个字段在 `radix_tree_node` 的生命周期中，绝不会在同一时刻被使用。一个用于节点存活的时候，一个用于节点即将消亡之前
+
+-	`struct list_head private_list`：标准的双向链表的节点成员，节点活着时的私有挂钩（内核很常见的定义了），当节点还在基数树中、被正常使用时，如在某些特殊的内存回收算法中，内核可能需要把某些特定的基数树节点串起来，记录在一个待处理列表中。基数树的使用方可以利用这个字段，将多个 `radix_tree_node` 串成一个链表，方便批量追踪和管理。此时，该节点在树中是可见的，`rcu_head` 没有任何意义，因为节点还没到被释放的时候
+-	`struct rcu_head rcu_head`：**本质是 RCU 异步释放机制的容器，内核用于调用 `radix_tree_delete` 等函数导致一个节点被从radix树中移除时的rcu并发读取保护**，其原理简单描述是为了保证并发读取者的安全，节点在从树中摘除后不能立即销毁。内核会调用 `call_rcu(&node->rcu_head, radix_tree_node_rcu_free)`，该函数的内部逻辑是`rcu_head` 本质上是一个临时的钩子，它包含一个回调函数指针。RCU 子系统会把这个 `rcu_head` 挂入 CPU 的私有队列。当所有正在读取的 CPU 都离开了 RCU 临界区（经历了一个宽限期之后），这个回调函数才会被触发，最终执行 `kmem_cache_free`真正释放节点
+-	使用 `union`定义是由于上述二者不可能同时生效，即在树中时，节点可能需要被挂在 `private_list` 中，此时它绝不会出现在 RCU 的待释放队列中；而在被移除后，节点必须脱离所有的私有链表（否则会导致链表破坏），然后被挂入 `rcu_head` 队列等待被销毁，此时它不再属于任何业务链表
 
 ####	`tags[RADIX_TREE_MAX_TAGS][RADIX_TREE_TAG_LONGS]`的作用
 引入一个概念：高效文件系统索引，在 `struct radix_tree_node` 中，`tags` 数组是一个分级位图（Hierarchical Bitmap），前文说了`RADIX_TREE_MAP_SHIFT`被定义成`6`，即一个内部节点做多有`64`个child节点， 也即`slots`指针数组被定义成`void *slots[64]`，这`64`个槽位使用`1`个`64`位整型的bitmap就可以了
