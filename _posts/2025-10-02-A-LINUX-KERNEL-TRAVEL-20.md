@@ -188,6 +188,7 @@ TODO
 -	`MAP_ANONYMOUS`：匿名映射将虚拟地址映射到物理内存而不是文件（忽略fd、offset）
 
 ![mmap-result](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/mmap-result.jpg)
+所以可以看到，**`mmap`系统调用中最重要的参数就是`addr`、`offset`与`len`（申请长度），内核会根据vma的分配情况，决定本次`mmap`映射分配的vma的开始地址并返回**
 
 ####	虚拟内存地址与vma
 `mmap`系统调用在内核的主要调用链如下：
@@ -211,12 +212,15 @@ SYSCALL_DEFINE6(mmap, unsigned long, addr, unsigned long, len,
 	if (off & ~PAGE_MASK)
 		goto out;
 
+	// 重要：这里，用户态的参数offset会通过`off >> PAGE_SHIFT`转换为页数
+	// 后面内核都使用页数作为计算参数
 	error = sys_mmap_pgoff(addr, len, prot, flags, fd, off >> PAGE_SHIFT);
 out:
 	return error;
 }
 
 //https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/kernel/sys_x86_64.c#L87
+// 注意：参数pgoff就是按照PAGE_SHIFT对齐之后的（原始用户传入的）offset
 SYSCALL_DEFINE6(mmap_pgoff, unsigned long, addr, unsigned long, len,
 		unsigned long, prot, unsigned long, flags,
 		unsigned long, fd, unsigned long, pgoff)
@@ -332,7 +336,7 @@ do_mmap_pgoff(struct file *file, unsigned long addr,
 ####    do_mmap：映射的核心实现
 `do_mmap`核心功能如下：
 
-1.	调用 `get_unmapped_area` 函数用于在进程地址空间中寻找出一段长度为 `len`，并且还未映射的虚拟内存区域 vma 出来，返回值 `addr` 表示这段虚拟内存区域的起始地址。之后根据不同的文件打开方式设置不同的 vm 标志位 `flag`
+1.	调用 `get_unmapped_area` 函数用于在进程地址空间中寻找出一段长度为 `len`，并且还未映射的虚拟内存区域 vma 出来，返回值 `addr` 表示这段虚拟内存区域的起始地址。之后根据不同的文件打开方式设置不同的 vma 标志位 `flag`
 2.	调用 `mmap_region` 函数，首先会为刚才选取出来的映射虚拟内存区域分配 vma 结构，并根据映射信息进行初始化，以及建立 vma 与相关映射文件的关系，最后将这段 vma 插入到进程的虚拟内存空间中（链表或红黑树进行管理）
 
 **本小节基于AMD64（X86_64）体系下的经典布局为背景介绍**
@@ -999,6 +1003,9 @@ unsigned long mmap_region(struct file *file, unsigned long addr,
 	vma->vm_end = addr + len;
 	vma->vm_flags = vm_flags;
 	vma->vm_page_prot = vm_get_page_prot(vm_flags);
+
+	// 重要：经过PAGE_SHIFT对齐的用户传入的offset参数，最终会存储在vma结构的vm_pgoff成员中
+	// 注意：这个单位是页数（按PAGE_SHIFT）
 	vma->vm_pgoff = pgoff;
 	INIT_LIST_HEAD(&vma->anon_vma_chain);
 
@@ -1833,7 +1840,7 @@ static const struct vm_operations_struct shmem_vm_ops = {
 ```
 
 ##	0x0	缺页中断的主要处理
-本小节以ext4文件系统的mmap文件映射过程为例，分析缺页中断的处理过程。缺页中断的核心逻辑中，涉及到的主要内核结构及成员如下：
+上面完成了mmap文件映射到vma创建（文件inode关联vma）的基本过程，对应于应用层系统调用`mmap(....)`的过程，然后用户拿到了`mmap`返回的虚拟内存地址进行读写操作时`char c = ptr[0]`时，若为首次对该虚拟内存地址的访问，那么会触发缺页中断。本小节以ext4文件系统的mmap文件映射过程为例，分析缺页中断的处理过程。缺页中断的核心逻辑中，涉及到的主要内核结构及成员如下：
 
 ```cpp
 // vma
@@ -1853,7 +1860,44 @@ struct vm_fault {
 };
 ```
 
-当MMU触发缺页异常时，内核会进入缺页处理流程，缺页异常处理入口函数如下：
+当MMU触发缺页异常时，内核会进入缺页处理流程，缺页异常处理入口函数`do_page_fault`如下。在`do_page_fault`中，会通过`read_cr2`拿到触发缺页中断的虚拟内存地址`address`，`__do_page_fault` 是处理缺页异常的核心逻辑。当 CPU 访问某个虚拟内存地址（`address`）失败时，它会根据该地址所处的上下文（内核态还是用户态、是否在有效 VMA 内等）采取不同的处理策略，核心工作如下：
+
+1、早期校验与上下文判断（前置检查）
+
+2、查找虚拟内存区域（VMA），内核需要确定 `address` 是否落在一个合法的进程虚拟内存区域内
+
+-	查找 VMA： 搜索进程的 `mm_struct`，寻找第一个结束地址大于 `address` 的 VMA
+-	栈扩展检查：如果地址不在现有 VMA 内，内核会检查该地址是否紧挨着栈区域。如果是，内核会尝试尝试扩展栈（Expand Stack）
+-	bad地址处理： 如果找不到匹配的 VMA，说明访问了非法内存，跳转到 `bad_area` 逻辑，通常向进程发送 `SIGSEGV`（段错误）
+
+3、权限校验 （Permission Check），找到 VMA 后，内核会对比 `error_code`（由硬件压入）和 VMA 的权限：
+
+-	写操作： 如果是写操作导致的缺页，但 VMA 是只读的，触发错误
+-	执行操作： 如果是指令获取导致的缺页，但 VMA 不允许执行，触发错误
+-	用户权限： 用户态进程尝试访问内核地址，触发错误
+
+4、核心分配逻辑：`handle_mm_fault`，一旦确认地址合法且权限正确，内核进入最核心的分配阶段，这个过程本质上是自上而下填充页表：
+
+1.	页目录填充： 检查并分配 PGD、P4D、PUD、PMD 等各级页目录项
+2.	触发巨页 (Huge Pages)： 如果该区域配置了透明巨页（THP），内核会尝试在此处直接分配 `2MB` 的大页
+3.	对于常规页page的处理 (`handle_pte_fault`)：
+	-	匿名映射 (Anonymous)： 进程私有内存（如 `malloc` 分配），内核分配一个清零后的物理页框，并在 PTE（页表项）中建立映射
+	-	文件映射 (File-backed)：从磁盘读取文件内容到 Page Cache，然后将 `address` 映射到该物理页
+	-	写时复制 (COW)： 如果是因为写入只读的共享页（如 `fork` 后的子进程），内核会拷贝一份物理页，让进程拥有自己的副本
+	-	交换出 (Swap-in)：如果该页之前被换出到磁盘，内核将其换回内存
+
+5、错误与收尾
+
+-	成功：更新 MMU 状态，刷新相关的 TLB，函数返回，CPU 重新执行触发异常的那条指令
+-	内存不足 (OOM)：如果系统无法分配物理内存，可能触发 `out_of_memory` 机制
+-	总线错误：如果文件映射对应的磁盘扇区损坏，发送 `SIGBUS`
+
+在后续的代码中，关注如下一些关键函数：
+
+1. 查找	`find_vma()`：确认 `address` 是否属于进程空间
+2. 校验&&检查 `vma->vm_flags`：确认操作权限（读/写/执行）是否合法
+3. 缺页中断的核心处理&&分配物理内存	`handle_mm_fault()`：填充多级页表，分配物理内存
+4. 映射物理内存	`set_pte_at()`：将虚拟地址正式指向物理地址
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/mm/fault.c#L1446
@@ -1864,6 +1908,7 @@ do_page_fault(struct pt_regs *regs, unsigned long error_code)
 	enum ctx_state prev_state;
 
 	prev_state = exception_enter();
+	//重要：address即触发缺页中断的虚拟内存地址
 	__do_page_fault(regs, error_code, address);
 	exception_exit(prev_state);
 }
@@ -1956,7 +2001,7 @@ static int __handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
 		.vma = vma,
 		.address = address & PAGE_MASK,
 		.flags = flags,
-		.pgoff = linear_page_index(vma, address),	//重要：计算文件页偏移
+		.pgoff = linear_page_index(vma, address),	//重要：计算文件页偏移（见下文分析）
 		.gfp_mask = __get_fault_gfp_mask(vma),
 	};
 	struct mm_struct *mm = vma->vm_mm;
@@ -2043,6 +2088,7 @@ static int handle_pte_fault(struct vm_fault *vmf)
 	......
 }
 
+// do_fault：缺页映射的核心实现
 static int do_fault(struct vm_fault *vmf)
 {
 	struct vm_area_struct *vma = vmf->vma;
@@ -2102,12 +2148,13 @@ static int __do_fault(struct vm_fault *vmf)
 	return ret;
 }
 
-
+// ext4文件系统的mmap文件映射
 int ext4_filemap_fault(struct vm_fault *vmf)
 {
 	struct inode *inode = file_inode(vmf->vma->vm_file);
 	int err;
 
+	//调用filemap_fault，先加锁
 	down_read(&EXT4_I(inode)->i_mmap_sem);
 	// 最终调用filemap_fault实现
 	err = filemap_fault(vmf);
@@ -2130,7 +2177,10 @@ int filemap_fault(struct vm_fault *vmf)
 	struct address_space *mapping = file->f_mapping;	// 文件对应的地址空间（找到radix树即page cache管理入口）
 	struct file_ra_state *ra = &file->f_ra;	 	// 预读状态
 	struct inode *inode = mapping->host;		// 文件inode
-	pgoff_t offset = vmf->pgoff;	// 这就是从vm_area_struct获取的偏移
+	pgoff_t offset = vmf->pgoff;	
+	// 重要：这就是从vm_area_struct获取的偏移（页数）
+	// 在下面对本文件inode->address_space指向radix树进行查找时，使用的offset查找参数
+
 	struct page *page;
 	loff_t size;
 	int ret = 0;
@@ -2892,15 +2942,78 @@ static struct inode *shmem_get_inode(struct super_block *sb, const struct inode 
 ```
 
 ##	0x0	总结
+最后，整理下本文介绍的若干关键知识点
 
-1、mmap 系统调用分配虚拟内存的本质其实就是在进程的虚拟内存空间中的文件映射与匿名映射区，找出一段未被映射过的空闲虚拟内存区域 vma，这个 vma 就是申请到的虚拟内存
+####	linear_page_index 的细节
 
-![]()
+todo
+
+####	mmap系统调用的本质
+mmap 系统调用分配虚拟内存的本质其实就是在进程的虚拟内存空间中的文件映射与匿名映射区，找出一段未被映射过的空闲虚拟内存区域 vma，这个 vma 就是申请到的虚拟内存
+
+![mmap-essence]()
+
+####	缺页中断 vs address_space（radix树）查不到指定的`struct page`
+在mmap文件映射的场景下，缺页中断（Page Fault）、在page cache（radix树）查找指定的`struct page`结构（当发现对应的page不存在时，新建page）、页表转换及查找（填充）、page对象关联物理内存页，这几个名词的关系是什么？
+
+缺页中断是一种CPU异常保护机制，而查找 `address_space` 并新建 Page 是处理缺页中断过程中的一个具体步骤（属于文件映射的场景）
+
+1、缺页中断
+
+什么是缺页中断（Page Fault）：是一个宏观的硬件/软件协作机制，通常由 CPU 抛出一个异常信号，当 CPU 试图访问一个虚拟地址，但在硬件页表（Page Table）里找不到对应的物理内存页时，就会触发缺页中断。目前，已涉及到讨论的缺页中断的情况：
+
+-	匿名映射：通过`malloc`申请了堆内存，第一次触发写数据时
+-	文件映射：访问的代码或数据还在磁盘上，没读进内存
+-	写时复制（COW）：试图写入一个只读的共享页面
+
+2、当缺页中断发生时，什么场景下会触发查找 `address_space`呢？答案是基于文件的缺页中断，通过前文知道，内核中每个文件inode在内存（充足）里都有一个 `address_space` 结构，负责维护该文件已经被读进了内存的部分（Page Cache）。具体流程如下：
+
+-	触发缺页中断：用户进程访问某个文件映射的地址，即CPU寻址
+-	内核介入： 发现对应的物理页不存在
+-	查找 `address_space`：内核去该文件inode对应的 `address_space` 里的radix树中查找，偏移量`offset`对应的页面是否在 Page Cache 里，如果在 `address_space` 里没找到，内核就会新建一个 `struct page` 结构，接着发起磁盘 I/O（预读），把文件内容读进这个新创建的 Page中，最后将这个 Page 挂载到 `address_space` 中
+-	更新页表： 最后把这个物理页的地址填入进程的页表，让 CPU 能恢复运行
+
+
+####	重要：mmap文件映射的完整过程
+
+第一阶段：mmap 系统调用（占位&&承诺），当调用 `mmap` 时，内核并没有真正去读文件，也没有分配物理内存。
+
+1.	创建 VMA：内核在进程的虚拟地址空间里找一块足够大的区域，新建一个 `vm_area_struct` (VMA)
+2.	绑定关系：这个 VMA 会记录它是哪个文件（指向 `struct file`，进而找到 inode）以及偏移量（`offset`）
+3.	设置钩子：最关键的一步，内核会把这个 VMA 的操作函数（`vma->vm_ops`）指向特定文件系统的函数集（比如 `ext4_file_vm_ops`）
+4.	操作结果：此时页表是空的。内核只是承诺了这块虚拟地址属于这个文件`struct file`
+
+第二阶段：CPU 触发缺页（兑现承诺），当第一次访问这段虚拟地址（比如 `char c = ptr[0]`）时：
+
+1.	硬件尝试翻译：CPU 的 MMU 查找页表（`PGD->PUD->PMD->PTE`）
+2.	触发异常：发现 PTE（页表项）为空，硬件自动跳到内核的缺页异常处理程序（Entry Point）
+3.	进入通用层：内核执行 `handle_mm_fault`
+
+第三阶段：`handle_mm_fault` 函数处理缺页中断，**目的是为了建立完整页表并关联物理页（负责把各级页表的空洞填满）**，这一步的核心是根据**虚拟内存地址->找到对应的VMA（已建立映射）->找到对应文件的`address_space`即radix树->将虚拟内存地址转换为radix树的查找偏移->查找radix树并填充对应的物理内存页->返回**
+
+1.	填表（Walk Tables）：如果 PGD/PUD/PMD 缺失，内核会先申请内存把这些页表项填满
+2.	定位到 `do_fault`：内核发现这个虚拟地址属于一个文件（`struct file`）映射的 VMA，于是调用 `vma->vm_ops->fault`
+3.	核心是查找 `address_space`（在 `handle_mm_fault` 里，如果是文件映射，会看到它处理的是 `struct page`物理页描述，而对于`address_space` 来说，它管理的是这个物理页与文件内容的对应关系），即**通过 VMA 找到文件的 `address_space`，根据偏移量（`offset`）在 Page Cache（基数树或者XArray）里**，参考[]()，一般有两种结果：
+	-	Case A (命中)：如果之前有进程读过这个文件，页已经在内存里了，直接获取该页地址
+	-	Case B (未命中)：如果不在（radix树查找失败），内核新建一个 Page，发起磁盘 I/O（通过 readpage），把文件内容读进来
+4.	关联映射，将找回来的（或新读入的）物理页地址填入最底层的 PTE 页表项
+5.	设置权限（只读/读写），完成
+6.  这一阶段最关键的函数是上文分析的 `ext4_filemap_fault->filemap_fault` 这个函数，它是 mmap 缺页后处理文件读取的最核心逻辑
+
+**对于文件映射来说，这一步完成后，虚拟内存地址指向的物理内存地址中已经存有映射文件的数据了**
+
+第四阶段：指令重试
+
+1.	返回用户态：`handle_mm_fault` 执行完后，CPU 重新执行刚才那条报错的指令（`char c = ptr[0]`）
+2.	MMU 成功：这一次，MMU 沿着四级页表能一路走到 PTE，拿到物理地址，读取数据
+
+####	mmap匿名页映射的完整过程
+
+TODO
 
 ####	overcommit_memory策略
 
 TODO
-
 
 ##  0x0  参考
 -   [深入理解Linux内核共享内存机制- shmem&tmpfs](https://aijishu.com/a/1060000000451498)

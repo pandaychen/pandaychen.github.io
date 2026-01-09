@@ -211,7 +211,9 @@ struct radix_tree_node {
 
 如图，radix树的叶子节点对应的就是`struct page`
 
-再回顾下radix树的查询过程，[]()
+再回顾下radix树的查询过程，参考[]()
+
+TODO
 
 ##  0x0    struct page的本质
 前文已经描述了内核中虚拟内存主要分为两种类型的页，即匿名页与文件页，此外还介绍了虚拟内存地址到物理内存地址的翻译过程、页表体系等
@@ -222,7 +224,73 @@ struct radix_tree_node {
 
 ####    基础结构
 ```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/mm_types.h#L40
+struct page {
+	/* First double word block */
+	unsigned long flags;
+	union {
+		struct address_space *mapping;	/* If low bit clear, points to
+						 * inode address_space, or NULL.
+						 * If page mapped as anonymous
+						 * memory, low bit is set, and
+						 * it points to anon_vma object:
+						 * see PAGE_MAPPING_ANON below.
+						 */
+		void *s_mem;			/* slab first object */
+		atomic_t compound_mapcount;	/* first tail page */
+		/* page_deferred_list().next	 -- second tail page */
+	};
 
+	/* Second double word */
+	union {
+		pgoff_t index;		/* Our offset within mapping. */
+		void *freelist;		/* sl[aou]b first free object */
+		/* page_deferred_list().prev	-- second tail page */
+	};
+
+	union {
+		struct {
+			union {
+				atomic_t _mapcount;
+				unsigned int active;		/* SLAB */
+				struct {			/* SLUB */
+					unsigned inuse:16;
+					unsigned objects:15;
+					unsigned frozen:1;
+				};
+				int units;			/* SLOB */
+			};
+			atomic_t _refcount;
+		};
+	};
+
+	union {
+		struct list_head lru;	/* Pageout list, eg. active_list
+					 * protected by zone_lru_lock !
+					 * Can be used as a generic list
+					 * by the page owner.
+					 */
+		struct dev_pagemap *pgmap; /* ZONE_DEVICE pages are never on an
+					    * lru or handled by a slab
+					    * allocator, this points to the
+					    * hosting device page map.
+					    */
+		struct {		/* slub per cpu partial pages */
+			struct page *next;	/* Next partial slab */
+		};
+
+		struct rcu_head rcu_head;	/* Used by SLAB
+						 * when destroying via RCU
+						 */
+		/* Tail pages of compound page */
+		struct {
+			unsigned long compound_head; /* If bit zero is set */
+
+			/* First tail page only */
+		}
+	};
+	......
+}
 ```
 
 需要注意的一点是：**`struct page`中是不包含存储数据的，其成员仅包含元数据，每个page对应的实际的页面内容放在物理内存中，需要通过虚拟地址访问**
@@ -278,13 +346,37 @@ TODO
 0xffff 8800 0000 0000 ┼───────────────────┤ <- 这里是struct page数组所在
                       │  直接映射区域      │   (PAGE_OFFSET = 0xffff880000000000)
                       │  1:1映射物理内存   │
-0xffff 8800 0000 0000 ┼───────────────────┤
+0xffff 8800 0000 0000 ┼──────────────────┤
                       │  struct page数组  │
                       │  物理页描述符      │
-0xffff 8800 0010 0000 ┼───────────────────┤
+0xffff 8800 0010 0000 ┼──────────────────┤
                       │  其他内核数据      │
-0xffff c900 0000 0000 ┴───────────────────┘
+0xffff c900 0000 0000 ┴──────────────────┘
 ```
+
+####	struct page的本质
+对于文件inode结构中`address_space`关联的radix树，其叶子结点存储的value是一个`struct page`，其**本质代表一个物理内存页**，即`address_space` 关联的 Radix 树叶子节点存放的指针，指向的就是该文件偏移量（`index`）对应的 `struct page` 结构体实例，注意`index`的意义是页偏移（`PAGE_SHIFT`），要点如下：
+
+1、`struct page` 并不等同于物理内存本身（物理内存是一块 `4KB` 的电信号存储区域），它是内核用来管理物理页帧（Page Frame）的元数据结构
+
+-	一一对应关系：系统中的每一个物理页帧，在内核初始化时都会创建一个唯一的 `struct page` 实例
+-	指向物理地址：通过这个 `struct page` 结构，内核可以非常容易计算出它对应的实际物理起始地址（`page_to_phys`）
+
+2、 radix树的叶子节点里存储的内容：叶子节点实际上存储的是一个指针，该指针指向内核虚拟地址空间中的 `mem_map` 数组里的某一个 `struct page`。为什么存指针而不是直接存储物理地址呢？ 因为 `struct page` 包含了很多极其重要的管理信息，内核在处理缺页中断或文件读写时会使用到，典型的几个成员如下：
+    - `flags`：标记这个页是否为脏（Dirty）、是否正在被锁定进行磁盘 I/O（Locked）、是否已经是最新的数据（Uptodate）
+    - `mapping`：反向指向它所属的 `address_space`
+    -  `index`：记录这个页在文件中的偏移位置
+    - `_count/_mapcount`：引用计数，记录有多少个进程或内核模块正在使用此页
+
+3、缺页中断中的数据流转，结合查找 `address_space`过程来看，包含了输入/查找/定位/获取/映射的几个过程：
+
+-	输入：缺页中断拿到虚拟地址，计算出文件偏移量 `index`
+-	查找：内核拿着 `index` 去 `address_space`中的radix树里查找
+-	定位：在 Radix 树的叶子节点找到了一个指针
+-	获取：内核拿到这个指针（`struct page *`）
+-	映射：内核从这个 `struct page` 对象中提取出物理页帧号（PFN），然后将其填入进程的 PTE（页表项） 中
+
+再思考一下前文描述过的`mmap`文件映射共享机制，进程 A 与 B 都 `mmap` 同一个文件（虽然它们的虚拟内存空间与`mmap`返回的地址都不同），正是由于 Radix 树存的是 `struct page` 指针，这就实现了 Page Cache 的共享。在进程A 与 B的 `handle_mm_fault`函数中，最终都会去同一个 `address_space` 的 Radix 树查找，最终会拿到同一个 `struct page` 指针，即最终两个进程的虚拟地址最终都指向了同一块物理内存
 
 ####    page cache相关的操作函数
 
