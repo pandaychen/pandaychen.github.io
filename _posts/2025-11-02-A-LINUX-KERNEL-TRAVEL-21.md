@@ -104,6 +104,8 @@ page = pfn_to_page(pfn);                   // PFN 转 struct page
 -	文件页（内存文件映射）：文件页中的数据来自于磁盘中的文件，文件页需要先关联一个磁盘中的文件，然后再和进程虚拟地址空间建立映射供进程使用，使得进程可以通过操作虚拟内存实现对文件的操作
 
 ##  0x02    基础数据结构
+
+####	address_space
 前面在介绍VFS的时候提到了`struct inode`中的一个重要成员：`address_space`，`address_space`对象是文件系统中管理内存页page cache的核心数据结构
 
 ```cpp
@@ -177,6 +179,12 @@ struct page {
 
 ![inode-to-address_space](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/21/inode2addressspace2page.png)
 
+####	`address_space`的意义
+`address_space`是inux 统一管理 I/O 的核心，在内核中，不管是 `mmap` 文件映射场景下的缺页中断，还是普通的 `read()` 系统调用，最终都会走到 `address_space`，这意味着无论用哪种方式访问文件，内存里永远只有一份 Page Cache，这就是为什么`mmap` 后的内存和 `read` 读到的缓存是实时同步的
+
+-	`mmap` 文件映射缺页：触发 `filemap_fault` -> 查`address_space`
+-	`read` 读系统调用：触发 `generic_file_read_iter` -> 查`address_space`
+
 ####    内核中的radix tree
 因为文件位于慢速的块设备上，如果没有缓存，每一次对文件的读写都要走到块设备，这样的访问速度是无法容忍的。在Linux上操作，如果一次读某个文件慢的话，紧接着读这个文件第二次，速度会有明显的提升。原因是Linux已经将文件的部分内容或全部内容缓存到了page cache，先列举几个问题：
 
@@ -212,6 +220,10 @@ struct radix_tree_node {
 如图，radix树的叶子节点对应的就是`struct page`
 
 再回顾下radix树的查询过程，参考[]()
+
+TODO
+
+####	`address_space`与page cache的管理机制
 
 TODO
 

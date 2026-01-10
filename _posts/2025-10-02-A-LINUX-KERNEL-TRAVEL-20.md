@@ -1802,7 +1802,7 @@ static int ext4_file_mmap(struct file *file, struct vm_area_struct *vma)
 }
 ```
 
-##  0x0 mmap匿名共享映射实现
+##  0x02 mmap匿名共享映射实现
 若使用mmap进行共享匿名映射，父子进程之间需要依赖 tmpfs 文件系统中的匿名文件对共享内存进行访问，当进行共享匿名映射时，内核会在 `shmem_zero_setup` 函数中，使用 tmpfs 文件系统里为映射创建一个匿名文件（`shmem_kernel_file_setup`），随后将 tmpfs 文件系统中的这个匿名文件与虚拟映射区 vma 中的 `vm_file` 关联映射起来，当父进程调用 fork 创建子进程的时候，内核会将父进程的虚拟内存空间全部拷贝给子进程，包括这里创建的共享匿名映射区域 vma，这样一来，父子进程就可以通过共同的 vma->vm_file 来实现共享内存的通信了（mmap 的共享匿名映射其实本质上还是共享文件映射）
 
 ```cpp
@@ -1839,7 +1839,7 @@ static const struct vm_operations_struct shmem_vm_ops = {
 };
 ```
 
-##	0x0	缺页中断的主要处理
+##	0x03	缺页中断的主要处理
 上面完成了mmap文件映射到vma创建（文件inode关联vma）的基本过程，对应于应用层系统调用`mmap(....)`的过程，然后用户拿到了`mmap`返回的虚拟内存地址进行读写操作时`char c = ptr[0]`时，若为首次对该虚拟内存地址的访问，那么会触发缺页中断。本小节以ext4文件系统的mmap文件映射过程为例，分析缺页中断的处理过程。缺页中断的核心逻辑中，涉及到的主要内核结构及成员如下：
 
 ```cpp
@@ -1962,7 +1962,7 @@ good_area:
 }
 ```
 
-而对于文件映射的缺页处理，调用链如下：
+而对于文件映射的缺页处理，调用链如下，可以看到`handle_mm_fault -> do_fault` 是在处理文件映射页面时的一个特定动作
 
 ```text
 //https://elixir.bootlin.com/linux/v4.11.6/source/mm/memory.c#L3870
@@ -2113,6 +2113,16 @@ static int do_fault(struct vm_fault *vmf)
 }
 ```
 
+在上面的`__handle_mm_fault`函数中，调用了`p4d_alloc/pud_alloc/pmd_alloc/pte...`等函数对页表进行修复（注意是修复页表，非翻译），回顾先前的知识，在正常的 CPU 执行过程中，虚拟内存地址转物理地址是由 MMU（内存管理单元）硬件自动完成的，它依赖于进程的四级页表。`handle_mm_fault`的作用是当四级页表的某个层级（PGD/PUD/PMD/PTE）缺失时，负责把缺少的页表项填进去，并关联一个真正的物理页（**最终关联	`set_pte_at`将物理页地址填入最底层的 PTE，即将物理页的地址写入 PTE**），如此重新执行CPU	再次访问 `0x12345678` MMU 转换成功，直接访问物理内存
+
+-	页表完整：MMU 直接完成转换，不会进入 `handle_mm_fault`
+-	页表为空：MMU 触发异常，内核调用 `handle_mm_fault`
+
+最后，会根据当然类型是匿名映射或者文件映射来查找（分配）物理内存页：
+
+-	匿名内存：会调用 `alloc_pages` 申请一个全零物理内存页
+-	文件映射：关联通过inode查找 `address_space` 逻辑
+
 继续，以`do_read_fault->__do_fault`调用链路，`__do_fault`中的`vma->vm_ops->fault`，这里的`fault`在ext4文件系统中就对应着`ext4_file_vm_ops`的`fault`成员，即`ext4_filemap_fault`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/inode.c#L5959)
 
 ```cpp
@@ -2123,7 +2133,7 @@ static int do_read_fault(struct vm_fault *vmf)
 	int ret = 0;
 
 	......
-	//
+	//__do_fault
 	ret = __do_fault(vmf);
 	if (unlikely(ret & (VM_FAULT_ERROR | VM_FAULT_NOPAGE | VM_FAULT_RETRY)))
 		return ret;
@@ -2141,7 +2151,7 @@ static int __do_fault(struct vm_fault *vmf)
 	struct vm_area_struct *vma = vmf->vma;
 	int ret;
 
-	//CALL ext4_filemap_fault
+	//CALL ext4_filemap_fault->filemap_fault
 	ret = vma->vm_ops->fault(vmf);
 	......
 
@@ -2157,6 +2167,7 @@ int ext4_filemap_fault(struct vm_fault *vmf)
 	//调用filemap_fault，先加锁
 	down_read(&EXT4_I(inode)->i_mmap_sem);
 	// 最终调用filemap_fault实现
+	// 包含了查找 address_space 和 新建 Page 的过程
 	err = filemap_fault(vmf);
 	up_read(&EXT4_I(inode)->i_mmap_sem);
 
@@ -2170,6 +2181,7 @@ int ext4_filemap_fault(struct vm_fault *vmf)
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/mm/filemap.c#L2174
+// filemap_fault：核心任务是根据偏移量（pgoff）在 Page Cache 中拿到一个 struct page
 int filemap_fault(struct vm_fault *vmf)
 {
 	int error;
@@ -2367,6 +2379,97 @@ static int page_cache_read(struct file *file, pgoff_t offset, gfp_t gfp_mask)
 
 2、`filemap_fault`中的性能优化，虽然`filemap_fault`函数主要处理单page缺页，但会通过预读（`readahead`）机制连续加载多页。从其调用入口`page = find_get_page(mapping, offset)`来看，这里只查找指定偏移的一页，但通过预读机制实际上在优化连续的内存访问模式。即**预读后续页面，减少未来缺页**
 
+####	finish_fault
+继续`do_read_fault->__do_fault`完成之后的流程，即`finish_fault`的实现。当 `filemap_fault` 返回了这个 page 给 `__do_fault` 后，此时页表依然是空的，`finish_fault`是内核缺页中断（Page Fault）处理中的最好的收尾工作，其核心职责是：决定使用哪个物理页，并将其安装到进程的页表中
+
+1、确定要使用的物理页面，这里会根据是否触发了写时复制（COW）来选择
+
+-	COW 场景：如果这是一个**私有（Private）且可写（Write）**的映射触发了缺页，内核会使用之前在 `do_cow_fault` 中分配并拷贝好数据的 `vmf->cow_page`，参考[前文](https://pandaychen.github.io/2024/11/05/A-LINUX-KERNEL-TRAVEL-2/#%E6%96%B9%E5%BC%8F2%E7%A7%81%E6%9C%89%E6%96%87%E4%BB%B6%E6%98%A0%E5%B0%84)
+-	非 COW 场景：如果是只读访问，或者是一个共享映射（Shared Mapping），则直接使用文件系统读取到 Page Cache 中的`vmf->page`
+
+2、映射与权限设置（Mapping），主要调用核心函数 `alloc_set_pte`
+
+-	分配页表项：如果对应的 PTE 表项还没分配，`alloc_set_pte` 会负责分配
+-	设置权限：根据 `vma->vm_page_prot` 结合 `WRITE` 标志，计算出该页表项的读写权限（如果是 COW 页面，此时会给它加上可写属性）
+-	建立映射：调用 `set_pte_at` 将物理页地址填入硬件页表
+-	统计与反向映射，若是 COW 页，按匿名页处理（`MM_ANONPAGES`）；若是原始页，按文件页处理（`MM_FILEPAGE`）
+
+3、 解锁与清理
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/memory.c#L3261
+int finish_fault(struct vm_fault *vmf)
+{
+	struct page *page;
+	int ret;
+
+	/* Did we COW the page? */
+	//验证权限：检查 VMA 权限是否允许读/写
+	if ((vmf->flags & FAULT_FLAG_WRITE) &&
+	    !(vmf->vma->vm_flags & VM_SHARED))
+		page = vmf->cow_page;	//for cow：使用新分配的匿名页（COW 副本）
+	else
+		page = vmf->page;	//使用 Page Cache 中的原始文件页
+	// 
+	ret = alloc_set_pte(vmf, vmf->memcg, page);
+	if (vmf->pte)
+		pte_unmap_unlock(vmf->pte, vmf->ptl);
+	return ret;
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/memory.c#L3196
+int alloc_set_pte(struct vm_fault *vmf, struct mem_cgroup *memcg,
+		struct page *page)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	bool write = vmf->flags & FAULT_FLAG_WRITE;
+	pte_t entry;
+	int ret;
+
+	......
+	//生成 PTE 内容：使用 mk_pte(page, vma->vm_page_prot) 将物理页地址转换为页表项格式
+	entry = mk_pte(page, vma->vm_page_prot);
+	
+	/*
+	下面这段代码有些意思：
+	写时复制 (COW) 产生的匿名页 和 共享的文件页/只读页
+	*/
+	if (write)
+		entry = maybe_mkwrite(pte_mkdirty(entry), vma);
+	/* copy-on-write page */
+	if (write && !(vma->vm_flags & VM_SHARED)) {
+		//分支1：私有可写映射 （Private Writable Mapping）
+
+		//因为这是 COW 出来的页，它已经脱离了原来的文件映射，变成了匿名页 (Anonymous Page)，所以增加进程的匿名页计数
+		inc_mm_counter_fast(vma->vm_mm, MM_ANONPAGES);
+		//为这个新生成的匿名页建立反向映射
+		page_add_new_anon_rmap(page, vma, vmf->address, false);
+		//将该页面的内存消耗计入当前进程所在的 cgroup
+		mem_cgroup_commit_charge(page, memcg, false, false);
+		//将该页加入 LRU 链表，以便内核进行内存回收管理
+		lru_cache_add_active_or_unevictable(page, vma);
+	} else {
+		//分支2：共享映射 （Shared Mapping） 或者 只读映射 ）（Read-only Mapping）
+
+		//增加进程的文件页 （File-backed Page） 计数
+		inc_mm_counter_fast(vma->vm_mm, mm_counter_file(page));
+		//建立文件页的反向映射
+		page_add_file_rmap(page, false);
+	}
+
+	//设置页表：调用 set_pte_at。这一步执行完，虚拟地址到物理地址的映射正式在硬件层面打通
+	//真正将物理页的地址写入进程页表（PTE）的动作。从此以后，虚拟地址就指向了相应的物理地址
+	set_pte_at(vma->vm_mm, vmf->address, vmf->pte, entry);
+
+	/* no need to invalidate: a not-present page won't be cached */
+
+	// 重要：设置MMU缓存
+	update_mmu_cache(vma, vmf->address, vmf->pte);
+
+	//set_pte_at && update_mmu_cache结束：CPU 重新执行指令
+	return 0;
+}
+```
 
 ####	vm_mmap_pgoff->mm_populate：立即为映射分配物理内存
 上面讨论了通常调用 mmap 进行内存映射的时，内核只是会在进程的虚拟内存空间中为这次映射分配一段虚拟内存，然后建立好这段虚拟内存与相关文件之间的映射关系就结束了，内核并不会为映射分配物理内存。而物理内存的分配工作需要延后到这段虚拟内存被 CPU 访问的时候，通过缺页中断来进入内核，分配物理内存，并在页表中建立好映射关系。但如果在 `flags` 参数中设置了 `MAP_POPULATE`、`MAP_LOCKED` 标志位之后，物理内存的分配动作会提前发生。首先会通过 `do_mmap_pgoff` 函数在进程虚拟内存空间中分配出一段未映射的虚拟内存区域，返回值 `ret` 表示映射的这段虚拟内存区域的起始地址，紧接着就会调用 `mm_populate`，**内核会在 mmap 刚刚映射出来的这段虚拟内存区域上，依次扫描这段 vma 中的每一个虚拟页，并对每一个虚拟页触发缺页异常，从而为其立即分配物理内存**
@@ -2945,8 +3048,61 @@ static struct inode *shmem_get_inode(struct super_block *sb, const struct inode 
 最后，整理下本文介绍的若干关键知识点
 
 ####	linear_page_index 的细节
+在`mmap`文件映射中，特别要理清虚拟内存地址（用户访问的）、虚拟内存地址（`mmap`返回的）、offset（`mmap`参数）、查找radix树的偏移index、`vma->vm_start`、`vma->vm_pgoff`之间的关系，思考几个问题：
 
-todo
+1.	当用户拿着`mmap`返回的地址（若干偏移）的新地址，触发内存访问的时候，内核是怎么计算定位到实际的radix树的index的？
+2.	page index（页序号） && page offset（页内偏移）
+3.	当缺页异常发生时，内核需要知道当前访问的这个虚拟内存地址`address`，对应文件里的第几个 Page？
+
+![offset]()
+
+步骤1，调用 `mmap(addr, length, ......, fd, offset)` 时，内核并不会立即把文件内容读入内存，而是创建了一个 `vm_area_struct`（此时页表项PTE是空的。vma记录如下关键信息：
+-	虚拟内存的起始地址`vm_start`
+-	对应的文件偏移量 `vm_pgoff`
+
+步骤2：在缺页中断处理函数`__handle_mm_fault`开始对`address`的转换，即`linear_page_index`函数，这正是内核将进程的虚拟世界（虚拟地址）映射到文件的物理世界（文件偏移）的关键转折点，`linear_page_index`作用是将发生缺页的虚拟地址转化为该数据在文件（底层存储）中的逻辑坐标（注意，对于不同的进程，这里的`address`是随机的）
+
+**在建立页表映射时，通常只关心页对齐的地址，`linear_page_index` 的任务就是确定指定的页被搬到了内存，并把它的地址填进了页表，地址线上的低 12 位物理偏移会自动对齐虚拟地址的低 12 位**
+
+```cpp
+static int __handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
+		unsigned int flags)
+{
+	struct vm_fault vmf = {
+		.vma = vma,
+		.address = address & PAGE_MASK,
+		.flags = flags,
+		.pgoff = linear_page_index(vma, address),	//重要：计算文件页偏移（见下文分析）
+		.gfp_mask = __get_fault_gfp_mask(vma),
+	};
+
+	......
+}
+
+static inline pgoff_t linear_page_index(struct vm_area_struct *vma,
+					unsigned long address)
+{
+	pgoff_t pgoff;
+	if (unlikely(is_vm_hugetlb_page(vma)))
+		return linear_hugepage_index(vma, address);
+	pgoff = (address - vma->vm_start) >> PAGE_SHIFT;
+	pgoff += vma->vm_pgoff;
+	return pgoff;
+}
+```
+
+从上面代码`linear_page_index` 的作用就是把这个随机的虚拟地址转换为文件中的第几个页面（变量`pgoff`）
+
+-	`address`：触发缺页的虚拟内存地址
+-	`vma->vm_start`：该虚拟内存区域vma的起始地址
+-	`vma->vm_pgoff`：mmap 系统调用时传入的 `offset`（已转换为页面单位）
+-	`address - vma->vm_start`：计算当前地址距离该映射区域开头的距离（`address`差异化消除的关键步骤）
+-	`>>PAGE_SHIFT`：转换为页数
+-	`pgoff+=vma->vm_pgoff`：加上 `mmap` 时指定的起始偏移，如果映射是从文件开头开始（通常为 `0`）
+
+一旦计算出了 `vmf.pgoff`（作为 Page Cache 的全局唯一索引），内核就不再关心 `address` 到底是多少了，在后 `filemap_fault` 流程中，内核会拿着这个`vmf.pgoff`去该文件inode的 `address_space`的radix树中查找（即在 radix树中查找 `struct page` 的 key），最终不同的进程虽然 `address` 不同，但经过 `linear_page_index` 计算后的 `pgoff` 是完全一致的，这就保证了内核能够引导两个进程指向 Page Cache 中的同一个物理页面，从而实现内存共享
+
+小结下，两个`offset`，一个是虚拟地址在页面内的偏移（页内偏移 Page Offset），另一个是该页面在整个文件中的偏移（文件页索引）。页内偏移就比较简单了，直接通过 `address&(PAGE_SIZE-1)`即可得到，即访问的是该 `4KB` 物理页中的哪一个字节
 
 ####	mmap系统调用的本质
 mmap 系统调用分配虚拟内存的本质其实就是在进程的虚拟内存空间中的文件映射与匿名映射区，找出一段未被映射过的空闲虚拟内存区域 vma，这个 vma 就是申请到的虚拟内存
@@ -2973,6 +3129,7 @@ mmap 系统调用分配虚拟内存的本质其实就是在进程的虚拟内存
 -	查找 `address_space`：内核去该文件inode对应的 `address_space` 里的radix树中查找，偏移量`offset`对应的页面是否在 Page Cache 里，如果在 `address_space` 里没找到，内核就会新建一个 `struct page` 结构，接着发起磁盘 I/O（预读），把文件内容读进这个新创建的 Page中，最后将这个 Page 挂载到 `address_space` 中
 -	更新页表： 最后把这个物理页的地址填入进程的页表，让 CPU 能恢复运行
 
+所以，可以把缺页中断看作是目的，而查找 `address_space` 是为了实现这个目的所采取的步骤（之一）
 
 ####	重要：mmap文件映射的完整过程
 
@@ -3008,8 +3165,122 @@ mmap 系统调用分配虚拟内存的本质其实就是在进程的虚拟内存
 2.	MMU 成功：这一次，MMU 沿着四级页表能一路走到 PTE，拿到物理地址，读取数据
 
 ####	mmap匿名页映射的完整过程
+`handle_mm_fault` 中有另一条重要支线即匿名页（Anonymous Page）的处理，常见于`malloc`申请内存等，由于背后无关联磁盘文件，因此处理逻辑与 `address_space` 完全不同。`do_anonymous_page`函数是匿名页缺页的处理入口
+
+```text
+CPU 硬件（缺页）异常 -> do_page_fault (架构相关入口)
+    └── handle_mm_fault (通用内存管理层)
+        └── handle_pte_fault (发现页表项为空)
+            ├── do_anonymous_page (如果是 malloc 的内存 -> 直接要物理页，不找 address_space)
+            └── do_fault (如果是映射的文件 -> 此时才开始找 address_space)
+                └── __do_fault
+                    └── vma->vm_ops->fault (具体文件系统的处理函数)
+                        └── find_get_page (去 address_space 里查，找不到就新建 Page 并读磁盘)
+```
+
+`do_anonymous_page`的实现如下，其机制是典型的懒加载机制
 
 TODO
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/memory.c#L2896
+//handle_pte_fault 函数中，当发现该地址不属于文件映射（VMA 没设置 vm_ops）且页表项为空时，会进入 do_anonymous_page
+static int do_anonymous_page(struct vm_fault *vmf)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	struct mem_cgroup *memcg;
+	struct page *page;
+	pte_t entry;
+
+	/* File mapping without ->vm_ops ? */
+	if (vma->vm_flags & VM_SHARED)
+		return VM_FAULT_SIGBUS;
+
+	/* Check if we need to add a guard page to the stack */
+	if (check_stack_guard_page(vma, vmf->address) < 0)
+		return VM_FAULT_SIGSEGV;
+
+
+	if (pte_alloc(vma->vm_mm, vmf->pmd, vmf->address))
+		return VM_FAULT_OOM;
+
+	/* See the comment in pte_alloc_one_map() */
+	if (unlikely(pmd_trans_unstable(vmf->pmd)))
+		return 0;
+
+	/* Use the zero-page for reads */
+	if (!(vmf->flags & FAULT_FLAG_WRITE) &&
+			!mm_forbids_zeropage(vma->vm_mm)) {
+		entry = pte_mkspecial(pfn_pte(my_zero_pfn(vmf->address),
+						vma->vm_page_prot));
+		vmf->pte = pte_offset_map_lock(vma->vm_mm, vmf->pmd,
+				vmf->address, &vmf->ptl);
+		if (!pte_none(*vmf->pte))
+			goto unlock;
+		/* Deliver the page fault to userland, check inside PT lock */
+		if (userfaultfd_missing(vma)) {
+			pte_unmap_unlock(vmf->pte, vmf->ptl);
+			return handle_userfault(vmf, VM_UFFD_MISSING);
+		}
+		goto setpte;
+	}
+
+	/* Allocate our own private page. */
+	if (unlikely(anon_vma_prepare(vma)))
+		goto oom;
+	page = alloc_zeroed_user_highpage_movable(vma, vmf->address);
+	if (!page)
+		goto oom;
+
+	if (mem_cgroup_try_charge(page, vma->vm_mm, GFP_KERNEL, &memcg, false))
+		goto oom_free_page;
+
+	/*
+	 * The memory barrier inside __SetPageUptodate makes sure that
+	 * preceeding stores to the page contents become visible before
+	 * the set_pte_at() write.
+	 */
+	__SetPageUptodate(page);
+
+	entry = mk_pte(page, vma->vm_page_prot);
+	if (vma->vm_flags & VM_WRITE)
+		entry = pte_mkwrite(pte_mkdirty(entry));
+
+	vmf->pte = pte_offset_map_lock(vma->vm_mm, vmf->pmd, vmf->address,
+			&vmf->ptl);
+	if (!pte_none(*vmf->pte))
+		goto release;
+
+	/* Deliver the page fault to userland, check inside PT lock */
+	if (userfaultfd_missing(vma)) {
+		pte_unmap_unlock(vmf->pte, vmf->ptl);
+		mem_cgroup_cancel_charge(page, memcg, false);
+		put_page(page);
+		return handle_userfault(vmf, VM_UFFD_MISSING);
+	}
+
+	inc_mm_counter_fast(vma->vm_mm, MM_ANONPAGES);
+	page_add_new_anon_rmap(page, vma, vmf->address, false);
+	mem_cgroup_commit_charge(page, memcg, false, false);
+	lru_cache_add_active_or_unevictable(page, vma);
+setpte:
+	set_pte_at(vma->vm_mm, vmf->address, vmf->pte, entry);
+
+	/* No need to invalidate - it was non-present before */
+	update_mmu_cache(vma, vmf->address, vmf->pte);
+unlock:
+	pte_unmap_unlock(vmf->pte, vmf->ptl);
+	return 0;
+release:
+	mem_cgroup_cancel_charge(page, memcg, false);
+	put_page(page);
+	goto unlock;
+oom_free_page:
+	put_page(page);
+oom:
+	return VM_FAULT_OOM;
+}
+```
 
 ####	overcommit_memory策略
 
