@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      Linux proc 知识点汇总
+title:      Linux procfs 知识点汇总
 subtitle:   
 date:       2024-08-05
 author:     pandaychen
@@ -1528,13 +1528,38 @@ struct task_struct *pid_task(struct pid *pid, enum pid_type type)
 }
 ```
 
+这里有一处内核的并发细节实现，注意上面`get_pid_task-->pid_task`的调用路径上的`rcu_read_lock/rcu_read_unlock`操作以及`pid_task`中的`lockdep_tasklist_lock_is_held`，对于`lockdep_tasklist_lock_is_held`而言，如果要调用函数`pid_task`，必须遵循如下两种范式：
+
+1、范式一，RCU 读者（最常见，高性能），典型函数实现如[` proc_fd_permission`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/fd.c#L292)、[`get_proc_task_net`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/proc_net.c#L116)、[`kill_pid_info`](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/signal.c#L1306)等
+
+```cpp
+rcu_read_lock();
+// 通过 pid 获取 task
+struct task_struct *task = pid_task(pid, PIDTYPE_PID);
+if (task) {
+    // 只能在临界区内使用 task，且不能睡眠
+	......
+    printk("Task name: %s\n", task->comm);
+}
+rcu_read_unlock();
+```
+
+2、范式二，持有全局锁（写操作），典型的操作如[`zap_pid_ns_processes`](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid_namespace.c#L243)
+
+```cpp
+read_lock(&tasklist_lock);
+struct task_struct *task = pid_task(pid, PIDTYPE_PID);
+// 操作 task...
+read_unlock(&tasklist_lock);
+```
+
 所以，这里核心查找路径是`inode->proc_inode->[struct pid]->task_struct`
 
 ```cpp
 //https://elixir.bootlin.com/linux/v6.18.3/source/fs/proc/internal.h#L142
 static inline struct pid *proc_pid(const struct inode *inode)
 {
-	//
+	// 根据vfs_node获取到对应的pid结构
 	return PROC_I(inode)->pid;
 }
 
