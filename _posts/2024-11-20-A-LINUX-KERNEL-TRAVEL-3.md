@@ -468,6 +468,9 @@ struct vfsmount {
 }
 ```
 
+####	vfs cache arch
+![vfs-all-cache-arch.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/vfs/vfs-all-cache-arch.png)
+
 ####	vfs 相关 API（operations）
 文件系统相关的一些对象，和对应的数据结构：
 
