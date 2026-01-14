@@ -342,7 +342,7 @@ LADDR:LPORT              RADDR:RPORT             RETRANSMITS
 ####    内核态实现
 核心基于`tracepoint:tcp:tcp_retransmit_skb/kprobe:tcp_send_loss_probe`实现，本质上还是基于单hook的事件记录
 
-```python
+```PYTHON
 # define BPF program
 bpf_text = """
 #include <uapi/linux/ptrace.h>
