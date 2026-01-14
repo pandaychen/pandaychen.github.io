@@ -26,19 +26,21 @@ tags:
 以内核默认的平坦内存模型（FLATMEM ）为例，来解释下物理内存与虚拟内存（地址）之间的映射关系：
 
 -	内核以页（page）为基本单位对物理内存进行管理，通过将物理内存划分为一页一页的内存块，每页大小为 `4K`。一页大小的内存块在内核中用 `struct page` 来进行管理，`struct page` 中封装了每页内存块的状态信息，比如组织结构、使用信息、统计信息以及与其他结构的关联映射信息等
--	为了快速索引到具体的物理内存页，内核为每个物理页 `struct page` 结构体定义了一个索引编号，即PFN（Page Frame Number），其中PFN 与 `struct page` 是一一对应的关系
+-	为了快速索引到具体的物理内存页，内核为每个物理页 `struct page` 结构体定义了一个索引编号，即`PFN`（Page Frame Number），其中`PFN` 与 `struct page` 是一一对应的关系
 -	内核提供了两个宏来完成 PFN 与 物理页结构体 `struct page` 之间的相互转换，分别是 `page_to_pfn` 与 `pfn_to_page`
 
 内核中如何组织管理这些物理内存页 `struct page` 的方式称之为做物理内存模型，不同的物理内存模型，应对的场景以及 `page_to_pfn` 与 `pfn_to_page` 的计算逻辑都是不一样的，介绍下最简单的FLATMEM模型：
 
 ![flat-mem](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/21/flatmem_model.png)
 
-平坦内存模型 FLATMEM的架构如下：先把物理内存想象成一片地址连续的存储空间，在这一大片地址连续的内存空间中，内核将这块内存空间分为一页一页的内存块 `struct page`，由于这块物理内存是连续的，物理地址也是连续的，划分出来的这一页一页的物理页必然也是连续的，并且每页的大小都是固定的，所以很容易想到用一个数组来组织这些连续的物理内存页 `struct page` 结构，其在数组中对应的下标即为 PFN
+平坦内存模型 FLATMEM的架构如下：先把物理内存想象成一片地址连续的存储空间，在这一大片地址连续的内存空间中，内核将这块内存空间分为一页一页的内存块 `struct page`，由于这块物理内存是连续的，物理地址也是连续的，划分出来的这一页一页的物理页必然也是连续的，并且每页的大小都是固定的，所以很容易想到用一个数组来组织这些连续的物理内存页 `struct page` 结构，其在数组中对应的下标即为 `PFN`
 
--	mem_map是数组（虚拟内存地址）：是虚拟地址空间中 `struct page`结构体的连续数组，此数组在内核的虚拟地址空间中连续存放，数组的每个元素对应一个物理页的元数据（状态信息）
--	PFN 是物理概念：代表物理页的编号
+-	`mem_map`是数组（虚拟内存地址）：是虚拟地址空间中 `struct page`结构体的连续数组（全局的 `struct page` 数组指针），此数组在内核的虚拟地址空间中连续存放，数组的每个元素对应一个物理页的元数据（状态信息）。在平坦模型下，系统认为物理内存是连续的，所以内核启动时会申请一个巨大的数组，数组的第 i 个元素就代表第 i 个物理页帧
+-	`PFN`：物理概念，代表物理页的编号
+-	`ARCH_PFN_OFFSET`：物理地址的起始偏移量（x86_64 系统通常为 `0`），但在某些架构上，物理内存可能从一个很高的地址开始（比如 `0x1000000`），这个偏移量就用来修正数组下标
+-	指针减法：`(page) - mem_map` 用来计算两个指针之间的元素个数
 
-相关的代码如下，在FLATMEM模型下 ，`page_to_pfn` 与 `pfn_to_page` 本质就是基于 `mem_map` 数组进行偏移操作，其中 `mem_map` 是全局数组，用来组织所有划分出来的物理内存页。`mem_map` 全局数组的下标就是相应物理页对应的 PFN
+相关的代码如下，在FLATMEM模型下 ，`page_to_pfn` 与 `pfn_to_page` 本质就是基于 `mem_map` 数组进行偏移操作，其中 `mem_map` 是全局数组，用来组织所有划分出来的物理内存页。`mem_map` 全局数组的下标就是相应物理页对应的 `PFN`
 
 ```cpp
 struct page *mem_map;  // 全局数组，指向 struct page结构体数组的指针
@@ -77,13 +79,13 @@ mem_map + index：通过数组索引找到对应的 struct page指针
 +-----+-----+-----+-----+-----+
 ```
 
-为什么说是虚拟地址空间中的转换呢？`mem_map`数组本身存在于内核的虚拟地址空间，每个 `struct page`是虚拟地址空间中的一个对象，PFN 代表的是物理地址的页帧号，上面两个宏实际上是建立了**虚拟地址（`struct page`指针）<-> 物理页编号（PFN）的映射关系**
+为什么说是虚拟地址空间中的转换呢？`mem_map`数组本身存在于内核的虚拟地址空间，每个 `struct page`是虚拟地址空间中的一个对象，`PFN` 代表的是物理地址的页帧号，上面两个宏实际上是建立了**虚拟地址（`struct page`指针）<-> 物理页编号（PFN）的映射关系**
 
 实际使用时的地址转换流程如下：
 
 ```cpp
 // 从 struct page 获取物理地址
-struct page *page = ...;
+struct page *page = .......;
 unsigned long pfn = page_to_pfn(page);     // 1. 得到 PFN
 phys_addr_t phys = pfn << PAGE_SHIFT;      // 2. PFN 转为物理地址
 void *virt = phys_to_virt(phys);           // 3. 物理地址转虚拟地址
@@ -91,6 +93,167 @@ void *virt = phys_to_virt(phys);           // 3. 物理地址转虚拟地址
 // 从虚拟内存地址转struct page
 pfn = virt_to_pfn(virt);                   // 虚拟地址转 PFN
 page = pfn_to_page(pfn);                   // PFN 转 struct page
+```
+
+在4.11.6内核，x86_64架构下（三种内存模型）的相关的定义如下：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/asm-generic/memory_model.h#L32
+#define page_to_pfn __page_to_pfn
+#define pfn_to_page __pfn_to_page
+
+/*
+ * supports 3 memory models.
+ */
+#if defined(CONFIG_FLATMEM)
+
+// 本文：平坦内存模型
+#define __pfn_to_page(pfn)	(mem_map + ((pfn) - ARCH_PFN_OFFSET))
+#define __page_to_pfn(page)	((unsigned long)((page) - mem_map) + \
+				 ARCH_PFN_OFFSET)
+#elif defined(CONFIG_DISCONTIGMEM)
+
+#define __pfn_to_page(pfn)			\
+({	unsigned long __pfn = (pfn);		\
+	unsigned long __nid = arch_pfn_to_nid(__pfn);  \
+	NODE_DATA(__nid)->node_mem_map + arch_local_page_offset(__pfn, __nid);\
+})
+
+#define __page_to_pfn(pg)						\
+({	const struct page *__pg = (pg);					\
+	struct pglist_data *__pgdat = NODE_DATA(page_to_nid(__pg));	\
+	(unsigned long)(__pg - __pgdat->node_mem_map) +			\
+	 __pgdat->node_start_pfn;					\
+})
+
+#elif defined(CONFIG_SPARSEMEM_VMEMMAP)
+
+/* memmap is virtually contiguous.  */
+#define __pfn_to_page(pfn)	(vmemmap + (pfn))
+#define __page_to_pfn(page)	(unsigned long)((page) - vmemmap)
+
+#elif defined(CONFIG_SPARSEMEM)
+/*
+ * Note: section's mem_map is encoded to reflect its start_pfn.
+ * section[i].section_mem_map == mem_map's address - start_pfn;
+ */
+#define __page_to_pfn(pg)					\
+({	const struct page *__pg = (pg);				\
+	int __sec = page_to_section(__pg);			\
+	(unsigned long)(__pg - __section_mem_map_addr(__nr_to_section(__sec)));	\
+})
+
+#define __pfn_to_page(pfn)				\
+({	unsigned long __pfn = (pfn);			\
+	struct mem_section *__sec = __pfn_to_section(__pfn);	\
+	__section_mem_map_addr(__sec) + __pfn;		\
+})
+#endif /* CONFIG_FLATMEM/DISCONTIGMEM/SPARSEMEM */
+```
+
+在x86_64上，常用`CONFIG_SPARSEMEM_VMEMMAP`（稀疏内存模型），由于FLATMEM模型要求 `mem_map` 数组在虚拟地址上必须是连续的，若物理内存中间有巨大的空洞，FLATMEM 依然要为这段空洞分配空的 `struct page` 结构体，非常浪费空间。而SPARSEMEM_VMEMMAP模型把不连续的物理内存映射到一段连续的 `struct page` 虚拟地址上。这样既能享受指针减法的高效，又不会浪费内存，简单描述下
+
+SPARSEMEM模型为了支持内存热插拔和巨大的空洞，将内存分成了多个 Section，`page_to_pfn` 必须先找到这个 page 属于哪个 Section，然后计算该 page 在该 Section 内的偏移，最后加上该 Section 的起始 `PFN`
+
+####	原理：page 与 PFN的关系
+在[前文](https://pandaychen.github.io/2025/09/02/A-LINUX-KERNEL-TRAVEL-20/)讨论mmap文件映射缺页中断引发的radix树查找的时候，曾经描述过**内核从这个 struct page 中提取出物理页帧号（PFN），然后将其填入进程的 PTE（页表项）中，这样就完成了页表填充**，如何理解这个概念呢？这里涉及到**软件（内核数据结构）到硬件（MMU/页表）**的跨越
+
+**由于CPU 并不认识 `struct page`，所以本质上将这个 PFN 转化成 x86_64 硬件能读懂的 64 位 PTE 值**，即将 `struct page` 转化为硬件能识别的 PTE，主要经历 **Page -> PFN -> PTE -> Memory**
+
+-	内核世界（软件）：使用 `struct page`，该结构对象存放在内核内存里，记录了页面状态、引用计数等
+-	硬件世界（CPU/MMU）：只认识物理地址，当访问内存时，MMU 需要的是一个 `64` 位的数字，这个数字代表电信号通往内存条的准确位置
+-	PFN（Physical Frame Number）：物理页帧号（整数），内核提供了`page_to_pfn(page)`，它根据 `struct page` 结构体在内存中的位置，通过数学计算（下标偏移），直接算出它是第几个物理内存页。所以`PFN`这个数字就是硬件需要的核心信息
+
+1、PTE（页表项）的本质，**PTE 是存在于内存中的一段硬件能读懂的数据**，格式如下，而页表映射的最终过程（填充PTE的过程），可汇总为如下两步（`handle_mm_fault`）：
+
+-	内核拿到 `struct page`，通过 `page_to_pfn` 算出它是第 `N` 个页框
+-	内核把 `N`左移（加上偏移量），填入 PTE 的高位，然后内核再把可读/可写/已存在等权限标志填入 PTE 的低位
+
+| :-----| :---- | :---- |
+| `63 ~ 12` 位  | `11 ~ 9`位 | `8 ~ 0` 位 |
+| PFN (物理页帧号) | os保留 | 权限位 (Dirty, Accessed, Present R/W) |
+
+那么在查找页表的过程中，CPU 重试访问之前缺页的虚拟内存地址，这样查询页表的过程中，PTE已经有值了，那么CPU/MMU 提取出其中的`PFN`（乘以 `4096`），即得到真正的物理地址，最后CPU 直接把电信号发往内存条，获得内存中数据
+
+2、`handle_mm_fault`函数中，最终会调用[`alloc_set_pte-->set_pte_at`](https://elixir.bootlin.com/linux/v4.11.6/source/mm/memory.c#L3238)填充页表，这里涉及到几个关键的转换实现
+
+-	`page_to_pfn`：从 `struct page` 到 PFN，所有的 `struct page` 都在一个连续的数组 `mem_map` 中。用当前的 page 指针减去数组首地址，就得到了它是第几个页（即 `PFN`）
+-	`pfn_pte`：从 PFN 到 PTE 内容转换，将PFN封装为硬件CPU要求的`64`位格式
+-	当PTE数值计算好后，内核需要把它真正写入到内存中的页表里，这里会调用[`set_pte_at`](https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/include/asm/pgtable.h#L47
+)将PTE写入硬件页表
+
+```cpp
+#define page_to_pfn(page) ((unsigned long)((page) - mem_map))
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/include/asm/pgtable.h#L699
+#define mk_pte(page, pgprot)   pfn_pte(page_to_pfn(page), (pgprot))
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/include/asm/pgtable.h#L487
+static inline pte_t pfn_pte(unsigned long page_nr, pgprot_t pgprot)
+{
+	// 将 PFN 左移 12 位（因为一个页是 4096 字节，即 2^12）
+    // 然后加上权限位（pgprot）
+	// 左移 12 位是因为物理地址 = PFN * 4096
+	return __pte(((phys_addr_t)page_nr << PAGE_SHIFT) |
+		     massage_pgprot(pgprot));
+}
+
+
+int alloc_set_pte(struct vm_fault *vmf, struct mem_cgroup *memcg,
+		struct page *page)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	bool write = vmf->flags & FAULT_FLAG_WRITE;
+	pte_t entry;
+	......
+	//生成 PTE 内容：使用 mk_pte(page, vma->vm_page_prot) 将物理页地址转换为页表项格式
+	//mk_pte-->pfn_pte：生成64位pte格式
+
+	// 核心操作1：生成 PTE 内容：提取 PFN 并加入 VMA 的权限标志
+	entry = mk_pte(page, vma->vm_page_prot);
+	
+	/*
+	下面这段代码有些意思：
+	写时复制 (COW) 产生的匿名页 和 共享的文件页/只读页
+	*/
+
+	//核心操作2：如果是写操作，标记为 Dirty 和 Write
+	if (write)
+		entry = maybe_mkwrite(pte_mkdirty(entry), vma);
+	/* copy-on-write page */
+	if (write && !(vma->vm_flags & VM_SHARED)) {
+		//分支1：私有可写映射 （Private Writable Mapping）
+
+		//因为这是 COW 出来的页，它已经脱离了原来的文件映射，变成了匿名页 (Anonymous Page)，所以增加进程的匿名页计数
+		inc_mm_counter_fast(vma->vm_mm, MM_ANONPAGES);
+		//为这个新生成的匿名页建立反向映射
+		page_add_new_anon_rmap(page, vma, vmf->address, false);
+		//将该页面的内存消耗计入当前进程所在的 cgroup
+		mem_cgroup_commit_charge(page, memcg, false, false);
+		//将该页加入 LRU 链表，以便内核进行内存回收管理
+		lru_cache_add_active_or_unevictable(page, vma);
+	} else {
+		//分支2：共享映射 （Shared Mapping） 或者 只读映射 ）（Read-only Mapping）
+
+		//增加进程的文件页 （File-backed Page） 计数
+		inc_mm_counter_fast(vma->vm_mm, mm_counter_file(page));
+		//建立文件页的反向映射
+		page_add_file_rmap(page, false);
+	}
+
+	//核心操作3：将 entry 写入硬件页表
+	//设置页表：调用 set_pte_at。这一步执行完，虚拟地址到物理地址的映射正式在硬件层面打通
+	//真正将物理页的地址写入进程页表（PTE）的动作。从此以后，虚拟地址就指向了相应的物理地址
+	set_pte_at(vma->vm_mm, vmf->address, vmf->pte, entry);
+
+	/* no need to invalidate: a not-present page won't be cached */
+
+	// 核心操作4：设置MMU缓存
+	update_mmu_cache(vma, vmf->address, vmf->pte);
+
+	//set_pte_at && update_mmu_cache结束：CPU 重新执行指令
+	return 0;
+}
 ```
 
 ####	内核对物理内存页的描述
@@ -386,7 +549,7 @@ TODO
 -	查找：内核拿着 `index` 去 `address_space`中的radix树里查找
 -	定位：在 Radix 树的叶子节点找到了一个指针
 -	获取：内核拿到这个指针（`struct page *`）
--	映射：内核从这个 `struct page` 对象中提取出物理页帧号（PFN），然后将其填入进程的 PTE（页表项） 中
+-	映射：**内核从这个 `struct page` 对象中提取出物理页帧号（PFN），然后将其填入进程的 PTE（页表项） 中**
 
 再思考一下前文描述过的`mmap`文件映射共享机制，进程 A 与 B 都 `mmap` 同一个文件（虽然它们的虚拟内存空间与`mmap`返回的地址都不同），正是由于 Radix 树存的是 `struct page` 指针，这就实现了 Page Cache 的共享。在进程A 与 B的 `handle_mm_fault`函数中，最终都会去同一个 `address_space` 的 Radix 树查找，最终会拿到同一个 `struct page` 指针，即最终两个进程的虚拟地址最终都指向了同一块物理内存
 

@@ -14,7 +14,7 @@ tags:
 ##  0x00    前言
 先回顾一下，调用read系统调用之后，内核的调用路径是什么？
 
-![read-syscall-kernel-trace]()
+![read-syscall-kernel-trace](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/22/read-syscall-kernel-trace.png)
 
 再回顾一下，前文介绍的`splice`实现零拷贝中的内核读操作，是怎么实现的？
 
