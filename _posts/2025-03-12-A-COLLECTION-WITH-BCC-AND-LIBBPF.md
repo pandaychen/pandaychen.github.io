@@ -295,10 +295,16 @@ int BPF_KRETPROBE(vfs_unlink_ret)
 }
 ```
 
+####    mountsnoop
+[`mountsnoop`](https://github.com/iovisor/bcc/blob/master/libbpf-tools/mountsnoop.bpf.c)，
+
 ####    syncsnoop
 [`syncsnoop`](https://github.com/iovisor/bcc/blob/master/libbpf-tools/syncsnoop.bpf.c)
 
 ##      0x0    内核的兼容性思考 
+
+####    结构体成员变更的兼容性
+
 在bcc基于libbpf实现功能的时候，采用了如下方式来解决兼容性的问题，参考[`core_fixes.bpf.h`](https://github.com/iovisor/bcc/blob/master/libbpf-tools/core_fixes.bpf.h)
 
 ```cpp
@@ -321,6 +327,62 @@ static __always_inline bool renamedata_has_new_mnt_idmap_field(void)
 	return false;
 }
 ```
+
+####    tracepoint/kprobe：如何动态控制ebpf的钩子加载？
+在不同版本的内核中，开发者需要检测hook的有效性。若相关的hook函数不存在，则可通过`bpf_object__find_program_by_name`查找到 eBPF 程序，再使用`bpf_program__set_autoload` 动态设置 eBPF 程序的`autoload`属性使其不加载
+
+-       检查指定的 tracepoint 是否存在
+-       检查指定的 kprobe 是否存在
+
+1、如何检查tracepoint挂载点是否存在，通常检查如下两个路径`/sys/kernel/debug/tracing/events`、`/sys/kernel/tracing/events`是否存在以hook命名的目录
+
+```cpp
+bool tracepoint_exists(const char* tp_category, const char* tp_name)
+{
+    char path[256];
+    snprintf(path, sizeof(path), "/sys/kernel/debug/tracing/events/%s/%s",
+             tp_category, tp_name);
+    auto ret = access(path, F_OK);
+    if (ret == 0) {
+        return true;
+    }
+    snprintf(path, sizeof(path), "/sys/kernel/tracing/events/%s/%s", tp_category, tp_name);
+    ret = access(path, F_OK);
+    if (ret == 0) {
+        return true;
+    }
+    return false;
+}
+```
+
+2、检查kprobe挂载点是否存在，kprobes允许动态挂载内核函数进行调试，通常检查如下路径：
+
+-   `/sys/kernel/debug/tracing/available_filter_functions`
+-   `/sys/kernel/tracing/available_filter_functions`
+
+```cpp
+bool kprobe_exists(const char *kprobe_name)
+{
+    FILE* file = fopen("/sys/kernel/debug/tracing/available_filter_functions", "r");
+    if (!file) {
+        file = fopen("/sys/kernel/tracing/available_filter_functions", "r");
+        if (!file) {
+            return false;
+        }
+    }
+    char line[256];
+    while (fgets(line, sizeof(line), file)) {
+        line[strcspn(line, "\n")] = 0;
+        if (strcmp(line, kprobe_name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+```
+
+####    动态设置 eBPF 程序的 autoload 属性
+
 
 ##  0x08 参考
 -   [BCC-文件系统组件分析](https://share.note.youdao.com/ynoteshare/index.html?id=18c1e114f98401ca3b2ececc67980726&type=note&_time=1760355931322)
