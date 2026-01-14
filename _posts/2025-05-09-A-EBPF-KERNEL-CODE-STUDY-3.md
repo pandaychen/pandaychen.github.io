@@ -280,8 +280,14 @@ int BPF_PROG(tcp_rcv, struct sock *sk)
 }
 ```
 
-##  0x04    tcpconnect
+##  0x04    tcpconnect：主动 TCP 连接跟踪
 [`tcpconnect`](https://github.com/iovisor/bcc/blob/v0.35.0/libbpf-tools/tcpconnect.bpf.c)
+
+```bash
+PID    COMM             IP SADDR            DADDR            DPORT
+1055869 xxx      4  9.1.2.3    9.1.2.4    8443 
+1789533 xxx1  4  9.1.2.3    9.1.2.4    8443 
+```
 
 ##  0x05    tcpconnlat
 [`tcpconnlat`](https://github.com/iovisor/bcc/blob/v0.35.0/libbpf-tools/tcpconnlat.bpf.c)
@@ -305,7 +311,331 @@ int BPF_PROG(tcp_rcv, struct sock *sk)
 
 ##  0x0C    tcpaccept
 
-##  0x0D tcp-retrans
+##  0x0D tcp-retrans：重传的 TCP 连接跟踪
+`tcpretrans` 工具显示有关 TCP 重新传输的相关信息，如本地和远程的 IP 地址和端口号，以及重新传输时 TCP 的状态。每次TCP重传数据包时，`tcpretrans`会打印一行记录，包含源地址和目的地址，以及当时该 TCP 连接所处的内核状态，TCP 重传会导致延迟和吞吐量方面的问题，如果重传发生在`ESTABLISHED`状态下，会进一步寻找外部网络可能存在的问题。若重传发在`SYNSENT`状态下，这可能是 CPU 饱和的一个征兆，也可能是内核丢包引发的
+
+输出`T`列的含义：
+
+-   `L`：尝试，内核可能发送了一个TLP，但在某些情况下它可能最终没有被发送
+-   `L>`：表示数据包是从本地地址LADDR发送到远程地址RADDR
+-   `R>`：表示数据包是从远程地址RADDR发送到本地地址LADDR
+
+```bash
+Tracing retransmits ... Hit Ctrl-C to end
+TIME     PID     IP LADDR:LPORT          T> RADDR:RPORT          STATE
+12:35:36 107232  4  192.168.26.100:39122 R> 192.168.26.100:3306  FIN_WAIT1（本地已经收到来自远端的 FIN 包，但本地应用还未完全关闭连接）
+12:35:36 0       4  192.168.26.99:3306   R> 192.168.26.101:57360 ESTABLISHED
+12:35:55 0       4  192.168.26.99:48370  R> 192.168.26.99:3306   FIN_WAIT1
+01:55:53 0      4  10.153.223.157:22    L> 69.53.245.40:46444   ESTABLISHED
+
+
+# python3 tcpretrans.py -c
+# 要快速发现重传流，可以使用-c标志。它将计算每个流中发生的重传次数
+Tracing retransmits ... Hit Ctrl-C to end
+^C
+LADDR:LPORT              RADDR:RPORT             RETRANSMITS
+192.168.10.50:60366  <-> 172.217.21.194:443         700
+192.168.10.50:666    <-> 172.213.11.195:443         345
+192.168.10.50:366    <-> 172.212.22.194:443         211
+```
+
+####    内核态实现
+核心基于`tracepoint:tcp:tcp_retransmit_skb/kprobe:tcp_send_loss_probe`实现，本质上还是基于单hook的事件记录
+
+```python
+# define BPF program
+bpf_text = """
+#include <uapi/linux/ptrace.h>
+#include <net/sock.h>
+#include <net/tcp.h>
+#include <bcc/proto.h>
+
+#define RETRANSMIT  1
+#define TLP         2
+
+// separate data structs for ipv4 and ipv6
+struct ipv4_data_t {
+    u32 pid;
+    u64 ip;
+    u32 seq;
+    u32 saddr;
+    u32 daddr;
+    u16 lport;
+    u16 dport;
+    u64 state;
+    u64 type;
+};
+BPF_PERF_OUTPUT(ipv4_events);
+
+struct ipv6_data_t {
+    u32 pid;
+    u32 seq;
+    u64 ip;
+    unsigned __int128 saddr;
+    unsigned __int128 daddr;
+    u16 lport;
+    u16 dport;
+    u64 state;
+    u64 type;
+};
+BPF_PERF_OUTPUT(ipv6_events);
+
+// separate flow keys per address family
+struct ipv4_flow_key_t {
+    u32 saddr;
+    u32 daddr;
+    u16 lport;
+    u16 dport;
+};
+BPF_HASH(ipv4_count, struct ipv4_flow_key_t);
+
+struct ipv6_flow_key_t {
+    unsigned __int128 saddr;
+    unsigned __int128 daddr;
+    u16 lport;
+    u16 dport;
+};
+BPF_HASH(ipv6_count, struct ipv6_flow_key_t);
+"""
+
+# 核心trace_event
+bpf_text_kprobe = """
+static int trace_event(struct pt_regs *ctx, struct sock *skp, struct sk_buff *skb, int type)
+{
+    struct tcp_skb_cb *tcb;
+    u32 seq;
+
+    if (skp == NULL)
+        return 0;
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+
+    // pull in details
+    u16 family = skp->__sk_common.skc_family;
+    u16 lport = skp->__sk_common.skc_num;
+    u16 dport = skp->__sk_common.skc_dport;
+    char state = skp->__sk_common.skc_state;
+
+    seq = 0;
+    if (skb) {
+        /* macro TCP_SKB_CB from net/tcp.h */
+        tcb = ((struct tcp_skb_cb *)&((skb)->cb[0]));
+        seq = tcb->seq;
+    }
+
+    FILTER_FAMILY
+
+    if (family == AF_INET) {
+        IPV4_INIT
+        IPV4_CORE
+    } else if (family == AF_INET6) {
+        IPV6_INIT
+        IPV6_CORE
+    }
+    // else drop
+
+    return 0;
+}
+"""
+
+#trace_retransmit：入口
+bpf_text_kprobe_retransmit = """
+int trace_retransmit(struct pt_regs *ctx, struct sock *sk, struct sk_buff *skb)
+{
+    trace_event(ctx, sk, skb, RETRANSMIT);
+    return 0;
+}
+"""
+
+#trace_tlp入口
+bpf_text_kprobe_tlp = """
+int trace_tlp(struct pt_regs *ctx, struct sock *sk)
+{
+    trace_event(ctx, sk, NULL, TLP);
+    return 0;
+}
+"""
+
+bpf_text_tracepoint = """
+TRACEPOINT_PROBE(tcp, tcp_retransmit_skb)
+{
+    struct tcp_skb_cb *tcb;
+    u32 seq;
+
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    const struct sock *skp = (const struct sock *)args->skaddr;
+    const struct sk_buff *skb = (const struct sk_buff *)args->skbaddr;
+    u16 lport = args->sport;
+    u16 dport = args->dport;
+    char state = skp->__sk_common.skc_state;
+    u16 family = skp->__sk_common.skc_family;
+
+    seq = 0;
+    if (skb) {
+        /* macro TCP_SKB_CB from net/tcp.h */
+        tcb = ((struct tcp_skb_cb *)&((skb)->cb[0]));
+        seq = tcb->seq;
+    }
+
+    FILTER_FAMILY
+
+    if (family == AF_INET) {
+        IPV4_CODE
+    } else if (family == AF_INET6) {
+        IPV6_CODE
+    }
+    return 0;
+}
+"""
+
+struct_init = { 'ipv4':
+        { 'count' :
+            """
+               struct ipv4_flow_key_t flow_key = {};
+               flow_key.saddr = skp->__sk_common.skc_rcv_saddr;
+               flow_key.daddr = skp->__sk_common.skc_daddr;
+               // lport is host order
+               flow_key.lport = lport;
+               flow_key.dport = ntohs(dport);""",
+               'trace' :
+               """
+               struct ipv4_data_t data4 = {};
+               data4.pid = pid;
+               data4.ip = 4;
+               data4.seq = seq;
+               data4.type = type;
+               data4.saddr = skp->__sk_common.skc_rcv_saddr;
+               data4.daddr = skp->__sk_common.skc_daddr;
+               // lport is host order
+               data4.lport = lport;
+               data4.dport = ntohs(dport);
+               data4.state = state; """
+               },
+        'ipv6':
+        { 'count' :
+            """
+                    struct ipv6_flow_key_t flow_key = {};
+                    bpf_probe_read_kernel(&flow_key.saddr, sizeof(flow_key.saddr),
+                        skp->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
+                    bpf_probe_read_kernel(&flow_key.daddr, sizeof(flow_key.daddr),
+                        skp->__sk_common.skc_v6_daddr.in6_u.u6_addr32);
+                    // lport is host order
+                    flow_key.lport = lport;
+                    flow_key.dport = ntohs(dport);""",
+          'trace' : """
+                    struct ipv6_data_t data6 = {};
+                    data6.pid = pid;
+                    data6.ip = 6;
+                    data6.seq = seq;
+                    data6.type = type;
+                    bpf_probe_read_kernel(&data6.saddr, sizeof(data6.saddr),
+                        skp->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
+                    bpf_probe_read_kernel(&data6.daddr, sizeof(data6.daddr),
+                        skp->__sk_common.skc_v6_daddr.in6_u.u6_addr32);
+                    // lport is host order
+                    data6.lport = lport;
+                    data6.dport = ntohs(dport);
+                    data6.state = state;"""
+                }
+        }
+
+struct_init_tracepoint = { 'ipv4':
+        { 'count' : """
+               struct ipv4_flow_key_t flow_key = {};
+               __builtin_memcpy(&flow_key.saddr, args->saddr, sizeof(flow_key.saddr));
+               __builtin_memcpy(&flow_key.daddr, args->daddr, sizeof(flow_key.daddr));
+               flow_key.lport = lport;
+               flow_key.dport = dport;
+               ipv4_count.increment(flow_key);
+               """,
+          'trace' : """
+               struct ipv4_data_t data4 = {};
+               data4.pid = pid;
+               data4.lport = lport;
+               data4.dport = dport;
+               data4.type = RETRANSMIT;
+               data4.ip = 4;
+               data4.seq = seq;
+               data4.state = state;
+               __builtin_memcpy(&data4.saddr, args->saddr, sizeof(data4.saddr));
+               __builtin_memcpy(&data4.daddr, args->daddr, sizeof(data4.daddr));
+               ipv4_events.perf_submit(args, &data4, sizeof(data4));
+               """
+               },
+        'ipv6':
+        { 'count' : """
+               struct ipv6_flow_key_t flow_key = {};
+               __builtin_memcpy(&flow_key.saddr, args->saddr_v6, sizeof(flow_key.saddr));
+               __builtin_memcpy(&flow_key.daddr, args->daddr_v6, sizeof(flow_key.daddr));
+               flow_key.lport = lport;
+               flow_key.dport = dport;
+               ipv6_count.increment(flow_key);
+               """,
+          'trace' : """
+               struct ipv6_data_t data6 = {};
+               data6.pid = pid;
+               data6.lport = lport;
+               data6.dport = dport;
+               data6.type = RETRANSMIT;
+               data6.ip = 6;
+               data6.seq = seq;
+               data6.state = state;
+               __builtin_memcpy(&data6.saddr, args->saddr_v6, sizeof(data6.saddr));
+               __builtin_memcpy(&data6.daddr, args->daddr_v6, sizeof(data6.daddr));
+               ipv6_events.perf_submit(args, &data6, sizeof(data6));
+               """
+               }
+        }
+
+count_core_base = """
+        COUNT_STRUCT.increment(flow_key);
+"""
+
+# 代码文本替换
+if BPF.tracepoint_exists("tcp", "tcp_retransmit_skb"):
+    if args.count:
+        bpf_text_tracepoint = bpf_text_tracepoint.replace("IPV4_CODE", struct_init_tracepoint['ipv4']['count'])
+        bpf_text_tracepoint = bpf_text_tracepoint.replace("IPV6_CODE", struct_init_tracepoint['ipv6']['count'])
+    else:
+        bpf_text_tracepoint = bpf_text_tracepoint.replace("IPV4_CODE", struct_init_tracepoint['ipv4']['trace'])
+        bpf_text_tracepoint = bpf_text_tracepoint.replace("IPV6_CODE", struct_init_tracepoint['ipv6']['trace'])
+    bpf_text += bpf_text_tracepoint
+
+if args.lossprobe or not BPF.tracepoint_exists("tcp", "tcp_retransmit_skb"):
+    bpf_text += bpf_text_kprobe
+    if args.count:
+        bpf_text = bpf_text.replace("IPV4_INIT", struct_init['ipv4']['count'])
+        bpf_text = bpf_text.replace("IPV6_INIT", struct_init['ipv6']['count'])
+        bpf_text = bpf_text.replace("IPV4_CORE", count_core_base.replace("COUNT_STRUCT", 'ipv4_count'))
+        bpf_text = bpf_text.replace("IPV6_CORE", count_core_base.replace("COUNT_STRUCT", 'ipv6_count'))
+    else:
+        bpf_text = bpf_text.replace("IPV4_INIT", struct_init['ipv4']['trace'])
+        bpf_text = bpf_text.replace("IPV6_INIT", struct_init['ipv6']['trace'])
+        bpf_text = bpf_text.replace("IPV4_CORE", "ipv4_events.perf_submit(ctx, &data4, sizeof(data4));")
+        bpf_text = bpf_text.replace("IPV6_CORE", "ipv6_events.perf_submit(ctx, &data6, sizeof(data6));")
+    if args.lossprobe:
+        bpf_text += bpf_text_kprobe_tlp
+    if not BPF.tracepoint_exists("tcp", "tcp_retransmit_skb"):
+        bpf_text += bpf_text_kprobe_retransmit
+if args.ipv4:
+    bpf_text = bpf_text.replace('FILTER_FAMILY',
+        'if (family != AF_INET) { return 0; }')
+elif args.ipv6:
+    bpf_text = bpf_text.replace('FILTER_FAMILY',
+        'if (family != AF_INET6) { return 0; }')
+else:
+    bpf_text = bpf_text.replace('FILTER_FAMILY', '')
+if debug or args.ebpf:
+    print(bpf_text)
+    if args.ebpf:
+        exit()
+
+# initialize BPF
+b = BPF(text=bpf_text)
+if not BPF.tracepoint_exists("tcp", "tcp_retransmit_skb"):
+    b.attach_kprobe(event="tcp_retransmit_skb", fn_name="trace_retransmit")
+if args.lossprobe:
+    b.attach_kprobe(event="tcp_send_loss_probe", fn_name="trace_tlp")
+```
 
 ##  0x0E tcpsubnet
 
@@ -318,3 +648,5 @@ int BPF_PROG(tcp_rcv, struct sock *sk)
 -   [TCP Tracepoints](https://www.brendangregg.com/blog/2018-03-22/tcp-tracepoints.html)
 -   [eBPF入门开发实践教程十三：统计 TCP 连接延时，并使用 libbpf 在用户态处理数据](https://eunomia.dev/zh/tutorials/13-tcpconnlat/)
 -   [tcpconnect - TCP Connection Monitoring](https://ebee.xmigrate.cloud/tools/tcpconnect/)
+-   [redhat](https://docs.redhat.com/zh_hans/documentation/red_hat_enterprise_linux/9/html/configuring_and_managing_networking/network-tracing-using-the-bpf-compiler-collection_configuring-and-managing-networking
+)
