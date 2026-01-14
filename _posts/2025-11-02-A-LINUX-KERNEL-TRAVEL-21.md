@@ -182,6 +182,30 @@ SPARSEMEM模型为了支持内存热插拔和巨大的空洞，将内存分成�
 -	当PTE数值计算好后，内核需要把它真正写入到内存中的页表里，这里会调用[`set_pte_at`](https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/include/asm/pgtable.h#L47
 )将PTE写入硬件页表
 
+3、`set_pte_at`：写入页表的实现
+
+```cpp
+#define set_pte_at(mm, addr, ptep, pte)	native_set_pte(ptep, pte)
+
+static inline void native_set_pte(pte_t *ptep, pte_t pte)
+{
+    // ptep 是指向页表位置的内核虚拟地址指针，它是通过 handle_mm_fault 逐级找下去得到的，如 PGD -> PUD -> PMD，最终定位到那张包含 512 个项的 PTE 页表页面中的某一个具体位置
+    // pte 是刚才构造出来的 64 位值
+	// 细节：在 x86_64 上，直接对对齐的 64 位内存进行赋值是原子的。这保证了PTE变量的原子性
+    *ptep = pte;
+}
+```
+
+当执行完`set_pte_at`之后，对应的内存条上那 `8` 字节的PTE格式大致如下：
+
+| bit | 名称 | 含义 | 
+| :-----| :---- | :---- |
+|0|	P (Present)| `1` 表示物理页已存在，MMU 不再报错|
+|1|	R/W| `0` 为只读，`1` 为读写|
+|6|	D (Dirty)|	`1` 表示该页被写过|
+|12 ~ 51| Physical Address	这里存储即`page_to_pfn` 算出的地址高位，即第N个物理页的起始地址|
+|63| NX| `1` 表示禁止执行（No Execute）|
+
 ```cpp
 #define page_to_pfn(page) ((unsigned long)((page) - mem_map))
 
@@ -215,6 +239,11 @@ int alloc_set_pte(struct vm_fault *vmf, struct mem_cgroup *memcg,
 	/*
 	下面这段代码有些意思：
 	写时复制 (COW) 产生的匿名页 和 共享的文件页/只读页
+	下面这段代码主要是权限位的设置：
+	1.	此时生成的 PTE 是原始的，在 `handle_mm_fault` 结束前，内核会根据当前的异常类型（读还是写）修改标志位：
+		-	pte_mkdirty(entry)：将第 6 位设为 1。告诉 CPU，这个内存页被写过了
+		-	pte_mkwrite(entry)：将第 1 位设为 1。如果没设这一位，CPU 写入时会再次触发异常
+		-	_PAGE_PRESENT：将第 0 位设为 1。这是最关键的，只有这一位是 1，MMU 才会认为这个映射是有效的
 	*/
 
 	//核心操作2：如果是写操作，标记为 Dirty 和 Write
@@ -256,12 +285,17 @@ int alloc_set_pte(struct vm_fault *vmf, struct mem_cgroup *memcg,
 }
 ```
 
+小结下，从缺页中断到页表填充过程中，对页表的核心操作链路如下：
+
+1.	缺页中断，软件查找：`filemap_fault` 根据虚拟内存地址（转换为radix树的index）在 `address_space` 找到 `struct page`
+2.	地址计算&&格式化：通过 `page_to_pfn` 算出这个页在物理内存区域的第几个位置，通过`pfn_pte`构造`64`位的PTE数值
+3.	物理写入，页表填充完成：`set_pte_at` 把这个 `64` 位整数写进 CPU 维护的那张页表里
+4.	硬件恢复：缺页异常返回，CPU 再次执行指令。此时 MMU 读到这个新写入的 `64` 位整数，发现 `P=1`，直接提取出物理地址，访问成功
+
 ####	内核对物理内存页的描述
 ![linux-mem]()
 
-`struct page` 分为两种：
-
-内核中的物理内存页有两种类型，分别用于不同的场景：
+`struct page` 内核中的物理内存页有两种类型，分别用于不同的场景：
 
 -	匿名页：匿名页背后并没有一个磁盘中的文件作为数据来源，匿名页中的数据都是通过进程运行过程中产生的，匿名页直接和进程虚拟地址空间建立映射供进程使用
 -	文件页（内存文件映射）：文件页中的数据来自于磁盘中的文件，文件页需要先关联一个磁盘中的文件，然后再和进程虚拟地址空间建立映射供进程使用，使得进程可以通过操作虚拟内存实现对文件的操作
@@ -269,7 +303,7 @@ int alloc_set_pte(struct vm_fault *vmf, struct mem_cgroup *memcg,
 ##  0x02    基础数据结构
 
 ####	address_space
-前面在介绍VFS的时候提到了`struct inode`中的一个重要成员：`address_space`，`address_space`对象是文件系统中管理内存页page cache的核心数据结构
+前面在介绍VFS的时候提到了`struct inode`中的一个重要成员：`address_space`，`address_space`对象是文件系统中管理内存页page cache的核心数据结构，即它代表的是一个数据源（通常是文件）在内存中的缓存管理结构
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/fs.h#L554
@@ -288,17 +322,23 @@ struct inode {
 
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/fs.h#L379
 struct address_space {
+	/* 拥有此空间的 inode */
 	struct inode		*host;		/* owner: inode, block_device */
+	/* 核心：存储所有 Page Cache 的基数树 */
 	struct radix_tree_root	page_tree;	/* radix tree of all pages */
+	/* 保护基数树的自旋锁 */
 	spinlock_t		tree_lock;	/* and lock protecting it */
 	atomic_t		i_mmap_writable;/* count VM_SHARED mappings */
+	/* 所有的 mmap 映射 VMA 链表 */
 	struct rb_root		i_mmap;		/* tree of private and shared mappings */
 	struct rw_semaphore	i_mmap_rwsem;	/* protect tree, count, list */
+	/* 缓存页的总数 */
 	/* Protected by tree_lock together with the radix tree */
 	unsigned long		nrpages;	/* number of total pages */
 	/* number of shadow or DAX exceptional entries */
 	unsigned long		nrexceptional;
 	pgoff_t			writeback_index;/* writeback starts here */
+	/* 方法集：readpage, writepage 等 */
 	const struct address_space_operations *a_ops;	/* methods */
 	unsigned long		flags;		/* error bits */
 	spinlock_t		private_lock;	/* for use by the address_space */
@@ -342,6 +382,9 @@ struct page {
 
 ![inode-to-address_space](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/21/inode2addressspace2page.png)
 
+-	`page_tree`：它通过文件偏移量（index）作为索引，快速找到对应的物理页page
+-	`a_ops`：一组函数指针，如缺页中断发现 Page 不存在时，就会调用 `a_ops->readpage` 去磁盘读数据，不同的文件系统（ext4/xfs/ nfs等）会实现不同的 `a_ops`
+
 ####	`address_space`的意义
 `address_space`是inux 统一管理 I/O 的核心，在内核中，不管是 `mmap` 文件映射场景下的缺页中断，还是普通的 `read()` 系统调用，最终都会走到 `address_space`，这意味着无论用哪种方式访问文件，内存里永远只有一份 Page Cache，这就是为什么`mmap` 后的内存和 `read` 读到的缓存是实时同步的
 
@@ -356,7 +399,6 @@ struct page {
 3.  若A用户的a进程操作文件，将文件带入缓存，那么稍后B用户的b进程操作通一个文件时，同样可以享受文件内容在页高速缓存带来的福利
 4.  page cache预读的原理是什么？
 5.  要读某文件的第`N`个页面，内核是如何判断该页面是否在页高速缓存？如果在，如何找到该页的内容？如果不在，内核是如何处理的？
-
 
 `ext4`支持到PB级文件存储，如此页的量级是巨大的。访问大文件时，page cache中存在着有关该文件巨大数量的页，所以内核提供了radix树来加快查找（一个address_space对象对应一个radix树）。`struct address_space`中成员`page_tree`指向是基树的根`radix_tree_root`，基树根中的`struct radix_tree_node *rnode`指向基树的最高层节点`radix_tree_node`，radix树节点都是`radix_tree_node`结构，节点中存放的都是指针，叶子节点的指针指向page描述符，radix树中上层节点指向存放其他节点的指针。一般一个`radix_tree_node`最多可以有`64`个指针，字段`count`表示该`radix_tree_node`已用节点数
 
@@ -380,17 +422,29 @@ struct radix_tree_node {
 
 ![radix-tree](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/21/radix-tree-with-page-cache-1.jpg)
 
-如图，radix树的叶子节点对应的就是`struct page`
+如图，radix树利用文件偏移量作为索引，它是一个多叉树，层级固定，查找速度极快，且非常适合通过 index 范围进行批量操作（如预读）。radix树的叶子节点对应的就是`struct page`。再回顾下radix树的查询过程，参考[前文](https://pandaychen.github.io/2024/10/01/A-RADIX-TREE-REVIEW/)
 
-再回顾下radix树的查询过程，参考[]()
+1.	内核计算文件的 `pgoff`（比如访问文件的第`4096` 字节，index 就是 `1`）
+2.	从 `page_tree` 的根节点向下跳转，每一层解析 index 的一部分bit
+3.	最底层的叶子节点存放的就是 `struct page` 的指针
 
-TODO
+####	`address_space`与page cache的（状态）管理机制
 
-####	`address_space`与page cache的管理机制
+`address_space` 对page的管理涉及两个关键状态，脏页（Dirty）和锁定（Locked），简单描述下：
 
-TODO
+1、页面写入与脏状态：当进程通过 `write/mmap` 等系统调用修改内存页时
 
-##  0x0    struct page的本质
+-	内核调用 `set_page_dirty()`
+-	`address_space` 标记该页page为 Dirty
+-	为了加速扫描radix树中的脏页，radix树的中间节点会设置 Tag，内核回写线程（pdflush/kworker）在扫描脏页时，不需要遍历整棵树，只需要沿着带有 `PAGECACHE_TAG_DIRTY` 标记的路径向下找即可
+
+2、页面回收机制（Eviction）与 LRU：当内存不足时，内核会通过 LRU (Least Recently Used) 算法回收页面（page cache）
+
+-	`address_space` 中的页面会被挂载到全局的 `lru_list` 上
+-	如果页面是干净的（与磁盘一致），直接释放
+-	如果页面是脏的，必须先调用 `a_ops->writepage` 同步到磁盘，才能释放
+
+##  0x02    struct page的本质
 前文已经描述了内核中虚拟内存主要分为两种类型的页，即匿名页与文件页，此外还介绍了虚拟内存地址到物理内存地址的翻译过程、页表体系等
 
 -   [Linux 内核之旅（三）：虚拟内存管理（上）](https://pandaychen.github.io/2024/11/05/A-LINUX-KERNEL-TRAVEL-2/)
@@ -538,10 +592,11 @@ TODO
 -	指向物理地址：通过这个 `struct page` 结构，内核可以非常容易计算出它对应的实际物理起始地址（`page_to_phys`）
 
 2、 radix树的叶子节点里存储的内容：叶子节点实际上存储的是一个指针，该指针指向内核虚拟地址空间中的 `mem_map` 数组里的某一个 `struct page`。为什么存指针而不是直接存储物理地址呢？ 因为 `struct page` 包含了很多极其重要的管理信息，内核在处理缺页中断或文件读写时会使用到，典型的几个成员如下：
-    - `flags`：标记这个页是否为脏（Dirty）、是否正在被锁定进行磁盘 I/O（Locked）、是否已经是最新的数据（Uptodate）
-    - `mapping`：反向指向它所属的 `address_space`
-    -  `index`：记录这个页在文件中的偏移位置
-    - `_count/_mapcount`：引用计数，记录有多少个进程或内核模块正在使用此页
+
+- `flags`：标记这个页是否为脏（Dirty）、是否正在被锁定进行磁盘 I/O（Locked）、是否已经是最新的数据（Uptodate）
+- `mapping`：反向指向它所属的 `address_space`
+-  `index`：记录这个页在文件中的偏移位置
+- `_count/_mapcount`：引用计数，记录有多少个进程或内核模块正在使用此页
 
 3、缺页中断中的数据流转，结合查找 `address_space`过程来看，包含了输入/查找/定位/获取/映射的几个过程：
 
@@ -549,7 +604,7 @@ TODO
 -	查找：内核拿着 `index` 去 `address_space`中的radix树里查找
 -	定位：在 Radix 树的叶子节点找到了一个指针
 -	获取：内核拿到这个指针（`struct page *`）
--	映射：**内核从这个 `struct page` 对象中提取出物理页帧号（PFN），然后将其填入进程的 PTE（页表项） 中**
+-	映射：**内核从这个 `struct page` 对象中提取出物理页帧号（PFN），然后将其填入进程的 PTE（页表项）中**
 
 再思考一下前文描述过的`mmap`文件映射共享机制，进程 A 与 B 都 `mmap` 同一个文件（虽然它们的虚拟内存空间与`mmap`返回的地址都不同），正是由于 Radix 树存的是 `struct page` 指针，这就实现了 Page Cache 的共享。在进程A 与 B的 `handle_mm_fault`函数中，最终都会去同一个 `address_space` 的 Radix 树查找，最终会拿到同一个 `struct page` 指针，即最终两个进程的虚拟地址最终都指向了同一块物理内存
 
