@@ -11,7 +11,7 @@ tags:
 ---
 
 ##  0x00 前言
-本文学习下基于ebpf技术的网络（协议栈）追踪，主要基于[bcc-v0.35.0](https://github.com/iovisor/bcc/tree/v0.35.0/libbpf-tools)，内核版本参考[5.4.241](https://elixir.bootlin.com/linux/v5.4.241/source/kernel/)
+本文学习下基于ebpf技术的网络（协议栈）追踪，主要基于[bcc-v0.35.0](https://github.com/iovisor/bcc/tree/v0.35.0/libbpf-tools)，内核版本（非注明）参考[5.4.241](https://elixir.bootlin.com/linux/v5.4.241/source/kernel/)
 
 -   [tcpstates](https://github.com/iovisor/bcc/blob/v0.35.0/libbpf-tools/tcpstates.bpf.c)：用于记录 TCP 连接的状态变化，tcpstates主要依赖于 eBPF 的 Tracepoints 来捕获 TCP 连接的状态变化，从而跟踪 TCP 连接在每个状态下的停留时间
 -   [tcprtt](https://github.com/iovisor/bcc/blob/v0.35.0/libbpf-tools/tcprtt.bpf.c)：用于记录 TCP 的往返时间（RTT/Round-Trip Time），同样也可以基于cgroup 统计一段时间内 tcp rtt 的分布，显示连接的状态信息
@@ -310,6 +310,170 @@ PID    COMM             IP SADDR            DADDR            DPORT
 ##  0x0B    tcpdrop
 
 ##  0x0C    tcpaccept
+   TCP 被动连接（即 accept 成功的连接），基于hook点为`kretprobe/inet_csk_accept`，函数原型如下。该函数`inet_csk_accept`的主要功能是Linux 内核中负责从监听队列（accept queue）中摘取一个已完成三次握手的连接，因为需要获取的数据
+
+```cpp
+//返回为struct sock*对象
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/inet_connection_sock.c#L427
+struct sock *inet_csk_accept(struct sock *sk, int flags, int *err, bool kern)
+```
+
+tcpaccept的内核态实现核心是挂钩内核函数 -> 提取套接字信息 -> 异步传输到用户态，由于要提取的核心字段（五元组信息）在`inet_csk_accept`函数的返回值`struct sock *`中 a啊 ，所以需要使用`kretprobe`方式（`kretprobe` 在函数返回时触发，只有当函数返回时，才能拿到新创建的 `struct sock` 指针，从而获取连接的五元组）。内核主要提取的字段如下：
+
+-   `PID/COMM`：触发 accept 的进程 ID 和进程名
+-   五元组信息：源 IP (`skc_rcv_saddr`)、目的 IP (`skc_daddr`)、源端口 (`skc_num`) 和目的端口 (`skc_dport`)，从返回内核指针 `newsk`（即 `struct sock`）中提取
+-   时间戳：使用 `bpf_ktime_get_ns()` 记录事件发生的精确时间
+
+```PYTHON
+# define BPF program
+bpf_text = """
+#include <uapi/linux/ptrace.h>
+#include <net/sock.h>
+#include <bcc/proto.h>
+
+// separate data structs for ipv4 and ipv6
+struct ipv4_data_t {
+    u64 ts_us;
+    u32 pid;
+    u32 saddr;
+    u32 daddr;
+    u64 ip;
+    u16 lport;
+    u16 dport;
+    char task[TASK_COMM_LEN];
+};
+BPF_PERF_OUTPUT(ipv4_events);
+
+struct ipv6_data_t {
+    u64 ts_us;
+    u32 pid;
+    unsigned __int128 saddr;
+    unsigned __int128 daddr;
+    u64 ip;
+    u16 lport;
+    u16 dport;
+    char task[TASK_COMM_LEN];
+};
+BPF_PERF_OUTPUT(ipv6_events);
+"""
+
+#
+# The following code uses kprobes to instrument inet_csk_accept().
+# On Linux 4.16 and later, we could use sock:inet_sock_set_state
+# tracepoint for efficiency, but it may output wrong PIDs. This is
+# because sock:inet_sock_set_state may run outside of process context.
+# Hence, we stick to kprobes until we find a proper solution.
+#
+bpf_text_kprobe = """
+int kretprobe__inet_csk_accept(struct pt_regs *ctx)
+{
+    if (container_should_be_filtered()) {
+        return 0;
+    }
+
+    //PT_REGS_RC(ctx)：获取 inet_csk_accept 函数的返回值，即新连接的 sock 指针
+    struct sock *newsk = (struct sock *)PT_REGS_RC(ctx);
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+
+    ##FILTER_PID##
+
+    if (newsk == NULL)
+        return 0;
+
+    // check this is TCP
+    u16 protocol = 0;
+    // workaround for reading the sk_protocol bitfield:
+
+    // Following comments add by Joe Yin:
+    // Unfortunately,it can not work since Linux 4.10,
+    // because the sk_wmem_queued is not following the bitfield of sk_protocol.
+    // And the following member is sk_gso_max_segs.
+    // So, we can use this:
+    // bpf_probe_read_kernel(&protocol, 1, (void *)((u64)&newsk->sk_gso_max_segs) - 3);
+    // In order to  diff the pre-4.10 and 4.10+ ,introduce the variables gso_max_segs_offset,sk_lingertime,
+    // sk_lingertime is closed to the gso_max_segs_offset,and
+    // the offset between the two members is 4
+
+    int gso_max_segs_offset = offsetof(struct sock, sk_gso_max_segs);
+    int sk_lingertime_offset = offsetof(struct sock, sk_lingertime);
+
+
+    // Since kernel v5.6 sk_protocol is its own u16 field and gso_max_segs
+    // precedes sk_lingertime.
+    if (sk_lingertime_offset - gso_max_segs_offset == 2)
+        protocol = newsk->sk_protocol;
+    else if (sk_lingertime_offset - gso_max_segs_offset == 4)
+        // 4.10+ with little endian
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+        protocol = *(u8 *)((u64)&newsk->sk_gso_max_segs - 3);
+    else
+        // pre-4.10 with little endian
+        protocol = *(u8 *)((u64)&newsk->sk_wmem_queued - 3);
+#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        // 4.10+ with big endian
+        protocol = *(u8 *)((u64)&newsk->sk_gso_max_segs - 1);
+    else
+        // pre-4.10 with big endian
+        protocol = *(u8 *)((u64)&newsk->sk_wmem_queued - 1);
+#else
+# error "Fix your compiler's __BYTE_ORDER__?!"
+#endif
+
+    if (protocol != IPPROTO_TCP)
+        return 0;
+
+    // pull in details
+    u16 family = 0, lport = 0, dport;
+    family = newsk->__sk_common.skc_family;
+    lport = newsk->__sk_common.skc_num;
+    dport = newsk->__sk_common.skc_dport;
+
+    //dport：网络字节序转主机字节序（端口号转换），用于规则过滤
+    dport = ntohs(dport);
+    
+    //占位符，由 Python 代码根据用户输入的参数（如 -p 1234）动态替换为过滤逻辑
+    ##FILTER_FAMILY##
+
+    ##FILTER_PORT##
+
+    if (family == AF_INET) {
+        struct ipv4_data_t data4 = {.pid = pid, .ip = 4};
+        data4.ts_us = bpf_ktime_get_ns() / 1000;
+        data4.saddr = newsk->__sk_common.skc_rcv_saddr;
+        data4.daddr = newsk->__sk_common.skc_daddr;
+        data4.lport = lport;
+        data4.dport = dport;
+        bpf_get_current_comm(&data4.task, sizeof(data4.task));
+        ipv4_events.perf_submit(ctx, &data4, sizeof(data4));
+
+    } else if (family == AF_INET6) {
+        struct ipv6_data_t data6 = {.pid = pid, .ip = 6};
+        data6.ts_us = bpf_ktime_get_ns() / 1000;
+        bpf_probe_read_kernel(&data6.saddr, sizeof(data6.saddr),
+            &newsk->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
+        bpf_probe_read_kernel(&data6.daddr, sizeof(data6.daddr),
+            &newsk->__sk_common.skc_v6_daddr.in6_u.u6_addr32);
+        data6.lport = lport;
+        data6.dport = dport;
+        bpf_get_current_comm(&data6.task, sizeof(data6.task));
+        ipv6_events.perf_submit(ctx, &data6, sizeof(data6));
+    }
+    // else drop
+
+    return 0;
+}
+"""
+```
+
+这段代码不复杂，比较玩味的是上面的注释部分：
+
+1、注释一：为什么不用 tracepoint机制？注释中说明了问题所在，即`inet_sock_set_state` 跟踪的是套接字状态的变化。但在某些情况下（如内核软中断处理数据包时），状态转换发生的上下文可能并不是发起 `accept()` 系统调用的进程上下文，因此为了保证获取到的 PID 是真正调用 `accept` 的应用进程，代码选择 kprobe机制实现，因为它运行在进程系统调用的同步上下文中
+
+2、注释二关于 `sk_protocol` 的长篇注释即说明了ebpf对内核版本兼容性（字段提取），代码中需要明确知道socket 类型是否为 TCP 协议（`IPPROTO_TCP`），但在内核的不同版本中，`struct sock` 结构体的定义一直在变化，即`sk_protocol` 字段的位置和存储方式发生了变化，典型的如下：
+
+-   早期内核（4.10之前）：`sk_protocol` 被放在位域（bitfield）定义中，BPF 无法直接安全地读取位域
+-   中期内核（4.10~5.5）：`sk_protocol` 的位置发生了偏移。代码通过计算 `sk_gso_max_segs` 和 `sk_lingertime` 两个邻近字段的相对距离，来推断当前内核的版本，从而计算出 `sk_protocol` 的物理偏移量
+-   较新内核 （5.6之后）：内核开发者将 `sk_protocol` 独立成了一个 `u16` 字段，可以直接读取
 
 ##  0x0D tcp-retrans：重传的 TCP 连接跟踪
 `tcpretrans` 工具显示有关 TCP 重新传输的相关信息，如本地和远程的 IP 地址和端口号，以及重新传输时 TCP 的状态。每次TCP重传数据包时，`tcpretrans`会打印一行记录，包含源地址和目的地址，以及当时该 TCP 连接所处的内核状态，TCP 重传会导致延迟和吞吐量方面的问题，如果重传发生在`ESTABLISHED`状态下，会进一步寻找外部网络可能存在的问题。若重传发在`SYNSENT`状态下，这可能是 CPU 饱和的一个征兆，也可能是内核丢包引发的
