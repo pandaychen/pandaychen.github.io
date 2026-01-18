@@ -140,6 +140,21 @@ cleanup:
 }
 ```
 
+####    hook兼容性检测
+1、[`tracepoint_exists`](https://github.com/iovisor/bcc/blob/v0.35.0/src/python/bcc/__init__.py#L1054)
+
+```python
+DEBUGFS = "/sys/kernel/debug"
+TRACEFS = os.path.join(DEBUGFS, "tracing")
+if not os.path.exists(TRACEFS):
+    TRACEFS = "/sys/kernel/tracing"
+
+@staticmethod
+    def tracepoint_exists(category, event):
+        evt_dir = os.path.join(TRACEFS, "events", category, event)
+        return os.path.isdir(evt_dir)
+```
+
 ####    BCC的rewrite
 1、内核态代码中，比如对`pid_t pid = task->pid`，BCC会将其改写为如下代码：
 

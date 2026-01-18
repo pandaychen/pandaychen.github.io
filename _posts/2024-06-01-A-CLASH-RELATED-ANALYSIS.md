@@ -198,8 +198,13 @@ func match(metadata *C.Metadata) (C.Proxy, C.Rule, error) {
 }
 ```
 
-##  0x03 参考
+##  0x03    原理分析（Windivert）
+
+TODO:gemini+图
+
+##  0x0 参考
 -   [Clash 教程](https://www.codein.icu/clashtutorial/)
 -   [规则集](https://github.com/angwz/DomainRouter)
 -   [[Feature] Tun #393](https://github.com/Dreamacro/clash/pull/393)
 -   [虚空终端 Docs：Tun 模式](https://wiki.metacubex.one/config/inbound/tun/)
+-	[net-speeder：在高延迟不稳定链路上优化单线程下载速度](https://github.com/snooda/net-speeder)

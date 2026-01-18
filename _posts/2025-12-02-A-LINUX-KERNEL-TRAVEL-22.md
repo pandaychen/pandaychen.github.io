@@ -830,7 +830,38 @@ struct file_ra_state {
 ####	page_cache_sync_readahead的实现原理
 
 ####	page_cache_async_readahead的实现原理
-[`page_cache_async_readahead`](https://elixir.bootlin.com/linux/v4.11.6/source/mm/readahead.c#L530)
+[`page_cache_async_readahead`](https://elixir.bootlin.com/linux/v4.11.6/source/mm/readahead.c#L530)函数
+
+```cpp
+void
+page_cache_async_readahead(struct address_space *mapping,
+			   struct file_ra_state *ra, struct file *filp,
+			   struct page *page, pgoff_t offset,
+			   unsigned long req_size)
+{
+	/* no read-ahead */
+	if (!ra->ra_pages)
+		return;
+
+	/*
+	 * Same bit is used for PG_readahead and PG_reclaim.
+	 */
+	if (PageWriteback(page))
+		return;
+
+	ClearPageReadahead(page);
+
+	/*
+	 * Defer asynchronous read-ahead on IO congestion.
+	 */
+	if (inode_read_congested(mapping->host))
+		return;
+
+	/* do read-ahead */
+	ondemand_readahead(mapping, ra, filp, true, offset, req_size);
+}
+
+```
 
 ##	0x0	数据拷贝到用户空间
 [`iov_iter`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/uio.h#L30)结构的作用：
@@ -1202,3 +1233,6 @@ out:
 -	[Linux readahead文件预读分析](https://zhuanlan.zhihu.com/p/690066876)
 -	<<Linux 内核文件 Cache 机制>>
 -	[Linux 内核的 IO 预读算法](https://www.bluepuni.com/archives/kernel-readahead/)
+-	[Linux文件系统预读（一）](https://zhuanlan.zhihu.com/p/41307290)
+-	[Linux文件系统预读(二)](https://zhuanlan.zhihu.com/p/41851040)
+-	[Linux文件系统预读(三)](https://zhuanlan.zhihu.com/p/42406805)

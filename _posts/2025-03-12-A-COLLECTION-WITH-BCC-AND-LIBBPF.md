@@ -20,6 +20,117 @@ tags:
 
 ##  0x01    基础
 
+####    内核态工具函数
+1、`offsetof`
+
+```cpp
+//cc/libbpf/include/linux/kernel.h
+#ifndef offsetof
+#define offsetof(TYPE, MEMBER) ((size_t) &((TYPE *)0)->MEMBER)
+#endif
+```
+
+2、`container_of`
+
+```cpp
+#ifndef container_of
+#define container_of(ptr, type, member) ({                      \
+        const typeof(((type *)0)->member) * __mptr = (ptr);     \
+        (type *)((char *)__mptr - offsetof(type, member)); })
+#endif
+```
+
+####    libbpf工具函数（重要）
+1、`bpf_object__find_program_by_name`：根据给定的程序名称，从 BPF 对象中查找并返回相应的 eBPF 程序。如可以通过程序动态判断是否支持某个tracepoint/kprobe的挂载点，若不存在，需要使用这个API查找到对应的ebpf程序（struct bpf_program *），方便后续设置其`autoload`属性
+
+```cpp
+/*
+- obj: 指向 BPF 对象的指针。该对象通常是通过加载 BPF ELF 文件生成的，包含多个 eBPF 程序。在libbpf-bootstrap框架中，可以通过skel->obj来获取
+- name: 要查找的 eBPF 程序的名称。名称是一个字符串，应与 BPF 程序在源代码中的定义名称相匹配
+- 返回值
+成功时，返回指向找到的 eBPF 程序的指针（struct bpf_program *）
+如果未找到匹配的程序，则失败，返回 NULL
+*/
+struct bpf_program * bpf_object__find_program_by_name(const struct bpf_object *obj, const char *name)
+```
+
+2、`bpf_program__set_autoload`：启用/禁用特定 eBPF 程序的自动加载。开发者可以决定某个 eBPF 程序在调用 `bpf_object__load` 时是否应被加载到内核中（实现动态加载ebpf hook）
+
+```cpp
+/*
+- prog: 指向要设置自动加载属性的 eBPF 程序的指针（struct bpf_program *）
+- autoload: 一个布尔值，指示是否应自动加载该程序。设为 true 表示启用自动加载，设为 false 表示禁用自动加载
+- 返回值
+成功时返回 0
+失败时返回一个负值的错误码
+*/
+int bpf_program__set_autoload(struct bpf_program *prog, bool autoload)
+```
+
+```cpp
+// 查找&&禁用
+void disable_hook_autoload(struct bpf_object *obj, const char *prog_name) {
+    struct bpf_program *prog = bpf_object__find_program_by_name(obj, prog_name);
+    if (!prog) {
+        fprintf(stderr, "Program %s not found in object\n", prog_name);
+        return;
+    }
+    if (bpf_program__set_autoload(prog, false) != 0) {
+        fprintf(stderr, "Failed to disable autoload for program %s\n", prog_name);
+    } else {
+        printf("Autoload disabled for program %s\n", prog_name);
+    }
+
+    return;
+}
+```
+
+3、`ensure_core_btf`
+
+4、`kprobe_exists`
+
+5、`tracepoint_exists`
+
+6、`fentry_can_attach`
+
+TODO
+
+在bcc的`libbpf-tools`实现中，能够看到大量使用此二者实现的用户态检测代码，主要用于kprobe/fentry等机制兼容性问题
+
+```text
+biolatency.c
+biosnoop.c
+biostacks.c
+biotop.c
+cachestat.c
+cpudist.c
+drsnoop.c
+filelife.c
+fsdist.c
+fsslower.c
+funclatency.c
+hardirqs.c
+klockstat.c
+mdflush.c
+memleak.c
+mountsnoop.c
+numamove.c
+offcputime.c
+opensnoop.c
+readahead.c
+runqlat.c
+runqslower.c
+sigsnoop.c
+slabratetop.c
+softirqs.c
+solisten.c
+statsnoop.c
+tcpconnlat.c
+tcppktlat.c
+tcprtt.c
+tcpsynbl.c
+vfsstat.c
+```
 
 ##  0x02    文件系统相关
 
@@ -300,6 +411,143 @@ int BPF_KRETPROBE(vfs_unlink_ret)
 
 ####    syncsnoop
 [`syncsnoop`](https://github.com/iovisor/bcc/blob/master/libbpf-tools/syncsnoop.bpf.c)
+
+####    readahead：页表预读机制的细节（版本5.11.1）
+readahead工具很有趣，其核心原理是追踪 Linux 内核页缓存 (Page Cache) 的预读 (Read-ahead) 机制，并计算预读页面的寿命与利用率。简单来说，它在记录如下数据：
+
+1. 预读了多少页？
+2. 这些页在多久之后被真正使用了？
+3. 有多少页根本没被用到
+
+内核态代码如下，涉及到如下hook点：
+
+-  [`fentry/do_page_cache_ra`](https://elixir.bootlin.com/linux/v5.11.1/source/mm/readahead.c#L249)：
+-  `fexit/__page_cache_alloc`：
+-  `fexit/do_page_cache_ra`
+-  `fentry/mark_page_accessed`
+
+涉及核心hashtable的用途如下：
+
+1. 核心数据结构：BPF Maps
+
+-  `in_readahead`（Hash Map）： 存放当前正在执行预读任务的线程 PID
+-  `birth`（Hash Map）：核心追踪表，key 是 `struct page *` 指针，value 是分配时的时间戳
+-  `hist`：存放最终的统计结果，包括直方图数组 `slots`、总页面数 `total` 和未使用的页面数 `unused`
+
+readahead工具的运行流程如下：
+
+1、第一阶段：进入预读上下文 （The Context Switch），关联hook 点为`fentry/do_page_cache_ra`，当内核进入预读函数时，获取当前 PID，在 `in_readahead` hash表做一次记录，这里的目的是标记接下来的页面page分配动作属于预读行为
+
+2、第二阶段：捕捉页面诞生的事件，hook 点为`fexit/__page_cache_alloc`（分配函数，当函数退出时触发），直接获取到函数的返回值 `ret`（即新分配的页面指针）。这里会检查当前 PID 是否在 `in_readahead` 中？如果该PID在hash表存在，说明这是个预读页，然后记录 `bpf_ktime_get_ns()` 到 `birth` 这个hash表中（key 为页面page指针），最后使用原子操作 `__sync_fetch_and_add` 增加全局计数器
+
+3、第三阶段：退出预读上下文，关联hook 点为 `fexit/do_page_cache_ra`，当预读函数执行完毕退出时，从 `in_readahead` 中删除当前 PID。防止后续不相关的内存分配被计入
+
+4、第四阶段：命中与统计，关联hook 点 `fentry/mark_page_accessed`，当内核通过 `mark_page_accessed` 访问一个页面时，先去 `birth` hash表查这个页面page指针，如果查找成功，说明预读页被命中（触发统计逻辑）
+
+-  计算延迟：当前时间 - birth时间 = 页面在缓存中的生存时间
+-  直方图统计：将延迟转换为 `log_2` 分度，存入直方图 `slots`
+-  更新计数：既然page已经被标记使用了，那么`unused` 计数减 `1`
+-  销毁记录：从 `birth` 表删除该页面page指针，这个page已经被使用了，所以需要从记录中清理掉
+
+```cpp
+//内核态实现
+#define MAX_ENTRIES     10240
+
+struct {
+        __uint(type, BPF_MAP_TYPE_HASH);
+        __uint(max_entries, MAX_ENTRIES);
+        __type(key, u32);
+        __type(value, u64);
+} in_readahead SEC(".maps");
+
+struct {
+        __uint(type, BPF_MAP_TYPE_HASH);
+        __uint(max_entries, MAX_ENTRIES);
+        __type(key, struct page *);
+        __type(value, u64);
+} birth SEC(".maps");
+
+struct hist hist = {};
+
+SEC("fentry/do_page_cache_ra")
+int BPF_PROG(do_page_cache_ra)
+{
+        u32 pid = bpf_get_current_pid_tgid();
+        u64 one = 1;
+
+        bpf_map_update_elem(&in_readahead, &pid, &one, 0);
+        return 0;
+}
+
+static __always_inline
+int alloc_done(struct page *page)
+{
+        u32 pid = bpf_get_current_pid_tgid();
+        u64 ts;
+
+        if (!bpf_map_lookup_elem(&in_readahead, &pid))
+                return 0;
+
+        ts = bpf_ktime_get_ns();
+        bpf_map_update_elem(&birth, &page, &ts, 0);
+        __sync_fetch_and_add(&hist.unused, 1);
+        __sync_fetch_and_add(&hist.total, 1);
+
+        return 0;
+}
+
+SEC("fexit/__page_cache_alloc")
+int BPF_PROG(page_cache_alloc_ret, gfp_t gfp, struct page *ret)
+{
+        return alloc_done(ret);
+}
+
+
+SEC("fexit/do_page_cache_ra")
+int BPF_PROG(do_page_cache_ra_ret)
+{
+        u32 pid = bpf_get_current_pid_tgid();
+
+        bpf_map_delete_elem(&in_readahead, &pid);
+        return 0;
+}
+
+static __always_inline
+int mark_accessed(struct page *page)
+{
+        u64 *tsp, slot, ts = bpf_ktime_get_ns();
+        s64 delta;
+
+        tsp = bpf_map_lookup_elem(&birth, &page);
+        if (!tsp)
+                return 0;
+        delta = (s64)(ts - *tsp);
+        if (delta < 0)
+                goto update_and_cleanup;
+        slot = log2l(delta / 1000000U);
+        if (slot >= MAX_SLOTS)
+                slot = MAX_SLOTS - 1;
+        __sync_fetch_and_add(&hist.slots[slot], 1);
+
+update_and_cleanup:
+        __sync_fetch_and_add(&hist.unused, -1);
+        bpf_map_delete_elem(&birth, &page);
+
+        return 0;
+}
+
+SEC("fentry/mark_page_accessed")
+int BPF_PROG(mark_page_accessed, struct page *page)
+{
+        return mark_accessed(page);
+}
+```
+
+这里有个小问题，为何可以使用page页面指针来作为hash表的key呢？
+
+TODO
+##      0x0    用户态代码的加载过程分析
+TODO
 
 ##      0x0    内核的兼容性思考 
 

@@ -511,6 +511,8 @@ stack_traces = b.get_table("stack_traces")
 
 额外多说一点，TODO
 
+https://elixir.bootlin.com/linux/v5.17.6/source/net/core/skbuff.c#L770
+
 ####    基于命名空间的过滤
 在Docker 环境中，宿主机上运行海量容器，每个容器都有自己的网络栈（Namespace）。下面这段代码，可以控制只捕获指定命名空间 ID下面的tcpdrop事件
 

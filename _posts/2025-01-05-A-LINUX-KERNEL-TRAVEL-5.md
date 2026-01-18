@@ -126,6 +126,7 @@ cat trace
 
 ##  0x02    bpftrace
 
+参考[bpftrace](https://pandaychen.github.io/2025/06/22/A-COLLECTION-WITH-BPFTRACE/)
 
 ##  0x03    perf
 ![perf-arch]()
