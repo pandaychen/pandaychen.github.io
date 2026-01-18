@@ -200,7 +200,32 @@ func match(metadata *C.Metadata) (C.Proxy, C.Rule, error) {
 
 ##  0x03    原理分析（Windivert）
 
-TODO:gemini+图
+![windivert]()
+
+Windivert是一种高性能的用户层数据包截获工具，核心价值在于让开发者无需编写复杂的内核驱动（Kernel Driver），就能在用户态（User Mode）直接操纵网络底层数据包。WinDivert 基于 WFP（Windows Filtering Platform）实现，这是 Windows 内核中处理网络过滤的官方框架，架构由两部分组成：
+
+-	`WinDivert.sys`（内核驱动）：负责根据过滤规则，从网络协议栈中捕获（钩）出数据包
+-	`WinDivert.dll`（用户态库）：为代理程序提供 API，通过句柄（Handle）与内核驱动通信
+
+####	WinDivert 全流量代理的工作原理
+在全流量代理场景下，WinDivert 的执行逻辑如下：
+
+1、设定过滤器（DivertOpen）过程，当代理程序启动时，通过 WinDivert 向内核下达指令，设定过滤规则。如`tcp.DstPort == 80 or tcp.DstPort == 443`表述拦截所有 `80/443` 端口的 TCP 流量，内核驱动会根据这个规则监控所有经过网络栈的数据包
+
+2、数据包截获（DivertRecv）过程，当符合规则的数据包到达（或发出）时，会触发下面的事件：
+
+-	内核挂起： `WinDivert.sys` 会在协议栈中拦截该数据包，防止它继续向上传递给应用或向下发出网卡
+-	拷贝至用户态：数据包被放入一个队列，代理程序通过 `WinDivertRecv` 将整个原始数据包（包含 IP/TCP 头部）读取到内存中
+
+3、数据包操纵与魔改（Modification）过程，通常由开发者实现（代理程序），会根据代理协议（如 Shadowsocks/V2Ray/ Trojan 等）对包进行如下处理：
+
+-	修改目的地址： 将数据包的原始目标 IP 修改为代理服务器的 IP
+-	SNI 嗅探： 分析 HTTPS 握手包，识别目标域名以进行分流
+-	流量封包： 将数据包作为负载（Payload）封装进新的加密协议中
+
+4、重新注入（DivertSend），处理完成后，代理程序通过 `WinDivertSend` 将修改后的（或全新的）数据包交还给内核，重新注入协议栈，内核驱动将包重新放回网络流中。由于原始数据包的目的 IP 已被修改，Windows 路由表会将其发送至代理网关，而不是直接发往原始目标
+
+5、在代理网关中会通过代理协议，将数据包转化为真实的原始目的IP的数据包（流）
 
 ##  0x0 参考
 -   [Clash 教程](https://www.codein.icu/clashtutorial/)
