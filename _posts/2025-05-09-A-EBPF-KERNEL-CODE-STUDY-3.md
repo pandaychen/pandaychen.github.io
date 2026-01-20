@@ -55,7 +55,7 @@ ffff9fd7e8192000 0     swapper/5  1.1.1.1  63446 2.2.2.2    80    FIN_WAIT1   ->
 ffff9fd7e8192000 0     swapper/5  1.1.1.1  63446 2.2.2.2    80    FIN_WAIT2   -> CLOSE       0.006
 ```
 
-####    内核态实现
+####    内核态实现tcpstates.bpf.c
 实现原理主要是依赖hook `tracepoint/sock/inet_sock_set_state`，当 TCP 连接状态发生变化时，这个 tracepoint 就会被触发，然后执行`handle_set_state`函数统计
 
 ```bash
@@ -216,7 +216,7 @@ struct hist_key {
 };
 ```
 
-内核态实现主要逻辑如下：
+内核态实现`tcprtt.bpf.c`主要逻辑如下：
 
 1.  根据过滤规则对 TCP 连接进行过滤
 2.  在`hists` map 中查找或者初始化对应的 histogram
@@ -281,7 +281,7 @@ int BPF_PROG(tcp_rcv, struct sock *sk)
 ```
 
 ##  0x04    tcpconnect：主动 TCP 连接跟踪
-[`tcpconnect`](https://github.com/iovisor/bcc/blob/v0.35.0/libbpf-tools/tcpconnect.bpf.c)
+内核态实现[`tcpconnect.bpf.c`](https://github.com/iovisor/bcc/blob/v0.35.0/libbpf-tools/tcpconnect.bpf.c)
 
 ```bash
 PID    COMM             IP SADDR            DADDR            DPORT
@@ -290,22 +290,565 @@ PID    COMM             IP SADDR            DADDR            DPORT
 ```
 
 ##  0x05    tcpconnlat
-[`tcpconnlat`](https://github.com/iovisor/bcc/blob/v0.35.0/libbpf-tools/tcpconnlat.bpf.c)
+内核态实现[`tcpconnlat.bpf.c`](https://github.com/iovisor/bcc/blob/v0.35.0/libbpf-tools/tcpconnlat.bpf.c)
 
 ##  0x06    tcplife
-[`tcplife`](https://github.com/iovisor/bcc/blob/v0.35.0/libbpf-tools/tcplife.bpf.c)
+内核态实现[`tcplife.bpf.c`](https://github.com/iovisor/bcc/blob/v0.35.0/libbpf-tools/tcplife.bpf.c)
 
 ##  0x07    tcppktlat
-[`tcppktlat`](https://github.com/iovisor/bcc/blob/v0.35.0/libbpf-tools/tcppktlat.bpf.c)
+内核态实现[`tcppktlat.bpf.c`](https://github.com/iovisor/bcc/blob/v0.35.0/libbpf-tools/tcppktlat.bpf.c)
 
 ##  0x08    tcpsynbl
-[`tcpsynbl`](https://github.com/iovisor/bcc/blob/v0.35.0/libbpf-tools/tcpsynbl.bpf.c)
+内核态实现[`tcpsynbl.bpf.c`](https://github.com/iovisor/bcc/blob/v0.35.0/libbpf-tools/tcpsynbl.bpf.c)
 
-##  0x09    tcptop
-[`tcptop`](https://github.com/iovisor/bcc/blob/v0.35.0/libbpf-tools/tcptop.bpf.c)
+##  0x09    tcptop：跟踪 IP 端口的网络吞吐量
+该工具以 `KB` 为单位显示主机发送并接收的 TCP 流量，会自动刷新并只包含活跃的 TCP 连接（若连接关闭，则不再可见）。内核态实现[`tcptop.bpf.c`](https://github.com/iovisor/bcc/blob/v0.35.0/libbpf-tools/tcptop.bpf.c)，可以使用`-C`选项不清屏打印
+
+```bash
+13:46:29 loadavg: 0.10 0.03 0.01 1/215 3875
+
+PID    COMM         LADDR           RADDR              RX_KB   TX_KB
+3853   3853         192.0.2.1:22    192.0.2.165:41838  32     102626
+1285   sshd         192.0.2.1:22    192.0.2.45:39240   0           0
+```
+
+####    内核态实现
+
+TODO
+
+```cpp
+const volatile bool filter_cg = false;
+const volatile pid_t target_pid = -1;
+const volatile int target_family = -1;
+
+struct {
+        __uint(type, BPF_MAP_TYPE_CGROUP_ARRAY);
+        __type(key, u32);
+        __type(value, u32);
+        __uint(max_entries, 1);
+} cgroup_map SEC(".maps");
+
+struct {
+        __uint(type, BPF_MAP_TYPE_HASH);
+        __uint(max_entries, 10240);
+        __type(key, struct ip_key_t);
+        __type(value, struct traffic_t);
+} ip_map SEC(".maps");
+
+static int probe_ip(bool receiving, struct sock *sk, size_t size)
+{
+        struct ip_key_t ip_key = {};
+        struct traffic_t *trafficp;
+        u16 family;
+        u32 pid;
+
+        if (filter_cg && !bpf_current_task_under_cgroup(&cgroup_map, 0))
+                return 0;
+
+        pid = bpf_get_current_pid_tgid() >> 32;
+        if (target_pid != -1 && target_pid != pid)
+                return 0;
+
+        family = BPF_CORE_READ(sk, __sk_common.skc_family);
+        if (target_family != -1 && target_family != family)
+                return 0;
+
+        /* drop */
+        if (family != AF_INET && family != AF_INET6)
+                return 0;
+
+        ip_key.pid = pid;
+        bpf_get_current_comm(&ip_key.name, sizeof(ip_key.name));
+        ip_key.lport = BPF_CORE_READ(sk, __sk_common.skc_num);
+        ip_key.dport = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
+        ip_key.family = family;
+
+        if (family == AF_INET) {
+                bpf_probe_read_kernel(&ip_key.saddr,
+                                      sizeof(sk->__sk_common.skc_rcv_saddr),
+                                      &sk->__sk_common.skc_rcv_saddr);
+                bpf_probe_read_kernel(&ip_key.daddr,
+                                      sizeof(sk->__sk_common.skc_daddr),
+                                      &sk->__sk_common.skc_daddr);
+        } else {
+                /*
+                 * family == AF_INET6,
+                 * we already checked above family is correct.
+                 */
+                bpf_probe_read_kernel(&ip_key.saddr,
+                                      sizeof(sk->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32),
+                                      &sk->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
+                bpf_probe_read_kernel(&ip_key.daddr,
+                                      sizeof(sk->__sk_common.skc_v6_daddr.in6_u.u6_addr32),
+                                      &sk->__sk_common.skc_v6_daddr.in6_u.u6_addr32);
+        }
+
+        trafficp = bpf_map_lookup_elem(&ip_map, &ip_key);
+        if (!trafficp) {
+                struct traffic_t zero;
+
+                if (receiving) {
+                        zero.sent = 0;
+                        zero.received = size;
+                } else {
+                        zero.sent = size;
+                        zero.received = 0;
+                }
+
+                bpf_map_update_elem(&ip_map, &ip_key, &zero, BPF_NOEXIST);
+        } else {
+                if (receiving)
+                        trafficp->received += size;
+                else
+                        trafficp->sent += size;
+
+                bpf_map_update_elem(&ip_map, &ip_key, trafficp, BPF_EXIST);
+        }
+
+        return 0;
+}
+
+SEC("kprobe/tcp_sendmsg")
+int BPF_KPROBE(tcp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size)
+{
+        return probe_ip(false, sk, size);
+}
+
+/*
+ * tcp_recvmsg() would be obvious to trace, but is less suitable because:
+ * - we'd need to trace both entry and return, to have both sock and size
+ * - misses tcp_read_sock() traffic
+ * we'd much prefer tracepoints once they are available.
+ */
+SEC("kprobe/tcp_cleanup_rbuf")
+int BPF_KPROBE(tcp_cleanup_rbuf, struct sock *sk, int copied)
+{
+        if (copied <= 0)
+                return 0;
+
+        return probe_ip(true, sk, copied);
+}
+```
 
 ##  0x0A    tcptracer
-[tcptracer](https://github.com/iovisor/bcc/blob/v0.35.0/libbpf-tools/tcptracer.bpf.c)
+内核态实现[tcptracer.bpf.c](https://github.com/iovisor/bcc/blob/v0.35.0/libbpf-tools/tcptracer.bpf.c)，本工具用于追踪内核中与 TCP 连接建立（通过 `connect()/accept()`等）和关闭（`close()`或异常退出等）相关的函数，典型输入如下
+
+-   `C` 连接（Connect）：表示一个 TCP 连接请求已经发送或接收
+-   `X` 关闭（Close）：表示 TCP 连接已经关闭，可能是由于正常关闭（通过 `FIN/ACK` 握手）或由于某种错误导致的异常关闭
+-   `A` 接受（Accept）：通常表示服务器已经接受了一个来自客户端的连接请求，并创建了一个新的连接。每当内核连接、接受或关闭连接时，tcptracer 都会显示连接的详情
+
+```bash
+Tracing TCP established connections. Ctrl-C to end.
+T  PID    COMM             IP SADDR            DADDR            SPORT  DPORT
+C  28943  telnet           4  192.168.1.2      192.168.1.1      59306  23
+C  28818  curl             6  [::1]            [::1]            55758  80
+X  28943  telnet           4  192.168.1.2      192.168.1.1      59306  23
+A  28817  nc               6  [::1]            [::1]            80     55758
+X  28818  curl             6  [::1]            [::1]            55758  80
+X  28817  nc               6  [::1]            [::1]            80     55758
+```
+
+####    过滤条件
+
+```bash
+tcptracer: Trace TCP connections
+
+EXAMPLES:
+    tcptracer             # trace all TCP connections
+    tcptracer -t          # include timestamps
+    tcptracer -p 181      # only trace PID 181
+    tcptracer -U          # include UID
+    tcptracer -u 1000     # only trace UID 1000
+    tcptracer --C mappath # only trace cgroups in the map
+    tcptracer --M mappath # only trace mount namespaces in the map
+
+  -C, --cgroupmap=PATH       trace cgroups in this map
+  -M, --mntnsmap=PATH        trace mount namespaces in this map
+  -p, --pid=PID              Process PID to trace
+  -t, --timestamp            Include timestamp on output
+  -u, --uid=UID              Process UID to trace
+  -U, --print-uid            Include UID on output
+  -v, --verbose              Verbose debug output
+  -?, --help                 Give this help list
+      --usage                Give a short usage message
+  -V, --version              Print program version
+```
+
+####    tcptracer 设计的目的
+tcptracer工具的核心设计是解决追踪TCP整个生命周期（建立到消失） 事件追踪时，PID 的丢失问题，这里的TCP包含主动connect与被动accept两种模式
+
+PID丢失问题主要是在监控连接建立的相关hook `tcp_set_state/inet_sock_set_state`，然而当内核通过异步方式（如内核收到对端的 ACK 包触发状态机）将连接设为 `ESTABLISHED` 时，当前运行的上下文一般是内核中断，而不是发起 connect() 的进程（通过ebpf捕获的`comm`为内核线程非用户态进程）
+
+因此 tcptracer 设计用`tuplepid`的hash表来解决上面的问题，简单描述如下：
+
+1.  第一阶段 (connect)：在 `tcp_v4_connect` 进入时记录当前进程的 PID/COMM，以网络五元组（`tuple_key_t`）作为 Key 存入 `tuplepid`
+2.  第二阶段 (set_state)：当 TCP 状态变为 `ESTABLISHED` 时，通过当前的五元组去 Map 里查表，找回第一阶段存入的 PID，从而避免了PID丢失
+
+####    内核态实现
+列举下相关的hook（IPV4），基于hook的顺序和功能如下：
+
+```cpp
+//https://elixir.bootlin.com/linux/v5.4.241/source/net/ipv4/tcp_ipv4.c#L199
+int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len);
+
+//https://elixir.bootlin.com/linux/v5.4.241/source/net/ipv4/tcp.c#L2225
+void tcp_set_state(struct sock *sk, int state)
+
+//https://elixir.bootlin.com/linux/v5.4.241/source/net/ipv4/inet_connection_sock.c#L451
+struct sock *inet_csk_accept(struct sock *sk, int flags, int *err, bool kern)
+
+//https://elixir.bootlin.com/linux/v5.4.241/source/net/ipv4/tcp.c#L2353
+void tcp_close(struct sock *sk, long timeout)
+```
+
+上面hook对应的顺序如下：
+
+1.  `kprobe/connect`：客户端请求连接（主动连接），`TID`（key）->`sk`（value），存入`sockets` map
+2.  `kretprobe/connect`：检查返回值，提取五元组 -> `PID/COMM`，存入 `tuplepid` map
+3.  `kprobe/set_state`：从 `tuplepid` 查出 `PID`，然后输出 `CONNECT` 事件
+4.  `kretprobe/accept`：被动连接，直接获取 `PID`，输出 `ACCEPT` 事件
+5.  `kprobe/close`：连接关闭，直接获取 `PID`，输出 `CLOSE` 事件
+
+代码中涉及到hash表的用途：
+
+-   `tuplepid`：存储五元组到 `PID/COMM` 的映射，用于跨阶段查找进程相关信息
+-   `sockets`：临时存储当前正在执行 `connect` 系统调用的套接字指针
+
+```cpp
+const volatile uid_t filter_uid = -1;
+const volatile pid_t filter_pid = 0;
+
+/* Define here, because there are conflicts with include files */
+#define AF_INET         2
+#define AF_INET6        10
+
+/*
+ * tcp_set_state doesn't run in the context of the process that initiated the
+ * connection so we need to store a map TUPLE -> PID to send the right PID on
+ * the event.
+ */
+struct tuple_key_t {
+        union {
+                __u32 saddr_v4;
+                unsigned __int128 saddr_v6;
+        };
+        union {
+                __u32 daddr_v4;
+                unsigned __int128 daddr_v6;
+        };
+        u16 sport;
+        u16 dport;
+        u32 netns;  //ns
+};
+
+struct pid_comm_t {
+        u64 pid;
+        char comm[TASK_COMM_LEN];
+        u32 uid;
+};
+
+struct {
+        __uint(type, BPF_MAP_TYPE_HASH);
+        __uint(max_entries, MAX_ENTRIES);
+        __type(key, struct tuple_key_t);
+        __type(value, struct pid_comm_t);
+} tuplepid SEC(".maps");
+
+struct {
+        __uint(type, BPF_MAP_TYPE_HASH);
+        __uint(max_entries, MAX_ENTRIES);
+        __type(key, u32);
+        __type(value, struct sock *);
+} sockets SEC(".maps");
+
+struct {
+        __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+        __uint(key_size, sizeof(u32));
+        __uint(value_size, sizeof(u32));
+} events SEC(".maps");
+
+
+//从 struct sock 中提取关键信息
+static __always_inline bool
+fill_tuple(struct tuple_key_t *tuple, struct sock *sk, int family)
+{
+        struct inet_sock *sockp = (struct inet_sock *)sk;
+
+        // NetNS Inode：sk->__sk_common.skc_net.net->ns.inum
+        BPF_CORE_READ_INTO(&tuple->netns, sk, __sk_common.skc_net.net, ns.inum);
+
+        //IP 地址：根据 AF_INET/AF_INET6 提取源地址和目的地址
+        switch (family) {
+        case AF_INET:
+                BPF_CORE_READ_INTO(&tuple->saddr_v4, sk, __sk_common.skc_rcv_saddr);
+                if (tuple->saddr_v4 == 0)
+                        return false;
+
+                BPF_CORE_READ_INTO(&tuple->daddr_v4, sk, __sk_common.skc_daddr);
+                if (tuple->daddr_v4 == 0)
+                        return false;
+
+                break;
+        case AF_INET6:
+                BPF_CORE_READ_INTO(&tuple->saddr_v6, sk,
+                                   __sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
+                if (tuple->saddr_v6 == 0)
+                        return false;
+                BPF_CORE_READ_INTO(&tuple->daddr_v6, sk,
+                                   __sk_common.skc_v6_daddr.in6_u.u6_addr32);
+                if (tuple->daddr_v6 == 0)
+                        return false;
+
+                break;
+        /* it should not happen but to be sure let's handle this case */
+        default:
+                return false;
+        }
+
+        //端口号：提取源端口 (skc_num) 和目的端口 (skc_dport)
+        BPF_CORE_READ_INTO(&tuple->dport, sk, __sk_common.skc_dport);
+        if (tuple->dport == 0)
+                return false;
+
+        BPF_CORE_READ_INTO(&tuple->sport, sockp, inet_sport);
+        if (tuple->sport == 0)
+                return false;
+
+        return true;
+}
+
+static __always_inline void
+fill_event(struct tuple_key_t *tuple, struct event *event, __u32 pid,
+           __u32 uid, __u16 family, __u8 type)
+{
+        event->ts_us = bpf_ktime_get_ns() / 1000;
+        event->type = type;
+        event->pid = pid;
+        event->uid = uid;
+        event->af = family;
+        event->netns = tuple->netns;
+        if (family == AF_INET) {
+                event->saddr_v4 = tuple->saddr_v4;
+                event->daddr_v4 = tuple->daddr_v4;
+        } else {
+                event->saddr_v6 = tuple->saddr_v6;
+                event->daddr_v6 = tuple->daddr_v6;
+        }
+        event->sport = tuple->sport;
+        event->dport = tuple->dport;
+}
+
+/* returns true if the event should be skipped */
+static __always_inline bool
+filter_event(struct sock *sk, __u32 uid, __u32 pid)
+{
+        u16 family = BPF_CORE_READ(sk, __sk_common.skc_family);
+
+        if (family != AF_INET && family != AF_INET6)
+                return true;
+
+        if (filter_pid && pid != filter_pid)
+                return true;
+
+        if (filter_uid != (uid_t) -1 && uid != filter_uid)
+                return true;
+
+        return false;
+}
+
+static __always_inline int
+enter_tcp_connect(struct sock *sk)
+{
+        __u64 pid_tgid = bpf_get_current_pid_tgid();
+        __u32 pid = pid_tgid >> 32;
+        __u32 tid = pid_tgid;
+        __u64 uid_gid = bpf_get_current_uid_gid();
+        __u32 uid = uid_gid;
+
+        if (filter_event(sk, uid, pid))
+                return 0;
+
+        bpf_map_update_elem(&sockets, &tid, &sk, 0);
+        return 0;
+}
+
+static __always_inline int
+exit_tcp_connect(int ret, __u16 family)
+{
+        __u64 pid_tgid = bpf_get_current_pid_tgid();
+        __u32 pid = pid_tgid >> 32;
+        __u32 tid = pid_tgid;
+        __u64 uid_gid = bpf_get_current_uid_gid();
+        __u32 uid = uid_gid;
+        struct tuple_key_t tuple = {};
+        struct pid_comm_t pid_comm = {};
+        struct sock **skpp;
+        struct sock *sk;
+
+        skpp = bpf_map_lookup_elem(&sockets, &tid);
+        if (!skpp)
+                return 0;
+
+        if (ret)
+                goto end;
+
+        sk = *skpp;
+
+        if (!fill_tuple(&tuple, sk, family))
+                goto end;
+
+        pid_comm.pid = pid;
+        pid_comm.uid = uid;
+        bpf_get_current_comm(&pid_comm.comm, sizeof(pid_comm.comm));
+
+        bpf_map_update_elem(&tuplepid, &tuple, &pid_comm, 0);
+
+end:
+        bpf_map_delete_elem(&sockets, &tid);
+        return 0;
+}
+
+//kprobe (enter)：在函数开始处，将当前线程 ID (tid) 和 sock 指针关联存入 sockets Map
+SEC("kprobe/tcp_v4_connect")
+int BPF_KPROBE(tcp_v4_connect, struct sock *sk)
+{
+        return enter_tcp_connect(sk);
+}
+
+//kretprobe (exit)：在函数返回处，确认连接发起成功后，提取五元组，并连同当前进程的 pid、comm 写入 tuplepid 映射表，为后续状态转换做准备
+SEC("kretprobe/tcp_v4_connect")
+int BPF_KRETPROBE(tcp_v4_connect_ret, int ret)
+{
+        return exit_tcp_connect(ret, AF_INET);
+}
+
+......
+
+/*tcp_close：连接关闭跟踪，监控连接关闭。
+
+-   状态过滤：为了避免垃圾数据，会检查 oldstate。如果连接还没建立好就关了（如 SYN_SENT 状态），则不生成事件
+*/
+SEC("kprobe/tcp_close")
+int BPF_KPROBE(entry_trace_close, struct sock *sk)
+{
+        __u64 pid_tgid = bpf_get_current_pid_tgid();
+        __u32 pid = pid_tgid >> 32;
+        __u64 uid_gid = bpf_get_current_uid_gid();
+        __u32 uid = uid_gid;
+        struct tuple_key_t tuple = {};
+        struct event event = {};
+        u16 family;
+
+        if (filter_event(sk, uid, pid))
+                return 0;
+
+        /*
+         * Don't generate close events for connections that were never
+         * established in the first place.
+         */
+        
+        //如果连接没有建立好，则退出
+        u8 oldstate = BPF_CORE_READ(sk, __sk_common.skc_state);
+        if (oldstate == TCP_SYN_SENT ||
+            oldstate == TCP_SYN_RECV ||
+            oldstate == TCP_NEW_SYN_RECV)
+                return 0;
+
+        family = BPF_CORE_READ(sk, __sk_common.skc_family);
+        if (!fill_tuple(&tuple, sk, family))
+                return 0;
+
+        fill_event(&tuple, &event, pid, uid, family, TCP_EVENT_TYPE_CLOSE);
+        bpf_get_current_comm(&event.task, sizeof(event.task));
+
+        bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU,
+                      &event, sizeof(event));
+
+        return 0;
+};
+
+
+//tcp_set_state：状态机跟踪
+/*
+-   监控 TCP_ESTABLISHED（连接建立成功）事件
+-   通过五元组在 tuplepid 中查找原始进程信息
+-   如果找到了，会调用 bpf_perf_event_output 将一个 TCP_EVENT_TYPE_CONNECT 类型的事件发送到用户态
+*/
+SEC("kprobe/tcp_set_state")
+int BPF_KPROBE(enter_tcp_set_state, struct sock *sk, int state)
+{
+        struct tuple_key_t tuple = {};
+        struct event event = {};
+        __u16 family;
+
+        if (state != TCP_ESTABLISHED && state != TCP_CLOSE)
+                goto end;
+
+        family = BPF_CORE_READ(sk, __sk_common.skc_family);
+
+        if (!fill_tuple(&tuple, sk, family))
+                goto end;
+
+        if (state == TCP_CLOSE)
+                goto end;
+
+        struct pid_comm_t *p;
+        p = bpf_map_lookup_elem(&tuplepid, &tuple);
+        if (!p)
+                return 0; /* missed entry */
+
+        fill_event(&tuple, &event, p->pid, p->uid, family, TCP_EVENT_TYPE_CONNECT);
+        __builtin_memcpy(&event.task, p->comm, sizeof(event.task));
+
+        bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU,&event, sizeof(event));
+
+end:
+        bpf_map_delete_elem(&tuplepid, &tuple);
+
+        return 0;
+}
+
+/*inet_csk_accept：被动连接跟踪，对于作为服务器端被动接收的连接
+
+-   由于 accept 返回时，新连接已经完全建立且就在当前进程上下文中，因此不需要复杂的查表
+-   直接从返回的 sk 中提取信息，发送 TCP_EVENT_TYPE_ACCEPT 事件
+*/
+SEC("kretprobe/inet_csk_accept")
+int BPF_KRETPROBE(exit_inet_csk_accept, struct sock *sk)
+{
+        __u64 pid_tgid = bpf_get_current_pid_tgid();
+        __u32 pid = pid_tgid >> 32;
+        __u64 uid_gid = bpf_get_current_uid_gid();
+        __u32 uid = uid_gid;
+        __u16 sport, family;
+        struct event event = {};
+
+        if (!sk)
+                return 0;
+
+        if (filter_event(sk, uid, pid))
+                return 0;
+
+        family = BPF_CORE_READ(sk, __sk_common.skc_family);
+        sport = BPF_CORE_READ(sk, __sk_common.skc_num);
+
+        struct tuple_key_t t = {};
+        fill_tuple(&t, sk, family);
+        t.sport = bpf_ntohs(sport);
+        /* do not send event if IP address is 0.0.0.0 or port is 0 */
+        if (t.saddr_v6 == 0 || t.daddr_v6 == 0 || t.dport == 0 || t.sport == 0)
+                return 0;
+
+        fill_event(&t, &event, pid, uid, family, TCP_EVENT_TYPE_ACCEPT);
+
+        bpf_get_current_comm(&event.task, sizeof(event.task));
+        bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU,&event, sizeof(event));
+
+        return 0;
+}
+```
+
+最后，代码中使用基于CO-RE技术的`BPF_CORE_READ_*`系列宏来解决兼容问题，如`BPF_CORE_READ_INTO(&tuple->netns, sk, __sk_common.skc_net.net, ns.inum)`，因为在不同内核版本中，`struct net` 结构体里的 `ns.inum` 偏移量可能会变，其原理如前文描述，**在编译时记录下这个字段的名字，在加载到内核时，由 libbpf 根据目标内核的 BTF 信息动态修正偏移量**
 
 ##  0x0B    tcpdrop
 tcpdrop监控 Linux 内核在何处、因何种原因丢弃了 TCP 数据包。可以直接定位到数据包是被防火墙拦截了、校验和错误，还是因为内核缓冲区满等原因
