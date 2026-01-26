@@ -292,14 +292,97 @@ PID    COMM             IP SADDR            DADDR            DPORT
 ##  0x05    tcpconnlat
 内核态实现[`tcpconnlat.bpf.c`](https://github.com/iovisor/bcc/blob/v0.35.0/libbpf-tools/tcpconnlat.bpf.c)
 
+```bash
+[root@VM-119-175-tencentos libbpf-tools]# ./tcpconnlat 
+PID    COMM         IP SADDR            DADDR            DPORT LAT(ms)
+1716304 barad_agent  4  9.1.1.175    1.254.0.4      80    4.79
+1716304 barad_agent  4  9.1.1.175    1.254.0.4      80    5.04
+1716304 barad_agent  4  9.1.1.175    1.254.0.4      80    4.58
+1716304 barad_agent  4  9.1.1.175    1.254.0.4      80    4.79
+```
+
 ##  0x06    tcplife
 内核态实现[`tcplife.bpf.c`](https://github.com/iovisor/bcc/blob/v0.35.0/libbpf-tools/tcplife.bpf.c)
+
+```bash
+[root@VM-119-175-tencentos libbpf-tools]# ./tcplife 
+PID     COMM             LADDR           LPORT RADDR           RPORT TX_KB  RX_KB  MS
+1716304 barad_agent      9.1.1.175   58400 1.254.0.4     80    0.98   0.21   34.63
+1716304 barad_agent      9.1.1.175   58416 1.254.0.4     80    0.56   0.21   53.32
+1716304 barad_agent      9.1.1.175   50532 1.254.0.4     80    0.64   0.21   23.80
+1716304 barad_agent      9.1.1.175   50536 1.254.0.4     80    1.49   0.21   27.23
+```
 
 ##  0x07    tcppktlat
 内核态实现[`tcppktlat.bpf.c`](https://github.com/iovisor/bcc/blob/v0.35.0/libbpf-tools/tcppktlat.bpf.c)
 
+```bash
+[root@VM-119-175-tencentos libbpf-tools]# ./tcppktlat 
+PID     TID     COMM             LADDR           LPORT RADDR           RPORT MS
+2528    2534    agent            9.1.119.175   43052 9.1.108.44    9922  0.08
+1716304 1716304 barad_agent      9.1.119.175   37664 1.254.0.4     80    0.12
+1716304 1716304 barad_agent      9.1.119.175   37680 1.254.0.4     80    0.08
+3306933 3306933 sshd             9.1.119.175   36000 1.1.36.96     50096 0.07
+```
+
 ##  0x08    tcpsynbl
 内核态实现[`tcpsynbl.bpf.c`](https://github.com/iovisor/bcc/blob/v0.35.0/libbpf-tools/tcpsynbl.bpf.c)
+
+```cpp
+#define MAX_ENTRIES 65536
+
+struct {
+   __uint(type, BPF_MAP_TYPE_HASH);
+   __uint(max_entries, MAX_ENTRIES);
+   __type(key, u64);
+   __type(value, struct hist);
+} hists SEC(".maps");
+
+static struct hist zero;
+
+static int do_entry(struct sock *sk)
+{
+   u64 max_backlog, backlog, slot;
+   struct hist *histp;
+
+   max_backlog = BPF_CORE_READ(sk, sk_max_ack_backlog);
+   backlog = BPF_CORE_READ(sk, sk_ack_backlog);
+   histp = bpf_map_lookup_or_try_init(&hists, &max_backlog, &zero);
+   if (!histp)
+      return 0;
+
+   slot = log2l(backlog);
+   if (slot >= MAX_SLOTS)
+      slot = MAX_SLOTS - 1;
+   __sync_fetch_and_add(&histp->slots[slot], 1);
+   return 0;
+}
+
+
+SEC("kprobe/tcp_v4_syn_recv_sock")
+int BPF_KPROBE(tcp_v4_syn_recv_kprobe, struct sock *sk)
+{
+   return do_entry(sk);
+}
+
+SEC("kprobe/tcp_v6_syn_recv_sock")
+int BPF_KPROBE(tcp_v6_syn_recv_kprobe, struct sock *sk)
+{
+   return do_entry(sk);
+}
+
+SEC("fentry/tcp_v4_syn_recv_sock")
+int BPF_PROG(tcp_v4_syn_recv, struct sock *sk)
+{
+   return do_entry(sk);
+}
+
+SEC("fentry/tcp_v6_syn_recv_sock")
+int BPF_PROG(tcp_v6_syn_recv, struct sock *sk)
+{
+   return do_entry(sk);
+}
+```
 
 ##  0x09    tcptop：跟踪 IP 端口的网络吞吐量
 该工具以 `KB` 为单位显示主机发送并接收的 TCP 流量，会自动刷新并只包含活跃的 TCP 连接（若连接关闭，则不再可见）。内核态实现[`tcptop.bpf.c`](https://github.com/iovisor/bcc/blob/v0.35.0/libbpf-tools/tcptop.bpf.c)，可以使用`-C`选项不清屏打印
@@ -429,6 +512,22 @@ int BPF_KPROBE(tcp_cleanup_rbuf, struct sock *sk, int copied)
         return probe_ip(true, sk, copied);
 }
 ```
+
+####    细节：注释
+上面的注释解释了为什么接收端选择 `tcp_cleanup_rbuf` 而不是 `tcp_recvmsg`，比较有参考价值。为什么不选 `tcp_recvmsg`这个hook呢？虽然`tcp_recvmsg` 函数是接收数据的入口，但它有两个缺点：
+
+1.  维护成本较高（kprobe vs kretprobe）：在 `tcp_recvmsg` 进入时，可以拿到 `sock` 指针，但不知道会读到多少数据（`size` 还没产生，在kretprobe才能拿到），在 `tcp_recvmsg` 返回时，可以拿到读取的字节数，但此时 `sock` 指针所在的寄存器通常已经被覆盖，拿不到连接信息了。要解决这个问题，必须同时使用 kprobe 和 kretprobe，并在一个额外的 hash表中暂存 `sock` 指针，性能开销大且逻辑复杂
+2.  可能存在覆盖不全的问题，内核中并不是所有的 TCP 接收都通过 `tcp_recvmsg`。如 `tcp_read_sock` 等路径（常用于内核层面的数据处理，如某些重定向或透明代理）会跳过 `tcp_recvmsg`
+
+所以本工具选择`tcp_cleanup_rbuf`作为hook点，该函数在数据被成功处理并从缓冲区释放时调用。此时，`sock` 和 `copied`（即字节数）作为参数，可以直接拿到。`tcp_cleanup_rbuf`是更底层的函数，无论是通过 `tcp_recvmsg` 还是其他路径读取的数据，最终都会经过这里进行缓冲区清理，所以统计结果更准确
+
+```cpp
+//https://elixir.bootlin.com/linux/v5.4.241/source/net/ipv4/tcp.c#L1534
+static void tcp_cleanup_rbuf(struct sock *sk, int copied);
+```
+
+####    细节：统计
+代码中的并发， `ip_map` 的更新并没有使用原子加`__sync_fetch_and_add`，在高并发下可能会有极小的统计偏差，但在 tcptop 监控场景下是可以接受的
 
 ##  0x0A    tcptracer
 内核态实现[tcptracer.bpf.c](https://github.com/iovisor/bcc/blob/v0.35.0/libbpf-tools/tcptracer.bpf.c)，本工具用于追踪内核中与 TCP 连接建立（通过 `connect()/accept()`等）和关闭（`close()`或异常退出等）相关的函数，典型输入如下
