@@ -24,6 +24,8 @@ tags:
 通常大部分文件系统的读取read实现，都是将`read_iter`置为`generic_file_read_iter`，如本文分析的ext4系统
 ![generic_file_read_iter-flow]()
 
+预读函数栈分析的整体流程如上图，用户态程序执行`read`系统调用后进入到内核虚拟文件系统层`vfs_read`函数，然后逐层调用，`new_sync_read`函数中使用`struct kiocb`结构体封装了`struct file`结构体，并对当前读取文件的状态进行管理。`new_sync_read`函数创建`struct iov_iter`进行内核态与用户态之间数据的拷贝以及记录本次读取长度（`len`）。而后进入`generic_file_read_iter`函数进行了`direct_IO`的判断，即不通过页缓存读取文件数据。如果使用页缓存读取数据就进入了预读的主要处理函数`generic_file_buffered_read`。`generic_file_read_iter`的实现如下：
+
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/mm/filemap.c#L2015
 /**
@@ -286,7 +288,7 @@ readpage:
 		/* Start the actual read. The read will unlock the page. */
 
 		//重要：调用文件系统的 readpage 方法（实际磁盘读取）
-		//比如对于ext4系统：调用ext4_readpage
+		//比如对于ext4系统：调用 ext4_readpage
 		//此调用会提交 BIO 请求到底层块设备
 		//https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/inode.c#L3224
 		error = mapping->a_ops->readpage(filp, page);
@@ -810,31 +812,687 @@ int add_to_page_cache_lru(struct page *page, struct address_space *mapping,
 ##	0x0	页缓存命中/未命中处理
 
 ##	0x0	预读机制
-预读状态结构体如下：
+
+####	page：单个页的状态
+
+
+####	进入预读的条件
+从`generic_file_buffered_read`的实现可知，进入预读的条件有两种：
 
 ```cpp
-struct file_ra_state {
-    pgoff_t start;                  // 预读窗口起始页
-    unsigned int size;               // 当前预读窗口大小（页面数）
-    unsigned int async_size;         // 异步预读大小
-    unsigned int ra_pages;           // 最大预读页面数
-    unsigned int mmap_miss;          // mmap 缓存未命中
-    loff_t prev_pos;                 // 上次读取位置
-};
+page = find_get_page(mapping, index);
+if (!page) {
+	if (iocb->ki_flags & IOCB_NOWAIT)
+			goto would_block;
+	page_cache_sync_readahead(mapping, //case1
+					ra, filp,
+					index, last_index - index);
+	page = find_get_page(mapping, index);	//重新查找
+	if (unlikely(page == NULL))
+			goto no_cached_page;
+}
+if (PageReadahead(page)) {
+	page_cache_async_readahead(mapping, //case2
+					ra, filp, page,
+					index, last_index - index);
+}
 ```
 
+1.  radix tree 中没有找到页缓存，触发同步预读
+2.	找到页缓存且该页面标记上 `PG_Readahead`，触发异步预读
+
+在整个预读算法中，`file_ra_state`记录了当前预读状态
+
+####	数据结构 file_ra_state（预读窗口）
+预读状态结构体`file_ra_state`（预读窗口）定义如下。内核通过该窗口在当前文件读取流中不断后移，实现对文件页（page）的预读
+
+![file_ra_state_relation]()
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/fs.h#L815
+struct file_ra_state {
+    pgoff_t start;                  // 预读窗口起始页，当前窗口的第一个page索引，初始0
+    unsigned int size;               // 当前预读窗口大小（页面数），当前窗口的页面数量，值为-1表示预读临时关闭，0表示当前窗口为空，初始0
+    unsigned int async_size;         // 异步预读大小，异步预读页面数量，预读窗口还剩余多少未被访问页面时启动下一次预读，初始0
+    unsigned int ra_pages;           // 最大预读页面数，预读窗口最大页面数量。0表示预读暂时关闭，初始32
+    unsigned int mmap_miss;          // mmap 缓存未命中，预读命中率。初始0
+    loff_t prev_pos;                 // 上次读取位置， Cache中最近一次读位置。初始-1
+};
+
+static inline int ra_has_index(struct file_ra_state *ra, pgoff_t index)
+{
+	return (index >= ra->start &&
+		index <  ra->start + ra->size);
+}
+```
+
+`file_ra_state`结构体维护了readahead 状态信息，相关成员为 `start/size/async_size`，它们通过`O(1)`空间来维护 `ahead` 窗口
+
+-	`start` 和 `size` 二元组构成预读窗口，记录最近一次预读请求的位置 `start` 和连续大小 `size`
+-	`async_size` 为预读提前量，表示还剩余 `async_size` 个未访问页时启动下一次预读
+
+需要注意的是，**页索引（`page_index`）为`(size-async_size)`的页会被标示为`PG_readahead`，即表示用户态程序读到该页时需要进行下一次预读，因此`async_size`的大小决定了当前窗口进行下一次预读并后移的时机**，同时`PG_readahead`只会在某个page（单页）被标记
+
+```TEXT
+/*
+ * The fields in struct file_ra_state represent the most-recently-executed
+ * readahead attempt:
+ *
+ *                        |<----- async_size ---------|
+ *     |------------------- size -------------------->|
+ *     |==================#===========================|
+ *     ^start             ^page marked with PG_readahead
+ */
+```
+
+简单描述一次完全顺序执行读请求的预读过程
+
+-	`|`、`=` 为单个page
+-	`#` ：被标记为 `PG_readahead` 的页
+-	`^`： `ra->start`
+-	`~`： `offset` 当前访问到的值
+	`x`：文件中待读取的剩余页
+
+1、初始状态 (Initial)
+
+文件刚打开，预读状态处于冷启动前的初始值。当对一个没有访问过的文件/页进行顺序读时，从 `offset = 0,request_size = 1`（页为单位）开始，会触发同步预读
+
+```
+|
+~
+```
+
+由于没有访问过，`file_ra_state`中的四元组信息如下：
+
+```cpp
+.start = 0
+.size = 0
+.async_size = 0
+.prev_pos = -1
+```
+
+2、第一次 read (`0-4096` 字节)，内核发现 Page `0` 缺失，触发同步预读（`ondemand_readahead`），预读流程会根据 `prev_pos` 构造出预读窗口，求出 `size` 和 `async_size`，并且在 `offset = #` 打上 `PG_readahead` 标记。其中 `#` 直到右边 `|` 为 `async_size` 范围，共预读入 `size` 大小的页
+
+```
+|===#======|xxxxxxxxxxxxxx
+^
+~
+```
+
+3、假设下一次顺序读的起始页（`offset`）在 `^` 后和 `#` 前，则不触发预读，由于数据已经被读取到page cache，所以直接返回
+
+```
+|===#======|
+^  ~
+```
+
+4、继续顺序读至 `offset = #`，则会发出下一次的异步预读
+
+```
+|==========|#======================|xxxxxxxxx
+    ~       ^
+```
+
+5、预读的过程（位置）会受到文件读取结束位置page的影响
+
 ####	readahead 状态
+在`generic_file_buffered_read`函数中，针对内核设计的文件预读算法，主要是三种状态：
+
+-	首次首部同步预读（第一次读取文件数据）
+-	后续异步预读（后续读取，并且命中了预读标识`PG_readahead`）
+-	后续缓存命中读取（缓存命中并且没有进行预读）
+
+以下面的代码为例：
+
+```cpp
+int main()
+{
+    char c[4096];
+    int in = -1;
+    in = open("file.txt", O_RDONLY);
+    int index=0;
+	//通过用户态调用read系统调用，对文件进行每次4K（4096字节）大小的循环顺序读取
+	//设置目标读取文件file.txt的大小为128K，预计全部读完需要循环读取32次
+    while (read(in, &c, 4096/*缓冲区一次4k*/) == 4096)
+    {
+	    printf("index: %d,len: %ld.\n",index,strlen(c));
+	    memset(c, 0, sizeof(c));
+	     index++;
+    } 
+    close(in);
+    return 0;
+}
+```
+
+####	readahead阶段1：首次首部同步预读
+
+第一次调用`read->new_sync_read`时，参数`len=4096`，继续执行到`generic_file_buffered_read`，该函数首先会获取当然读取文件的`struct file`，以及本次读取数据在文件内的偏移量`loff_t *ppos`，从`struct file`中获取初始预读窗口，初始值只有`ra_pages=32`（表示窗口最大为`32`个page），`prev_pos=-1`表示文件还没有读取过，初始值如下
+
+```text
+//struct file_ra_ state *ra = &filp->f_ra;
+start=0
+size=0
+async_size=0
+ra_pages=32
+mmap_miss=0
+prev_pos=-1        
+```
+
+接下来`generic_file_buffered_read`函数会计算文件内相关页索引以及偏移量，用于计算读取的次数，读取的位置进行读取状态、方式的判断。 页索引（`index`）初始值为`0`，表示文件中的第一页数据，核心代码如下：
+
+```cpp
+	//页索引
+	index = *ppos >> PAGE_SHIFT;
+	//上次页索引
+	prev_index = ra->prev_pos >> PAGE_SHIFT;
+
+	//上次页内偏移量
+	prev_offset = ra->prev_pos & (PAGE_SIZE-1);
+
+	//结束页下标，例如pos读到第1页的数据，则last_index=2
+	last_index = (*ppos + iter->count + PAGE_SIZE-1) >> PAGE_SHIFT;
+	//PAGE_MASK是12个0，本次页内偏移量
+	offset = *ppos & ~PAGE_MASK;
+```
+
+接下来`generic_file_buffered_read`函数调用`find_get_page`，该函数会从该文件inode关联的地址空间（`address_space`）中尝试读取页索引（`index`）对应的页（page）。由于是首次读取，该文件的数据页并不会在PageCache中找到，因此会执行同步预读函数`page_cache_sync_readahead`，实现如下：
+
+首先，判断预读窗口是否处于关闭状态以及检查是否为随机访问模式
+
+```cpp
+// 同步预读一些页面到内存中
+// mapping：文件拥有者的addresss_space对象
+// ra：包含此页面的文件file_ra_state描述符
+// filp：文件对象
+// offset：页面在文件内的偏量
+// req_size：完成当前读操作需要的页面数
+void page_cache_sync_readahead(struct address_space *mapping,
+			       struct file_ra_state *ra, struct file *filp,
+			       pgoff_t offset, unsigned long req_size)
+{
+	/* no read-ahead 预读窗口是否为关闭状态*/
+	if (!ra->ra_pages)
+		return;
+	//当文件模式设置FMODE_RANDOM时，表示文件预期为随机访问
+	if (filp && (filp->f_mode & FMODE_RANDOM)) {
+		force_page_cache_readahead(mapping, filp, offset, req_size);
+		return;
+	}
+	/* do read-ahead */
+	ondemand_readahead(mapping, ra, filp, false, offset, req_size);
+}
+```
+
+最后调用`ondemand_readahead`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/mm/readahead.c#L376)，该函数的主要工作如下：
+
+1、（首次进入）对同步预读窗口进行初始化，通过`get_init_ra_size`函数计算预读窗口长度（`ra->size`）
+
+计算窗口长度的函数`get_init_ra_size`如下：
+
+```cpp
+static unsigned long get_init_ra_size(unsigned long size, unsigned long max){
+    //size = reqsize = last_index-index;
+	unsigned long newsize = roundup_pow_of_two(size);//四舍五入到最近的2次幂
+
+	if (newsize <= max / 32)//读的小 <1
+		newsize = newsize * 4;//预读四倍
+	else if (newsize <= max / 4)//读的中等1-8
+		newsize = newsize * 2;//预读2倍
+	else//>8
+		newsize = max;
+	return newsize;
+}
+```
+
+此时，预读窗口的值更新为如下：
+
+```text
+start=0
+size=4
+async_size=3
+ra_pages=32
+mmap_miss=0
+prev_pos=0   
+```
+
+2、（非首次进入）根据预读窗口的当前状态以及`offset`，调整预读窗口的值
+
+3、当预读窗口取值确定以后，就该调用函数`__do_page_cache_readahead`进行页的分配与磁盘数据的读取
+
+![__do_page_cache_readahead]()
+
+最后，分析下`__do_page_cache_readahead`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/mm/readahead.c#L150)
+
+```cpp
+int __do_page_cache_readahead(struct address_space *mapping, struct file *filp,
+			pgoff_t offset, unsigned long nr_to_read,
+			unsigned long lookahead_size)
+{
+	......
+	LIST_HEAD(page_pool);// 将要读取的页存入到这个list当中
+	......
+	end_index = ((isize - 1) >> PAGE_SHIFT);
+
+	/*
+	 * Preallocate as many pages as we will need.
+	 再次检查页面是否已经被其他进程读进内存，如果没有则申请页面。
+	 nr_to_read是预读窗口的大小，ra->size
+	 */
+	for (page_idx = 0; page_idx < nr_to_read; page_idx++) {
+		pgoff_t page_offset = offset + page_idx;// 计算得到page index
+
+		if (page_offset > end_index)// 超过了文件的尺寸就break，停止读取
+			break;
+
+		rcu_read_lock();
+		//查看是否在page cache，如果已经在了cache中，再判断是否为脏，要不要进行读取
+		page = radix_tree_lookup(&mapping->page_tree, page_offset);
+		rcu_read_unlock();
+		if (page && !radix_tree_exceptional_entry(page))
+			continue;
+		// 如果不存在，则创建一个page cache结构
+		page = __page_cache_alloc(gfp_mask);
+		if (!page)
+			break;
+		// 设定page cache的index
+		page->index = page_offset;
+
+		// 加入到list当中
+		list_add(&page->lru, &page_pool);
+		//当分配到第nr_to_read ‐ lookahead_size个页面时，就设置该页面标志PG_readahead，以让下次进行异步预读
+		if (page_idx == nr_to_read - lookahead_size)
+			SetPageReadahead(page);
+		ret++;
+	}
+	......
+
+	if (ret)
+		read_pages(mapping, filp, &page_pool, ret, gfp_mask);
+	......
+}
+```
+
+`__do_page_cache_readahead`的主要流程如下：
+
+1、入参`nr_to_read`即为本次预读窗口的大小
+
+2、然后循环执行`ra->size`次，即读取预读窗口中的每个page，调用`__page_cache_alloc`依次分配page，并保存在链表`page_pool`中，根据页索引（`page_idx = size-async_size`）的取值给预读的页设置`PageReadahead`标识，当用户态程序读到该标识页时进行下一次异步预读
+
+```cpp
+// 这里仅仅只会对唯一的单页进行设置
+if (page_idx == nr_to_read - lookahead_size)
+	SetPageReadahead(page);
+```
+
+3、最后调用`read_pages`（关联文件系统）进行磁盘读操作，完成后再次执行`find_get_page`，就能够从缓存中命中页面
+
+![__do_page_cache_readahead_first]()
+
+上图展示了首次同步预读后的预读窗口情况，以及当前缓存中数据的状况，用户态当前正在读取的page index 为`0`，预读窗口`size`为`4`，预读`4`个页面到内存后，给页索引（`index=size-async_size`）为 `1`的页设置了预读标识（蓝色），该标识会在下一次用户态程序读到该page时触发异步预读
+
+所以，再次说明了`PageReadahead`标识只是内核预读算法的一个记号
+
+####	readahead阶段2：后续异步预读
+当第一次用户态`read`操作读取完成后，用户态程序会进行第二次循环读取`read(in, &c, 4096)`，由于代码设置每次读取一页大小（`4k`），第二次`read`系统调用刚好读取`page_index = 1`的页，`generic_file_buffered_read`同样还是率先进行`find_get_page`，期望能够从page cache中获取到`index=1`的page
+
+![readahead_step2]()
+
+在上面阶段1读取进行同步预读，由于提前预读了下标为`0~3`的`4`个页面，本次可以在缓存中命中页面。命中缓存之后，会对当前page进行异步预读标识`PageReadahead`的判定，即查看当前读取的页面（本次`page_index=1`）是否被预读窗口标识了预读标识`PG_readahead`
+
+```cpp
+static ssize_t do_generic_file_read(struct file *filp, loff_t *ppos,struct iov_iter *iter, ssize_t written){
+	......
+	if (PageReadahead(page)) {
+				//检测页标志是否设置了PG_readahead，启动异步预读
+				page_cache_async_readahead(mapping,
+						ra, filp, page,
+						index, last_index - index);
+	}
+	......
+}
+```
+
+在readahead阶段1同步完成之后，标识了页索引（`index`）为`1`的page为`PG_readahead`，所以本次读取会触发异步预读。触发异步预读之后，`page_cache_async_readahead`函数的主要工作流程：
+
+1.	清除掉当前页面（page）的预读标志`PG_readahed`
+2.	同样调用`ondemand_readahead`函数（和上面的同步预读相似），不同之处是在`ondemand_readahead`函数中会重新设置预读窗口长度（`ra->size`），通常会扩大为原来长度的`2/4`倍
+
+此时预读窗口的值更新为：
+
+```
+start=4	//表示窗口往后推移了4个页面，将页索引为4的页面作为窗口开始
+size=8	//表示窗口的长度扩大为原来的二倍，因为算法觉察到用户态程序是在顺序读取，加大预读的页数
+async_size=8	//表示为当前窗口的第一个（index=0）页设置预读标识
+ra_pages=32
+mmap_miss=0
+prev_pos=0
+```
+
+异步预读后的窗口和当前内存缓存页的情况如下图所示，本次预读了`index`为`4~11`共`8`个page，并给`index=4`的page设置了`PG_readahead`标识，当前用户态程序读取的`page_index=1`
+
+![__do_page_cache_readahead_second]()
+
+####	readahead阶段3：后续缓存命中读取
+至此已经完成两轮`read`系统调用，由于之前的两次预读，该文件的前`12`个page已经缓存在内存中（page cache），第三次`read`会直接命中缓存，并且该页未设置`PG_readahead`标识，也不会触发异步预读
+
+此时，预读窗口的值更新为如下，本次读取完成后，可以看到预读窗口的大小没有发生变化，只更新了`prev_pos`，表示上次读文件的起始偏移位置
+
+```text
+start=4
+size=8
+async_size=8
+ra_pages=32
+mmap_miss=0
+prev_pos=8192
+```
+
+当`find_get_page`函数命中缓存后，会执行`pageok`标签处的代码片段，然后调用`mark_page_accessed`函数，为page在其所属的LRU链表中提升等级。其中`inactive/unreferenced` 为最不活跃页面，`active/referenced`为最活跃页面
+
+```text
+inactive,unreferenced        ->      inactive,referenced
+inactive,referenced          ->      active,unreferenced
+active,unreferenced          ->      active,referenced
+```
+
+![__do_page_cache_readahead_third]()
+
+在这个阶段，读取`page_index=2,3`的页面都会直接命中缓存且不会触发预读机制，当用户态程序快进到读取`index=4`的page时，内核会再次启动预读
+
+当用户态继续调用`read`时，读取页索引（`page_index`）为`4`的页面，由于`page_index=4`的页面被标识了`PG_readahead`，因此会再次启动异步预读，窗口大小变为原来的`2`倍，即`size=16`。本次预读了`index=12~27`，共`16`个页面，并且`index=12`的页面会被标识`PG_readahead`
+
+此时，预读窗口的值更新为如下：
+
+```text
+start=12
+size=16
+async_size=16
+ra_pages=32
+mmap_miss=0
+prev_pos=16384
+```
+
+![__do_page_cache_readahead_fourth]()
+
+当前用户态程序读取的`page_index=4`，后面的页面`5~11`会全部命中缓存，并且不会预读，直接跳到用户态程序读取`page_index=12`的页面时，内核才会触发异步预读
+
+####	readahead阶段4：读取page_index=12的页面
+本次预读窗口的`size`会变成`32`，也就是会预读`32`个后续page，测试文件的大小为`32`个页面，上一次已经预读了`28`个页面`index=0~27`，本文件还剩余`4`个页面未被缓存。注意在`__do_page_cache_readahead`函数中实际分配预读的page时，内核会通过文件的大小，计算文件的最大`page_index`。同时在分配页面的时候进行判断，若`page_index`超过了`end_index`，就会终止页面的分配
+
+```cpp
+int __do_page_cache_readahead(struct address_space *mapping, struct file *filp,
+			pgoff_t offset, unsigned long nr_to_read,
+			unsigned long lookahead_size)
+{
+	......
+	end_index = ((isize - 1) >> PAGE_SHIFT);
+	......
+	pgoff_t page_offset = offset + page_idx;// 计算得到page index
+	......
+	if (page_offset > end_index)// 超过了文件的尺寸就break，停止读取
+			break;
+	......
+}
+```
+
+此时，预读窗口的值更新为如下：
+
+```text
+start=28
+size=32
+async_size=32
+ra_pages=32
+mmap_miss=0
+prev_pos=49152
+```
+
+本次异步预读窗口`size`虽然是`32`，但是目标文件只有`4`个剩余page，最终也只会分配`4`个page进行数据的缓存。最后还会给`page_index=28`的页面设置`PG_readahead`标识，当读到该页面时还是会触发异步预读
+
+![__do_page_cache_readahead_fifth]()
+
+最后，走到读取页索引`page_index=28`的页面的流程时，此时预读窗口的值更新为如下：
+
+```text
+start=28
+size=32
+async_size=32
+ra_pages=32
+mmap_miss=0
+prev_pos=49152
+```
+
+本次读取窗口`size`依然会更新，但是窗口`size`不能大于最大值`ra_pages=32`，因此本次预读还是`32`个page（窗口不再更新），同样因为文件已经没有数据，并不会进行实际的page分配和磁盘读取
+
+继续，读取`page_index=28`的页面后的预读窗口状态：
+
+```text
+start=60
+size=32
+async_size=32
+ra_pages=32
+mmap_miss=0
+prev_pos=114688
+```
+
+读取`page_index=31`的页面后的预读窗口状态：
+
+```text
+start=60
+size=32
+async_size=32
+ra_pages=32
+mmap_miss=0
+prev_pos=130596
+```
+
+至此整个文件全部读取完成，数据全部缓存在内存中
 
 ####	page_cache_sync_readahead VS page_cache_async_readahead
 
 ####	page_cache_sync_readahead的实现原理
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/readahead.c#L495
+void page_cache_sync_readahead(struct address_space *mapping,
+			       struct file_ra_state *ra, struct file *filp,
+			       pgoff_t offset, unsigned long req_size)
+{
+	/* no read-ahead */
+	if (!ra->ra_pages)
+		return;
+
+	......
+	
+	/* do read-ahead */
+	ondemand_readahead(mapping, ra, filp, false/*sync为false*/, offset, req_size);
+}
+```
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/readahead.c#L376
+static unsigned long
+ondemand_readahead(struct address_space *mapping,
+		   struct file_ra_state *ra, struct file *filp,
+		   bool hit_readahead_marker, pgoff_t offset,
+		   unsigned long req_size)
+{
+	struct backing_dev_info *bdi = inode_to_bdi(mapping->host);
+	unsigned long max_pages = ra->ra_pages;
+	pgoff_t prev_offset;
+
+	/*
+	 * If the request exceeds the readahead window, allow the read to
+	 * be up to the optimal hardware IO size
+	 */
+	if (req_size > max_pages && bdi->io_pages > max_pages)
+		max_pages = min(req_size, bdi->io_pages);
+
+	/*
+	 * start of file
+	 */
+
+	// 初始化时，直接跳转到initial_readahead，进行初始化处理
+	if (!offset)
+		goto initial_readahead;
+
+	/*
+	 * It's the expected callback offset, assume sequential access.
+	 * Ramp up sizes, and push forward the readahead window.
+	 */
+	if ((offset == (ra->start + ra->size - ra->async_size) ||
+	     offset == (ra->start + ra->size))) {
+		ra->start += ra->size;
+		ra->size = get_next_ra_size(ra, max_pages);
+		ra->async_size = ra->size;
+		goto readit;
+	}
+
+	/*
+	 * Hit a marked page without valid readahead state.
+	 * E.g. interleaved reads.
+	 * Query the pagecache for async_size, which normally equals to
+	 * readahead size. Ramp it up and use it as the new readahead size.
+	 */
+	if (hit_readahead_marker) {
+		pgoff_t start;
+
+		rcu_read_lock();
+		start = page_cache_next_hole(mapping, offset + 1, max_pages);
+		rcu_read_unlock();
+
+		if (!start || start - offset > max_pages)
+			return 0;
+
+		ra->start = start;
+		ra->size = start - offset;	/* old async_size */
+		ra->size += req_size;
+		ra->size = get_next_ra_size(ra, max_pages);
+		ra->async_size = ra->size;
+		goto readit;
+	}
+
+	/*
+	 * oversize read
+	 */
+	if (req_size > max_pages)
+		goto initial_readahead;	//
+
+	/*
+	 * sequential cache miss
+	 * trivial case: (offset - prev_offset) == 1
+	 * unaligned reads: (offset - prev_offset) == 0
+	 */
+	prev_offset = (unsigned long long)ra->prev_pos >> PAGE_SHIFT;
+	if (offset - prev_offset <= 1UL)
+		goto initial_readahead;
+
+	/*
+	 * Query the page cache and look for the traces(cached history pages)
+	 * that a sequential stream would leave behind.
+	 */
+	if (try_context_readahead(mapping, ra, offset, req_size, max_pages))
+		goto readit;
+
+	/*
+	 * standalone, small random read
+	 * Read as is, and do not pollute the readahead state.
+	 */
+	return __do_page_cache_readahead(mapping, filp, offset, req_size, 0);
+
+initial_readahead:
+	ra->start = offset;
+	ra->size = get_init_ra_size(req_size, max_pages);
+	ra->async_size = ra->size > req_size ? ra->size - req_size : ra->size;
+
+readit:
+	/*
+	 * Will this read hit the readahead marker made by itself?
+	 * If so, trigger the readahead marker hit now, and merge
+	 * the resulted next readahead window into the current one.
+	 */
+	if (offset == ra->start && ra->size == ra->async_size) {
+		ra->async_size = get_next_ra_size(ra, max_pages);
+		ra->size += ra->async_size;
+	}
+
+	return ra_submit(ra, mapping, filp);
+}
+```
+
+最核心的实现`__do_page_cache_readahead`
+
+```cpp
+static inline unsigned long ra_submit(struct file_ra_state *ra,
+		struct address_space *mapping, struct file *filp)
+{
+	return __do_page_cache_readahead(mapping, filp,
+					ra->start, ra->size, ra->async_size);
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/readahead.c#L150
+int __do_page_cache_readahead(struct address_space *mapping, struct file *filp,
+			pgoff_t offset, unsigned long nr_to_read,
+			unsigned long lookahead_size)
+{
+	struct inode *inode = mapping->host;
+	struct page *page;
+	unsigned long end_index;	/* The last page we want to read */
+	LIST_HEAD(page_pool);
+	int page_idx;
+	int ret = 0;
+	loff_t isize = i_size_read(inode);
+	gfp_t gfp_mask = readahead_gfp_mask(mapping);
+
+	if (isize == 0)
+		goto out;
+
+	end_index = ((isize - 1) >> PAGE_SHIFT);
+
+	/*
+	 * Preallocate as many pages as we will need.
+	 */
+	for (page_idx = 0; page_idx < nr_to_read; page_idx++) {
+		pgoff_t page_offset = offset + page_idx;
+
+		if (page_offset > end_index)
+			break;
+
+		rcu_read_lock();
+		page = radix_tree_lookup(&mapping->page_tree, page_offset);
+		rcu_read_unlock();
+		if (page && !radix_tree_exceptional_entry(page))
+			continue;
+
+		page = __page_cache_alloc(gfp_mask);
+		if (!page)
+			break;
+		page->index = page_offset;
+		list_add(&page->lru, &page_pool);
+		if (page_idx == nr_to_read - lookahead_size)
+			SetPageReadahead(page);
+
+		//本次循环中，page cache分配了多少页
+		//即需要去触发文件系统读多少page
+		ret++;
+	}
+
+	/*
+	 * Now start the IO.  We ignore I/O errors - if the page is not
+	 * uptodate then the caller will launch readpage again, and
+	 * will then handle the error.
+	 */
+	if (ret)
+		read_pages(mapping, filp, &page_pool, ret, gfp_mask);
+	BUG_ON(!list_empty(&page_pool));
+out:
+	return ret;
+}
+```
 
 ####	page_cache_async_readahead的实现原理
 [`page_cache_async_readahead`](https://elixir.bootlin.com/linux/v4.11.6/source/mm/readahead.c#L530)函数
 
 ```cpp
-void
-page_cache_async_readahead(struct address_space *mapping,
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/readahead.c#L530
+void page_cache_async_readahead(struct address_space *mapping,
 			   struct file_ra_state *ra, struct file *filp,
 			   struct page *page, pgoff_t offset,
 			   unsigned long req_size)
@@ -858,9 +1516,8 @@ page_cache_async_readahead(struct address_space *mapping,
 		return;
 
 	/* do read-ahead */
-	ondemand_readahead(mapping, ra, filp, true, offset, req_size);
+	ondemand_readahead(mapping, ra, filp, true/*async模式为true*/, offset, req_size);
 }
-
 ```
 
 ##	0x0	数据拷贝到用户空间
@@ -1225,6 +1882,43 @@ out:
 ####	do_generic_file_read中的页表转换
 
 
+####	read_pages
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/readahead.c#L111
+static int read_pages(struct address_space *mapping, struct file *filp,
+		struct list_head *pages, unsigned int nr_pages, gfp_t gfp)
+{
+	struct blk_plug plug;
+	unsigned page_idx;
+	int ret;
+
+	blk_start_plug(&plug);
+
+	if (mapping->a_ops->readpages) {
+		ret = mapping->a_ops->readpages(filp, mapping, pages, nr_pages);
+		/* Clean up the remaining pages */
+		put_pages_list(pages);
+		goto out;
+	}
+
+	for (page_idx = 0; page_idx < nr_pages; page_idx++) {
+		struct page *page = lru_to_page(pages);
+		list_del(&page->lru);
+		if (!add_to_page_cache_lru(page, mapping, page->index, gfp))
+			mapping->a_ops->readpage(filp, page);
+		put_page(page);
+	}
+	ret = 0;
+
+out:
+	blk_finish_plug(&plug);
+
+	return ret;
+}
+```
+
+
 ##  0x0 参考
 -   [VFS：读文件的过程中发生了什么](https://zhuanlan.zhihu.com/p/268375848)
 -   [read 文件一个字节实际会发生多大的磁盘IO？](https://cloud.tencent.com/developer/article/1964473)
@@ -1236,3 +1930,4 @@ out:
 -	[Linux文件系统预读（一）](https://zhuanlan.zhihu.com/p/41307290)
 -	[Linux文件系统预读(二)](https://zhuanlan.zhihu.com/p/41851040)
 -	[Linux文件系统预读(三)](https://zhuanlan.zhihu.com/p/42406805)
+-	[Linux内核中跟踪文件页缓存预读](https://www.kerneltravel.net/blog/2021/debug_pagecache_szp/)
