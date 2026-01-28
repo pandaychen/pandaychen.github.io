@@ -852,7 +852,7 @@ static ssize_t do_generic_file_read(struct file *filp, loff_t *ppos,struct iov_i
 ####	数据结构 file_ra_state（预读窗口）
 预读状态结构体`file_ra_state`（预读窗口）定义如下。内核通过该窗口在当前文件读取流中不断后移，实现对文件页（page）的预读
 
-![file_ra_state_relation]()
+![file_ra_state_relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/22/file_ra_state_relation.png)
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/fs.h#L815
@@ -1041,11 +1041,11 @@ static unsigned long get_init_ra_size(unsigned long size, unsigned long max){
     //size = reqsize = last_index-index;
 	unsigned long newsize = roundup_pow_of_two(size);//四舍五入到最近的2次幂
 
-	if (newsize <= max / 32)//读的小 <1
-		newsize = newsize * 4;//预读四倍
-	else if (newsize <= max / 4)//读的中等1-8
-		newsize = newsize * 2;//预读2倍
-	else//>8
+	if (newsize <= max / 32)	//读的小 <1
+		newsize = newsize * 4;	//预读四倍
+	else if (newsize <= max / 4)	//读的中等1-8
+		newsize = newsize * 2;	//预读2倍
+	else	//>8
 		newsize = max;
 	return newsize;
 }
@@ -1066,7 +1066,7 @@ prev_pos=0
 
 3、当预读窗口取值确定以后，就该调用函数`__do_page_cache_readahead`进行页的分配与磁盘数据的读取
 
-![__do_page_cache_readahead]()
+![__do_page_cache_readahead](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/kernel/22/__do_page_cache_readahead.png)
 
 最后，分析下`__do_page_cache_readahead`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/mm/readahead.c#L150)
 
@@ -1133,7 +1133,7 @@ if (page_idx == nr_to_read - lookahead_size)
 
 3、最后调用`read_pages`（关联文件系统）进行磁盘读操作，完成后再次执行`find_get_page`，就能够从缓存中命中页面
 
-![__do_page_cache_readahead_first]()
+![__do_page_cache_readahead_first](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/22/__do_page_cache_readahead_first.png)
 
 上图展示了首次同步预读后的预读窗口情况，以及当前缓存中数据的状况，用户态当前正在读取的page index 为`0`，预读窗口`size`为`4`，预读`4`个页面到内存后，给页索引（`index=size-async_size`）为 `1`的页设置了预读标识（蓝色），该标识会在下一次用户态程序读到该page时触发异步预读
 
@@ -1142,7 +1142,7 @@ if (page_idx == nr_to_read - lookahead_size)
 ####	readahead阶段2：后续异步预读
 当第一次用户态`read`操作读取完成后，用户态程序会进行第二次循环读取`read(in, &c, 4096)`，由于代码设置每次读取一页大小（`4k`），第二次`read`系统调用刚好读取`page_index = 1`的页，`do_generic_file_read`同样还是率先进行`find_get_page`，期望能够从page cache中获取到`index=1`的page
 
-![readahead_step2]()
+![readahead_step2](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/22/readahead_step2.png)
 
 在上面阶段1读取进行同步预读，由于提前预读了下标为`0~3`的`4`个页面，本次可以在缓存中命中页面。命中缓存之后，会对当前page进行异步预读标识`PageReadahead`的判定，即查看当前读取的页面（本次`page_index=1`）是否被预读窗口标识了预读标识`PG_readahead`
 
@@ -1177,7 +1177,7 @@ prev_pos=0
 
 异步预读后的窗口和当前内存缓存页的情况如下图所示，本次预读了`index`为`4~11`共`8`个page，并给`index=4`的page设置了`PG_readahead`标识，当前用户态程序读取的`page_index=1`
 
-![__do_page_cache_readahead_second]()
+![__do_page_cache_readahead_second](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/22/__do_page_cache_readahead_second.png)
 
 ####	readahead阶段3：后续缓存命中读取
 至此已经完成两轮`read`系统调用，由于之前的两次预读，该文件的前`12`个page已经缓存在内存中（page cache），第三次`read`会直接命中缓存，并且该页未设置`PG_readahead`标识，也不会触发异步预读
@@ -1201,7 +1201,7 @@ inactive,referenced          ->      active,unreferenced
 active,unreferenced          ->      active,referenced
 ```
 
-![__do_page_cache_readahead_third]()
+![__do_page_cache_readahead_third](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/22/__do_page_cache_readahead_third.png)
 
 在这个阶段，读取`page_index=2,3`的页面都会直接命中缓存且不会触发预读机制，当用户态程序快进到读取`index=4`的page时，内核会再次启动预读
 
@@ -1218,7 +1218,7 @@ mmap_miss=0
 prev_pos=16384
 ```
 
-![__do_page_cache_readahead_fourth]()
+![__do_page_cache_readahead_fourth](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/22/__do_page_cache_readahead_fourth.png)
 
 当前用户态程序读取的`page_index=4`，后面的页面`5~11`会全部命中缓存，并且不会预读，直接跳到用户态程序读取`page_index=12`的页面时，内核才会触发异步预读
 
@@ -1254,7 +1254,7 @@ prev_pos=49152
 
 本次异步预读窗口`size`虽然是`32`，但是目标文件只有`4`个剩余page，最终也只会分配`4`个page进行数据的缓存。最后还会给`page_index=28`的页面设置`PG_readahead`标识，当读到该页面时还是会触发异步预读
 
-![__do_page_cache_readahead_fifth]()
+![__do_page_cache_readahead_fifth](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/22/__do_page_cache_readahead_fifth.png)
 
 最后，走到读取页索引`page_index=28`的页面的流程时，此时预读窗口的值更新为如下：
 
@@ -1527,7 +1527,7 @@ void page_cache_async_readahead(struct address_space *mapping,
 }
 ```
 
-##	0x0	数据拷贝到用户空间
+####	page_ok标签：数据拷贝到用户空间
 [`iov_iter`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/uio.h#L30)结构的作用：
 
 ```cpp
@@ -1545,9 +1545,7 @@ struct iov_iter {
 };
 ```
 
-`copy_page_to_iter`：当page cache中的数据准备好之后，内核调用此函数将数据从内存copy至用户空间的缓冲区
-
-`i->type`对应四种不同的迭代器类型：
+`copy_page_to_iter`：当page cache中的数据准备好之后，内核调用此函数`copy_page_to_iter`将数据从内存copy至用户空间的缓冲区。`i->type`对应四种不同的迭代器类型：
 
 ```cpp
 // include/linux/uio.h
