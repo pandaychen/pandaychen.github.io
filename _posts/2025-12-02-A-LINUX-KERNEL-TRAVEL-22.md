@@ -12,7 +12,7 @@ tags:
 ---
 
 ##  0x00    前言
-先回顾一下，调用read系统调用之后，内核的调用路径是什么？
+先回顾一下，调用`read`系统调用之后，内核的调用路径是什么？
 
 ![read-syscall-kernel-trace](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/22/read-syscall-kernel-trace.png)
 
@@ -22,9 +22,9 @@ tags:
 
 ##  0x01    generic_file_read_iter的实现细节
 通常大部分文件系统的读取read实现，都是将`read_iter`置为`generic_file_read_iter`，如本文分析的ext4系统
-![generic_file_read_iter-flow]()
+![generic_file_read_iter-flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/22/generic_file_read_iter-flow.png)
 
-预读函数栈分析的整体流程如上图，用户态程序执行`read`系统调用后进入到内核虚拟文件系统层`vfs_read`函数，然后逐层调用，`new_sync_read`函数中使用`struct kiocb`结构体封装了`struct file`结构体，并对当前读取文件的状态进行管理。`new_sync_read`函数创建`struct iov_iter`进行内核态与用户态之间数据的拷贝以及记录本次读取长度（`len`）。而后进入`generic_file_read_iter`函数进行了`direct_IO`的判断，即不通过页缓存读取文件数据。如果使用页缓存读取数据就进入了预读的主要处理函数`generic_file_buffered_read`。`generic_file_read_iter`的实现如下：
+预读函数栈分析的整体流程如上图，用户态程序执行`read`系统调用后进入到内核虚拟文件系统层`vfs_read`函数，然后逐层调用，`new_sync_read`函数中使用`struct kiocb`结构体封装了`struct file`结构体，并对当前读取文件的状态进行管理。`new_sync_read`函数创建`struct iov_iter`进行内核态与用户态之间数据的拷贝以及记录本次读取长度（`len`）。而后进入`generic_file_read_iter`函数进行了`direct_IO`的判断，即不通过页缓存读取文件数据。如果使用页缓存读取数据就进入了预读的主要处理函数`do_generic_file_read[generic_file_buffered_read]`。`generic_file_read_iter`的实现如下：
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/mm/filemap.c#L2015
@@ -394,7 +394,6 @@ pgoff_t max_index = file_size >> PAGE_SHIFT;    // 2621440 个页面
 ```
 
 此外，在回顾一下，在IDR树中，key就是`offset`（页索引），而value 就是`struct page*`即页面指针
-
 
 ####	page_ok标签
 `page_ok`标签处表示当前页面已准备就绪，可以进行用户空间拷贝。这个标签处理单个页面的读取完成，包括：
@@ -817,24 +816,31 @@ int add_to_page_cache_lru(struct page *page, struct address_space *mapping,
 
 
 ####	进入预读的条件
-从`generic_file_buffered_read`的实现可知，进入预读的条件有两种：
+从`do_generic_file_read`的实现可知，进入预读的条件有两种：
 
 ```cpp
-page = find_get_page(mapping, index);
-if (!page) {
-	if (iocb->ki_flags & IOCB_NOWAIT)
-			goto would_block;
-	page_cache_sync_readahead(mapping, //case1
-					ra, filp,
-					index, last_index - index);
-	page = find_get_page(mapping, index);	//重新查找
-	if (unlikely(page == NULL))
-			goto no_cached_page;
-}
-if (PageReadahead(page)) {
-	page_cache_async_readahead(mapping, //case2
-					ra, filp, page,
-					index, last_index - index);
+static ssize_t do_generic_file_read(struct file *filp, loff_t *ppos,struct iov_iter *iter, ssize_t written){
+	......
+	for (;;) {	// 无限循环，处理多个页面
+		page = find_get_page(mapping, index);
+		if (!page) {
+			if (iocb->ki_flags & IOCB_NOWAIT)
+					goto would_block;
+			page_cache_sync_readahead(mapping, //case1
+							ra, filp,
+							index, last_index - index);
+			page = find_get_page(mapping, index);	//重新查找
+			if (unlikely(page == NULL))
+					goto no_cached_page;
+		}
+		if (PageReadahead(page)) {
+			page_cache_async_readahead(mapping, //case2
+							ra, filp, page,
+							index, last_index - index);
+		}
+		.......
+	}
+......
 }
 ```
 
@@ -891,7 +897,8 @@ static inline int ra_has_index(struct file_ra_state *ra, pgoff_t index)
 -	`#` ：被标记为 `PG_readahead` 的页
 -	`^`： `ra->start`
 -	`~`： `offset` 当前访问到的值
-	`x`：文件中待读取的剩余页
+-	`x`：文件中待读取的剩余页
+-	`$`：文件页末尾（``）
 
 1、初始状态 (Initial)
 
@@ -914,7 +921,7 @@ static inline int ra_has_index(struct file_ra_state *ra, pgoff_t index)
 2、第一次 read (`0-4096` 字节)，内核发现 Page `0` 缺失，触发同步预读（`ondemand_readahead`），预读流程会根据 `prev_pos` 构造出预读窗口，求出 `size` 和 `async_size`，并且在 `offset = #` 打上 `PG_readahead` 标记。其中 `#` 直到右边 `|` 为 `async_size` 范围，共预读入 `size` 大小的页
 
 ```
-|===#======|xxxxxxxxxxxxxx
+|===#======|xxxxxxxxxxxxxx$
 ^
 ~
 ```
@@ -922,21 +929,21 @@ static inline int ra_has_index(struct file_ra_state *ra, pgoff_t index)
 3、假设下一次顺序读的起始页（`offset`）在 `^` 后和 `#` 前，则不触发预读，由于数据已经被读取到page cache，所以直接返回
 
 ```
-|===#======|
+|===#======|xxxxxxxxx$
 ^  ~
 ```
 
 4、继续顺序读至 `offset = #`，则会发出下一次的异步预读
 
 ```
-|==========|#======================|xxxxxxxxx
+|==========|#======================|xxxxxxxxx$
     ~       ^
 ```
 
-5、预读的过程（位置）会受到文件读取结束位置page的影响
+5、预读的过程（位置）会受到文件读取结束位置page的影响，相关[代码](https://elixir.bootlin.com/linux/v4.11.6/source/mm/readahead.c#L174)
 
 ####	readahead 状态
-在`generic_file_buffered_read`函数中，针对内核设计的文件预读算法，主要是三种状态：
+在`do_generic_file_read`函数中，针对内核设计的文件预读算法，主要是三种状态：
 
 -	首次首部同步预读（第一次读取文件数据）
 -	后续异步预读（后续读取，并且命中了预读标识`PG_readahead`）
@@ -966,7 +973,7 @@ int main()
 
 ####	readahead阶段1：首次首部同步预读
 
-第一次调用`read->new_sync_read`时，参数`len=4096`，继续执行到`generic_file_buffered_read`，该函数首先会获取当然读取文件的`struct file`，以及本次读取数据在文件内的偏移量`loff_t *ppos`，从`struct file`中获取初始预读窗口，初始值只有`ra_pages=32`（表示窗口最大为`32`个page），`prev_pos=-1`表示文件还没有读取过，初始值如下
+第一次调用`read->new_sync_read`时，参数`len=4096`，继续执行到`do_generic_file_read`，该函数首先会获取当然读取文件的`struct file`，以及本次读取数据在文件内的偏移量`loff_t *ppos`，从`struct file`中获取初始预读窗口，初始值只有`ra_pages=32`（表示窗口最大为`32`个page），`prev_pos=-1`表示文件还没有读取过，初始值如下
 
 ```text
 //struct file_ra_ state *ra = &filp->f_ra;
@@ -978,7 +985,7 @@ mmap_miss=0
 prev_pos=-1        
 ```
 
-接下来`generic_file_buffered_read`函数会计算文件内相关页索引以及偏移量，用于计算读取的次数，读取的位置进行读取状态、方式的判断。 页索引（`index`）初始值为`0`，表示文件中的第一页数据，核心代码如下：
+接下来`do_generic_file_read`函数会计算文件内相关页索引以及偏移量，用于计算读取的次数，读取的位置进行读取状态、方式的判断。 页索引（`index`）初始值为`0`，表示文件中的第一页数据，核心代码如下：
 
 ```cpp
 	//页索引
@@ -995,7 +1002,7 @@ prev_pos=-1
 	offset = *ppos & ~PAGE_MASK;
 ```
 
-接下来`generic_file_buffered_read`函数调用`find_get_page`，该函数会从该文件inode关联的地址空间（`address_space`）中尝试读取页索引（`index`）对应的页（page）。由于是首次读取，该文件的数据页并不会在PageCache中找到，因此会执行同步预读函数`page_cache_sync_readahead`，实现如下：
+接下来`do_generic_file_read`函数调用`find_get_page`，该函数会从该文件inode关联的地址空间（`address_space`）中尝试读取页索引（`index`）对应的页（page）。由于是首次读取，该文件的数据页并不会在PageCache中找到，因此会执行同步预读函数`page_cache_sync_readahead`，实现如下：
 
 首先，判断预读窗口是否处于关闭状态以及检查是否为随机访问模式
 
@@ -1133,7 +1140,7 @@ if (page_idx == nr_to_read - lookahead_size)
 所以，再次说明了`PageReadahead`标识只是内核预读算法的一个记号
 
 ####	readahead阶段2：后续异步预读
-当第一次用户态`read`操作读取完成后，用户态程序会进行第二次循环读取`read(in, &c, 4096)`，由于代码设置每次读取一页大小（`4k`），第二次`read`系统调用刚好读取`page_index = 1`的页，`generic_file_buffered_read`同样还是率先进行`find_get_page`，期望能够从page cache中获取到`index=1`的page
+当第一次用户态`read`操作读取完成后，用户态程序会进行第二次循环读取`read(in, &c, 4096)`，由于代码设置每次读取一页大小（`4k`），第二次`read`系统调用刚好读取`page_index = 1`的页，`do_generic_file_read`同样还是率先进行`find_get_page`，期望能够从page cache中获取到`index=1`的page
 
 ![readahead_step2]()
 
