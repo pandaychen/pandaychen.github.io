@@ -97,7 +97,7 @@ page = pfn_to_page(pfn);                   // PFN 转 struct page
 
 在4.11.6内核，x86_64架构下（三种内存模型）的相关的定义如下：
 
-```cpp
+```CPP
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/asm-generic/memory_model.h#L32
 #define page_to_pfn __page_to_pfn
 #define pfn_to_page __pfn_to_page
@@ -444,7 +444,36 @@ struct radix_tree_node {
 -	如果页面是干净的（与磁盘一致），直接释放
 -	如果页面是脏的，必须先调用 `a_ops->writepage` 同步到磁盘，才能释放
 
-##  0x02    struct page的本质
+####	反向映射
+`address_space`结构中的`i_mmap`成员，也是rbtree方式存储，这棵rbtree存储了所有与该`address_space`相关的映射（包括私有的和共享的），所以`i_mmap`也是属于特定 inode 的，特点如下：
+
+-	存储所有映射了该文件（inode）的 vma
+-	存储类型包括共享映射（`VM_SHARED`）以及私有映射（`VM_PRIVATE`）、匿名映射与文件映射
+-	多个进程的 vma 可能在同一棵树上，即不同进程映射到同一个文件（inode）的不同位置，它们对应的所有 VMA 都会被插入到该文件的 `i_mmap`红黑树中
+-	反向映射的场景主要有从物理页找到映射它的所有的 vma、页面回收时快速定位所有映射（[参考](https://pandaychen.github.io/2025/09/02/A-LINUX-KERNEL-TRAVEL-20/#%E5%9B%9E%E6%94%B6shmem%E9%A1%B5)）以及文件 `truncate` 时解除相关映射等
+
+```cpp
+struct address_space {
+	......
+    struct inode        *host;      /* owner: inode, block_device */
+    // page cache
+    struct radix_tree_root  i_pages;    /* cached pages */
+    atomic_t        i_mmap_writable;/* count VM_SHARED mappings */
+    // 文件与 vma 反向映射的核心数据结构，i_mmap 也是一颗红黑树
+    // 在所有进程的地址空间中，只要与该文件发生映射的 vma 均挂在 i_mmap 中
+    struct rb_root_cached   i_mmap;     /* tree of private and shared mappings */
+	......
+}
+```
+
+TODO
+
+####	文件与进程之间的双向映射
+
+-	进程（task_struct）-> 文件（inode）：通过进程的 `mm_rb` 定位到vma，从而获取映射的文件
+-	文件 -> 进程（task_struct）：通过文件的 `i_mmap` 找到所有映射该文件的进程
+
+##  0x03    struct page的本质
 前文已经描述了内核中虚拟内存主要分为两种类型的页，即匿名页与文件页，此外还介绍了虚拟内存地址到物理内存地址的翻译过程、页表体系等
 
 -   [Linux 内核之旅（三）：虚拟内存管理（上）](https://pandaychen.github.io/2024/11/05/A-LINUX-KERNEL-TRAVEL-2/)
