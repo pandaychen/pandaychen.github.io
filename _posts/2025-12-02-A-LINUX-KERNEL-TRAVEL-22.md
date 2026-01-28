@@ -405,7 +405,8 @@ pgoff_t max_index = file_size >> PAGE_SHIFT;    // 2621440 个页面
 5.	更新状态并决定是否继续（检查退出状态）
 
 ```cpp
-{
+static ssize_t do_generic_file_read(struct file *filp, loff_t *ppos,
+		struct iov_iter *iter, ssize_t written){
 	......
 page_ok:
 		//检查文件大小边界
@@ -813,7 +814,36 @@ int add_to_page_cache_lru(struct page *page, struct address_space *mapping,
 ##	0x0	预读机制
 
 ####	page：单个页的状态
+在内核 `do_generic_file_read` 路径中，根据页面在 Page Cache 中的存在（与否）状态、数据的一致性（Uptodate）以及预读标记（Readahead），主要有以下几种类型：
 
+1、缺失页：在上述流程`find_get_page`中，在 Radix 树中未找到对应 `index` 的slot，内核判定为缓存未命中（Cache Miss），此时处理过程如下：
+
+-	内核会触发同步预读机制（`page_cache_sync_readahead`），内核认为这是首次读取（或随机跳读），尝试批量从磁盘加载数据
+-	再次查找：预读后再次查找Radix树，若仍缺失（如内存极度紧张导致刚加入就被回收），则进入 `no_cached_page` 逻辑
+-	手动补齐：调用 `page_cache_alloc_cold` 分配物理页，将其加入 Radix 树，并启动文件系统的`a_ops->readpage` 异步 I/O
+
+2、预读触发页（Readahead Page）：页面已在缓存中且有效，但被标记了 `PG_readahead` 位。这里内核判定进程已读到之前预读窗口的阈值点。处理办法如下：
+
+-	触发异步预读：调用 `page_cache_async_readahead`，内核会立即在后台启动对下一组连续页面的读取请求
+-	非阻塞继续：进程不会因为这个标记而停止，它会清除该页面的标记，然后直接进入数据拷贝流程
+
+内核如此实现的目的是维持 I/O 流水线，确保用户读到后面页面时，数据已经提前就绪
+
+3、未就绪页（Not-Uptodate Page）：当页面在 Radix 树中存在，但 `PG_uptodate` 位为 `0`。该状态表示页面已被创建，但磁盘数据尚未完全搬运到内存（可能由于之前的预读还在进行中，或者读取出错了等原因），处理办法如下：
+
+-	同步等待：调用 `lock_page_killable` 或 `wait_on_page_locked_killable`
+-	阻塞进程：进程进入睡眠状态，等待磁盘 DMA 完成并触发中断
+-	错误恢复：如果锁释放后发现仍非 `Uptodate`，则说明之前的读取失败，会尝试重新发起 `readpage`
+
+4、理想页（Uptodate Page）：页面在缓存中，且 `PG_uptodate`被置位，且没有 `PG_readahead` 标记。该页为最理想的状态，处理如下：
+
+-	直接访问：跳过所有预读和等待逻辑，直接跳转到 `page_ok` 标签
+-	数据可交付：执行 `copy_page_to_iter`，将数据由内核copy到用户态
+
+5、截断/无效页（Truncated Page）：查找到了页面，但在处理过程中，该页面被另一个进程从文件的 `address_space` 中移除了（例如文件被截断 `truncate`），即`page->mapping` 为空。内核处理办法如下：
+
+-	释放并重试：执行`put_page(page)` 减少引用
+-	跳转 `find_page`：返回循环起点重新查找。若文件变小了，后续流程会通过 `i_size_read` 判定并直接退出
 
 ####	进入预读的条件
 从`do_generic_file_read`的实现可知，进入预读的条件有两种：
@@ -840,7 +870,7 @@ static ssize_t do_generic_file_read(struct file *filp, loff_t *ppos,struct iov_i
 		}
 		.......
 	}
-......
+	......
 }
 ```
 
@@ -869,6 +899,34 @@ static inline int ra_has_index(struct file_ra_state *ra, pgoff_t index)
 {
 	return (index >= ra->start &&
 		index <  ra->start + ra->size);
+}
+
+static unsigned long get_init_ra_size(unsigned long size, unsigned long max)
+{
+	unsigned long newsize = roundup_pow_of_two(size);
+
+	if (newsize <= max / 32)
+		newsize = newsize * 4;
+	else if (newsize <= max / 4)
+		newsize = newsize * 2;
+	else
+		newsize = max;
+
+	return newsize;
+}
+
+static unsigned long get_next_ra_size(struct file_ra_state *ra,
+						unsigned long max)
+{
+	unsigned long cur = ra->size;
+	unsigned long newsize;
+
+	if (cur < max / 16)
+		newsize = 4 * cur;
+	else
+		newsize = 2 * cur;
+
+	return min(newsize, max);
 }
 ```
 
@@ -1358,6 +1416,9 @@ ondemand_readahead(struct address_space *mapping,
 	 * Query the pagecache for async_size, which normally equals to
 	 * readahead size. Ramp it up and use it as the new readahead size.
 	 */
+
+	//sync模式：false
+	//async模式：true
 	if (hit_readahead_marker) {
 		pgoff_t start;
 
@@ -1527,7 +1588,7 @@ void page_cache_async_readahead(struct address_space *mapping,
 }
 ```
 
-####	page_ok标签：数据拷贝到用户空间
+##	0x0	page_ok标签：数据拷贝到用户空间
 [`iov_iter`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/uio.h#L30)结构的作用：
 
 ```cpp
