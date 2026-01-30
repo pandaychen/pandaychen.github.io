@@ -481,8 +481,8 @@ page_ok:
 从上面代码分析可知在`copy_page_to_iter`执行完对本page的copy动作完成之后，会依次检查这些（退出）条件是否满足：
 
 -	通常情况下，用户缓冲区的size等于本次要copy的文件page的总字节大小，但实际跨越的page页数，需要由offset来决定，可能跨越多页
--	copy大文件，本次copy未到达文件的尾部，用户缓冲区已经耗尽
--	copy小文件，本次copy到达了文件尾部（到达了文件最后一页，但未占满最后一页），用户缓冲区还有剩余空间
+-	copy大文件的场景，本次copy未到达文件的尾部，用户缓冲区已经耗尽
+-	copy小文件的场景，本次copy到达了文件尾部（到达了文件最后一页，但未占满最后一页），用户缓冲区还有剩余空间
 
 1、检查用户缓冲区是否已满，代码片段：
 
@@ -500,7 +500,7 @@ if (ret < nr) {             // 实际拷贝字节数小于预期拷贝字节数
 }
 ```
 
-细节二：对边界条件处理，片段如下：
+细节二：对边界条件处理，如下描述
 
 1、在copy前发现已经到达了文件的末尾，如下：
 
@@ -564,6 +564,7 @@ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
 	return ret;
 }
 
+//获取file结构的f_pos成员
 static inline loff_t file_pos_read(struct file *file)
 {
 	return file->f_pos;
@@ -580,25 +581,30 @@ static inline loff_t file_pos_read(struct file *file)
 
 ```cpp
 ......
-// 在 page_ok 标签处：
-// 1. 根据文件大小计算当前页可用的字节数 (nr)
-if (index == end_index) {
-    nr = ((isize - 1) & ~PAGE_MASK) + 1;  // 最后一页的有效字节
-    if (nr <= offset) {
-        put_page(page);
-        goto out;  // 文件结束
-    }
+static ssize_t do_generic_file_read(struct file *filp, loff_t *ppos,
+		struct iov_iter *iter, ssize_t written)
+{
+	// 在 page_ok 标签处：
+	// 1. 根据文件大小计算当前页可用的字节数 (nr)
+	if (index == end_index) {
+		nr = ((isize - 1) & ~PAGE_MASK) + 1;  // 最后一页的有效字节
+		if (nr <= offset) {
+			put_page(page);
+			goto out;  // 文件结束
+		}
+	}
+	nr = nr - offset;  // 页内从 offset 开始的有效字节
+
+	// 2. copy_page_to_iter 会读取 min(nr, iov_iter_count(iter))
+	// 即会取 nr和 iov_iter_count(iter)的较小值进行拷贝
+	ret = copy_page_to_iter(page, offset, nr, iter);
+
+	......
+
 }
-nr = nr - offset;  // 页内从 offset 开始的有效字节
-
-// 2. copy_page_to_iter 会读取 min(nr, iov_iter_count(iter))
-// 即会取 nr和 iov_iter_count(iter)的较小值进行拷贝
-ret = copy_page_to_iter(page, offset, nr, iter);
-
-......
 ```
 
-当然针对大文件，最普遍的情况还是一直copy pages到用户缓冲区已经耗尽
+当然针对读大文件的场景，最普遍的情况还是一直copy pages到用户缓冲区已经耗尽
 
 此外，这里内核使用`for(;;)`，主要考虑到一个 `read` 系统调用可能跨越多个page内存页面（处理跨页读取），其中每个page都需要完成下面的操作：
 
@@ -607,27 +613,35 @@ ret = copy_page_to_iter(page, offset, nr, iter);
 3.	单独拷贝到用户空间
 
 ```cpp
-for (;;) {
+static ssize_t do_generic_file_read(struct file *filp, loff_t *ppos,
+		struct iov_iter *iter, ssize_t written)
+{
 	......
-	cond_resched();	// 允许调度器中断（防止无限循环）
-find_page:	//提供直接跳转的标签
-    ......
-	// 处理某一页（page）
-	copy_page_to_iter(......)
-    // 在 page_ok 标签后：
-    if (!iov_iter_count(iter))  // 用户缓冲区已满
-        goto out;
-    if (ret < nr) {  // copy_page_to_iter 拷贝不完整
-        error = -EFAULT;
-        goto out;
-    }
-    continue;  // 继续处理下一页
+	for (;;) {
+		......
+		cond_resched();	// 允许调度器中断（防止无限循环）
+	find_page:	//提供直接跳转的标签
+		......
+		// 处理某一页（page）
+		copy_page_to_iter(......)
+		// 在 page_ok 标签后：
+		if (!iov_iter_count(iter))  // 用户缓冲区已满
+			goto out;
+		if (ret < nr) {  // copy_page_to_iter 拷贝不完整
+			error = -EFAULT;
+			goto out;
+		}
+		continue;  // 继续处理下一页
+	}
+	......
 }
 ```
 
 几个问题：
 
-接下来继续将`do_generic_file_read`的实现拆解分析，首先看下对单个页page的处理逻辑
+1、TODO
+
+接下来继续跟踪`do_generic_file_read`的实现拆解分析，首先看下对单个页page的处理逻辑
 
 ##	0x02	do_generic_file_read：计算页索引和偏移
 本节主要分析下`find_get_page`的实现过程，注意到其入参`pgoff_t offset`，来源于`index = *ppos >> PAGE_SHIFT`， 即page在文件中的索引index，这让人很容易联想到内核IDR结构的key
