@@ -100,6 +100,48 @@ Eino 也支持多智能体控制权转移，需要理解主智能体（Host Agen
 -   流式处理 （Streaming）： AI 模型通常是打字机式输出。Eino 提供了流式合并、分发和转换机制，通常在 Go 中处理 Iter（迭代器）类型的返回结果
 -   强类型安全： Eino 在编译期检查类型，需要习惯为每个节点定义清晰的输入（Input）和输出（Output）结构体
 
+####    Eino: 核心模块（开发）
+
+1、Components 组件，抽象出来的大模型应用中常用的组件，例如 `ChatModel`、`Embedding`、`Retriever` 等，这是实现一个大模型应用搭建的积木，是应用能力的基础，也是复杂逻辑编排时的原子对象
+
+2、Chain/Graph 编排，多个组件混合使用来实现业务逻辑的串联
+
+3、Flow 集成工具（agents），将常用的大模型应用模式封装成简单、易用的工具，目前提供了 ReAct Agent 和 Host Multi Agent
+
+4、ADK（Agent Development Kit）
+
+####    Eino：component
+[Components 组件](https://www.cloudwego.io/zh/docs/eino/core_modules/components/)
+
+大模型应用开发和传统应用开发的区别在于，大模型开发更强调：
+
+1.  基于语义的文本处理能力：能够理解和生成人类语言，处理非结构化的内容语义关系
+2.  智能决策能力：能够基于上下文进行推理和判断，做出相应的行为决策
+
+伴随三种主要的应用模式：
+
+1.  直接对话模式：处理用户输入并生成相应回答
+2.  知识处理模式：对文本文档进行语义化处理、存储和检索
+3.  工具调用模式：基于上下文做出决策并调用相应工具
+
+####    Eino：编排
+[Chain & Graph & Workflow 编排功能](https://www.cloudwego.io/zh/docs/eino/core_modules/chain_and_graph_orchestration/)
+
+在大模型应用中，Components 组件是提供原子能力的最小单元，比如：
+
+-   `ChatModel`：提供了大模型的对话能力
+-   `Embedding`：提供了基于语义的文本向量化能力
+-   `Retriever`：提供了关联内容召回的能力
+-   `ToolsNode`：提供了执行外部工具的能力
+
+一个大模型应用，除了需要这些原子能力之外，还需要根据场景化的业务逻辑，对这些原子能力进行组合、串联，这就是编排。此外，大模型应用的典型特征是自定义的业务逻辑本身不会很复杂，几乎主要都是对原子能力的组合串联
+
+Eino 提供了**基于 Graph 模型 (node + edge) 的，以组件为原子节点的，以上下游类型对齐为基础的编排**的解决方案。Graph 本身是强大且语义完备的，可绘制出所有的数据流动网络（如 分支、并行、循环等）。但 Graph 并不是没有缺点的，基于点、边模型的 Graph 在使用时，要求开发者要使用 `graph.AddXXXNode()` 和 `graph.AddEdge()` 两个接口来创建一个数据通道，强大但是略显复杂。而在现实的大多数业务场景中，往往仅需要按顺序串联即可，因此，Eino 封装了接口更易于使用的 Chain。Chain 是对 Graph 的封装，除了环之外，Chain 暴露了几乎所有 Graph 的能力
+
+####    Eino：Flow集成
+对大模型应用中通用场景和模式的抽象，目前 Eino 已经集成了 react agent、host multi agent 两个常用的 Agent 模式，以及 MultiQueryRetriever, ParentIndexer 等Flow
+
+[Flow 集成](https://www.cloudwego.io/zh/docs/eino/core_modules/flow_integration_components/)
 
 ##  0x  多智能体的应用
 
@@ -706,7 +748,7 @@ Hello World
 
 ---
 
-入门示例 (Intro)
+入门示例 （Intro）
 
 | 目录名称 | 说明 |
 | :--- | :--- |
@@ -722,7 +764,7 @@ Hello World
 
 ---
 
-Human-in-the-Loop (人机协作)
+Human-in-the-Loop （人机协作）
 
 | 目录名称 | 说明 |
 | :--- | :--- |
@@ -750,7 +792,7 @@ Multi-Agent （多 Agent 协作）
 
 ---
 
-GraphTool (图工具)
+GraphTool （图工具）
 
 | 目录名称 | 说明 |
 | :--- | :--- |
@@ -768,9 +810,9 @@ Chain （链式编排）
 
 | 目录名称 | 说明 |
 | :--- | :--- |
-| `compose/chain` | **Chain 基础示例**：展示如何使用 compose.Chain 进行顺序编排，包含 Prompt + ChatModel |
+| `compose/chain` | **Chain 基础示例**：展示如何使用 compose.Chain 进行顺序编排，包含 Prompt + ChatModel|
 
-Graph (图编排)
+Graph （图编排）
 
 | 目录名称 | 说明 |
 | :--- | :--- |
@@ -782,7 +824,7 @@ Graph (图编排)
 | `compose/graph/async_node` | **异步节点**：展示异步 Lambda 节点，包含报告生成和实时转录场景 |
 | `compose/graph/react_with_interrupt` | **ReAct + 中断**：票务预订场景，展示 Interrupt 和 Checkpoint 实践 |
 
-Workflow (工作流编排)
+Workflow （工作流编排）
 
 | 目录名称 | 说明 |
 | :--- | :--- |
@@ -793,7 +835,7 @@ Workflow (工作流编排)
 | `compose/workflow/5_static_values` | **静态值**：展示如何在 Workflow 中使用静态值 |
 | `compose/workflow/6_stream_field_map` | **流式字段映射**：流式场景下的字段映射 |
 
-Batch (批处理)
+Batch （批处理）
 
 | 目录名称 | 说明 |
 | :--- | :--- |
@@ -801,7 +843,7 @@ Batch (批处理)
 
 ---
 
-#### 🌊 Flow (流程模块)
+#### 🌊 Flow （流程模块）
 
 ReAct Agent
 
@@ -828,23 +870,23 @@ Multi-Agent
 
 ---
 
-#### 🧩 Components (组件)
+#### 🧩 Components （组件）
 
-Model (模型)
+Model （模型）
 
 | 目录名称 | 说明 |
 | :--- | :--- |
 | `components/model/abtest` | **A/B 测试路由**：动态路由 ChatModel，支持 A/B 测试和模型切换 |
 | `components/model/httptransport` | **HTTP 传输日志**：cURL 风格的 HTTP 请求日志记录，支持流式响应和敏感信息脱敏 |
 
-Retriever (检索器)
+Retriever （检索器）
 
 | 目录名称 | 说明 |
 | :--- | :--- |
 | `components/retriever/multiquery` | **多查询检索**：使用 LLM 生成多个查询变体，提高检索召回率 |
 | `components/retriever/router` | **路由检索**：根据查询内容动态路由到不同的检索器 |
 
-Tool (工具)
+Tool （工具）
 
 | 目录名称 | 说明 |
 | :--- | :--- |
@@ -853,7 +895,7 @@ Tool (工具)
 | `components/tool/middlewares/errorremover` | **错误移除中间件**：工具调用错误处理中间件，将错误转换为友好提示 |
 | `components/tool/middlewares/jsonfix` | **JSON 修复中间件**：修复 LLM 生成的格式错误 JSON 参数 |
 
-Document (文档)
+Document （文档）
 
 | 目录名称 | 说明 |
 | :--- | :--- |
@@ -861,7 +903,7 @@ Document (文档)
 | `components/document/parser/extparser` | **扩展解析器**：使用扩展解析器处理 HTML 等格式 |
 | `components/document/parser/textparser` | **文本解析器**：基础文本文档解析器示例 |
 
-Prompt (提示词)
+Prompt （提示词）
 
 | 目录名称 | 说明 |
 | :--- | :--- |
@@ -875,7 +917,7 @@ Lambda
 
 ---
 
-#### 🚀 QuickStart (快速开始)
+#### 🚀 QuickStart （快速开始）
 
 | 目录名称 | 说明 |
 | :--- | :--- |
@@ -885,7 +927,7 @@ Lambda
 
 ---
 
-#### 🛠️ DevOps (开发运维)
+#### 🛠️ DevOps （开发运维）
 
 | 目录名称 | 说明 |
 | :--- | :--- |
