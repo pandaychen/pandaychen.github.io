@@ -15,6 +15,8 @@ tags:
 
 -   [Eino：Cookbook](https://www.cloudwego.io/zh/docs/eino/eino-cookbook/)
 
+本文源码基于[v0.7.30](https://github.com/cloudwego/eino/blob/v0.7.30)
+
 ##  0x01    AI 基础
 
 ####    提示词
@@ -760,14 +762,16 @@ GraphTool (图工具)
 
 ---
 
-#### 🔗 Compose (编排)
+#### 🔗 Compose （编排）
 
-### Chain (链式编排)
+Chain （链式编排）
+
 | 目录名称 | 说明 |
 | :--- | :--- |
 | `compose/chain` | **Chain 基础示例**：展示如何使用 compose.Chain 进行顺序编排，包含 Prompt + ChatModel |
 
-### Graph (图编排)
+Graph (图编排)
+
 | 目录名称 | 说明 |
 | :--- | :--- |
 | `compose/graph/simple` | **简单 Graph**：Graph 基础用法示例 |
@@ -778,7 +782,8 @@ GraphTool (图工具)
 | `compose/graph/async_node` | **异步节点**：展示异步 Lambda 节点，包含报告生成和实时转录场景 |
 | `compose/graph/react_with_interrupt` | **ReAct + 中断**：票务预订场景，展示 Interrupt 和 Checkpoint 实践 |
 
-### Workflow (工作流编排)
+Workflow (工作流编排)
+
 | 目录名称 | 说明 |
 | :--- | :--- |
 | `compose/workflow/1_simple` | **简单 Workflow**：最简单的 Workflow 示例，等价于 Graph |
@@ -788,16 +793,18 @@ GraphTool (图工具)
 | `compose/workflow/5_static_values` | **静态值**：展示如何在 Workflow 中使用静态值 |
 | `compose/workflow/6_stream_field_map` | **流式字段映射**：流式场景下的字段映射 |
 
-### Batch (批处理)
+Batch (批处理)
+
 | 目录名称 | 说明 |
 | :--- | :--- |
 | `compose/batch` | **BatchNode**：批量处理组件，支持并发控制、中断恢复，适用于文档批量审核等场景 |
 
 ---
 
-## 🌊 Flow (流程模块)
+#### 🌊 Flow (流程模块)
 
-### ReAct Agent
+ReAct Agent
+
 | 目录名称 | 说明 |
 | :--- | :--- |
 | `flow/agent/react` | **ReAct Agent**：ReAct Agent 基础示例，餐厅推荐场景 |
@@ -805,13 +812,15 @@ GraphTool (图工具)
 | `flow/agent/react/dynamic_option_example` | **动态选项**：运行时动态修改 Model Option，控制思考模式和工具选择 |
 | `flow/agent/react/unknown_tool_handler_example` | **未知工具处理**：处理模型幻觉产生的未知工具调用，提高 Agent 鲁棒性 |
 
-### Multi-Agent
+Multi-Agent
+
 | 目录名称 | 说明 |
 | :--- | :--- |
 | `flow/agent/multiagent/host/journal` | **日记助手**：Host Multi-Agent 示例，支持写日记、读日记、根据日记回答问题 |
 | `flow/agent/multiagent/plan_execute` | **Plan-Execute**：计划执行模式的 Multi-Agent 示例 |
 
-### 完整应用示例
+完整应用示例
+
 | 目录名称 | 说明 |
 | :--- | :--- |
 | `flow/agent/manus` | **Manus Agent**：基于 Eino 实现的 Manus Agent，参考 OpenManus 项目 |
@@ -819,21 +828,24 @@ GraphTool (图工具)
 
 ---
 
-## 🧩 Components (组件)
+#### 🧩 Components (组件)
 
-### Model (模型)
+Model (模型)
+
 | 目录名称 | 说明 |
 | :--- | :--- |
 | `components/model/abtest` | **A/B 测试路由**：动态路由 ChatModel，支持 A/B 测试和模型切换 |
 | `components/model/httptransport` | **HTTP 传输日志**：cURL 风格的 HTTP 请求日志记录，支持流式响应和敏感信息脱敏 |
 
-### Retriever (检索器)
+Retriever (检索器)
+
 | 目录名称 | 说明 |
 | :--- | :--- |
 | `components/retriever/multiquery` | **多查询检索**：使用 LLM 生成多个查询变体，提高检索召回率 |
 | `components/retriever/router` | **路由检索**：根据查询内容动态路由到不同的检索器 |
 
-### Tool (工具)
+Tool (工具)
+
 | 目录名称 | 说明 |
 | :--- | :--- |
 | `components/tool/jsonschema` | **JSON Schema 工具**：展示如何使用 JSON Schema 定义工具参数 |
@@ -841,26 +853,30 @@ GraphTool (图工具)
 | `components/tool/middlewares/errorremover` | **错误移除中间件**：工具调用错误处理中间件，将错误转换为友好提示 |
 | `components/tool/middlewares/jsonfix` | **JSON 修复中间件**：修复 LLM 生成的格式错误 JSON 参数 |
 
-### Document (文档)
+Document (文档)
+
 | 目录名称 | 说明 |
 | :--- | :--- |
 | `components/document/parser/customparser` | **自定义解析器**：展示如何实现自定义文档解析器 |
 | `components/document/parser/extparser` | **扩展解析器**：使用扩展解析器处理 HTML 等格式 |
 | `components/document/parser/textparser` | **文本解析器**：基础文本文档解析器示例 |
 
-### Prompt (提示词)
+Prompt (提示词)
+
 | 目录名称 | 说明 |
 | :--- | :--- |
 | `components/prompt/chat_prompt` | **Chat Prompt**：展示如何使用 Chat Prompt 模板 |
 
-### Lambda
+Lambda
+
 | 目录名称 | 说明 |
 | :--- | :--- |
 | `components/lambda` | **Lambda 组件**：Lambda 函数组件的使用示例 |
 
 ---
 
-## 🚀 QuickStart (快速开始)
+#### 🚀 QuickStart (快速开始)
+
 | 目录名称 | 说明 |
 | :--- | :--- |
 | `quickstart/chat` | **Chat 快速开始**：最基础的 LLM 对话示例，包含模板、生成、流式输出 |
@@ -869,7 +885,8 @@ GraphTool (图工具)
 
 ---
 
-## 🛠️ DevOps (开发运维)
+#### 🛠️ DevOps (开发运维)
+
 | 目录名称 | 说明 |
 | :--- | :--- |
 | `devops/debug` | **调试工具**：展示如何使用 Eino 的调试功能，支持 Chain 和 Graph 调试 |
