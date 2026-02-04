@@ -28,7 +28,7 @@ tags:
 -   结构化输出：ReAct 依赖解析模型的 Action 字段。如果系统提示词写得不好，模型输出格式乱了，你的 `ToolsNode` 就无法解析出要执行哪个函数
 
 ####    消息模版（推荐模版）：Chat Template
-在 Eino 框架中对应 `ChatTemplate` 组件，它是一种包含占位符（变量）的字符串。由于模型输入通常是动态的（比如不同的用户问题、不同的上下文），模板允许你安全地注入这些变量。如**你现在的任务是处理用户关于 {{.topic}} 的提问，当前时间是 {{.time}}**
+在 Eino 框架中对应 `ChatTemplate` 组件，它是一种包含占位符（变量）的字符串。由于模型输入通常是动态的（比如不同的用户问题、不同的上下文），模板允许你安全地注入这些变量。如**你现在的任务是处理用户关于 `{{.topic}}` 的提问，当前时间是 `{{.time}}`**
 
 ####    react模式下的应用
 ReAct 的循环是**思考 (Thought) -> 行动 (Act) -> 观察 (Observation)**
@@ -152,7 +152,7 @@ TODO
 `ChatTemplate`用于创建对话模板并生成消息，Eino 提供了如下**模板化功能来构建要输入给大模型的消息**：
 
 -   FString：Python 风格的简单字符串格式化（例如：`你好，{name}！`）
--   Jinja2：支持丰富表达式的 Jinja2 风格模板（例如：`你好，{{name}}！`）
+-   Jinja2：支持丰富表达式的 Jinja2 风格模板（例如：`你好，\{\{name\}\}！`）
 -   GoTemplate：Go 语言内置的 `text/template` 格式（例如：`你好，{{.name}}！`）
 -   消息占位符：支持插入一组消息（如对话历史）
 
@@ -639,7 +639,7 @@ func main() {
 除了Chain式的Agent，框架还提供了[ReAct Agent](https://www.cloudwego.io/zh/docs/eino/core_modules/flow_integration_components/react_agent_manual/)、[Multi Agent](https://www.cloudwego.io/zh/docs/eino/core_modules/flow_integration_components/multi_agent_hosting/)等构建方式
 
 ##  0x0 参考
--   [eino官方](https://github.com/cloudwego/eino/blob/main/README.zh_CN.md)
+-   [eino官方文档](https://github.com/cloudwego/eino/blob/main/README.zh_CN.md)
 -   [实现一个最简 LLM 应用](https://www.cloudwego.io/zh/docs/eino/quick_start/simple_llm_application/)
 -   [Agent-让大模型拥有双手](https://www.cloudwego.io/zh/docs/eino/quick_start/agent_llm_with_tools/)
 -   [用 Eino ADK 构建你的第一个 AI 智能体：从 Excel Agent 实战开始](https://segmentfault.com/a/1190000047399985)
