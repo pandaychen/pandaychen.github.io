@@ -11,6 +11,9 @@ tags:
 
 
 ##  0x00    前言
+参考资料
+
+-   [Eino：Cookbook](https://www.cloudwego.io/zh/docs/eino/eino-cookbook/)
 
 ##  0x01    AI 基础
 
@@ -28,7 +31,7 @@ tags:
 -   结构化输出：ReAct 依赖解析模型的 Action 字段。如果系统提示词写得不好，模型输出格式乱了，你的 `ToolsNode` 就无法解析出要执行哪个函数
 
 ####    消息模版（推荐模版）：Chat Template
-在 Eino 框架中对应 `ChatTemplate` 组件，它是一种包含占位符（变量）的字符串。由于模型输入通常是动态的（比如不同的用户问题、不同的上下文），模板允许你安全地注入这些变量。如**你现在的任务是处理用户关于 `{{"{{"}}.topic{{"}}"}}` 的提问，当前时间是 `{{.time}}`**
+在 Eino 框架中对应 `ChatTemplate` 组件，它是一种包含占位符（变量）的字符串。由于模型输入通常是动态的（比如不同的用户问题、不同的上下文），模板允许你安全地注入这些变量。如**你现在的任务是处理用户关于 `{{"{{"}}.topic{{"}}"}}` 的提问，当前时间是 `{{"{{"}}.time{{"}}"}}`**
 
 ####    react模式下的应用
 ReAct 的循环是**思考 (Thought) -> 行动 (Act) -> 观察 (Observation)**
@@ -62,6 +65,14 @@ AI 核心概念和工程范式：
 -   Prompt Engineering（提示词工程）： 如何通过文本引导模型。在 Eino 中，会用到 ChatTemplate，需要理解变量注入和模板化 Prompt 的技巧
 -   Token（令牌）： 模型的计费和长度单位。需要有上下文长度限制的概念，避免因输入过长导致模型报错
 -   Function Calling / Tool Use（工具调用）： 这是 Agent 区别于普通聊天机器人的核心。模型不会真的跑代码，而是输出一个 JSON 结构告知使用者想调用哪个函数。Eino 封装了 ToolsNode 来自动处理这些逻辑
+
+####    Eino架构
+![eino_structure.png]()
+
+####    Eino组件列表
+Eino 应用的基本构成元素是功能各异的组件，就像足球队由不同位置角色的队员组成：
+
+![]()
 
 ####    Agent 核心架构模式
 Eino 也提供了编排（Orchestration）能力，介绍下目前业界主流的几种 Agent 构建模式：
@@ -152,8 +163,8 @@ TODO
 `ChatTemplate`用于创建对话模板并生成消息，Eino 提供了如下**模板化功能来构建要输入给大模型的消息**：
 
 -   FString：Python 风格的简单字符串格式化（例如：`你好，{name}！`）
--   Jinja2：支持丰富表达式的 Jinja2 风格模板（例如：`你好，\{\{name\}\}！`）
--   GoTemplate：Go 语言内置的 `text/template` 格式（例如：`你好，{{.name}}！`）
+-   Jinja2：支持丰富表达式的 Jinja2 风格模板（例如：`你好，{{"{{"}}name{{"}}"}}！`）
+-   GoTemplate：Go 语言内置的 `text/template` 格式（例如：`你好，{{"{{"}}.name{{"}}"}}！`）
 -   消息占位符：支持插入一组消息（如对话历史）
 
 ##  0x0 组件：Tool
@@ -310,6 +321,23 @@ type ChatModel interface {
 
 Eino React Agent 是实现了 React 逻辑 的智能体框架，框架[代码](https://github.com/cloudwego/eino/tree/main/flow/agent/react)
 
+
+##  0x  组件：Eino ADK
+[文档](https://www.cloudwego.io/zh/docs/eino/overview/eino_adk0_1/)
+
+##  0x  核心：编排能力
+
+-   Chain：链式有向图，始终向前，简单。适合数据单向流动，没有复杂分支的场景
+-   Graph：有向图，有最大的灵活性；或有向无环图，不支持分支，但有清晰的祖先关系
+
+####    Chain
+![simple_template_and_chatmodel.png]()
+
+
+####    Graph
+最多执行一次 ToolCall 的 Agent，其编排图如下：
+
+![eino_practice_graph_tool_call.png]()
 
 ##  0x  入门示例
 
@@ -638,6 +666,215 @@ func main() {
 
 除了Chain式的Agent，框架还提供了[ReAct Agent](https://www.cloudwego.io/zh/docs/eino/core_modules/flow_integration_components/react_agent_manual/)、[Multi Agent](https://www.cloudwego.io/zh/docs/eino/core_modules/flow_integration_components/multi_agent_hosting/)等构建方式
 
+
+##  0x0 其他智能体学习（TODO）
+
+####    `eino_assistant`
+[eino_assistant](https://github.com/cloudwego/eino-examples/tree/main/quickstart/eino_assistant)
+
+构建一个基于从 Redis VectorStore 中召回的 Eino 知识回答用户问题，帮用户执行某些操作的 ReAct Agent，即典型的 RAG ReAct Agent。可根据对话上下文，自动帮用户记录任务、Clone 仓库，打开链接等
+
+![eino_practice_agent_graph.png]()
+
+关联文档
+
+-   [Eino 实践](https://www.cloudwego.io/zh/docs/eino/overview/bytedance_eino_practice/)
+
+
+####    excel agent
+[integration-excel-agent](https://github.com/cloudwego/eino-examples/tree/main/adk/multiagent/integration-excel-agent)：Excel Agent 是一个能够听懂你的话、看懂你的表格、写出并执行代码的智能助手。它把复杂的 Excel 处理工作拆解为清晰的步骤，通过自动规划、工具调用与结果校验，稳定完成各项 Excel 数据处理任务
+
+Excel Agent 是一个看得懂 Excel 的智能助手，它先把问题拆解成步骤，再一步步执行并校验结果。它能理解用户问题与上传的文件内容，提出可行的解决方案，并选择合适的工具（系统命令、生成并运行 Python 代码、网络查询等等）完成任务。Excel Agent 整体是基于 Eino ADK 实现的 Multi-Agent 系统，完整架构如下图所示：
+
+![eino_adk_excel_agent_architecture.png]()
+
+关联文档
+-   [用 Eino ADK 构建你的第一个 AI 智能体：从 Excel Agent 实战开始](https://www.cloudwego.io/zh/docs/eino/overview/eino_adk_excel_agent/)
+
+
+##  0x  Cookbook：学习指引
+
+#### 📦 ADK (Agent Development Kit) & Compose 目录规范文档
+
+Hello World
+
+| 目录名称 | 说明 |
+| :--- | :--- |
+| `adk/helloworld` | **Hello World Agent**：最简单的 Agent 示例，展示如何创建一个基础的对话 Agent |
+
+---
+
+入门示例 (Intro)
+
+| 目录名称 | 说明 |
+| :--- | :--- |
+| `adk/intro/chatmodel` | **ChatModel Agent**：展示如何使用 ChatModelAgent 并配合 Interrupt 机制 |
+| `adk/intro/custom` | **自定义 Agent**：展示如何实现符合 ADK 定义的自定义 Agent |
+| `adk/intro/workflow/loop` | **Loop Agent**：展示如何使用 LoopAgent 实现循环反思模式 |
+| `adk/intro/workflow/parallel` | **Parallel Agent**：展示如何使用 ParallelAgent 实现并行执行 |
+| `adk/intro/workflow/sequential` | **Sequential Agent**：展示如何使用 SequentialAgent 实现顺序执行 |
+| `adk/intro/session` | **Session 管理**：展示如何通过 Session 在多个 Agent 之间传递数据和状态 |
+| `adk/intro/transfer` | **Agent 转移**：展示 ChatModelAgent 的 Transfer 能力，实现 Agent 间的任务转移 |
+| `adk/intro/agent_with_summarization` | **带摘要的 Agent**：展示如何为 Agent 添加对话摘要功能 |
+| `adk/intro/http-sse-service` | **HTTP SSE 服务**：展示如何将 ADK Runner 暴露为支持 Server-Sent Events 的 HTTP 服务 |
+
+---
+
+Human-in-the-Loop (人机协作)
+
+| 目录名称 | 说明 |
+| :--- | :--- |
+| `adk/human-in-the-loop/1_approval` | **审批模式**：展示敏感操作前的人工审批机制，Agent 执行前需用户确认 |
+| `adk/human-in-the-loop/2_review-and-edit` | **审核编辑模式**：展示工具调用参数的人工审核和编辑，支持修改、批准或拒绝 |
+| `adk/human-in-the-loop/3_feedback-loop` | **反馈循环模式**：多 Agent 协作，Writer 生成内容，Reviewer 收集人工反馈，支持迭代优化 |
+| `adk/human-in-the-loop/4_follow-up` | **追问模式**：智能识别信息缺失，通过多轮追问收集用户需求，完成复杂任务规划 |
+| `adk/human-in-the-loop/5_supervisor` | **Supervisor + 审批**：Supervisor 多 Agent 模式结合审批机制，敏感操作需人工确认 |
+| `adk/human-in-the-loop/6_plan-execute-replan` | **计划执行重规划 + 审核编辑**：Plan-Execute-Replan 模式结合参数审核编辑，支持预订参数修改 |
+| `adk/human-in-the-loop/7_deep-agents` | **Deep Agents + 追问**：Deep Agents 模式结合追问机制，在分析前主动收集用户偏好 |
+| `adk/human-in-the-loop/8_supervisor-plan-execute` | **嵌套多 Agent + 审批**：Supervisor 嵌套 Plan-Execute-Replan 子 Agent，支持深层嵌套中断 |
+
+---
+
+Multi-Agent （多 Agent 协作）
+
+| 目录名称 | 说明 |
+| :--- | :--- |
+| `adk/multiagent/supervisor` | **Supervisor Agent**：基础的 Supervisor 多 Agent 模式，协调多个子 Agent 完成任务 |
+| `adk/multiagent/layered-supervisor` | **分层 Supervisor**：多层 Supervisor 嵌套，一个 Supervisor 作为另一个的子 Agent |
+| `adk/multiagent/plan-execute-replan` | **Plan-Execute-Replan**：计划-执行-重规划模式，支持动态调整执行计划 |
+| `adk/multiagent/integration-project-manager` | **项目管理器**：使用 Supervisor 模式的项目管理示例，包含 Coder、Researcher、Reviewer |
+| `adk/multiagent/deep` | **Deep Agents (Excel Agent)**：智能 Excel 助手，分步骤理解和处理 Excel 文件，支持 Python 代码执行 |
+| `adk/multiagent/integration-excel-agent` | **Excel Agent (ADK 集成版)**：ADK 集成版 Excel Agent，包含 Planner、Executor、Replanner、Reporter |
+
+---
+
+GraphTool (图工具)
+
+| 目录名称 | 说明 |
+| :--- | :--- |
+| `adk/common/tool/graphtool` | **GraphTool 包**：将 Graph/Chain/Workflow 封装为 Agent 工具的工具包 |
+| `adk/common/tool/graphtool/examples/1_chain_summarize` | **Chain 文档摘要**：使用 compose.Chain 实现文档摘要工具 |
+| `adk/common/tool/graphtool/examples/2_graph_research` | **Graph 多源研究**：使用 compose.Graph 实现并行多源搜索和流式输出 |
+| `adk/common/tool/graphtool/examples/3_workflow_order` | **Workflow 订单处理**：使用 compose.Workflow 实现订单处理，结合审批机制 |
+| `adk/common/tool/graphtool/examples/4_nested_interrupt` | **嵌套中断**：展示外层审批和内层风控的双层中断机制 |
+
+---
+
+#### 🔗 Compose (编排)
+
+### Chain (链式编排)
+| 目录名称 | 说明 |
+| :--- | :--- |
+| `compose/chain` | **Chain 基础示例**：展示如何使用 compose.Chain 进行顺序编排，包含 Prompt + ChatModel |
+
+### Graph (图编排)
+| 目录名称 | 说明 |
+| :--- | :--- |
+| `compose/graph/simple` | **简单 Graph**：Graph 基础用法示例 |
+| `compose/graph/state` | **State Graph**：带状态的 Graph 示例 |
+| `compose/graph/tool_call_agent` | **Tool Call Agent**：使用 Graph 构建工具调用 Agent |
+| `compose/graph/tool_call_once` | **单次工具调用**：展示单次工具调用的 Graph 实现 |
+| `compose/graph/two_model_chat` | **双模型对话**：两个模型相互对话的 Graph 示例 |
+| `compose/graph/async_node` | **异步节点**：展示异步 Lambda 节点，包含报告生成和实时转录场景 |
+| `compose/graph/react_with_interrupt` | **ReAct + 中断**：票务预订场景，展示 Interrupt 和 Checkpoint 实践 |
+
+### Workflow (工作流编排)
+| 目录名称 | 说明 |
+| :--- | :--- |
+| `compose/workflow/1_simple` | **简单 Workflow**：最简单的 Workflow 示例，等价于 Graph |
+| `compose/workflow/2_field_mapping` | **字段映射**：展示 Workflow 的字段映射功能 |
+| `compose/workflow/3_data_only` | **纯数据流**：仅数据流的 Workflow 示例 |
+| `compose/workflow/4_control_only_branch` | **控制流分支**：仅控制流的分支示例 |
+| `compose/workflow/5_static_values` | **静态值**：展示如何在 Workflow 中使用静态值 |
+| `compose/workflow/6_stream_field_map` | **流式字段映射**：流式场景下的字段映射 |
+
+### Batch (批处理)
+| 目录名称 | 说明 |
+| :--- | :--- |
+| `compose/batch` | **BatchNode**：批量处理组件，支持并发控制、中断恢复，适用于文档批量审核等场景 |
+
+---
+
+## 🌊 Flow (流程模块)
+
+### ReAct Agent
+| 目录名称 | 说明 |
+| :--- | :--- |
+| `flow/agent/react` | **ReAct Agent**：ReAct Agent 基础示例，餐厅推荐场景 |
+| `flow/agent/react/memory_example` | **短期记忆**：ReAct Agent 的短期记忆实现，支持内存和 Redis 存储 |
+| `flow/agent/react/dynamic_option_example` | **动态选项**：运行时动态修改 Model Option，控制思考模式和工具选择 |
+| `flow/agent/react/unknown_tool_handler_example` | **未知工具处理**：处理模型幻觉产生的未知工具调用，提高 Agent 鲁棒性 |
+
+### Multi-Agent
+| 目录名称 | 说明 |
+| :--- | :--- |
+| `flow/agent/multiagent/host/journal` | **日记助手**：Host Multi-Agent 示例，支持写日记、读日记、根据日记回答问题 |
+| `flow/agent/multiagent/plan_execute` | **Plan-Execute**：计划执行模式的 Multi-Agent 示例 |
+
+### 完整应用示例
+| 目录名称 | 说明 |
+| :--- | :--- |
+| `flow/agent/manus` | **Manus Agent**：基于 Eino 实现的 Manus Agent，参考 OpenManus 项目 |
+| `flow/agent/deer-go` | **Deer-Go**：参考 deer-flow 的 Go 语言实现，支持研究团队协作的状态图流转 |
+
+---
+
+## 🧩 Components (组件)
+
+### Model (模型)
+| 目录名称 | 说明 |
+| :--- | :--- |
+| `components/model/abtest` | **A/B 测试路由**：动态路由 ChatModel，支持 A/B 测试和模型切换 |
+| `components/model/httptransport` | **HTTP 传输日志**：cURL 风格的 HTTP 请求日志记录，支持流式响应和敏感信息脱敏 |
+
+### Retriever (检索器)
+| 目录名称 | 说明 |
+| :--- | :--- |
+| `components/retriever/multiquery` | **多查询检索**：使用 LLM 生成多个查询变体，提高检索召回率 |
+| `components/retriever/router` | **路由检索**：根据查询内容动态路由到不同的检索器 |
+
+### Tool (工具)
+| 目录名称 | 说明 |
+| :--- | :--- |
+| `components/tool/jsonschema` | **JSON Schema 工具**：展示如何使用 JSON Schema 定义工具参数 |
+| `components/tool/mcptool/callresulthandler` | **MCP 工具结果处理**：展示 MCP 工具调用结果的自定义处理 |
+| `components/tool/middlewares/errorremover` | **错误移除中间件**：工具调用错误处理中间件，将错误转换为友好提示 |
+| `components/tool/middlewares/jsonfix` | **JSON 修复中间件**：修复 LLM 生成的格式错误 JSON 参数 |
+
+### Document (文档)
+| 目录名称 | 说明 |
+| :--- | :--- |
+| `components/document/parser/customparser` | **自定义解析器**：展示如何实现自定义文档解析器 |
+| `components/document/parser/extparser` | **扩展解析器**：使用扩展解析器处理 HTML 等格式 |
+| `components/document/parser/textparser` | **文本解析器**：基础文本文档解析器示例 |
+
+### Prompt (提示词)
+| 目录名称 | 说明 |
+| :--- | :--- |
+| `components/prompt/chat_prompt` | **Chat Prompt**：展示如何使用 Chat Prompt 模板 |
+
+### Lambda
+| 目录名称 | 说明 |
+| :--- | :--- |
+| `components/lambda` | **Lambda 组件**：Lambda 函数组件的使用示例 |
+
+---
+
+## 🚀 QuickStart (快速开始)
+| 目录名称 | 说明 |
+| :--- | :--- |
+| `quickstart/chat` | **Chat 快速开始**：最基础的 LLM 对话示例，包含模板、生成、流式输出 |
+| `quickstart/eino_assistant` | **Eino 助手**：完整的 RAG 应用示例，包含知识索引、Agent 服务、Web 界面 |
+| `quickstart/todoagent` | **Todo Agent**：简单的 Todo 管理 Agent 示例 |
+
+---
+
+## 🛠️ DevOps (开发运维)
+| 目录名称 | 说明 |
+| :--- | :--- |
+| `devops/debug` | **调试工具**：展示如何使用 Eino 的调试功能，支持 Chain 和 Graph 调试 |
+| `devops/visualize` | **可视化工具**：将 Graph/Chain/Workflow 渲染为 Mermaid 图表 |
+
 ##  0x0 参考
 -   [eino官方文档](https://github.com/cloudwego/eino/blob/main/README.zh_CN.md)
 -   [实现一个最简 LLM 应用](https://www.cloudwego.io/zh/docs/eino/quick_start/simple_llm_application/)
@@ -647,3 +884,6 @@ func main() {
 -   [DeepSeek + Function Call：基于 Eino 的计划--执行多智能体范式实战](https://www.infoq.cn/article/zhgae6llqwo9cjwr9lks)
 -   [Eino: Cookbook](https://www.cloudwego.io/zh/docs/eino/eino-cookbook/)
 -   [Eino: ReAct Agent 使用手册](https://www.cloudwego.io/zh/docs/eino/core_modules/flow_integration_components/react_agent_manual/)
+-   [Eino Tutorial: Host Multi-Agent（日记助手实现）](https://www.cloudwego.io/zh/docs/eino/core_modules/flow_integration_components/multi_agent_hosting/)
+-   [字节跳动大模型应用 Go 开发框架：Eino 实践](https://www.cloudwego.io/zh/docs/eino/overview/bytedance_eino_practice/)
+-   [Agent 还是 Graph？AI 应用路线辨析](https://www.cloudwego.io/zh/docs/eino/overview/graph_or_agent/)
