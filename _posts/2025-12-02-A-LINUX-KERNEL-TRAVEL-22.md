@@ -372,7 +372,7 @@ out:
 
 核心流程图如下：
 
-```mermind
+```mermaid
 flowchart TB
     subgraph init["初始化"]
         A[do_generic_file_read 入口] --> B[获取 mapping, inode, ra]
