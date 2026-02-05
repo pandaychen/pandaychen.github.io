@@ -46,8 +46,19 @@ anchorjs: true                          # if you want to customize anchor. check
 # from PR#40, to support local preview for Jekyll 3.0
 gems: [jekyll-paginate]
 
+##############
+## => Markdown Enhancements
+##############################
+## Mathjax
+mathjax: true # false (default), true
+mathjax_autoNumber: true # false (default), true
 
+## Mermaid
+mermaid: true # false (default), true
 
+## Chart
+chart: true # false (default), true
+##############
 
 # Markdown settings
 # replace redcarpet to kramdown,
