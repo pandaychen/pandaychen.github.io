@@ -226,7 +226,10 @@
 </script>
 {% endif %}
 
-
+<!-- Mermaid 图表（当 _config.yml 中 mermaid: true 时生效） -->
+{% if site.mermaid %}
+{% include mermaid.html %}
+{% endif %}
 
 <!-- Side Catalog -->
 {% if page.catalog %}

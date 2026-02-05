@@ -1,0 +1,28 @@
+<!-- Mermaid.js: 渲染 Markdown 中的 ```mermaid 代码块 -->
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" crossorigin="anonymous"></script>
+<script>
+(function() {
+  function initMermaid() {
+    var blocks = document.querySelectorAll('pre > code.language-mermaid');
+    if (blocks.length === 0) return;
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: 'default',
+      securityLevel: 'loose'
+    });
+    blocks.forEach(function(block) {
+      var pre = block.parentNode;
+      var div = document.createElement('div');
+      div.className = 'mermaid';
+      div.textContent = block.textContent;
+      pre.parentNode.replaceChild(div, pre);
+    });
+    mermaid.run();
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initMermaid);
+  } else {
+    initMermaid();
+  }
+})();
+</script>
