@@ -171,6 +171,10 @@ ffffffff813eb8c0 T do_sys_open
 
 如上示例中，符号 `do_sys_open` 的地址 `ffffffff813eb8c0` 属于内核空间高位地址范围，由于进程用户空间是互相隔离的，每个进程拥有独立的用户空间（`32`位为 `0x00000000-0xBFFFFFFF`，`64`位为 `0x0000000000000000-0x00007FFFFFFFFFFF`），但所有进程共享同一份内核空间映射。`/proc/kallsyms` 的符号地址对所有进程是全局一致的。此外，虽然内核空间映射到每个进程的虚拟地址空间（通过页表），但进程在用户态是无权访问内核地址的，仅当进程通过系统调用陷入内核态时，才能访问内核空间
 
+##	0x0	高端内存
+
+
+
 ##  0x0  参考
 -   [4.6 深入理解 Linux 虚拟内存管理](https://www.xiaolincoding.com/os/3_memory/linux_mem.html)
 -   [4.7 深入理解 Linux 物理内存管理](https://www.xiaolincoding.com/os/3_memory/linux_mem2.html#_6-1-%E5%8C%BF%E5%90%8D%E9%A1%B5%E7%9A%84%E5%8F%8D%E5%90%91%E6%98%A0%E5%B0%84)
