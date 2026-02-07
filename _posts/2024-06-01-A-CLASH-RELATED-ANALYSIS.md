@@ -227,7 +227,61 @@ Windivert是一种高性能的用户层数据包截获工具，核心价值在�
 
 5、在代理网关中会通过代理协议，将数据包转化为真实的原始目的IP的数据包（流）
 
-##  0x0 参考
+windivert的工作机制如下图：
+
+```mermaid
+graph TD
+    subgraph "WinDivert 拦截阶段"
+        A[捕获 Outbound 数据包] --> B{解析五元组}
+        B -->|提取| C[LocalIP, LocalPort, RemoteIP, RemotePort, TCP/UDP]
+    end
+
+    subgraph "系统快照查询 (System Query)"
+        C --> D[调用 GetExtendedTcpTable / GetExtendedUdpTable]
+        D --> E[遍历系统连接表]
+        E --> F{匹配五元组?}
+        F -- No --> G[标记为未知进程]
+        F -- Yes --> H[获取关联 PID]
+    end
+
+    subgraph "进程过滤决策 (Decision)"
+        H --> I[OpenProcess 获取进程句柄]
+        I --> J[GetProcessImageFileName 获取进程名]
+        J --> K{匹配黑/白名单?}
+        K -- "命中过滤" --> L[代理/修改数据包]
+        K -- "未命中" --> M[直接 WinDivertSend 放行]
+    end
+
+    style H fill:#f96,stroke:#333
+    style J fill:#69f,stroke:#333
+```
+
+##	0x04	net-speeder
+net-speeder 是一个非常经典的解决高丢包网络环境下传输速度问题的工具。最初源于 Linux（利用 `iptables` 和 `libnet`），也可以利用WinDivert在Win系统上实现。其核心工作原理为**发两遍，赌一遍（Packet Double Sending）**，详细原理描述如下
+
+####	WinDivert的实现
+
+1、核心机制是（发包）流量倍增，在正常的网络传输中，如果发生丢包，TCP 协议会触发重传机制，这会导致明显的延迟和带宽下降。Net-speeder 的实现逻辑是它并不试图改变 TCP 的拥塞控制算法，而是通过 WinDivert 在网络层截获每一个**出站（Outbound）**数据包。即当代理程序每收到一个原始数据包，就会立即复制一份，然后通过 WinDivertSend 将两份完全一样的数据包（原始包 + 冗余包）重新注入到内核驱动中发往目标
+
+2、利用 WinDivert 实现全流量截获，步骤如下：
+
+-	透明拦截（DivertOpen）：使用特定的过滤规则（如 `ip and !impostor`）监听所有网卡的出站流量
+-	用户态克隆： 数据包从内核拷贝到 net-speeder 代理程序中
+-	重新注入到协议栈：第一次调用 WinDivertSend 发送原始包，紧接着第二次调用 WinDivertSend 发送完全一致的副本
+
+为什么能加速（对抗丢包）呢？本质上是带宽换稳定性，在高丢包率的线路（如跨国链路）上非常有效，如果第一个包在途中丢失，只要第二个冗余包到达，接收端就会认为数据已收到，从而避免了触发 TCP 指数级退避的重传逻辑。相较于普通重传需要等待接收端的 `SACK` 或等待超时，net-speeder 这种主动重传是零延迟的
+
+3、服务端的去重机制： 既然发了两遍，服务器会收到两个相同的包，TCP/IP 栈会自动丢弃重复的序列号包，因此接收端应用层不会感知到重复。另外对于TCP checksum的计算，由于包是原样复制的，WinDivert 会保留原始的 checksum，确保两个包都能通过目标系统的完整性检查
+
+最后还有两个细节问题：
+
+1.	带宽消耗： 全流量代理下使用此模式会导致带宽占用直接翻倍
+2.	如何防止发包死循环？必须使用 `!impostor` 标志，否则 WinDivert 重新发送的包会再次被自己截获（回环）
+
+####	Linux的实现
+参考[netspeed](https://github.com/chuixifeng/netspeeder)原始项目实现
+
+##  0x05 参考
 -   [Clash 教程](https://www.codein.icu/clashtutorial/)
 -   [规则集](https://github.com/angwz/DomainRouter)
 -   [[Feature] Tun #393](https://github.com/Dreamacro/clash/pull/393)
