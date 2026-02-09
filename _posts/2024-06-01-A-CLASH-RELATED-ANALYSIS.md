@@ -199,13 +199,59 @@ func match(metadata *C.Metadata) (C.Proxy, C.Rule, error) {
 ```
 
 ##  0x03    原理分析（Windivert）
-
-![windivert]()
-
 Windivert是一种高性能的用户层数据包截获工具，核心价值在于让开发者无需编写复杂的内核驱动（Kernel Driver），就能在用户态（User Mode）直接操纵网络底层数据包。WinDivert 基于 WFP（Windows Filtering Platform）实现，这是 Windows 内核中处理网络过滤的官方框架，架构由两部分组成：
 
 -	`WinDivert.sys`（内核驱动）：负责根据过滤规则，从网络协议栈中捕获（钩）出数据包
 -	`WinDivert.dll`（用户态库）：为代理程序提供 API，通过句柄（Handle）与内核驱动通信
+
+Windivert的主要工作数据流如下：
+
+```mermaid
+graph TD
+    subgraph "网络环境 (External)"
+        Internet((互联网))
+        TargetServer[目标服务器]
+    end
+
+    subgraph "Windows 内核态 (Kernel Mode)"
+        NIC[物理网卡 / Network Adapter]
+        TCP_IP[Windows TCP/IP 协议栈]
+        
+        subgraph "WFP (Windows Filtering Platform)"
+            WFP_Layer{WFP 过滤层}
+            DivertSys[WinDivert.sys 驱动]
+        end
+    end
+
+    subgraph "用户态 (User Mode - 你的 Go 程序)"
+        GoApp[Go 代理程序]
+        PacketBuffer[数据包缓冲区]
+        Logic{逻辑处理: <br/>分流/加密/重定向}
+    end
+
+    %% 数据包入站流程
+    Internet --> NIC
+    NIC --> WFP_Layer
+    WFP_Layer -- "符合过滤规则 (Filter)" --> DivertSys
+    DivertSys -- "拦截并挂起数据包" --> PacketBuffer
+
+    %% 用户态处理
+    PacketBuffer --> GoApp
+    GoApp --> Logic
+    Logic -- "修改 IP/端口/Payload" --> GoApp
+
+    %% 数据包出站/注入流程
+    GoApp -- "WinDivertSend()" --> DivertSys
+    DivertSys -- "重新注入 (Inject)" --> TCP_IP
+    TCP_IP --> NIC
+    NIC --> TargetServer
+
+    %% 样式美化
+    style DivertSys fill:#f96,stroke:#333,stroke-width:2px
+    style GoApp fill:#69f,stroke:#333,stroke-width:2px
+    style WFP_Layer fill:#fff4dd,stroke:#d4a017
+    style Logic fill:#bbf,stroke:#333,stroke-dasharray: 5 5
+```
 
 ####	WinDivert 全流量代理的工作原理
 在全流量代理场景下，WinDivert 的执行逻辑如下：
