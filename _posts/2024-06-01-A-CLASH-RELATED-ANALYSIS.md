@@ -263,7 +263,7 @@ graph TD
 -	内核挂起： `WinDivert.sys` 会在协议栈中拦截该数据包，防止它继续向上传递给应用或向下发出网卡
 -	拷贝至用户态：数据包被放入一个队列，代理程序通过 `WinDivertRecv` 将整个原始数据包（包含 IP/TCP 头部）读取到内存中
 
-3、数据包操纵与魔改（Modification）过程，通常由开发者实现（代理程序），会根据代理协议（如 Shadowsocks/V2Ray/ Trojan 等）对包进行如下处理：
+3、数据包操纵与魔改（Modification）过程，通常由开发者实现（代理程序），会根据代理协议（如 Shadowsocks/V2Ray/Trojan 等）对包进行如下处理：
 
 -	修改目的地址： 将数据包的原始目标 IP 修改为代理服务器的 IP
 -	SNI 嗅探： 分析 HTTPS 握手包，识别目标域名以进行分流
@@ -300,6 +300,136 @@ graph TD
 
     style H fill:#f96,stroke:#333
     style J fill:#69f,stroke:#333
+```
+
+####	windivert+gvisor的全流量代理
+1、基于windivert与gvisor实现的全流量代理的实现架构如下（包含了进程名/路径识别）
+
+```mermaid
+graph TD
+    subgraph "内核态 (Kernel Mode)"
+        NIC[物理网卡]
+        WFP{WinDivert.sys}
+    end
+
+    subgraph "用户态 Go 代理 (User Mode)"
+        direction TB
+        
+        %% 数据获取与初步解析
+        WD_Read[WinDivert Recv]
+        Parser[gopacket 解析五元组]
+        
+        %% 核心：进程识别模块
+        subgraph Process_Module [进程识别模块]
+            Cache[(五元组-PID 缓存)]
+            MIB_Lookup[MIB/TCPTable 查询]
+            Name_Resolver[PID -> 进程名/路径]
+        end
+
+        %% 分流决策
+        Decision{分流决策引擎}
+
+        %% 路径 A：gVisor 代理路径
+        subgraph GVisor_Stack [gVisor Netstack]
+            Link[Virtual Link Endpoint]
+            NetStack{用户态网络栈}
+            Gonet[gonet.Conn接口]
+        end
+        
+        Proxy_Out[隧道封装 & 远程发包]
+
+        %% 路径 B：直连路径
+        Direct_Inject[修改元数据/原样标记]
+        WD_Write[WinDivert Send]
+    end
+
+    %% 流程连接：入站捕获
+    NIC -->|原始 IP 包| WFP
+    WFP -->|拦截| WD_Read
+    WD_Read --> Parser
+    
+    %% 进程识别流
+    Parser -->|五元组| Cache
+    Cache -- "Miss" --> MIB_Lookup
+    MIB_Lookup --> Name_Resolver
+    Name_Resolver -->|更新| Cache
+    Cache -- "Hit" --> Decision
+
+    %% 分流逻辑
+    Decision -- "命中代理名单 (如 Chrome.exe)" --> Link
+    Decision -- "直连/白名单" --> Direct_Inject
+    
+    %% 代理路径流转
+    Link --> NetStack
+    NetStack --> Gonet
+    Gonet --> Proxy_Out
+    Proxy_Out -->|加密流量| NIC
+
+    %% 直连路径流转
+    Direct_Inject --> WD_Write
+    WD_Write -->|重新注入| WFP
+    WFP --> NIC
+
+    %% 样式
+    style Process_Module fill:#fff4dd,stroke:#d4a017
+    style GVisor_Stack fill:#e1f5fe,stroke:#01579b
+    style Decision fill:#f8bbd0,stroke:#880e4f
+```
+
+在上图中，未命中规则的进程会通过windivert重新注入到内核协议栈，而命中了规则的进程，会通过gvisor用户态协议栈进行封装（代理转发等）完整后续流程：
+
+```mermaid
+graph TD
+    subgraph "内核态 (Kernel Mode)"
+        NIC[物理网卡]
+        WFP_Intercept{WFP 拦截点}
+        WFP_Inject{WFP 注入点}
+        OS_Stack[Windows TCP/IP 协议栈]
+    end
+
+    subgraph "用户态 Go 代理 (User Mode)"
+        WD_Recv[WinDivert Recv]
+        Parser[解析五元组 & 识别进程]
+        Policy{策略检查}
+        
+        subgraph "代理路径 (Proxy Path)"
+            GVisor[gVisor / NetStack]
+            Encapsulation[隧道封装]
+        end
+
+        subgraph "直连路径 (Direct Path)"
+            Buffer[保持原始数据包 Buffer]
+            Checksum[重新计算校验和 - 可选]
+        end
+
+        WD_Send[WinDivert Send]
+    end
+
+    %% 数据包捕获
+    NIC -->|Outbound 包| WFP_Intercept
+    WFP_Intercept -->|Divert| WD_Recv
+    WD_Recv --> Parser
+    Parser --> Policy
+
+    %% 分流逻辑：未命中策略 (直连)
+    Policy -- "未命中 / 白名单" --> Buffer
+    Buffer --> Checksum
+    Checksum -->|原始包注入| WD_Send
+    
+    %% 分流逻辑：命中策略 (代理)
+    Policy -- "命中代理" --> GVisor
+    GVisor --> Encapsulation
+    Encapsulation -->|加密后的新包| OS_Stack
+
+    %% 注入回内核
+    WD_Send -->|Injection| WFP_Inject
+    WFP_Inject --> OS_Stack
+    OS_Stack --> NIC
+
+    %% 样式美化
+    style Buffer fill:#f9f9f9,stroke:#333,stroke-dasharray: 5 5
+    style WD_Send fill:#d4edda,stroke:#28a745
+    style Checksum fill:#fff3cd,stroke:#ffc107
 ```
 
 ##	0x04	net-speeder
