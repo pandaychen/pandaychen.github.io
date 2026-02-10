@@ -38,9 +38,12 @@ TODO
 ####    虚拟内存空间分布（64位）
 
 TODO
-TODO
-
 ![64-vm](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/64-vm.png)
+
+
+####    文件映射与匿名映射区
+
+
 
 ####    页表
 参考[一步一图带你构建 Linux 页表体系：详解虚拟内存如何与物理内存进行映射](https://mp.weixin.qq.com/s?__biz=Mzg2MzU3Mjc3Ng==&mid=2247488477&idx=1&sn=f8531b3220ea3a9ca2a0fdc2fd9dabc6&chksm=ce77d59af9005c8c2ef35c7e45f45cbfc527bfc4b99bbd02dbaaa964d174a4009897dd329a4d&scene=178&cur_album_id=2559805446807928833#rd)
@@ -184,19 +187,34 @@ struct mm_struct {
 };
 ```
 
-####    task_size
-`task_size`：定义了用户态地址空间与内核态地址空间之间的分界线，如`64` 位系统中用户地址空间和内核地址空间的分界线在 `0x0000 7FFF FFFF F000` 地址处，那么`task_struct.mm_struct` 结构中的 `task_size` 为 `0x0000 7FFF FFFF F000`
+####    task_size：用户地址空间和内核地址空间的分界线
+`task_size`定义了用户态地址空间与内核态地址空间之间的分界线，如`64` 位系统中用户地址空间和内核地址空间的分界线在 `0x0000 7FFF FFFF F000` 地址处，那么`task_struct.mm_struct` 结构中的 `task_size` 为 `0x0000 7FFF FFFF F000`
+
+```cpp
+#define TASK_SIZE		(test_thread_flag(TIF_ADDR32) ? \
+					IA32_PAGE_OFFSET : TASK_SIZE_MAX)
+
+#define TASK_SIZE_MAX		task_size_max()
+
+#define task_size_max()		((_AC(1,UL) << __VIRTUAL_MASK_SHIFT) - PAGE_SIZE)
+
+#define __VIRTUAL_MASK_SHIFT	47
+
+/* PAGE_SHIFT determines the page size */
+#define PAGE_SHIFT		12
+#define PAGE_SIZE		(_AC(1,UL) << PAGE_SHIFT)
+```
+
+在`mm_struct`结构中定义如下：
 
 ```cpp
 struct mm_struct {
     unsigned long task_size; /* size of task vm space */
+    ......
 }
 ```
 
-TODO
-
-![]()
-
+![task_size](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/task_size.png)
 
 ####    进程虚拟内存空间布局（区间端点）
 
@@ -218,7 +236,51 @@ struct mm_struct {
 }
 ```
 
-![mm_struct]()
+![mm_struct_buju](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/mm_struct_buju.png)
+
+如上图所示，内核中用 `mm_struct`的上述成员来定义上图中虚拟内存空间里的不同内存区域。
+
+-   `start_code` 和 `end_code` 定义代码段的起始和结束位置，程序编译后的二进制文件中的机器码被加载进内存之后就存放在这里
+-   `start_data` 和 `end_data` 定义数据段的起始和结束位置，二进制文件中存放的全局变量和静态变量被加载进内存中就存放在这里
+-   后面紧挨着的是 BSS 段，用于存放未被初始化的全局变量和静态变量，这些变量在加载进内存时会生成一段 `0` 填充的内存区域（BSS 段）， BSS 段的大小是固定的
+-   下面就是 OS 堆了，在堆中内存地址的增长方向是由低地址向高地址增长， `start_brk` 定义堆的起始位置，`brk` 定义堆当前的结束位置。使用 `malloc`系统调用申请小块内存时（小于 `128K`），就是通过改变 `brk` 位置调整堆大小实现的
+-   接下来就是内存映射区，在内存映射区内存地址的增长方向是由高地址向低地址增长，`mmap_base` 定义内存映射区的起始地址。进程运行时所依赖的动态链接库中的代码段，数据段，BSS 段以及我们调用 `mmap` 映射出来的一段虚拟内存空间就保存在这个区域
+-   `start_stack` 是栈的起始位置在 RBP 寄存器中存储，栈的结束位置也就是栈顶指针 stack pointer 在 RSP 寄存器中存储。在栈中内存地址的增长方向也是由高地址向低地址增长
+-   `arg_start` 和 `arg_end` 是参数列表的位置， `env_start` 和 `env_end` 是环境变量的位置。它们都位于栈中的最高地址处
+
+这里有个细节，对于文件映射与匿名映射区（Memory Mapping Segment）这个区域的VMA分配，后文会介绍两个函数`arch_get_unmapped_area_topdown`与`arch_get_unmapped_area`，这两个函数都用于为新的内存映射（`mmap`）寻找一块未使用的虚拟地址空间，它们的核心区别在于搜索的方向和地址空间的布局策略，分别讨论下：
+
+1、`arch_get_unmapped_area`，搜索方向通常为从低地址向高地址搜索（自底向上），起始点通常为从 `TASK_UNMAPPED_BASE`（在 x86_64 上通常在 `128TB` 空间的低位部分）开始向上寻找
+
+通常应用于经典的内存布局，这种方式下，堆（Heap）向上增长，映射区也向上增长，容易导致两者在中间追尾
+
+2、`arch_get_unmapped_area_topdown`，搜索方向通常为从高地址向低地址搜索（自顶向下），起始点通常为从用户态栈（Stack）的下方开始向下寻找
+
+通常作为现代 Linux（如x86_64下的Linux内核） 默认的布局方案，它将栈放在高地址向下生长，将 mmap 映射区也放在高地址附近向下生长，从而给底部的堆（Heap）留出更大的连续空间
+
+####    文件映射与匿名映射区的布局
+在 Linux 64位 x86 系统中，内存布局的选择取决于系统资源限制（主要是栈的大小）以及内核的配置。
+
+-   现代布局（Default）：如果内核没有显式关闭地址空间随机化（ASLR），或者没有通过 `ulimit -s unlimited` 将栈设置为无限大，内核会默认使用 Top-down（自顶向下） 策略
+-   传统布局（Legacy）：只有当手动将栈限制设为无限（Unlimited）时，内核为了防止巨大的栈和 mmap 区冲突，可能会切换回 Bottom-up 模式
+
+为什么 64 位更倾向于 Top-down模式呢？x86_64 提供了极大的虚拟地址空间（通常是 `48` 位或 `57` 位寻址），Top-down 布局能更好地利用这种稀疏性。此外，将 mmap 区域与进程堆（brk）分离到地址空间的两端，可以最大程度避免它们在地址空间中间发生重叠（碰撞）
+
+回到上一小节，说明下这两种布局下分配VMA时与 `start_xxx` 变量的关系
+
+1、`arch_get_unmapped_area`
+
+-   起始点：从 `mm->mmap_base` 开始向上搜索
+-   限制：它位于 堆（Heap） 的上方
+-   `mm->start_brk & mm->brk`：定义了堆的范围
+-   `TASK_UNMAPPED_BASE`：定义了自底向上分配的默认起始地址
+
+2、`arch_get_unmapped_area_topdown`
+
+-   起始点：从 `mm->mmap_base` 开始向下搜索
+-   限制：它位于 栈（Stack） 的下方
+-   `mm->start_stack`：用户栈的起始位置
+-   `mm->mmap_base`：在 Top-down 模式下，这个值通常被设置为靠近栈底的位置
 
 ####    vm_area_struct（VMA）
 Linux 内核按照功能上的差异，把虚拟内存空间划分为多个段。那么在内核中，是通过`vm_area_struct`结构来管理这些段，如代码段、数据段、BSS 段、堆、栈以及文件映射与匿名映射区等，在内核中都是 `struct vm_area_struct` 结构来表示的
@@ -327,6 +389,8 @@ struct vm_area_struct {
 
 ![mm_struct-vm_area_struct-ds2]()
 
+此外，如果一个进程映射了多个文件（多个偏移范围），那么对应的所有的vma都会存储在`mm_struct`对应的`mm_rb`以及`mmap`上
+
 ##  0x02    进程虚拟内存管理：ELF加载
 本小节主要讨论下进程的虚拟内存区是如何建立起来的，主要涉及到：
 -   ELF文件
@@ -334,7 +398,7 @@ struct vm_area_struct {
 ####    ELF：Executable and Linkable Format
 在 Linux 系统中使用ELF格式来存储一个可执行的应用程序，一个 ELF 文件由以下三部分组成：
 
-![elf-format]()
+![elf-format](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/elf-format.png)
 
 -   ELF 头（ELF header）：描述应用程序的类型、CPU架构、入口地址、程序头表偏移和节头表偏移等
 -   程序头表（Program header table）：列举了所有有效的段（segments）和其属性，程序头表需要加载器将文件中的段加载到虚拟内存段中
