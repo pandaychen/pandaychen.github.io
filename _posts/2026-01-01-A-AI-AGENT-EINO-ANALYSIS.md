@@ -383,6 +383,11 @@ Eino React Agent 是实现了 React 逻辑 的智能体框架，框架[代码](h
 
 ![eino_practice_graph_tool_call.png]()
 
+
+####	设计理念
+[编排的设计理念](https://www.cloudwego.io/zh/docs/eino/core_modules/chain_and_graph_orchestration/orchestration_design_principles/)
+
+
 ##  0x  入门示例
 
 -   [实现一个最简 LLM 应用](https://www.cloudwego.io/zh/docs/eino/quick_start/simple_llm_application/)
