@@ -2647,7 +2647,7 @@ struct task_struct {
 
 回到`struct pid`的定义，瞬间就清晰了，**`struct hlist_head tasks[PIDTYPE_MAX]`这里面的链表头，其链表成员就是`task_struct.pids[xxxx].node`（类型为`struct hlist_node`）**，参考下图：
 
-![pid-relation-with-task_struct]()
+![pid-relation-with-task_struct](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/1/pid-relation-task_struct.png)
 
 内核这个设计非常精妙，可以理解为`struct pid` 是master，`task_struct` 是worker，worker的 `node` 成员放置在master的 `tasks` 插槽里。内存中的链接关系如下（链表头指向 node时）
 
