@@ -819,22 +819,148 @@ struct pid *find_vpid(int nr)
 }
 ```
 
-3、根据 `pid` 及 PID 类型获取 `task_struct`
+3、`pid_task`：根据 `pid` 及 PID 类型获取 `task_struct`（重要）
+
 
 ```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/rculist.h#L453
+#define hlist_first_rcu(head)	(*((struct hlist_node __rcu **)(&(head)->first)))
+#define hlist_next_rcu(node)	(*((struct hlist_node __rcu **)(&(node)->next)))
+#define hlist_pprev_rcu(node)	(*((struct hlist_node __rcu **)((node)->pprev)))
+```
+
+```cpp
+// https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid.c#L434
+// 在哈希桶（pid->tasks[type]）中找到第一个节点，并将其转换回 task_struct 结构体
 struct task_struct *pid_task(struct pid *pid, enum pid_type type)
- {
+{
  	struct task_struct *result = NULL;
  	if (pid) {
  		struct hlist_node *first;
+		//hlist_first_rcu(head)：获取哈希桶（bucket）的第一个节点（并标记为__rcu）
  		first = rcu_dereference_check(hlist_first_rcu(&pid->tasks[type]),
  					      lockdep_tasklist_lock_is_held());
- 		if (first)
+ 		if (first){
+			//hlist_entry：利用偏移量+container_of计算出包含这个节点的 task_struct 的起始地址
+			//type：指定了 PID 的类型（如 PIDTYPE_PID 进程, PIDTYPE_PGID 进程组, PIDTYPE_SID 会话）
+			//pids[type].node：task_struct 内部嵌入的链表节点
  			result = hlist_entry(first, struct task_struct, pids[(type)].node);
+		}
  	}
  	return result;
- }
+}
 ```
+
+先分析下`pid_task`函数的实现，作用是利用RCU机制配合`rcu_dereference_check`无锁读取hashtable的链表头，根据 `struct pid` 获取对应任务（`task_struct`），其实现完美的体现了**尽可能通过 RCU 避免获取全局锁（`tasklist_lock`）**的理念。`pid_task`中的核心关键宏`rcu_dereference_check`，这里反应内核中一个非常普遍的并发保护场景，如下：
+
+当在一个 CPU 上通过 `pid_task` 查找某个进程组的组长时，另一个 CPU 可能正在把该组长对应的`task_struct`从链表中摘除（[`detach_pid`](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid.c#L414)）：
+
+-	RCU机制：保证了读取者（Reader）不需要加锁
+-	即便链表节点正在被删除，读取者拿到的指针依然是有效的内存地址（直到 RCU 宽限期结束才会真正释放），这保证了内核不会因为并发访问 PID 链表而崩溃（虽然RCU机制拿到的数据可能已经过期）
+
+```cpp
+//rcu_dereference_check：宏
+rcu_dereference_check(hlist_first_rcu(&pid->tasks[type]),
+ 					      lockdep_tasklist_lock_is_held());
+```
+
+-	参数`hlist_first_rcu(...)`：获取链表首节点的指针
+-	参数`lockdep_tasklist_lock_is_held()`：给内核调试工具 `Lockdep` 用的断言，有两个含义：
+	-	读取：该断言告诉内核，要以 RCU 的方式读取这个指针。它会处理内存屏障，确保读取到的指针是有效的
+    -	安全性检查：它要求调用者要么处于 RCU 读端临界区（`rcu_read_lock`），要么已经持有了 `tasklist_lock` 锁。如果两个条件都不满足，内核在调试模式下会直接报Warning警告
+
+还有一个细节问题，为什么这个函数只取 `first`（链表头），而不需要循环遍历（for_each）获取呢？结合前面对结构体的描述，内核这里也使用了一个小技巧，即链表头成员一般是组长或者是最新的成员
+
+稍微回顾下，在内核 PID 管理中，一个特定的 `struct pid`（代表一个具体的数值）对应一种 `type` 时，其 `tasks`（成员）链表通常代表的是进程领头者或归属于该 PID 的进程组/会话成员。对于 `PIDTYPE_PID` 类型，链表通常只有一个节点，对于进程组（`PGID`）类型，通过会关联多个进程，但 `pid_task` 返回的是链表头部的那个`task_struct`（组长或最新的成员）
+
+`pid_task`函数（读函数）的典型的调用方场景如下，可以看到下面两个函数有共同点：
+
+-	`rcu_read_lock()`：进入 RCU（Read-Copy-Update）临界区，由于进程列表和 `task_struct` 可能会动态变化，使用 RCU 可以安全地读取这些数据结构（不需要重量级的锁）
+-	`pid_task(.....)`：通过 `struct pid`对象获取目标进程的 `task_struct` 结构体指针
+-	`rcu_read_unlock()`： 退出 RCU 临界区
+
+为何要如此设计呢？`rcu_read_lock` 机制（轻量级）保证了在读操作期间，所引用的内存对象不会被其他 CPU 释放掉，结合下面两个函数来看就很容易理解了
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid.c#L475
+struct task_struct *get_pid_task(struct pid *pid, enum pid_type type)
+{
+	struct task_struct *result;
+	rcu_read_lock();
+	result = pid_task(pid, type);
+	if (result){
+		// 由于在调用层还需要使用result，所以这里需要增加task_struct的引用计数
+		get_task_struct(result);
+	}
+
+	//增加完result的计数，才关闭rcu_read_unlock，允许其他CPU进行调度
+	rcu_read_unlock();
+	return result;
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/fd.c#L282
+// 用于检测进程访问`/proc/[pid]/fd`文件是否有权限
+int proc_fd_permission(struct inode *inode, int mask)
+{
+	struct task_struct *p;
+	int rv;
+
+	rv = generic_permission(inode, mask);
+	if (rv == 0)
+		return rv;
+
+	rcu_read_lock();
+	p = pid_task(proc_pid(inode), PIDTYPE_PID);
+	
+	//same_thread_group：发起访问的进程（current）是否与目标进程（p）属于同一个线程组（Thread Group）？
+	if (p && same_thread_group(p, current)){
+		rv = 0;
+	}
+
+	//使用完p，才允许其他CPU调度
+	rcu_read_unlock();
+
+	return rv;
+}
+```
+
+这里再列举下`get_pid_task`的上层调用方都做了哪些事情，以`proc_single_show`函数为例：
+
+1.	调用`get_pid_task`获取 `task_struct`
+2.	使用`task_struct`
+3.	调用`put_task_struct`释放`task_struct`
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/base.c#L2183
+static int proc_single_show(struct seq_file *m, void *v)
+{
+	struct inode *inode = m->private;
+	struct pid_namespace *ns;
+	struct pid *pid;
+	struct task_struct *task;
+	int ret;
+
+	ns = inode->i_sb->s_fs_info;
+	pid = proc_pid(inode);
+
+	//调用get_pid_task，拿到task_struct，并使用
+	task = get_pid_task(pid, PIDTYPE_PID);
+	if (!task)
+		return -ESRCH;
+
+	ret = PROC_I(inode)->op.proc_show(m, ns, pid, task);
+
+	//释放task_struct
+	put_task_struct(task);
+	return ret;
+}
+```
+
+所以，上面列举的基于`get_pid_task`前后的典型的场景，体现了指针安全以及对象生存两个特性，即`pid_task` 内部的 RCU 是为了查找时的内存安全；而 `get_pid_task` 外部的 RCU 结合引用计数，是为了跨函数调用的对象持久性
+
+-	`pid_task` 的 RCU：仅仅保证在遍历链表时，拿到的 `task_struct` 指针是有效的，且在该 RCU 临界区内，这个结构体不会被释放内存
+-	`get_task_struct`：RCU 只能保证在 `rcu_read_unlock()` 之前对象不消失。如果想在 `rcu_read_unlock()` 之后继续使用这个 `task_struct`，就必须增加它的引用计数（Reference Count）
+-	如果 `get_pid_task` 不调用 `get_task_struct` 就返回指针，那么一旦函数返回，调用者就处于 RCU 临界区之外了。此时，如果该进程退出，内核可能会立即回收其内存，导致调用者持有一个野指针。所以通过 `get_pid_task` 获取的任务，调用者后续必须显式地调用 `put_task_struct` 来平衡引用计数
 
 ####	进程与线程
 ![process_and_thread](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/linux-process/process_vs_thread.png)
@@ -1203,8 +1329,52 @@ TODO
 2、查询pid
 
 
-####	`struct task_struct`相关
+####	`struct task_struct`：安全的引用/解引用
+`task_struct` 结构体在内核中被很多地方（如调度器、进程间通信、文件系统等）引用。为了防止它被提前销毁，内核采用了引用计数机制
+
 1、查找`task_struct`
+
+2、`get_task_struct/put_task_struct`的应用
+
+这里主要介绍`put_task_struct`函数，其核心功能是通过原子操作减少进程描述符的引用计数，并在计数归零时触发真正的内存释放
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/sched/task.h#L87
+#define get_task_struct(tsk) do { atomic_inc(&(tsk)->usage); } while(0)
+
+extern void __put_task_struct(struct task_struct *t);
+
+static inline void put_task_struct(struct task_struct *t)
+{
+    // 1. 原子减 1，并测试结果是否为 0
+    if (atomic_dec_and_test(&t->usage)){
+		// 如果atomic_dec_and_test结果是 0，返回 true（意味着这是最后一个使用者）
+        // 2. 如果（原子计数）减到了 0，说明没有任何地方再使用这个 task 了
+        __put_task_struct(t);
+	}
+	//如果atomic_dec_and_test结果 大于 0，返回 false（意味着还有其他人在使用）
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/fork.c#L393
+void __put_task_struct(struct task_struct *tsk)
+{
+	WARN_ON(!tsk->exit_state);
+	WARN_ON(atomic_read(&tsk->usage));
+	WARN_ON(tsk == current);
+
+	cgroup_free(tsk);
+	task_numa_free(tsk);
+	security_task_free(tsk);
+	exit_creds(tsk);
+	delayacct_tsk_free(tsk);
+	put_signal_struct(tsk->signal);
+
+	if (!profile_handoff_task(tsk))
+		free_task(tsk);
+}
+```
+
+`__put_task_struct`是底层清理函数，主要完成释放 `task_struct` 占用的内存，清理与该进程相关的内核栈和其他附带资源等，在应用层视角来看，当进程主动执行`exit`退出，父进程调用`wait`系统调用获取进程退出码时，`task_struct`，只有当调度器不再需要它（比如最后一次切换完成）、父进程也不再需要它、以及所有持有该 task 引用的内核模块都释放了它，`put_task_struct` 才会真正把这块内存还给系统
 
 ####	`struct upid`相关
 
@@ -2417,6 +2587,190 @@ static void session_clear_tty(struct pid *session)
 	} while_each_pid_task(session, PIDTYPE_SID, p);
 }
 ```
+
+4、数量（关系）
+
+从`struct pid`的视角来看，`tasks`这个hash表（链表头）
+
+```cpp
+enum pid_type {
+	PIDTYPE_PID, // 进程的PID（每个任务唯一）
+	PIDTYPE_TGID, // 线程组ID
+	PIDTYPE_PGID, // 进程组ID
+	PIDTYPE_SID, // 会话ID
+	PIDTYPE_MAX
+};
+
+struct pid {
+	......
+	struct hlist_head tasks[PIDTYPE_MAX]; // 不同类型的任务链表（4个链表头）
+	
+	......
+};
+```
+
+现在讨论下如上`struct pid`结构中，tasks数组中的`PIDTYPE_MAX`个元素（链表头），一般会对应多少个`task_struct`？这四个代表了以该 PID 为中心的不同角色的集合，每个链表头通常对应的 `task_struct` 数量如下：
+
+-	`PIDTYPE_PID`（进程 ID），对应数量为`1` 个。在内核中，每个 `task_struct`（无论是进程/线程）都有一个全局唯一的 PID。对于一个具体的 `struct pid` 结构体，它代表了一个具体的数值。在这个层级上，一个 PID 数值只能指向一个唯一的 `task_struct`。正常情况下，这个链表里永远只有一个元素
+-	`PIDTYPE_TGID`（线程组 ID），对应数量为`1` 个（线程组的主线程），TGID 即常说的进程 ID。虽然一个线程组内有很多线程，但内核规定**只有线程组的 Leader（主线程）**会挂载到 `struct pid` 的 `PIDTYPE_TGID` 链表上，如此设计是为了通过该 PID 快速找到整个进程的代表
+-	`PIDTYPE_PGID`（进程组 ID），对应数量可能多个（属于该进程组的所有进程），由于内核中一个进程组可以包含多个进程（如通过`|`连接的命令 `ls | grep`），当一个进程成为组长（Process Group Leader）时，所有属于该组的进程的 `task_struct->pids[PIDTYPE_PGID]` 都会挂载到组长所关联的这个 `struct pid` 的 `tasks[PIDTYPE_PGID]` 链表上
+-	`PIDTYPE_SID`（会话 ID），对应数量可能多个（属于该会话的所有进程），一个会话（Session）包含多个进程组，类似于 PGID，所有属于该会话的进程都会将其 `task_struct` 挂载到会话首进程（Session Leader）对应的 `struct pid` 的 `tasks[PIDTYPE_SID]` 链表上
+
+然后，从`struct task_struct`视角来看，`pid_link`的链表节点包含的`node`与`pid`成员如下：
+
+```cpp
+struct pid_link {
+	struct hlist_node node; // 链表节点
+	struct pid *pid; // 指向pid结构，每个 link 指向一个 struct pid 实例
+}
+
+struct task_struct {
+	......
+	// 在 task_struct 中，pids[PIDTYPE_MAX] 并不是存放 PID 数字
+	// 而是存放了 struct pid_link
+	// 每个 link 指向一个 struct pid 实例
+	struct pid_link pids[PIDTYPE_MAX];
+	......
+};
+```
+
+在 `task_struct.pids` 数组中，每个元素（链表节点）必然且只能对应 `1` 个 `struct pid`。由于 `task_struct.pids` 是一个长度为 `PIDTYPE_MAX`（通常为 `4`）的数组，这意味着一个`task_struct`（线程/进程）同时关联着 `4` 个不同的身份标志：
+
+-	`pids[PIDTYPE_PID]`：对应`task_struct`自身的标识，指向一个唯一的 `struct pid`，其数值就是在 `top/ps` 中看到的 LWP（线程ID）
+-	`pids[PIDTYPE_TGID]`：对应`task_struct`所属的线程组（即传统意义上的进程），如果是主线程，它指向的 `struct pid` 与上面的 PID 类型相同；如果是子线程，它指向主线程的那个 `struct pid`
+-	`pids[PIDTYPE_PGID]`：对应任务所属的进程组，指向进程组组长（Process Group Leader）的那个 `struct pid`
+-	`pids[PIDTYPE_SID]`：对应任务所属的会话，指向会话首进程（Session Leader）的那个 `struct pid`
+
+注意，上面四个类型数量都是一个，为什么数组里是 `4` 个 link呢？虽然一个进程有四种身份，但这四种身份可能指向同一个 `struct pid` 实例，也可能指向不同的。内核只需通过一个 `struct pid` 就能管理成百上千个属于同一组的任务，极大地节省了内存并提高了查找效率
+
+最后一个问题，`task_struct.pids[xxxx].node`这个成员到底是什么作用？从其定义`struct hlist_node node`来看，非指针，是一个结构体对象，大概率是通过某些关系定位到这个`node`成员后，然后使用`container_of`机制获取到`task_struct`的指针地址
+
+回到`struct pid`的定义，瞬间就清晰了，**`struct hlist_head tasks[PIDTYPE_MAX]`这里面的链表头，其链表成员就是`task_struct.pids[xxxx].node`（类型为`struct hlist_node`）**，参考下图：
+
+![pid-relation-with-task_struct]()
+
+内核这个设计非常精妙，可以理解为`struct pid` 是master，`task_struct` 是worker，worker的 `node` 成员放置在master的 `tasks` 插槽里。内存中的链接关系如下（链表头指向 node时）
+
+-	`struct pid` 结构体对象，它里面有一个 `tasks` 数组
+-	其成员`tasks[PIDTYPE_PGID]` 是一个 `struct hlist_head`（指针）
+-	这个指针存储的地址，正是某个 `task_struct` 内部嵌套的 `pids[PIDTYPE_PGID].node` 的地址
+
+内核如此设计的另一个目的是解决了**一个进程拥有多重身份**的问题，思考下，一个 `task_struct` 代表一个进程：
+
+-	它想当自己：它把 `pids[PIDTYPE_PID].node` 挂在它自己的 `struct pid` 上
+-	它想加入进程组：它把 `pids[PIDTYPE_PGID].node` 挂在组长进程的 `struct pid` 上
+
+```cpp
+struct pid {
+	......
+	struct hlist_head tasks[PIDTYPE_MAX]; // 不同类型的任务链表（4个链表头）
+	...... 
+};
+```
+
+-	`sturct pid`的`pid.tasks[PID_TYPE]`这个链表头，实际上是指向 `task_struct.pids[PID_TYPE].node`
+-	对于进程组而言，`sturct pid`的`pid.tasks[PGID_TYPE]`这个链表头，实际上是指向该`struct pid`对应的pgid的 `task_struct.pids[PGID_TYPE].node`
+-	`sturct pid`的`pid.tasks[PGID_TYPE]`这个链表头，指向该`struct pid`对应的pgid的 `task_struct.pids[PGID_TYPE].node`，对于`struct pid`与`task_struct.pids[PGID_TYPE].pid`，这两个`struct pid`可能不是一个pid
+
+在上文介绍过的`pid_task`函数实现，就利用了上面的技巧
+
+```cpp
+struct task_struct *pid_task(struct pid *pid, enum pid_type type)
+{
+ 	struct task_struct *result = NULL;
+ 	if (pid) {
+ 		struct hlist_node *first;
+		// 1. 从 pid->tasks[type] 拿到第一个 node 的地址
+		// struct hlist_node *first = pid->tasks[type].first;
+		// 2. 重点：根据 node 的地址，减去它在 task_struct 里的偏移量，还原出 task 的首地址
+		// struct task_struct *task = container_of(first, struct task_struct, pids[type].node);
+ 		first = rcu_dereference_check(hlist_first_rcu(&pid->tasks[type]),
+ 					      lockdep_tasklist_lock_is_held());
+ 		if (first){
+ 			result = hlist_entry(first, struct task_struct, pids[(type)].node);
+		}
+ 	}
+ 	return result;
+}
+```
+
+####	应用：task_tgid_vnr(current)
+`task_tgid_vnr`就是通过上面的`struct pid`对应的链条，一步步获取到最终的pid数字，该函数是用于获取TGID（线程组 ID，即用户态看到的进程 PID），核心代码如下：
+
+```cpp
+static inline pid_t task_tgid_vnr(struct task_struct *tsk)
+{
+    // 第一步：拿到该任务 TGID 对应的 struct pid
+    // 第二步：将这个 struct pid 转换成当前命名空间下的数字
+    return pid_vnr(task_tgid(tsk));
+}
+
+// 偷懒的方法：直接通过group_leader对应的task_struct结构，拿到对应的struct pid对象指针
+// group_leader->pids[PIDTYPE_PID].pid：表示group_leader对应的PIDTYPE_PID的pid结构
+static inline struct pid *task_tgid(struct task_struct *task)
+{
+	return task->group_leader->pids[PIDTYPE_PID].pid;
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid.c#L513
+pid_t pid_vnr(struct pid *pid)
+{
+	return pid_nr_ns(pid, task_active_pid_ns(current));
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid.c#L544
+struct pid_namespace *task_active_pid_ns(struct task_struct *tsk)
+{
+	return ns_of_pid(task_pid(tsk));
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/sched.h#L1056
+static inline struct pid *task_pid(struct task_struct *task)
+{
+	//获取task_struct本身的那个pid结构
+	return task->pids[PIDTYPE_PID].pid;
+}
+
+// ns_of_pid：这个也很重要
+// 直接根据pid所在的level，返回所属level的那个pid_namespace结构体
+static inline struct pid_namespace *ns_of_pid(struct pid *pid)
+{
+	struct pid_namespace *ns = NULL;
+	if (pid)
+		ns = pid->numbers[pid->level/*这里肯定是最深层级的那里的*/].ns;
+	return ns;
+}
+```
+
+上面实现了转换的第一步，定位 `struct pid`，内核通过 `task_pid_ptr` 这种内部逻辑，直接访问 `pids` 数组。对于 TGID，它会去找 `task->pids[PIDTYPE_TGID].pid`
+
+-	如果是主线程：这个指针指向它自己的 `struct pid`
+-	如果是子线程：这个指针指向它所属主线程的 `struct pid`
+
+下面是第二步，即数字转换（关键的命名空间处理）
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid.c#L499
+pid_t pid_nr_ns(struct pid *pid, struct pid_namespace *ns)
+{
+	struct upid *upid;
+	pid_t nr = 0;
+	// 只要 level 没超，且 namespace 匹配
+	if (pid && ns->level <= pid->level) {
+		// 关键：柔性数组 numbers 登场
+		upid = &pid->numbers[ns->level];
+		if (upid->ns == ns)
+			nr = upid->nr;	// 拿到数字
+	}
+	return nr;
+}
+```
+
+从`task_tgid_vnr`的实现，内核设计了三层解耦：
+    
+-	身份解耦（Role Separation）： 通过 `pids[PIDTYPE_MAX]` 数组，一个 `task_struct` 可以同时扮演四个角色。内核不需要在 `task_struct` 里存四个数字，只需要存四个链接
+-	空间解耦（Namespace Isolation）： `struct pid` 里的 `numbers[1]` 是个柔性数组。这意味着同一个进程在宿主机看是 PID 1024，在 Docker 容器里看可能是 PID 1。通过 `ns->level` 作为下标，一次内存寻址就能找到对应环境下的数字
+-	生存期解耦（Lifetime Management）：`struct pid` 拥有自己的引用计数（atomic_t count）。即便进程退出了（`task_struct` 释放），只要还有进程组里的其他进程指向这个 PID，这个 `struct pid` 结构就不会消失
 
 ##  0x0C  参考
 -   [Linux 进程是如何创建出来的？](https://cloud.tencent.com/developer/article/2187989)
