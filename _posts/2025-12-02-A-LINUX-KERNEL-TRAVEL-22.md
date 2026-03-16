@@ -2215,6 +2215,8 @@ out:
 
 TODO
 
+2、page cache：匿名映射与文件映射的区别
+
 
 ##  0x0 参考
 -   [VFS：读文件的过程中发生了什么](https://zhuanlan.zhihu.com/p/268375848)

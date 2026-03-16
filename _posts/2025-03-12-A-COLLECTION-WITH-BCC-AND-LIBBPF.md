@@ -91,7 +91,24 @@ void disable_hook_autoload(struct bpf_object *obj, const char *prog_name) {
 
 5、`tracepoint_exists`
 
+TODO
+
 6、`fentry_can_attach`
+
+```cpp
+if (fentry_can_attach("tcp_v4_connect", NULL)) {
+		bpf_program__set_attach_target(obj->progs.fentry_tcp_v4_connect, 0, "tcp_v4_connect");
+		bpf_program__set_attach_target(obj->progs.fentry_tcp_v6_connect, 0, "tcp_v6_connect");
+		bpf_program__set_attach_target(obj->progs.fentry_tcp_rcv_state_process, 0, "tcp_rcv_state_process");
+		bpf_program__set_autoload(obj->progs.tcp_v4_connect, false);
+		bpf_program__set_autoload(obj->progs.tcp_v6_connect, false);
+		bpf_program__set_autoload(obj->progs.tcp_rcv_state_process, false);
+	} else {
+		bpf_program__set_autoload(obj->progs.fentry_tcp_v4_connect, false);
+		bpf_program__set_autoload(obj->progs.fentry_tcp_v6_connect, false);
+		bpf_program__set_autoload(obj->progs.fentry_tcp_rcv_state_process, false);
+	}
+```
 
 TODO
 
