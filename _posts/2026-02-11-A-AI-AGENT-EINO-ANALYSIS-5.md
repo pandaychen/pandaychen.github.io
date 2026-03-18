@@ -40,6 +40,9 @@ Eino 内置了几种开箱即用的 Multi-Agent 最佳范式：
 -   Supervisor: 监督者模式，监督者 Agent 控制所有通信流程和任务委托，并根据当前上下文和任务需求决定调用哪个 Agent
 -   Plan-Execute：计划-执行模式，Plan Agent 生成含多个步骤的计划，Execute Agent 根据用户 query 和计划来完成任务。Execute 后会再次调用 Plan，决定完成任务 / 重新进行规划（前文已介绍）
 
+##  0x0 eino ADK 核心知识点梳理
+
+
 ##  0x0 excel agent实现解读
 
 ```mermaid
@@ -157,3 +160,4 @@ graph TB
 -	[Eino ADK: Quickstart](https://www.cloudwego.io/zh/docs/eino/core_modules/eino_adk/agent_quickstart/)
 -	[Eino: ADK - Agent Development Kit](https://www.cloudwego.io/zh/docs/eino/core_modules/eino_adk/)
 -   [用 Eino ADK 构建你的第一个 AI 智能体：从 Excel Agent 实战开始](https://segmentfault.com/a/1190000047399985)
+-   [Eino ADK：一文搞定 AI Agent 核心设计模式，从0到1搭建智能体系统](https://www.51cto.com/article/829335.html)

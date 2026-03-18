@@ -951,3 +951,5 @@ Lambda
 -   [Eino Tutorial: Host Multi-Agent（日记助手实现）](https://www.cloudwego.io/zh/docs/eino/core_modules/flow_integration_components/multi_agent_hosting/)
 -   [字节跳动大模型应用 Go 开发框架：Eino 实践](https://www.cloudwego.io/zh/docs/eino/overview/bytedance_eino_practice/)
 -   [Agent 还是 Graph？AI 应用路线辨析](https://www.cloudwego.io/zh/docs/eino/overview/graph_or_agent/)
+-	[DeepResearch之DeerFlow](https://zhuanlan.zhihu.com/p/1905211481391366801)
+-	[使用Eino框架实现DeerFlow系统](https://mp.weixin.qq.com/s?__biz=Mzg2MTc0Mjg2Mw==&mid=2247495153&idx=1&sn=e207794d53c6bc8256c5f8784aa13218&scene=21&poc_token=HGcIj2mjT2Tq4suIikAy3dGkk5fZthr4OP4gJjcA)
