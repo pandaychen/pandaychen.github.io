@@ -44,6 +44,7 @@ tags:
 
 ![dns-packet](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/network/dns/dns-packet-format.jpg)
 
+更多的细节，可参考[DNS报文格式](https://fasionchan.com/network/dns/packet-format/)
 
 ##  0x02    Kubernetes 的 DNS
 温馨提示：特别注意域名结尾是否有一个点号 `.`
