@@ -31,15 +31,15 @@ tags:
 - 超时，健康检查的请求也需要设置超时
 
 ##  0x01	Kubernetes的健康检查
-&emsp;&emsp; Kubernetes 服务的主动健康检查机制是通过健康探针来实现的。Kubernetes 提供了两种探针：
+Kubernetes 服务的主动健康检查机制是通过健康探针来实现的。Kubernetes 提供了两种探针：
 
 #### 就绪探针 (Readiness Probe)
-&emsp;&emsp; 在 Pod 启动时，Kubelet 使用 Readiness probe（就绪探针）来确定容器是否已经就绪可以接受流量。只有当 Pod 中的容器都处于就绪状态时 Kubelet 才会认定该 Pod 处于就绪状态。该信号的作用是控制哪些 Pod 应该作为 Service 的后端。如果 Pod 处于非就绪状态，那么它们将会被从 Service 的 Load balancer 中移除
+在 Pod 启动时，Kubelet 使用 Readiness probe（就绪探针）来确定容器是否已经就绪可以接受流量。只有当 Pod 中的容器都处于就绪状态时 Kubelet 才会认定该 Pod 处于就绪状态。该信号的作用是控制哪些 Pod 应该作为 Service 的后端。如果 Pod 处于非就绪状态，那么它们将会被从 Service 的 Load balancer 中移除
 
 ![readinessprobe](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/google-kubernetes-probe-readiness6ktf.gif)
 
 #### 存活探针 (Liveness Probe)
-&emsp;&emsp; 在 Pod 运行中，Kubelet 使用 Liveness probe（存活探针）来确定何时重启容器。例如，当应用程序处于运行状态但无法做进一步操作，Liveness 探针将捕获到 Deadlock，重启处于该状态下的容器，使应用程序在存在 bug 的情况下依然能够继续运行下去
+在 Pod 运行中，Kubelet 使用 Liveness probe（存活探针）来确定何时重启容器。例如，当应用程序处于运行状态但无法做进一步操作，Liveness 探针将捕获到 Deadlock，重启处于该状态下的容器，使应用程序在存在 bug 的情况下依然能够继续运行下去
 
 ![livenessprobe](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/google-kubernetes-probe-livenessae14.gif)
 
@@ -102,7 +102,7 @@ facebook 开源的库 [grace](https://github.com/facebookarchive/grace)，可以
 - 执行命令，写自定义命令判断服务是否正常运行
 
 ####  gRPC 的健康检查协议
-&emsp;&emsp;gRPC 中提供了健康检查的协议，[文档在此](https://github.com/grpc/grpc/blob/master/doc/health-checking.md)。所以，RPC 服务需要实现 `Check` 和 `Watch` 这2个方法。此外，官方文档还建议使用的 package 及 service 命令方式如下：
+gRPC 中提供了健康检查的协议，[文档在此](https://github.com/grpc/grpc/blob/master/doc/health-checking.md)。所以，RPC 服务需要实现 `Check` 和 `Watch` 这2个方法。此外，官方文档还建议使用的 package 及 service 命令方式如下：
 > The suggested format of service name is package_names.ServiceName, such as grpc.health.v1.Health.
 
 健康检查的协议如下：
