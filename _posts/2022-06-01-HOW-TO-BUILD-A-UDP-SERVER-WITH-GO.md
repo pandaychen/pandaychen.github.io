@@ -261,6 +261,7 @@ func (fd *netFD) dial(ctx context.Context, laddr, raddr sockaddr, ctrlFn func(st
 ```
 
 ##	0x03	UDP 优化
+[某高并发服务 Go GC 及 UDP Pool 优化](https://mp.weixin.qq.com/s/YAz5NyiNWJCMlGsJRTAaxw)这篇文章给出了golang中UDP的深度优化的例子，值得阅读
 
 ####  服务端优化
 
