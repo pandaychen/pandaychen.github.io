@@ -442,7 +442,7 @@ pgoff_t max_index = file_size >> PAGE_SHIFT;    // 2621440 个页面
 // 最大文件大小 = 2^32 * 4096 = 16TB（实际上受文件系统和其他限制）
 ```
 
-此外，在回顾一下，在IDR树中，key就是`offset`（页索引），而value 就是`struct page*`即页面指针
+此外，再回顾一下，在IDR树中，key就是`offset`（页索引），而value 就是`struct page*`即页面指针
 
 ####	page_ok标签
 `page_ok`标签处表示当前页面已准备就绪，可以进行用户空间拷贝。这个标签处理单个页面的读取完成，包括：
