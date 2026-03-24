@@ -111,6 +111,20 @@ func closureExample() {
 }
 ```
 
+##  0x01    Map with gc
+参考经典 [示例](https://github.com/pandaychen/golang_in_action/blob/master/gc/recycle_classic.go)，在本地验证如下（配置为Intel(R) Xeon(R) Gold 6133 CPU @ 2.50GHz/4 CPU/8G）：
+
+```BASH
+[root@VM-X-X-centos mem]# ./r 1
+With map[int32]*int32, GC took 837.12111ms
+[root@VM-X-X-centos mem]# ./r 2
+With map[int32]int32, GC took 1.752229ms
+[root@VM-X-X-centos mem]# ./r 3
+With map shards ([]map[int32]int32), GC took 2.363671ms
+[root@VM-X-X-centos mem]# ./r 4
+With a plain slice ([]main.t), GC took 434.678µs
+```
+
 ##  0x0 gc 原理
 
 ##  0x0 参考
