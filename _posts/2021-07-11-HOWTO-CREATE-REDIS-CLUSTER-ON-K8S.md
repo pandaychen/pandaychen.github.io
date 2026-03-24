@@ -153,13 +153,18 @@ spec:
 ## 0x02 Redis 集群搭建
 
 ####  第一步：创建 NFS 存储
+
 ####  创建 PV
+
+
 ####  创建 PVC
 
 使用 NFS 配置 StatefulSet 的动态持久化存储
 
 ####  创建 Configmap
+
 ####  创建 Headless Service
+
 ####  创建 Redis StatefulSet
 
 ## 0x03 参考
