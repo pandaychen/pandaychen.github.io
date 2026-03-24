@@ -74,6 +74,7 @@ guacd（Guacamole Daemon） 插件式的动态支持远程桌面协议，根据 
 
 ##  0x05  另外一种思路
 
+
 ## 0x06 参考
 -	[Go 进阶 53: 从零 Go 实现 Websocket-H5-RDP/VNC 远程桌面客户端](https://mojotv.cn/golang/golang-html5-websocket-remote-desktop)
 - [All in Web：远程桌面网关 - Apache Guacamole](https://zhuanlan.zhihu.com/p/432814073)
@@ -86,3 +87,4 @@ guacd（Guacamole Daemon） 插件式的动态支持远程桌面协议，根据 
 - [Directory Sharing in a Web-Based RDP Client Using the File System Access API](https://goteleport.com/blog/directory-sharing/)
 - [The Guacamole protocol](https://guacamole.apache.org/doc/gug/guacamole-protocol.html#guacamole-protocol-handshake)
 - [Next Terminal 是一个简单好用安全的开源交互审计系统，支持 RDP、SSH、VNC、Telnet、Kubernetes 协议](https://github.com/dushixiang/next-terminal)
+- [远程桌面](https://xiazemin.github.io/MyBlog/web/2022/05/25/remote.html)
