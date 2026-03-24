@@ -19,6 +19,7 @@ tags:
 4.  ip 分片重组，或 tcp 分段重组成上层协议如 http 协议的数据
 5.  对上层协议进行头部解析和负载部分解析
 
+本文的代码基于[v1.1.19](https://github.com/google/gopacket/releases/tag/v1.1.19)进行
 
 ####    应用场景
 -   网络流量分析：对网络设备流量进行实时采集以及数据包分析
@@ -49,7 +50,7 @@ gopacket 的子包（主要）功能如下：
 -   pcap：使用 libpcap 从网络读取数据包的 C 绑定，可以用来读取 / 写入 pcap 数据包
 -   pfring：使用 `PF_RING` 从网络读取数据包的 C 绑定
 -   afpacket：从网络上读取数据包的 Linux `AF_PACKET` 的 C 绑定
--   tcpassembly：TCP 流重组，建议使用 [reassembly](https://github.com/google/gopacket/tree/master/reassembly)，这个库较新
+-   tcpassembly：TCP 流重组，建议使用 [reassembly](https://github.com/google/gopacket/tree/master/reassembly)，这个库较新（不建议使用[tcpassembly](https://github.com/google/gopacket/tree/master/tcpassembly)库）
 
 ####    基础示例
 基础使用可以参考 [Basic_Usage](https://pkg.go.dev/github.com/google/gopacket@v1.1.19#hdr-Basic_Usage)、[examples](https://github.com/google/gopacket/tree/master/examples) 下面的代码
@@ -477,7 +478,61 @@ type tcpStream struct {
 ```
 
 
-##  0x04	参考
+##	0x03	核心代码
+-	[reassembly](https://pkg.go.dev/github.com/google/gopacket@v1.1.19/reassembly)
+-	[]()
+
+####	数据结构
+前文提到，实现重组，需要开发者自行实现如下结构的方法
+
+[Stream](https://pkg.go.dev/github.com/google/gopacket@v1.1.19/reassembly#Stream)
+
+```GO
+type Stream interface {
+	// Tell whether the TCP packet should be accepted, start could be modified to force a start even if no SYN have been seen
+	Accept(tcp *layers.TCP, ci gopacket.CaptureInfo, dir TCPFlowDirection, nextSeq Sequence, start *bool, ac AssemblerContext) bool
+
+	// ReassembledSG is called zero or more times.
+	// ScatterGather is reused after each Reassembled call,
+	// so it's important to copy anything you need out of it,
+	// especially bytes (or use KeepFrom())
+	ReassembledSG(sg ScatterGather, ac AssemblerContext)
+
+	// ReassemblyComplete is called when assembly decides there is
+	// no more data for this Stream, either because a FIN or RST packet
+	// was seen, or because the stream has timed out without any new
+	// packet data (due to a call to FlushCloseOlderThan).
+	// It should return true if the connection should be removed from the pool
+	// It can return false if it want to see subsequent packets with Accept(), e.g. to
+	// see FIN-ACK, for deeper state-machine analysis.
+	ReassemblyComplete(ac AssemblerContext) bool
+}
+```
+
+Stream 由调用者实现来处理传入的重组 TCP 数据。调用者创建一个 StreamFactory，然后 StreamPool 使用它为每个 TCP 流创建一个新的 Stream。
+
+大会将按顺序：
+
+通过 StreamFactory.New 创建流
+调用ReassembledSG 0次或多次，按顺序传入重组的TCP数据
+调用 Re assemblyComplete 一次，之后该流将被程序集解除引用。
+
+2、StreamFactory
+程序集使用 StreamFactory 为每个新的 TCP 会话创建新的流。
+```go
+type StreamFactory interface {
+	// New should return a new stream for the given TCP key.
+	New(netFlow, tcpFlow gopacket.Flow, tcp *layers.TCP, ac AssemblerContext) Stream
+}
+```
+
+##	0x04	开源项目汇总
+记录一些基于gopacket实现的开源项目：
+
+-	[Application layer protocol identification of traffic flows](https://github.com/mushorg/go-dpi/tree/master)
+-	[]()
+
+##  0x05	参考
 -   [Provides packet processing capabilities for Go](https://github.com/google/gopacket)
 -   [[译] 利用 gopackage 进行包的捕获、注入和分析](https://colobu.com/2019/06/01/packet-capture-injection-and-analysis-gopacket/)
 -   [tcp 重组](https://github.com/google/gopacket/blob/master/reassembly/tcpassembly.go)
@@ -493,3 +548,6 @@ type tcpStream struct {
 -	[解析 http：parser](https://github.com/akitasoftware/akita-libs/blob/main/akinet/http/parser.go)
 -	[tcp 重组实现：stream](https://github.com/akitasoftware/akita-cli/blob/main/pcap/stream.go)
 -	[再谈 golang 抓包 gopacket](https://www.jianshu.com/p/505995c8e0ba)
+-	[网络流量抓包库 gopacket](https://zhuanlan.zhihu.com/p/361737169)
+-	[Malware extraction from HTTP Streams in Go](https://medium.com/a-bit-off/malware-files-extraction-http-streams-go-c2088782fbfc)
+-	[Packet Capture, Injection, and Analysis with Gopacket](https://www.devdungeon.com/content/packet-capture-injection-and-analysis-gopacket)
