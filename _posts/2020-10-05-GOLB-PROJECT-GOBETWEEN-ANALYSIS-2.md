@@ -12,8 +12,7 @@ tags:
 ---
 
 ## 0x00 前言
-
-本文分析下 gobetween 的 metrics 采集方式。
+前文[基于 Golang 实现的负载均衡网关：gobetween 分析（一）](https://pandaychen.github.io/2020/10/01/GOLB-PROJECT-GOBETWEEN-ANALYSIS/)分析了项目的主要流程，本文继续分析下 gobetween 的 metrics 采集方式
 
 ## 0x01 ReadWriteCount 采集
 
@@ -62,7 +61,7 @@ func Copy(to io.Writer, from io.Reader, ch chan<- core.ReadWriteCount) error {
 }
 ```
 
-上述的 channel 接收方在 `proxy`[方法](https://github.com/yyyar/gobetween/blob/master/src/server/tcp/proxy.go#L31) 中，该方法返回`outStats := make(chan core.ReadWriteCount)`给调用方，用于接受出入流量的 metrics 数据：
+上述的 channel 接收方在 `proxy`[方法](https://github.com/yyyar/gobetween/blob/master/src/server/tcp/proxy.go#L31) 中，该方法返回 `outStats := make(chan core.ReadWriteCount)` 给调用方，用于接受出入流量的 metrics 数据：
 
 ```golang
 func proxy(to net.Conn, from net.Conn, timeout time.Duration) <-chan core.ReadWriteCount {
@@ -143,14 +142,14 @@ func proxy(to net.Conn, from net.Conn, timeout time.Duration) <-chan core.ReadWr
 }
 ```
 
-调用`proxy`方法位于`server.go`代理实现的[核心逻辑](https://github.com/yyyar/gobetween/blob/master/src/server/tcp/server.go#L353)中：
+调用 `proxy` 方法位于 `server.go` 代理实现的 [核心逻辑](https://github.com/yyyar/gobetween/blob/master/src/server/tcp/server.go#L353) 中：
 
 ```golang
 func (this *Server) handle(ctx *core.TcpContext) {
     //......
 	/* ----- Stat proxying ----- */
 
-	log.Debug("Begin ", clientConn.RemoteAddr(), " -> ", this.listener.Addr(), " -> ", backendConn.RemoteAddr())
+	log.Debug("Begin", clientConn.RemoteAddr(), "->", this.listener.Addr(), "->", backendConn.RemoteAddr())
 	cs := proxy(clientConn, backendConn, utils.ParseDurationOrDefault(*this.cfg.BackendIdleTimeout, 0))
 	bs := proxy(backendConn, clientConn, utils.ParseDurationOrDefault(*this.cfg.ClientIdleTimeout, 0))
 
@@ -174,7 +173,7 @@ func (this *Server) handle(ctx *core.TcpContext) {
 		}
 	}
 
-	log.Debug("End ", clientConn.RemoteAddr(), " -> ", this.listener.Addr(), " -> ", backendConn.RemoteAddr())
+	log.Debug("End", clientConn.RemoteAddr(), "->", this.listener.Addr(), "->", backendConn.RemoteAddr())
 }
 ```
 

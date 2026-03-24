@@ -12,7 +12,7 @@ tags:
 
 
 ##  0x00    前言
-前面分析过一款简单的反向代理实现：[一个 Http(s) 网关的实现分析](https://pandaychen.github.io/2020/03/22/A-GOLANG-HTTP-GATEWAY-ANALYSIS/)，这篇文章分析一款商用的 LB 开源项目：gobetween。它是一款 Pure-Golang 实现的四层代理网关，[文档在此](http://gobetween.io/documentation.html)，本文来探索下其实现及核心的源码分析。
+前面分析过一款简单的反向代理实现：[一个 Http(s) 反向代理（网关）的实现分析](https://pandaychen.github.io/2020/03/22/A-GOLANG-HTTP-GATEWAY-ANALYSIS/)，这篇文章分析一款商用的 LB 开源项目：gobetween。它是一款 Pure-Golang 实现的四层代理网关，[文档在此](http://gobetween.io/documentation.html)，本文来探索下其实现及核心的源码分析。
 
 > For a long time all of us have been using "traditional" load balancers / proxies like nginx, haproxy, and others.
 > But in modern world balancing become more and more flexible because of environment changes are made more often. Nodes behind load balancer are spawning and disappearing according to load and/or other requirements. Auto scaling and containerization became almost a "silver bullet" in modern IT infrastructure architectures.
@@ -91,7 +91,7 @@ gobetween 的架构图如下：
 -	[server-proxy](https://github.com/yyyar/gobetween/blob/master/src/server/tcp/server.go)：代理的实现逻辑
 
 
-下面，我们按照上面的基本要素来分析下 gobetween 的实现：
+下面，按照上面的基本要素来分析下 gobetween 的实现：
 
 ####    配置 Config
 gobetween 的 [主要配置结构如下](https://github.com/yyyar/gobetween/blob/master/src/config/config.go)：
@@ -260,7 +260,7 @@ type BackendStats struct {
 ```
 
 ##	0x05	核心模块分析 - 主流程
-我们从 [main.go](https://github.com/yyyar/gobetween/blob/master/main.go) 开始，`main` 方法中独立启动了 `3` 个子逻辑，传入参数为 `cfg` 配置：<br>
+从 [main.go](https://github.com/yyyar/gobetween/blob/master/main.go) 开始，`main` 方法中独立启动了 `3` 个子逻辑，传入参数为 `cfg` 配置：<br>
 1.  `manager`：核心逻辑
 2.  `metrics`：启动 metrics 服务
 3.  `api`：使用 `gin` 框架构建的管理端 CGI 服务
@@ -345,7 +345,7 @@ func Create(name string, cfg config.Server) error {
 	return nil
 }
 ```
-接下来，我们看下 `server.New()` 及 `server.Start()` 做了什么事情。
+接下来，看下 `server.New()` 及 `server.Start()` 做了什么事情。
 
 ####	Server 的初始化及启动
 本节以 Tcp 代理的初始化及启动 [代码为例](https://github.com/yyyar/gobetween/blob/master/src/server/tcp/server.go)，先看下 `tcp.Server` 的结构体定义，从此结构入手来分析一个代理的实现要素：
@@ -487,7 +487,7 @@ func (this *Server) Start() error {
 }
 ```
 
-这里我们先看下 `server.Listen()` 方法：
+这里先看下 `server.Listen()` 方法：
 ```golang
 func (this *Server) Listen() (err error) {
 
@@ -552,7 +552,7 @@ func (this *Server) wrap(conn net.Conn, sniEnabled bool) {
 }
 ```
 
-下面一篇文章，再分析下 gobetween 代理实现的部分代码细节。下一小节我们看下 `server.scheduler` 的结构及实现。
+下面一篇文章，再分析下 gobetween 代理实现的部分代码细节。下一小节看下 `server.scheduler` 的结构及实现。
 
 ##	0x07	Server 代理模块的 Scheduler 结构及实现
 上一节说到 `Server` 中重要的 [成员 `Scheduler`](https://github.com/yyyar/gobetween/blob/master/src/server/scheduler/scheduler.go)，这个结构是实现整个负载均衡调度的核心，它包含了如下组件：
@@ -791,7 +791,7 @@ func consulFetch(cfg config.DiscoveryConfig) (*[]core.Backend, error) {
 }
 ```
 ####	负载均衡选择组件 Balancer
-gobetween 的负载均衡算法也是 `map[string]reflect.Type` 方式存储的，通过 `name` 初始化注册，这里我们简单分析下 [`RoundrobinBalancer` 的实现](https://github.com/yyyar/gobetween/blob/master/src/balance/roundrobin.go)：
+gobetween 的负载均衡算法也是 `map[string]reflect.Type` 方式存储的，通过 `name` 初始化注册，这里简单分析下 [`RoundrobinBalancer` 的实现](https://github.com/yyyar/gobetween/blob/master/src/balance/roundrobin.go)：
 ```golang
 var typeRegistry = make(map[string]reflect.Type)
 
@@ -926,7 +926,7 @@ func (this *Healthcheck) Start() {
 }
 ```
 
-我们再看下 `this.UpdateWorkers()` 这个方法，根据传入的后端节点 `targets`，
+再看下 `this.UpdateWorkers()` 这个方法，根据传入的后端节点 `targets`，
 ```golang
 func (this *Healthcheck) UpdateWorkers(targets []core.Target) {
 	//result 为本次更新的 workerlist
