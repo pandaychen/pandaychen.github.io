@@ -39,6 +39,7 @@ GOST 作为隧道 tunnel 有三种主要使用方式：
 利用隧道和内网穿透将内网服务暴露到公网访问
 ![reverse](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/gost/v3-reverse.png)
 
+TODO
 
 先看一个简单的 [例子](https://gost.run/getting-started/quick-start/)：
 
@@ -513,3 +514,4 @@ gost -L :8080 -F http://192.168.1.1:8080 -F socks5://192.168.1.2:1080
 -   [GOSTV2](https://github.com/ginuerzh/gost)
 -   [GOST 官方文档](https://gost.run/en/)
 -   [GOST - 概述](https://gost.run/concepts/architecture/)
+- [反向代理与内网穿透](https://gost.run/blog/2023/reverse-proxy/)

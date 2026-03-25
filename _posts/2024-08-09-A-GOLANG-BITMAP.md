@@ -237,7 +237,7 @@ ebpf maps，包含`src_v4`、`sport_v4`、`dst_v4`、`dport_v4`、`proto_v4`和`
 
 以`src_v4`为例，注意其类型为`BPF_MAP_TYPE_LPM_TRIE`，比较适合CIDR匹配这种场景
 
-```CPP
+```cpp
 #define BITMAP_ARRAY_SIZE 160
 
 __u64 bitmap[BITMAP_ARRAY_SIZE];
@@ -255,7 +255,7 @@ struct bpf_map_def SEC("maps") src_v4 = {
 
 又如`sport_v4`存储端口匹配规则的内核态map，注意这里需要存储`0-65535`每个端口对应的bitmap，即key为端口号，value为`bitmap`结构
 
-```CPP
+```cpp
 // 支持的最多端口个数 1~65535; 65536 == 2^16
 #define PORT_MAX_ENTRIES_V4 65536
 
@@ -272,7 +272,7 @@ struct bpf_map_def SEC("maps") sport_v4 = {
 
 ![match](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/xdp/xdp_acl/core_struct_2.png)
 
-```CPP
+```cpp
 static __always_inline void get_hit_rules_optimize(__u64 *rule_array[], __u32 *rule_array_len_ptr, __u64 *rule_array_index_ptr, __u64 *hit_rules_ptr)
 {
 	if (5 == *rule_array_len_ptr)
@@ -307,7 +307,7 @@ static __always_inline void get_hit_rules_optimize(__u64 *rule_array[], __u32 *r
 
 `genPortConstraintsRuleArrAndLoadIntoMap`方法用于在第一次运行时，初始化配置文件中的端口规则，数据源来自全局配置规则列表[`ruleList`](https://github.com/hi-glenn/xdp_acl/blob/main/rules_about.go#L83)，把`ruleList`中所有规则的端口规则，按规则处理完成之后，通过`bpfMapForPort`写入到内核态的map中
 
-```CPP
+```cpp
 // specifiedPortRule：key 端口号，value：priority 序号数组
 
 // 参数specifiedPortRule 是全局变量	specifiedDstPortRule = make(map[uint16][]uint32, 1024) 的引用
@@ -396,7 +396,7 @@ func genPortConstraintsRuleArrAndLoadIntoMap(originalRulesWgPtr *sync.WaitGroup,
 
 2、对源/目的IP（CIDR规则）规则的处理，同端口处理一样，把`ruleList`中所有规则的CIDR规则，按规则处理完成之后，通过`bpfMapForIP`写入到内核态的map中。不过这里需要注意的是，由于CIDR之间可能会存在子集包含与包含关系，所以要边处理边检查CIDR集合关系。比如`192.168.1.0/24`对应规则priority为`100`，而`192.168.1.0/25`（子集）对应priority为`100`，那么最终`specialCidrMapRuleArr`中`192.168.1.0/25`对应的priority数组至少应该是`[100,200]`
 
-```CPP
+```cpp
 // specialCidr： key 为cidr结构体，value为priority 数组
 func genIpConstraintsRuleArrAndLoadIntoMap(originalRulesWgPtr *sync.WaitGroup, bpfMapForIP *ebpf.Map, specialCidrMapRuleArr map[SpecialCidr][]uint32, name string) {
 	/*
@@ -468,6 +468,55 @@ func genIpConstraintsRuleArrAndLoadIntoMap(originalRulesWgPtr *sync.WaitGroup, b
 ####    热更新（CRUD）实现
 xdp_acl支持[异步方式](https://github.com/hi-glenn/xdp_acl/blob/main/web.go#L176)修改规则，以新增规则为例：
 
+
+##	0x0	一些细节
+
+```cpp
+type SpecialCidr struct {
+	First    [4]byte
+	Last     [4]byte
+	MaskBits [4]byte
+	MaskSize uint32
+}
+SpecialCidr结构体用于表示CIDR网络地址范围，包含网络的起始地址、结束地址、掩码位和掩码长度。 rules_about.go:52-57
+
+SpecialCidr字段意义
+First [4]byte: 网络地址的起始IP地址（4字节IPv4格式）
+Last [4]byte: 网络地址的结束IP地址（广播地址）
+MaskBits [4]byte: 子网掩码的字节表示
+MaskSize uint32: 掩码长度（如/24中的24）
+```
+
+```cpp
+func (a *SpecialCidr) contains(b *SpecialCidr) bool {
+	if a.First[0] != (a.MaskBits[0]&b.First[0]) || a.First[0] != (a.MaskBits[0]&b.Last[0]) {
+		return false
+	}
+
+	if a.First[1] != (a.MaskBits[1]&b.First[1]) || a.First[1] != (a.MaskBits[1]&b.Last[1]) {
+		return false
+	}
+
+	if a.First[2] != (a.MaskBits[2]&b.First[2]) || a.First[2] != (a.MaskBits[2]&b.Last[2]) {
+		return false
+	}
+
+	if a.First[3] != (a.MaskBits[3]&b.First[3]) || a.First[3] != (a.MaskBits[3]&b.Last[3]) {
+		return false
+	}
+
+	return true
+}
+SpecialCidr.contains实现注释
+contains方法用于判断当前CIDR是否包含另一个CIDR网络段。 helpers.go:57-75
+
+实现逻辑：
+
+逐字节检查包含关系：对IPv4地址的4个字节分别进行检查
+掩码运算验证：使用a.MaskBits[i] & b.First[i]和a.MaskBits[i] & b.Last[i]来验证目标CIDR的起始和结束地址是否都在当前CIDR的网络范围内
+完全包含条件：只有当目标CIDR的起始地址和结束地址经过当前CIDR的掩码运算后，都等于当前CIDR的起始地址时，才认为是包含关系
+该方法在CIDR比较功能中被调用，用于检测网络地址段之间的包含、相等或无交集关系。 helpers.go:77-89
+```
 
 ##  0x06    参考
 -   [Golang 优化之路——bitset](https://blog.cyeam.com/golang/2017/01/18/go-optimize-bitset)
