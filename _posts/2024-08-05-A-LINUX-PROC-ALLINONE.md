@@ -204,6 +204,8 @@ TODO
 
 在procfs的内核实现中，大量出现了`seq_*`相关实现，`seq_read`在普通的文件`read`中加入了内核缓冲的功能，从而实现顺序多次遍历，读取大数据量的简单接口
 
+游标机制的详细介绍
+
 -	[`seq_read`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/seq_file.c#L169)
 
 ##  0x02 procfs 的内核视角

@@ -312,6 +312,11 @@ func (c *Client) ReceiveTask() (t *Task, err error) {
 }
 ```
 
+####    systemd启动
+
+```bash
+
+```
 
 ####    transport
 
@@ -326,3 +331,5 @@ func (c *Client) ReceiveTask() (t *Task, err error) {
 -   [最后防线：三款开源 HIDS 功能对比评估](https://mp.weixin.qq.com/s?__biz=MzU4NjY0NTExNA==&mid=2247488176&idx=1&sn=879142f6acbdcb291b432f8d4f6a45aa&chksm=fdf979a5ca8ef0b3b979a8cfe9b27dc8885427eab347fb31c94c2e43c6eac72eae8066652fe7&scene=178&cur_album_id=1783332321308229634#rd)
 -   [如何利用 Elkeid 发现生产网内恶意行为](https://www.anquanke.com/post/id/250881)
 -   [手把手带你部署 Elkeid 开源项目](https://zhuanlan.zhihu.com/p/498091918)
+-   [Driver 性能测试报告](https://github.com/bytedance/Elkeid/issues/145)
+-   [万字详解Linux内核调度器极其妙用](https://mp.weixin.qq.com/s/gkZ0kve8wOrV5a8Q2YeYPQ?nwr_flag=1#wechat_redirect)
