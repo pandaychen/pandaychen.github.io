@@ -11,6 +11,7 @@ tags:
 ---
 
 ##  0x00 前言
+本文基于[v1.7.3](https://github.com/hashicorp/raft/releases/tag/v1.7.3)版本进行分析
 
 ##  0x01  验证
 按照如下组成一个raft集群：
@@ -122,8 +123,12 @@ leader状态：
 gfe
 ```
 
-##  参考
+##  0x02  
+
+##  0x0 参考
 -   [基于hashicorp/raft的分布式一致性实战教学](https://cloud.tencent.com/developer/article/1183490)
 -   [Golang implementation of the Raft consensus protocol](https://github.com/hashicorp/raft)
 -   [使用开源技术构建有赞分布式KV存储服务](https://tech.youzan.com/shi-yong-kai-yuan-ji-zhu-gou-jian-you-zan-fen-bu-shi-kvcun-chu-fu-wu/)
 -   [深入分布式缓存-Raft & Lease机制](https://juejin.cn/post/7044442593895120903)
+-   [hashicorp raft源码学习](https://qiankunli.github.io/2020/05/17/hashicorp_raft.html)
+-   [stcache](https://github.com/KunTjz/stcache)
