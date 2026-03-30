@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      gopsutil 使用与分析
-subtitle:   一个跨平台的采集库 && windows API 实现
+subtitle:   一个跨平台的采集库实现与应用
 date:       2024-08-04
 author:     pandaychen
 header-img:
@@ -17,7 +17,81 @@ gopsutil 屏蔽了各个系统之间的差异，具有非常好的可移植性
 
 本文基于 [v4.24.7](https://github.com/shirou/gopsutil/releases/tag/v4.24.7) 分析
 
-##  0x01 应用实战
+
+##	0x01	Linux下的proc应用
+
+####	网络状态文件
+
+1、`/proc/net/tcp`
+
+```BASH
+sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+0: 0100007F:EA74 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 2819093322 1 ffff888313887200 100 0 0 10 0      
+# ......
+6: 0100007F:22B8 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 623457565 1 ffff88004f918740 750 0 0 2 -1
+2: 00000000:8CA0 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 28740 1 ffff8881047d0980 100 0 0 10 0                     
+19: XXXXXXXX:8CA0 2425570A:F464 01 00000080:00000000 01:00000008 00000000     0        0 3082231888 4 ffff88839b88d580 24 4 31 144 61
+```
+
+对应与`netstat -anpt`结果：
+
+```BASH
+[root@VM-X-X-X cmd]# netstat -napt|grep 36000
+tcp        0      0 0.0.0.0:36000           0.0.0.0:*               LISTEN      4175/sshd: /usr/sbi 
+tcp        0     64 X.X.X.X:36000     X.X.X.X:62564       ESTABLISHED 3811453/sshd: panda 
+tcp6       0      0 :::36000                :::*                    LISTEN      4175/sshd: /usr/sbi 
+```
+
+`/proc/net/tcp`输出内容的核心字段：
+-	`local_address`/`rem_address`：五元组信息，`00000000:8CA0`对应`0.0.0.0:36000`
+-	`st`：网络连接状态，`0A`代表进程正监听端口，`01`代表已经建立的TCP连接
+-	`inode`：inode号，如`28740`表示某进程监听socket（状态`0A`）的inode号，代表Linux系统中的一个文件系统对象包括文件、目录、设备文件、socket、管道等的元信息
+
+```BASH
+"01": "ESTABLISHED",
+"02": "SYN_SENT",	
+"03": "SYN_RECV",
+"04": "FIN_WAIT1",
+"05": "FIN_WAIT2",
+"06": "TIME_WAIT",
+"07": "CLOSE",
+"08": "CLOSE_WAIT",
+"09": "LAST_ACK",
+"0A": "LISTEN",
+"0B": "CLOSING"
+```
+
+2、`/proc/net/udp`
+
+```BASH
+sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops            
+4495: AF778609:0044 01708609:0043 01 00000000:00000000 00:00000000 00000000     0        0 10793 2 ffff88810d8b3440 0         
+4750: 0100007F:0143 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 9959 2 ffff88810dbf0000 0     
+```
+
+####	/proc/${pid}/fd
+记录了进程打开了文件句柄fd的快照信息，其中`0`、`1`、`2`表示标准输入、输出、错误，网络连接fd是以`socket:`开头的文件描述符，其中`[]`号内的是socket对应inode号，这样可以和网络状态文件`/proc/net/tcp`下的inode号进行关联
+
+```BASH
+[root@VM-X-X-X beat]# ll -arth /proc/4175/fd
+total 0
+dr-xr-xr-x 9 root root  0 Nov 28 13:25 ..
+dr-x------ 2 root root  5 Nov 28 13:25 .
+lrwx------ 1 root root 64 Nov 28 13:25 4 -> 'socket:[28742]'
+lrwx------ 1 root root 64 Nov 28 13:25 3 -> 'socket:[28740]'
+lrwx------ 1 root root 64 Nov 28 13:25 2 -> 'socket:[28731]'
+lrwx------ 1 root root 64 Nov 28 13:25 1 -> 'socket:[28731]'
+lr-x------ 1 root root 64 Nov 28 13:25 0 -> /dev/null
+```
+
+从上文看，可以通过`/proc/net/tcp`建立起五元组与inode的映射关系, 再从`/proc/pid/fd`建立起连接inode与进程的映射关系，这样通过inode号关联起系统内的进程与网络连接的信息，进而统计基于进程维度的流量采样数据，然后再基于`/proc/${pid}/cmdline`获取进程的启动参数等信息
+
+```BASH
+[root@VM-X-X-X tmp]# cat /proc/4175/cmdline 
+sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups
+```
+
+##  0x0 应用实战
 
 先引入一个问题，已知 srcip、srcport，如何查找到该信息对应（占用）的进程名字（pid）？思路大致如下：
 1.	通过 srcip、srcport 获取进程 pid
@@ -240,7 +314,17 @@ func main() {
 }
 ```
 
-##  0x02    参考
+##	0x0	跨平台的兼容
+
+####	CPU
+
+`CPUPercent`在跨平台下的实现，TODO
+
+####	内存
+
+`MemoryPercent`在跨平台下的实现，TODO
+
+##  0x0    参考
 -   [Linux Performance](http://www.brendangregg.com/linuxperf.html)
 -	[psutil for golang](https://github.com/shirou/gopsutil)
 -	[Go 每日一库之 gopsutil](https://darjun.github.io/2020/04/05/godailylib/gopsutil/)
