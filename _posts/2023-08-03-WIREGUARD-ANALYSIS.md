@@ -14,6 +14,8 @@ tags:
 ##  0x00    前言
 WireGuard（简称 wg）是一种快速、现代、安全的 VPN 协议，基于 golang 的开源地址 [在此](https://git.zx2c4.com/wireguard-go)，本文探讨其 linux 下的配置和实现等细节
 
+本文基于[0.0.20250522](https://github.com/WireGuard/wireguard-go/releases/tag/0.0.20250522)版本进行分析
+
 ##  0x01   工作原理
 WireGuard 以 UDP 实现，但是运行在 IP 层（即 ip-over-udp）。每个 Peer 都会生成一个 `wg0` 虚拟网卡，同时服务端会在物理网卡上监听 UDP `51820` 端口。应用程序的包发送到内核以后，如果地址是虚拟专用网内部的，那么就会交给 `wg0` 设备，WireGuard 就会把这个 IP 包封装成 WireGuard 的包，然后在 UDP 中发送出去，对方的 Peer 的内核收到这个 UDP 包后再反向操作，解包成为 IP 包，然后交给对应的应用程序。 WireGuard 实现的虚拟网卡就像 `eth0` 一样，可以使用标准的 Linux 工具操作，像是 `ip`, `ifconfig` 之类的命令。所以 WireGuard 也就不用实现 QoS 之类的功能，毕竟其他工具已经实现了
 
@@ -696,6 +698,8 @@ wireguard-go 的核心协议栈也是基于 gvisor[实现的](https://github.com
 
 
 ##  0x0 值得借鉴的地方
+
+TODO
 
 ####    wireguard 的路由配置方式
 

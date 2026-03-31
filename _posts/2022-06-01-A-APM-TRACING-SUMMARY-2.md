@@ -593,7 +593,7 @@ func Middleware(tr opentracing.Tracer, options ...MWOption) gin.HandlerFunc {
 }
 ```
 
-上述代码比较直观了，有一点不理解的是调用 `tr.Extract` 的返回值 err 为何不处理？有一种解释是如果选择创建一个新的 Root Span，那么新的 Root Span 将不会与之前的 Root Span 相关联，这可能会导致分布式追踪的效果不佳。因此，如果我们希望在出现错误时仍然能够进行分布式追踪，最好的做法是忽略该错误，继续使用当前的 Root Span
+上述代码比较直观了，有一点不理解的是调用 `tr.Extract` 的返回值 err 为何不处理？有一种解释是如果选择创建一个新的 Root Span，那么新的 Root Span 将不会与之前的 Root Span 相关联，这可能会导致分布式追踪的效果不佳。因此，如果希望在出现错误时仍然能够进行分布式追踪，最好的做法是忽略该错误，继续使用当前的 Root Span
 
 个人认为较合理的封装，见此 []()
 

@@ -247,7 +247,7 @@ Git 协议也遵循上述模式，只不过相比于 HTTP 协议，Git 协议直
 003egit-upload-pack /project.git\0host=myserver.com\0\0version=1\0
 ```
 
-其中包含了命令、仓库名称、Host 等相关信息，服务端建立连接之后，接收到上述信息（协议数据），对其中的信息进行加工，找到对应的仓库的位置也就是目录，当所有的信息都符合要求之后，只需要在服务端启动 `upload-pack` 命令即可，这里需要注意的是我们不需要添加 `--stateless-rpc` 参数，直接 `git upload-pack {repo_path}`，这个命令启动后会马上返回相关的引用信息并且阻塞等待下一次信息的输入：
+其中包含了命令、仓库名称、Host 等相关信息，服务端建立连接之后，接收到上述信息（协议数据），对其中的信息进行加工，找到对应的仓库的位置也就是目录，当所有的信息都符合要求之后，只需要在服务端启动 `upload-pack` 命令即可，这里需要注意的是不需要添加 `--stateless-rpc` 参数，直接 `git upload-pack {repo_path}`，这个命令启动后会马上返回相关的引用信息并且阻塞等待下一次信息的输入：
 
 ```bash
 ➜  hello git:(master) ✗ git upload-pack .
@@ -372,6 +372,8 @@ GitLab SSH 守护程序（gitlab-sshd）的运行流程如下：
 ####	GitLab Shell architecture
 
 ![gitlab-arch]()
+
+![gitlab-shell-arch](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/git/gitlab/gitlab-shell-arch.png)
 
 ##  0x04 补充：git over HTTP
 

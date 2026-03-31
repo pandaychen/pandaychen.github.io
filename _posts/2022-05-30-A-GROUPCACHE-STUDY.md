@@ -41,7 +41,6 @@ func (s *Frontend) Get(args *api.Load, reply *api.ValueResult) error {
 }
 ```
 
-
 ####    模拟运行
 ```bash
 ./cli -set -key foo -value bar      ## 模拟写入本地存储
@@ -625,7 +624,10 @@ func (g *Group) Get(ctx context.Context, key string, dest Sink) error {
 }
 ```
 
-##  0x04    groupcache VS memcache
+##	0x05	groupcache/lru的实现
+[lru](https://github.com/golang/groupcache/tree/master/lru)
+
+##  0x0    groupcache VS memcache
 Groupcache 库既是服务器，也是客户端，当在本地 groupcache 缓存中没有查找的数据时，通过一致性哈希，查找到该 key 所对应的 peer 服务器，再通过 http 协议，从该 peer 服务器上获取所需要的数据；还有一点就是当多个客户端同时访问 memcache 中不存在的键时，会导致多个客户端从 mysql 获取数据并同时插入 memcache 中，而在相同情况下，groupcache 只会有一个客户端从 mysql 获取数据，其他客户端阻塞，直到第一个客户端获取到数据之后，再返回给多个客户端
 
 ##	0x0	思考
@@ -633,7 +635,7 @@ Groupcache 库既是服务器，也是客户端，当在本地 groupcache 缓存
 比如groupcache节点发生了上/下线，如何实现一致性hash的动态调整？
 
 
-##  0x05  参考
+##  0x0  参考
 -   [dl.google.com: Powered by Go](https://go.dev/talks/2013/oscon-dl.slide#1)
 -   [groupcache 架构设计](https://www.jianshu.com/p/f69f3a3a9a78)
 -   [Playing with groupcache](https://capotej.com/blog/2013/07/28/playing-with-groupcache/)

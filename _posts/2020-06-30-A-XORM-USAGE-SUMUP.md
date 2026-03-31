@@ -97,6 +97,76 @@ func (a *Account) AfterInsert() {
 ##  0x04    Xorm 常用函数及方法
 参考[官方文档](https://gobook.io/read/gitea.com/xorm/manual-zh-CN/)
 
+####    基础例子
+`users`和`friends`两张表（存储用户信息和注册用户之间的好友关系），定义如下：
+
+```SQL
+create table users(
+    id         BIGSERIAL,
+    first_name VARCHAR(20) NOT NULL,
+    last_name  VARCHAR(20) NOT NULL,
+    first_name_kana VARCHAR(20),
+    last_name_kana  VARCHAR(20),
+    version    BIGINT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP,
+    PRIMARY KEY (id)
+);
+
+create table friends(
+    id         BIGSERIAL,
+    user_id    BIGINT NOT NULL,
+    friend_id  BIGINT NOT NULL,
+    version    BIGINT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP,
+    PRIMARY KEY (id),
+    FOREIGN KEY (user_id) REFERENCES users (id),
+    FOREIGN KEY (friend_id) REFERENCES users (id)
+);
+```
+
+1、insert
+
+```go
+type user struct {
+	ID            uint64 `xorm:"autoincr"`
+	FirstName     string
+	LastName      string
+	FirstNameKana string
+	LastNameKana  string
+	Version       uint64    `xorm:"version"`    //乐观锁
+	CreatedAt     time.Time `xorm:"created"`
+	UpdatedAt     time.Time `xorm:"updated"`
+	DeletedAt     time.Time `xorm:"deleted"`
+}
+
+func (user) TableName() string {
+	return "users"
+}
+
+func create(engine *xorm.Engine) {
+	u := user{
+		FirstName: "chen",
+		LastName:  "panday",
+	}  
+	affected, err := engine.Insert(&u)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	if affected == 0 {
+		log.Println("No Affected")
+		return
+	}
+}
+```
+
+2、
+
+
 ####    在同一会话（Session）执行
 可以使用xorm 的会话机制（Session）来批量执行SQL，`Session.Exec` 用于执行原始 SQL 命令，并返回受影响的行数以及在操作过程中遇到的错误，如下：
 
@@ -120,6 +190,28 @@ if err != nil {
 fmt.Printf("Updated %d rows\n", affected)
 ```
 
+####    分页操作
+[新版本](https://pkg.go.dev/xorm.io/xorm#Engine.FindAndCount)分页和计数（总数）可以使用`FindAndCount`方法同时获取到，如下：
+
+```golang
+func FindAndCount(){
+    //查询分页
+    datalist := make([]models.User, 0)
+    page := 0     //页索引
+    pageSize := 10 //每页数据
+    limit := pageSize
+    start := page * pageSize
+    totalCount, err := engine.Where("age > ? or name like ?", 40, "panda%").Limit(limit, start).FindAndCount(&datalist)
+    fmt.Println("total", totalCount, "datalist", datalist)
+}
+```
+
+####    事务操作
+
+1、多表插入事务
+
+
+2、多表更新事务
 
 ##  0x05    基于 Xorm 的自动分表
 本小节简单介绍下如何利用 Xorm 实现 Mysql 分表
@@ -270,12 +362,12 @@ type ContextHook struct {
 }
 ```
 
--   `Ctx`：本次 orm 操作的上下文，我们的 span 需要存储在这里
+-   `Ctx`：本次 orm 操作的上下文， span 需要存储在这里
 -   `SQL` 和 `Args`：可作为 spanLog
 -   `Err`：错误，可以作为 spanLog
 
 ####    一些细节
-以 `db.beforeProcess` 的实现为例（代码如下），就是实际 SQL 查询过程中调用日志和 Hook 的过程， `Hook` 参数传递使用的是指针，即将 `contexts.ContextHook` 的指针传入钩子函数执行流程，允许我们直接操作其成员 `c.Ctx` 以达到Hook的过程。
+以 `db.beforeProcess` 的实现为例（代码如下），就是实际 SQL 查询过程中调用日志和 Hook 的过程， `Hook` 参数传递使用的是指针，即将 `contexts.ContextHook` 的指针传入钩子函数执行流程，允许直接操作其成员 `c.Ctx` 以达到Hook的过程。
 
 ```golang
 func (db *DB) beforeProcess(c *contexts.ContextHook) (context.Context, error) {
@@ -379,3 +471,5 @@ func NewXormClient(option *XormOption) (*XormClient, error) {
 -   [Xorm 操作指南](https://www.kancloud.cn/kancloud/xorm-manual-zh-cn)
 -   [xorm - 课时 2：高级用法讲解](https://github.com/unknwon/wuwen.org/issues/6)
 -   [Golang XORM 分布式链路追踪（源码分析）](https://gitee.com/avtion/xormWithTracing)
+-   [xorm godoc](https://pkg.go.dev/xorm.io/xorm#section-readme)
+-   [XORM操作指南-事务处理](https://www.kancloud.cn/xormplus/xorm/167120)

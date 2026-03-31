@@ -622,10 +622,8 @@ WRAP:
 1.  增加可重入机制，如服务挂掉可以有重新注册的机制
 2.  给Cron增加持久化的实现，常用Etcd/Redis集群等来做Cron的持久化
 
-
 ####  数据结构的选型
-有开发者认为，可以使用timewheel或者heap来实现上述复杂的`for...select`中的排序机制，可以提高海量任务注册时排序的性能，见[issue：entries datastruct #236](https://github.com/robfig/cron/issues/236)，不过作者认为会存在如此大规模任务调用的场景：）
-
+有开发者认为，可以使用timewheel或者heap来实现上述复杂的`for...select`中的排序机制，可以提高海量任务注册时排序的性能，见[issue：entries datastruct #236](https://github.com/robfig/cron/issues/236)，不过作者认为不会存在如此大规模任务调用的场景：）
 
 ####  任务持久化
 
