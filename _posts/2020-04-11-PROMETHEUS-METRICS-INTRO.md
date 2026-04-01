@@ -112,7 +112,7 @@ scrape_configs:
 2、指标抓取和存储 <br>
 Prometheus 对指标的抓取采取主动 PULL 方式，即周期性的请求被监控服务暴露的 metrics 接口或者是 PushGateway，从而获取到 Metrics 指标，默认时间是 `15s` 抓取一次；抓取到的指标会被以时间序列的形式保存在内存中，并且定时刷到磁盘上（默认 `2h`）
 
-####  0x02  基础：Metrics
+##  0x02  基础：Metrics
 在 Prometheus 内部，所有采样样本都是以时间序列的形式保存在时序数据库中，本小节详细介绍下 `4` 种指标类型已经使用场景。
 
 #### 数据模型
@@ -334,9 +334,65 @@ fmt.Println(proto.MarshalTextString(metric))
 
 ####  指标导出
 1. 使用 exporter
-2. 利用 [官方库](github.com/prometheus/client_golang/prometheus/promhttp) 实现，笔者较常用
+2. 利用 [官方库](https://github.com/prometheus/client_golang/tree/main/prometheus/promhttp) 实现，笔者较常用
 
 代码示例，见 [仓库](https://github.com/pandaychen/golang_in_action/tree/master/prometheus)
+
+####  快速接入示例
+
+下面是一个最简的 Prometheus 指标暴露代码，定义了 Counter 和 Histogram 两种指标，并通过 `/metrics` 接口对外暴露：
+
+```go
+package main
+
+import (
+	"net/http"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+var (
+	requestCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "myapp_requests_total",
+			Help: "Total number of requests",
+		},
+		[]string{"method", "endpoint"},
+	)
+
+	requestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "myapp_request_duration_seconds",
+			Help:    "Request duration in seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"method", "endpoint"},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(requestCounter)
+	prometheus.MustRegister(requestDuration)
+}
+
+func main() {
+	http.HandleFunc("/api/hello", func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		defer func() {
+			requestCounter.WithLabelValues(r.Method, "/api/hello").Inc()
+			requestDuration.WithLabelValues(r.Method, "/api/hello").Observe(time.Since(start).Seconds())
+		}()
+		w.Write([]byte("hello"))
+	})
+
+	http.Handle("/metrics", promhttp.Handler())
+	http.ListenAndServe(":8080", nil)
+}
+```
+
+运行后通过 `curl http://localhost:8080/metrics` 即可查看暴露的指标数据
 
 ## 0x04 PromQL 介绍
 PromQL 的查询表达式有 `4` 种类型：

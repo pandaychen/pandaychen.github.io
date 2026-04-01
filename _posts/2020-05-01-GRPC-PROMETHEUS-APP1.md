@@ -64,7 +64,7 @@ func (r *Registry) MustRegister(cs ...Collector) {
 }
 ```
 
-##  0x03    Counter && CouterVec
+##  0x03    Counter && CounterVec
 计数器（Counter）是表示单个单调递增计数器的累积量，其值只能增加或在重启时重置为零。 例如，可以使用计数器来表示服务的总请求数，已完成的任务或错误总数。 但是注意不要使用计数器来监控可能减少的值。CounterVec 是一组 Counter，这些计数器具有相同的描述，但它们的变量标签具有不同的值。 如果要计算按各种维度划分的相同内容（例如，响应代码和方法分区的 HTTP 请求数），则使用此方法。使用 NewCounterVec 创建实例。
 Counter 主要两个方法，`Inc` 和 `Add`,
 ```golang
@@ -223,13 +223,185 @@ for i := 0; i < 1000; i++ {
 // internally).
 metric := &dto.Metric{}
 temps.Write(metric)
-fmt.Println(proto.MarshalTextString(metric)
+fmt.Println(proto.MarshalTextString(metric))
 ```
 
 ##  0x07 gRPC 与 Prometheus 结合
 这小节，以 PULL 方式为例，看下如何在 gRPC 中通过 prometheus 实现监控。基本的框架如下：
 ![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2020/prometheus/grpc2prometheus.png)
 
+[go-grpc-prometheus](https://github.com/grpc-ecosystem/go-grpc-prometheus) 是 gRPC 生态中最常用的 Prometheus 监控库，它通过 gRPC 拦截器（Interceptor）自动采集 Server 端和 Client 端的核心指标。该库默认采集的 Server 端指标包括：
+
+- `grpc_server_started_total`（Counter）：gRPC 服务收到的请求总数，按 `grpc_type`/`grpc_service`/`grpc_method` 分维度
+- `grpc_server_handled_total`（Counter）：gRPC 服务处理完成的请求总数，包含 `grpc_code` 标签
+- `grpc_server_msg_received_total`（Counter）：服务端接收的消息总数（Streaming 场景有用）
+- `grpc_server_msg_sent_total`（Counter）：服务端发送的消息总数
+- `grpc_server_handling_seconds`（Histogram）：请求处理耗时分布（需显式开启）
+
+####    Server 端接入
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"net"
+	"net/http"
+
+	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"google.golang.org/grpc"
+
+	pb "your_project/proto"
+)
+
+type server struct {
+	pb.UnimplementedYourServiceServer
+}
+
+func (s *server) SayHello(ctx context.Context, req *pb.HelloRequest) (*pb.HelloReply, error) {
+	return &pb.HelloReply{Message: "Hello " + req.Name}, nil
+}
+
+func main() {
+	lis, err := net.Listen("tcp", ":50051")
+	if err != nil {
+		log.Fatalf("failed to listen: %v", err)
+	}
+
+	// 自定义 histogram bucket（可选）
+	grpc_prometheus.EnableHandlingTimeHistogram(
+		grpc_prometheus.WithHistogramBuckets([]float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5}),
+	)
+
+	grpcServer := grpc.NewServer(
+		grpc.StreamInterceptor(grpc_prometheus.StreamServerInterceptor),
+		grpc.UnaryInterceptor(grpc_prometheus.UnaryServerInterceptor),
+	)
+
+	pb.RegisterYourServiceServer(grpcServer, &server{})
+
+	// 注册 grpc-prometheus 的 Server 端指标
+	grpc_prometheus.Register(grpcServer)
+
+	// 启动 Prometheus HTTP 端口暴露指标
+	go func() {
+		httpMux := http.NewServeMux()
+		httpMux.Handle("/metrics", promhttp.Handler())
+		log.Println("Prometheus metrics server listening on :9092")
+		if err := http.ListenAndServe(":9092", httpMux); err != nil {
+			log.Fatalf("metrics server failed: %v", err)
+		}
+	}()
+
+	log.Println("gRPC server listening on :50051")
+	if err := grpcServer.Serve(lis); err != nil {
+		log.Fatalf("failed to serve: %v", err)
+	}
+}
+```
+
+关键点说明：
+- `grpc_prometheus.EnableHandlingTimeHistogram()` 必须在创建 gRPC Server 之前调用，用于开启 `grpc_server_handling_seconds` Histogram 指标（默认不开启）
+- `grpc_prometheus.Register(grpcServer)` 会自动为所有已注册的 gRPC service 初始化 `0` 值指标，避免在 Prometheus 中出现指标缺失
+- Server 端拦截器需要同时注册 `UnaryServerInterceptor` 和 `StreamServerInterceptor`
+
+####    Client 端接入
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"time"
+
+	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
+	pb "your_project/proto"
+)
+
+func main() {
+	conn, err := grpc.Dial("localhost:50051",
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithUnaryInterceptor(grpc_prometheus.UnaryClientInterceptor),
+		grpc.WithStreamInterceptor(grpc_prometheus.StreamClientInterceptor),
+	)
+	if err != nil {
+		log.Fatalf("did not connect: %v", err)
+	}
+	defer conn.Close()
+
+	client := pb.NewYourServiceClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := client.SayHello(ctx, &pb.HelloRequest{Name: "world"})
+	if err != nil {
+		log.Fatalf("could not greet: %v", err)
+	}
+	log.Printf("Greeting: %s", resp.Message)
+}
+```
+
+Client 端采集的指标与 Server 端类似，前缀为 `grpc_client_*`，包括 `grpc_client_started_total`、`grpc_client_handled_total`、`grpc_client_handling_seconds` 等
+
+####    自定义指标扩展
+
+在 `go-grpc-prometheus` 基础上，可以通过注册额外的自定义 `CounterVec` 来扩展监控维度（如按业务错误码统计）：
+
+```go
+var (
+	customGrpcErrors = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "grpc_custom_errors_total",
+			Help: "Custom business error counter for gRPC",
+		},
+		[]string{"grpc_service", "grpc_method", "biz_code"},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(customGrpcErrors)
+}
+
+func (s *server) SayHello(ctx context.Context, req *pb.HelloRequest) (*pb.HelloReply, error) {
+	resp, bizErr := s.doBusinessLogic(req)
+	if bizErr != nil {
+		customGrpcErrors.WithLabelValues("YourService", "SayHello", bizErr.Code).Inc()
+	}
+	return resp, nil
+}
+```
+
+####    常用 gRPC PromQL 查询
+
+```text
+# gRPC 服务整体 QPS
+sum(rate(grpc_server_handled_total[5m]))
+
+# 按方法分组的 QPS
+sum(rate(grpc_server_handled_total[5m])) by (grpc_method)
+
+# gRPC 错误率（非 OK 状态码）
+sum(rate(grpc_server_handled_total{grpc_code!="OK"}[5m]))
+  /
+sum(rate(grpc_server_handled_total[5m]))
+
+# 按方法分组的 P99 延迟
+histogram_quantile(0.99,
+  sum(rate(grpc_server_handling_seconds_bucket[5m])) by (le, grpc_method)
+)
+
+# 全局平均延迟
+sum(rate(grpc_server_handling_seconds_sum[5m]))
+  /
+sum(rate(grpc_server_handling_seconds_count[5m]))
+```
 
 ##  0x08    gRPC的metrics设计（思考）
 
