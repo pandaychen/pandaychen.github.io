@@ -2,7 +2,7 @@
 layout:     post
 title:      Prometheus 应用接入：使用 Prometheus 开发 Exporter
 subtitle:	如何在项目中使用 Prometheus 及 Exporter 开发基础
-date:       2020-07-13
+date:       2020-08-04
 header-img: img/super-mario.jpg
 author:     pandaychen
 catalog:    true
@@ -235,7 +235,7 @@ prometheus.MustRegister(collector)
 
 直接使用 Collector 收集指标时，go client Colletor 只会在每次响应 Prometheus 请求的时候才收集数据。需要每次显式传递变量的值，否则就不会再维持该变量，在 Prometheus 也将看不到这个变量。Collector 是一个 `interface`，所有收集 metrics 数据的对象都需要实现该接口。它内部提供了两个函数，`Collector` 用于收集用户数据，将收集好的数据传递给传入参数 `channel` 就可；`Descirbe` 函数用于描述这个 `Collector`；当收集系统收集的数据太多时时，就可以自定义 Collector 收集的方式来优化流程，并且在某些情况下如果已经有了一个可用的 metrics，就不需要使用 Counter/Gauage 等这些数据结构，直接在 Collector 内部实现一个代理的功能即可（相当于 metrics 转发功能）
 
-##  0x04	一个完整的例子
+##  0x05	一个完整的例子
 本小节给出一个完整的 Exportor 例子，结构和接口的使用方法可以参考 [GODOC](https://godoc.org/github.com/prometheus/client_golang/prometheus)。
 需要引入的 package：
 ```golang
@@ -300,7 +300,7 @@ func main() {
 }
 ```
 
-##  0x05	抽象 Exportor 的实现步骤
+##  0x06	抽象 Exportor 的实现步骤
 1、定义指标及初始化方法 <br>
 
 定义指标就是创建指标的描述符，通常把要采集的指标描述符放在一个结构体里，如下我们定义了一个指标 `fooCollector`，其中包含了两种类型的数据 `fooMetric` 和 `barMetric`：
@@ -399,7 +399,7 @@ bar_metric 0.07074170776466579 1720775972352
 foo_metric 0.07074170776466579 1720772372352
 ```
 
-##	0x06	一个实践例子：sarama
+##	0x07	一个实践例子：sarama
 使用 [sarama](https://github.com/IBM/sarama) 库，由于其内置的指标实现是基于 `github.com/rcrowley/go-metrics` 库的，现在想把其转换为 Prometheus 的格式，如何实现？
 
 参考 [saramaprom](https://github.com/iimos/saramaprom) 的做法，这里简单分析下其实现。
@@ -620,7 +620,7 @@ func (c *exporter) histogramFromNameAndMetric(name string, goMetric interface{},
 -	[ssh_exporter](https://github.com/treydock/ssh_exporter/tree/master)
 -	[apache_exporter](https://github.com/Lusitaniae/apache_exporter/blob/master/collector/collector.go)：该项目的collector实现非常典型，值得阅读
 
-##	0x07	总结
+##	0x08	总结
 本篇文章分析了 Prometheus 在应用中的接入方法及实现的步骤。此外，在自定义collector的实现中，对于`prometheus.Desc`/`prometheus.Counter`/`prometheus.GaugeVec`这几种典型的指标上报，要特别注意，对于`prometheus.GaugeVec`这种自定义标签类型，通常的实现方式参考（典型的代码）：
 
 ```go
@@ -670,7 +670,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 **对于有动态标签的gauge的，需要通过`With(xxx).Set()`方法设置指标的值，并且需要使用`e.total.Collect(ch)` 方式去更新，不需要再把val传递到channel了**
 
-##  0x08	参考
+##  0x09	参考
 -   [WRITING EXPORTERS](https://prometheus.io/docs/instrumenting/writing_exporters/)
 -   [INSTRUMENTING A GO APPLICATION FOR PROMETHEUS](https://prometheus.io/docs/guides/go-application/)
 -   [EXPORTERS AND INTEGRATIONS](https://prometheus.io/docs/instrumenting/exporters/)

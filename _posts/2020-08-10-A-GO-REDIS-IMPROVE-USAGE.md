@@ -1,8 +1,8 @@
 ---
 layout:     post
 title:      Go-redis with Metrics：关键指标采集
-subtitle:   魔改 go-redis 实现 Metrcis + Prometheus 关键指标上报
-date:       2020-08-20
+subtitle:   魔改 go-redis 实现 Metrics + Prometheus 关键指标上报
+date:       2020-08-10
 header-img: img/super-mario.jpg
 author:     pandaychen
 catalog:    true

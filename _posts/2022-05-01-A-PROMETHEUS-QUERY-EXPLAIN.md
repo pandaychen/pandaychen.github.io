@@ -86,7 +86,7 @@ sum(rate(node_network_receive_bytes_total{device="eth0"}[1m]))
 4、`topk` 函数取前面 `N` 位的最高值（即 topN），当存在很多服务器时，想要获取某个 key 的数据排在前 `3` 位的服务器，可使用如下：
 
 ```python
-topk(3,key) #FOR GUAGE
+topk(3,key) #FOR GAUGE
 topk(3,rate(key[1m])) #FOR COUNTER
 ```
 

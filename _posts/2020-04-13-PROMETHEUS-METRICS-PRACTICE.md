@@ -46,7 +46,7 @@ http_requests_total{api="add_product"} 4633433
 rate(http_requests_total{api="add_product"}[5m])
 ```
 
-又如，为了计算一段时期内 counter 的绝对变化（delta），可以利用 `increate` 函数，下面的表达式会返回过去 `5` 分钟内的总请求数的增量，这相当于用每秒的速率乘以间隔时间的秒数：
+又如，为了计算一段时期内 counter 的绝对变化（delta），可以利用 `increase` 函数，下面的表达式会返回过去 `5` 分钟内的总请求数的增量，这相当于用每秒的速率乘以间隔时间的秒数：
 
 ```python
 increase(http_requests_total{api="add_product"}[5m])
@@ -362,11 +362,11 @@ sum_over_time(range-vector)：计算在给定时间范围内的时间序列总�
 count_over_time(range-vector)
 quantile_over_time(scalar, range-vector)
 stddev_over_time(range-vector)
-stdvar_over_time(range-vector)'
+stdvar_over_time(range-vector)
 ```
 
 range vectors 与 couter 的结合相当重要，单调递增 counter 的值永不减少；它要么增加要么保持不变。Prometheus 只允许一种 counter 减少的情况，即在目标重启期间。如果 counter 值低于之前记录的值，则 `rate` 和 `increase` 等 range vector 函数将假定目标重新启动并将整个值添加到它所知道的现有值。这也是为什么应该总是先 `rate` 后 `sum`，而不是先 `sum` 后 `rate`
-假设，`http_requests_total`5 分钟的时间序列如下：
+假设，`http_requests_total` 5 分钟的时间序列如下：
 
 ```TEXT
 时间（分钟）  service="serviceA"  service="serviceB"
@@ -598,6 +598,285 @@ histogram_quantile(0.99,
 
 ####	常用 PromQL 汇总
 
+本小节以一个完整的 HTTP Gin API 服务器为例，展示 Counter/Gauge/Histogram（含 Vec）在实际项目中的经典用法，并汇总对应的 PromQL 查询
+
+####	完整示例：基于 Gin 的 HTTP API 服务器
+
+下面的代码实现了一个典型的 Gin HTTP 服务，定义了 `CounterVec`（请求总数）、`GaugeVec`（当前并发请求数）、`HistogramVec`（请求耗时分布）三种指标，并通过 Prometheus 中间件自动采集：
+
+```go
+package main
+
+import (
+	"fmt"
+	"math/rand"
+	"net/http"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+var (
+	// CounterVec：按 method/path/status 维度统计请求总数
+	httpRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "myapp",
+			Subsystem: "http",
+			Name:      "requests_total",
+			Help:      "Total number of HTTP requests",
+		},
+		[]string{"method", "path", "status"},
+	)
+
+	// HistogramVec：按 method/path 维度统计请求耗时分布
+	httpRequestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: "myapp",
+			Subsystem: "http",
+			Name:      "request_duration_seconds",
+			Help:      "HTTP request duration in seconds",
+			Buckets:   []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+		},
+		[]string{"method", "path"},
+	)
+
+	// GaugeVec：按 method/path 维度统计当前活跃请求数
+	httpInflightRequests = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "myapp",
+			Subsystem: "http",
+			Name:      "inflight_requests",
+			Help:      "Number of inflight HTTP requests being processed",
+		},
+		[]string{"method", "path"},
+	)
+
+	// HistogramVec：按 method/path 维度统计响应体大小分布
+	httpResponseSizeBytes = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: "myapp",
+			Subsystem: "http",
+			Name:      "response_size_bytes",
+			Help:      "HTTP response size in bytes",
+			Buckets:   prometheus.ExponentialBuckets(100, 2, 10),
+		},
+		[]string{"method", "path"},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(httpRequestsTotal)
+	prometheus.MustRegister(httpRequestDuration)
+	prometheus.MustRegister(httpInflightRequests)
+	prometheus.MustRegister(httpResponseSizeBytes)
+}
+
+// prometheusMiddleware 封装 Gin 中间件，自动采集请求指标
+func prometheusMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		path := c.FullPath()
+		if path == "" {
+			path = "unknown"
+		}
+		method := c.Request.Method
+
+		// Gauge：进入时 +1，退出时 -1
+		httpInflightRequests.WithLabelValues(method, path).Inc()
+		defer httpInflightRequests.WithLabelValues(method, path).Dec()
+
+		start := time.Now()
+		c.Next()
+		duration := time.Since(start).Seconds()
+
+		status := fmt.Sprintf("%d", c.Writer.Status())
+
+		// Counter：请求计数 +1
+		httpRequestsTotal.WithLabelValues(method, path, status).Inc()
+		// Histogram：记录请求耗时
+		httpRequestDuration.WithLabelValues(method, path).Observe(duration)
+		// Histogram：记录响应体大小
+		httpResponseSizeBytes.WithLabelValues(method, path).Observe(float64(c.Writer.Size()))
+	}
+}
+
+func main() {
+	r := gin.Default()
+	r.Use(prometheusMiddleware())
+
+	// 业务接口
+	r.GET("/api/users", func(c *gin.Context) {
+		time.Sleep(time.Duration(rand.Intn(100)) * time.Millisecond)
+		c.JSON(http.StatusOK, gin.H{"users": []string{"alice", "bob"}})
+	})
+
+	r.POST("/api/orders", func(c *gin.Context) {
+		time.Sleep(time.Duration(rand.Intn(200)) * time.Millisecond)
+		c.JSON(http.StatusCreated, gin.H{"order_id": "12345"})
+	})
+
+	r.GET("/api/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
+	r.GET("/api/slow", func(c *gin.Context) {
+		time.Sleep(time.Duration(500+rand.Intn(2000)) * time.Millisecond)
+		c.JSON(http.StatusOK, gin.H{"msg": "done"})
+	})
+
+	// Prometheus 指标暴露端口（建议与业务端口分离）
+	go func() {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", promhttp.Handler())
+		http.ListenAndServe(":9527", mux)
+	}()
+
+	r.Run(":8080")
+}
+```
+
+基于上述代码中定义的指标，以下是在 Grafana/Prometheus 中常用的 PromQL 查询汇总：
+
+**1、Counter 经典用法**
+
+```text
+# 全局 QPS（每秒请求数）
+sum(rate(myapp_http_requests_total[5m]))
+
+# 按接口分组的 QPS
+sum(rate(myapp_http_requests_total[5m])) by (path)
+
+# 按请求方法分组的 QPS
+sum(rate(myapp_http_requests_total[5m])) by (method)
+
+# 错误率（5xx 占总请求的比例）
+sum(rate(myapp_http_requests_total{status=~"5.."}[5m]))
+  /
+sum(rate(myapp_http_requests_total[5m]))
+
+# 某接口的错误率
+sum(rate(myapp_http_requests_total{path="/api/orders",status=~"5.."}[5m]))
+  /
+sum(rate(myapp_http_requests_total{path="/api/orders"}[5m]))
+
+# 每分钟请求增量
+sum(increase(myapp_http_requests_total[1m])) by (path)
+
+# 非 200 请求的 QPS
+sum(rate(myapp_http_requests_total{status!="200"}[5m])) by (path, status)
+```
+
+**2、Gauge 经典用法**
+
+```text
+# 当前所有接口的并发请求总数
+sum(myapp_http_inflight_requests)
+
+# 按接口分组的并发请求数
+sum(myapp_http_inflight_requests) by (path)
+
+# 最近 5 分钟内并发请求的最大值
+max_over_time(sum(myapp_http_inflight_requests)[5m:])
+
+# 最近 10 分钟内并发数的平均值（按接口）
+avg_over_time(sum by (path) (myapp_http_inflight_requests)[10m:])
+```
+
+**3、Histogram（Vec）经典用法**
+
+```text
+# 全局 P50 延迟
+histogram_quantile(0.5,
+  sum(rate(myapp_http_request_duration_seconds_bucket[5m])) by (le)
+)
+
+# 全局 P90 延迟
+histogram_quantile(0.90,
+  sum(rate(myapp_http_request_duration_seconds_bucket[5m])) by (le)
+)
+
+# 全局 P99 延迟
+histogram_quantile(0.99,
+  sum(rate(myapp_http_request_duration_seconds_bucket[5m])) by (le)
+)
+
+# 按接口分组的 P95 延迟
+histogram_quantile(0.95,
+  sum(rate(myapp_http_request_duration_seconds_bucket[5m])) by (le, path)
+)
+
+# 全局平均延迟
+sum(rate(myapp_http_request_duration_seconds_sum[5m]))
+  /
+sum(rate(myapp_http_request_duration_seconds_count[5m]))
+
+# 按接口分组的平均延迟
+sum(rate(myapp_http_request_duration_seconds_sum[5m])) by (path)
+  /
+sum(rate(myapp_http_request_duration_seconds_count[5m])) by (path)
+
+# TopN 最慢接口（P99）
+topk(5,
+  histogram_quantile(0.99,
+    sum(rate(myapp_http_request_duration_seconds_bucket[5m])) by (le, path)
+  )
+)
+
+# 响应体大小 P90
+histogram_quantile(0.90,
+  sum(rate(myapp_http_response_size_bytes_bucket[5m])) by (le)
+)
+```
+
+**4、组合查询与告警规则**
+
+```text
+# 请求延迟突增告警：当前 5 分钟 P99 > 过去 1 小时 P99 的 2 倍
+histogram_quantile(0.99, sum(rate(myapp_http_request_duration_seconds_bucket[5m])) by (le))
+  >
+2 * histogram_quantile(0.99, sum(rate(myapp_http_request_duration_seconds_bucket[1h])) by (le))
+
+# QPS 突增告警：当前 5 分钟 QPS > 过去 1 小时平均 QPS 的 3 倍
+sum(rate(myapp_http_requests_total[5m]))
+  >
+3 * sum(rate(myapp_http_requests_total[1h]))
+
+# SLO 检查：P99 延迟 < 500ms
+histogram_quantile(0.99, sum(rate(myapp_http_request_duration_seconds_bucket[5m])) by (le)) < 0.5
+
+# Apdex 分数近似（阈值 T=0.5s）：满意 + 容忍/2 / 总数
+(
+  sum(rate(myapp_http_request_duration_seconds_bucket{le="0.5"}[5m]))
+  +
+  sum(rate(myapp_http_request_duration_seconds_bucket{le="2"}[5m]))
+) / 2
+  /
+sum(rate(myapp_http_request_duration_seconds_count[5m]))
+```
+
+汇总表：
+
+| 场景 | 指标类型 | 核心 PromQL |
+| :-----| :---- | :---- |
+| QPS（全局/按接口） | CounterVec | `sum(rate(myapp_http_requests_total[5m])) by (path)` |
+| 错误率 | CounterVec | `sum(rate(...{status=~"5.."}[5m])) / sum(rate(...[5m]))` |
+| 每分钟请求增量 | CounterVec | `sum(increase(myapp_http_requests_total[1m])) by (path)` |
+| 当前并发数 | GaugeVec | `sum(myapp_http_inflight_requests) by (path)` |
+| 并发数峰值 | GaugeVec | `max_over_time(sum(myapp_http_inflight_requests)[5m:])` |
+| P50/P90/P99 延迟 | HistogramVec | `histogram_quantile(0.99, sum(rate(..._bucket[5m])) by (le))` |
+| 按接口 P95 延迟 | HistogramVec | `histogram_quantile(0.95, sum(rate(..._bucket[5m])) by (le, path))` |
+| 平均延迟 | HistogramVec | `sum(rate(..._sum[5m])) / sum(rate(..._count[5m]))` |
+| TopN 慢接口 | HistogramVec | `topk(5, histogram_quantile(0.99, sum(rate(..._bucket[5m])) by (le, path)))` |
+| QPS 突增告警 | CounterVec | `rate(...[5m]) > 3 * rate(...[1h])` |
+| 延迟超标告警 | HistogramVec | `histogram_quantile(0.99, ...) > threshold` |
+
+注意事项：
+- 对 histogram 指标计算分位数时，`sum by (le)` 是必须的，不能丢掉 `le` 标签
+- 计算比率（如错误率）时，分子分母都要先 `rate` 再 `sum`，保持一致的时间窗口
+- `histogram_quantile` 结果是近似值，桶边界的设计直接影响精度，建议根据业务实际延迟分布调整 `Buckets`
+- 在生产环境中，metrics 暴露端口建议与业务端口分离，避免外部直接访问
+
 ##  0x03  promql 的典型应用：实践
 
 ####  sum 用法
@@ -791,7 +1070,7 @@ func prometheusMiddleware() gin.HandlerFunc {
 
 3、计算SLI/SLO
 
--	平均请求延迟应该小于`100ms`：`avg(http_request_duration_seconds_sum / http_request_duration_seconds_count) * 1000`
+-	平均请求延迟应该小于`100ms`：`sum(rate(http_request_duration_seconds_sum[5m])) / sum(rate(http_request_duration_seconds_count[5m])) * 1000`
 -	请求错误率应该小于`1%`：`sum(http_requests_failed_total) / sum(http_requests_total) * 100`
 -	`P99`的请求响应时间需要小于`500ms`：`histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le)) * 1000`
 其中`sum(rate(http_request_duration_seconds_bucket[5m])) by (le)`部分计算了每个延迟桶的速率，然后将其按照延迟上限（`le`）进行聚合。最后，将结果乘以`1000`，将其转换为`ms`
@@ -799,7 +1078,7 @@ func prometheusMiddleware() gin.HandlerFunc {
 进一步，将指标按照`GET`/`POST`进行分组，如下：
 
 ```python
-avg(http_request_duration_seconds_sum / http_request_duration_seconds_count) by (method) * 1000
+sum(rate(http_request_duration_seconds_sum[5m])) by (method) / sum(rate(http_request_duration_seconds_count[5m])) by (method) * 1000
 #请求错误率（按GET/POST分组）：
 sum(http_requests_failed_total) by (method) / sum(http_requests_total) by (method) * 100
 #P99响应时间（按GET/POST分组）：
