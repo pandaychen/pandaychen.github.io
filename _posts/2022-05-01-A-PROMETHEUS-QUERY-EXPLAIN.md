@@ -708,6 +708,11 @@ count(uptime)
 count by (bk_biz_id) (uptime)
 ```
 
+防止数据抖动的写法：如果网络环境不稳定，或者采集周期较长，直接 count 可能会产生掉线的假象（毛刺）。建议给指标加上一个很短的时间范围聚合，确保只要最近 `2` 分钟内有数据，就认为它在线：
+
+```text
+count by (bk_biz_id) (last_over_time(uptime[2m]))
+```
 
 ####   实际应用：基于 alertmanager 的高级配置
 如何使用 Counter 实现基于增量的告警策略？借助于 PromQL 编写适当的查询表达式，并将其配置为 Alertmanager 的告警规则来实现。下面使用 Prometheus Counter 监控 HTTP `5xx` 错误并在错误率超过阈值时触发告警，主要代码如下：
