@@ -621,6 +621,93 @@ func doWork() int {
 }
 ```
 
+####  现网应用举例
+有如下指标：
+
+1、gauge：`app_build_info`，典型的Info Metric（信息类指标），它的特殊之处在于它的数值（Value）永远是 `1`，而真正的价值全在于它携带的标签（Labels），通过 Gauge 模拟了一个实时的资产卡片
+
+```go
+appBuildInfo = prometheus.NewGaugeVec(
+      prometheus.GaugeOpts{
+          Namespace: Namespace,
+          Name:      "app_build_info",
+          Help:      "心跳指标",
+      },
+      []string{"version", "buildTime", "gitTag","btf","kernel_version"},
+)
+```
+
+典型用法如下：
+
+1.1：资产版本分布统计（最常用）：通过 `count` 函数，可以瞬间查出全网不同版本的分布情况，用于平滑升级过程的监控。
+关联场景**想知道现在有多少台机器已经更新到了 `v2.0.1`，还有多少旧版本**，PromQL为`count by (version) (app_build_info)`，在 Grafana 中使用饼图（Pie Chart）可以清晰展现版本占比
+
+1.2：内核兼容性异常排查（BTF/内核关联），可定位哪些机器因为不支持 BTF 导致插件功能受限。PromQL为`count by (kernel_version, btf) (app_build_info{btf="false"})`。若发现某一批 kernel_version 下 `btf` 全是 `false`，就能立刻确定是内核版本过低或配置缺失
+
+1.3：多指标关联查询（Join 技巧）：通过 `group_left/group_right`，将版本信息注入到性能指标中。如**想看不同版本的插件产生的事件发送速率（QPS），看看新版本是否性能更好**，PromQL为
+
+```text
+//app_build_info 像一张标签表，通过 instance 字段把 version 标签贴到了发送速率指标上
+sum by (version) (
+  rate(custom_namespace_metrics_succ_send_total[5m]) 
+  * on(instance) group_left(version) app_build_info
+)
+```
+
+1.4：运行时长与重启检测，虽然是 Gauge类型，但由于它随进程启动而上报，可以用来辅助判断进程存活。如**找出最近 1 小时内刚启动（上线）的机器**，PromQL为`app_build_info and (time() - process_start_time_seconds < 3600)`，结合 `version` 标签可以快速确认新部署的版本是否在频繁重启
+
+在项目中，需要注意几处细节
+- 数值必须为 `1`：在代码里初始化后，需要立即执行 `appBuildInfo.WithLabelValues(...).Set(1)`，这样上面的 `count` 和乘法关联才成立
+- 避免标签频繁变动：Info 指标的标签应该是静态的（如 `GitTag`）。千万不要把 `uptime` 或当前时间这种每秒都在变的值放进标签里，否则会产生海量的时间序列（Cardinality Explosion），直接撑爆 Prometheus 的内存
+
+最后强调一点，对Prometheus的pull与push模型，在指标的处理方式上会有区别：
+- 在传统的 Pull 模式下，Prometheus 是主动方，它没抓到数据就知道进程（指标）挂了，初始化时 `Set(1)` 一次即可，不需要在`tick.Ticker`中定时上报
+- 在 Push 模式下，Pushgateway 只负责存储最后一次推给它的数据，必须在 Tick 中循环（定时）推送
+
+
+2、counter
+
+```go
+// uptime 运行时间
+uptime = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: Namespace,
+			Name:      "uptime",
+			Help:      "uptime of program",
+		},
+)
+
+kernelEventSuccSendCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: Namespace,
+			Name:      "kernel_event_succ_send_counter",
+			Help:      "kernel event send success",
+		},
+		[]string{"event_type"},
+)
+```
+
+典型用法如下：
+
+2.1：运行时长，通常有两种视角即**当前累计运行了多久**以及**在特定时间段内运行了多久**，在代码中 `pmetrics.UpdateUptime(10)` 每 `10` 秒执行一次，那么这个 `uptime` 数值代表的是秒数，`uptime`这个指标就表示**每台机器从启动到现在（或者指标开始采集到现在）一共运行了多少秒**，需要加入label筛选具体的机器，如`uptime{bk_host_innerip="1.2.3.4"}`
+
+计算过去一段时间内的实际运行时间，因为 counter 会随时间增加，如果想知道在过去 1 小时内，这台机器在线了多久（用于排查是否有重启或中断），使用`increase(uptime[1h])`，此算式会计算 `1h` 前后的差值。如果结果是 `3600`，说明这一小时内机器 `100%` 在线。（注意`increase` 函数会自动处理 counter 重置的情况）
+
+2.2：查看每台机器的运行增长速率（理想情况下，运行时间每秒应该增加 `1` 秒），`rate(uptime[5m])`，作用是
+如果数值为 `1`，说明采集正常。如果数值小于 `1` 或波动很大，说明程序可能频繁重启或采集任务有延迟
+
+2.3：统计多台机器的总运行时长，若需要按业务（bk_biz_id）汇总所有机器的总运行时间，使用`sum by (bk_biz_id) (uptime)`
+
+2.4：机器在线数目
+
+```text
+#所有业务总在线机器数：查询会把所有业务的机器加在一起，得出一个总数随时间变化的曲线
+count(uptime)
+
+#按业务分组统计：每个业务各自的在线机器数
+count by (bk_biz_id) (uptime)
+```
+
 
 ####   实际应用：基于 alertmanager 的高级配置
 如何使用 Counter 实现基于增量的告警策略？借助于 PromQL 编写适当的查询表达式，并将其配置为 Alertmanager 的告警规则来实现。下面使用 Prometheus Counter 监控 HTTP `5xx` 错误并在错误率超过阈值时触发告警，主要代码如下：
@@ -698,7 +785,10 @@ flowchart LR
 - 区分和过滤时间序列：标签允许你根据特定条件过滤和选择时间序列数据。例如，你可以使用标签查询特定服务或实例的性能指标，或者根据请求方法和状态码过滤 HTTP 请求数据
 - 数据聚合：标签可以用于对数据进行分组和聚合，以便计算各种统计信息，如总和、平均值、最大值、最小值等
 
-##  0x06 参考
+##  0x06 总结&&技巧
+
+
+##  0x07 参考
 -   [彻底理解 Prometheus 查询语法](https://blog.csdn.net/zhouwenjun0820/article/details/105823389)
 -   [Prometheus 操作指南](https://github.com/yunlzheng/prometheus-book)
 -   [理解时间序列](https://github.com/yunlzheng/prometheus-book/blob/master/promql/what-is-prometheus-metrics-and-labels.md)
