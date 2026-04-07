@@ -2,7 +2,7 @@
 layout:     post
 title:  Linux 内核之旅（二十一）：page cache
 subtitle:   内核中的page cache管理
-date:       2025-09-02
+date:       2025-11-02
 author:     pandaychen
 header-img:
 catalog: true
