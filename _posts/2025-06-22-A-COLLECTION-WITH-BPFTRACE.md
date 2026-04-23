@@ -620,8 +620,56 @@ Attaching 1 probe...
 
 如上面引入的示例`bpftrace -e 'profile:hz:99 { @[ustack] = count(); }'`，该命令会每秒 `99` 次捕获所有 CPU 上正在执行的用户空间程序的调用栈（ustack），通过统计不同调用栈的出现次数（`count()`），可以分析出哪些代码路径消耗的 CPU 时间最多，用于可视化分析性能热点
 
-####    uprobe
+####    uprobe 
 
+1、使用 eBPF 跟踪 MySQL 查询
+
+该工具的实现原理是，跟踪 `dispatch_command` 函数，在 MySQL 中的 `dispatch_command` 函数上附加了一个 uprobe探针，当MySQL 需要执行 SQL 查询时调用，捕获函数执行的开始时间并记录正在执行的 SQL 查询
+
+此外，本例子通过uretprobe 附加到 `dispatch_command` 函数，uretprobe 在函数返回时触发，允许计算查询的总执行时间（延迟），单位为毫秒。代码中还额外使用一个 BPF map 来存储每个查询的开始时间，并以线程 ID（tid）作为键
+
+```
+#bpftrace trace_mysql.bt
+#!/usr/bin/env bpftrace
+
+// 跟踪 MySQL 中的 dispatch_command 函数
+uprobe:/usr/sbin/mysqld:dispatch_command
+{
+    // 将命令执行的开始时间存储在 map 中
+    @start_times[tid] = nsecs;
+
+    // 打印进程 ID 和命令字符串
+    printf("MySQL command executed by PID %d: ", pid);
+
+    // dispatch_command 的第三个参数是 SQL 查询字符串
+    printf("%s\n", str(arg3));
+}
+
+uretprobe:/usr/sbin/mysqld:dispatch_command
+{
+    // 从 map 中获取开始时间
+    $start = @start_times[tid];
+
+    // 计算延迟，以毫秒为单位
+    $delta = (nsecs - $start) / 1000000;
+
+    // 打印延迟
+    printf("Latency: %u ms\n", $delta);
+
+    // 从 map 中删除条目以避免内存泄漏
+    delete(@start_times[tid]);
+}
+```
+
+输出如下：
+```
+MySQL command executed by PID 1234: SELECT * FROM users WHERE id = 1;
+Latency: 15 ms
+MySQL command executed by PID 1234: UPDATE users SET name = 'Alice' WHERE id = 2;
+Latency: 23 ms
+MySQL command executed by PID 1234: INSERT INTO orders (user_id, product_id) VALUES (1, 10);
+Latency: 42 ms
+```
 
 ####    USDT
 
@@ -631,3 +679,4 @@ Attaching 1 probe...
 -   [bpftrace一行教程](https://eunomia.dev/zh/tutorials/bpftrace-tutorial/)
 -   [基于ebpf的性能工具-bpftrace脚本语法](https://cloud.tencent.com/developer/article/2322518)
 -   [The bpftrace One-Liner Tutorial](https://github.com/bpftrace/bpftrace/blob/master/docs/tutorial_one_liners.md)
+-   [使用 eBPF 跟踪 MySQL 查询](https://eunomia.dev/zh/tutorials/40-mysql/)
