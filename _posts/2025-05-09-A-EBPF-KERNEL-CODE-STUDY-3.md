@@ -304,6 +304,11 @@ PID    COMM         IP SADDR            DADDR            DPORT LAT(ms)
 TODO
 
 ####    内核态
+通过内核`tcp_v4_connect` 与 `tcp_rcv_state_process` 函数，去记录和分析 socket 连接建立的用时情况。发送事件到 `bpf_perf_event_output`
+
+-   `tcp_v4_connect`：内核尝试建立 socket 时调用，原型为`int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)`
+-   `tcp_rcv_state_process`：内核 socket 状态变化时调用，原型为`int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)`
+
 
 ```cpp
 struct piddata {
