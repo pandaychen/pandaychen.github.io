@@ -159,7 +159,7 @@ IO多路复用模型的出发点是如何用尽可能少的线程去处理更多
 
 以ext4为例，其文件系统中管理的文件对应的 `file_operations` 指向 `ext4_file_operations`，专门用于操作 ext4 文件系统中的文件
 
-```CPP
+```cpp
 const struct file_operations ext4_file_operations = {
     // 并未定义 .read方法，只实现了 .read_iter方法
     .read_iter  = ext4_file_read_iter,
@@ -171,7 +171,7 @@ const struct file_operations ext4_file_operations = {
 
 那么对ext4文件的VFS读取调用链路中，`__vfs_read` 调用的是 `new_sync_read` 方法
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/read_write.c#L446
 ssize_t __vfs_read (struct file *file, char __user *buf, size_t count,  loff_t *pos) {  
         ......
@@ -191,7 +191,7 @@ ssize_t __vfs_read (struct file *file, char __user *buf, size_t count,  loff_t *
 -   `size_t count`：进行读取的字节数，即传入的用户态缓冲区剩余可容纳的容量大小
 -   `loff_t *pos`：文件当前读取位置偏移 `offset`
 
-```CPP
+```cpp
 static inline void init_sync_kiocb(struct kiocb *kiocb, struct file *filp)
 {
 	*kiocb = (struct kiocb) {
@@ -252,7 +252,7 @@ static ssize_t new_sync_read(struct file *filp, char __user *buf, size_t len, lo
 
 继续跟踪：
 
-```CPP
+```cpp
 static inline ssize_t call_read_iter(struct file *file, struct kiocb *kio,
 				     struct iov_iter *iter)
 {   
@@ -267,7 +267,7 @@ static ssize_t ext4_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 }
 ```
 
-```CPP
+```cpp
 ssize_t generic_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 {
     ......
@@ -294,7 +294,7 @@ ssize_t generic_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 ####    `struct iovec`结构
 `struct iovec` 结构主要用来封装用来接收文件数据用的用户缓存区相关的信息：
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/uapi/linux/uio.h#L16
 struct iovec
 {
@@ -308,9 +308,9 @@ struct iovec
 ####    `struct iov_iter`结构
 内核中一般会使用 `struct iov_iter` 结构对 `struct iovec` 进行包装，`iov_iter` 中可以包含多个 `iovec`（`iov_iter`中的关键字 `iter`就说明了这点）。内核使用 `struct iov_iter` 结构体来包装 `struct iovec` 的目的是为了兼容 `readv()` 系列的系统调用，它允许用户使用多个用户缓存区去读取文件中的数据
 
-![iov_iter]()
+![iov_iter](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/16/Advantages_of_struct_iovec.png)
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/uio.h#L30
 struct iov_iter {
 	int type;                //标识读 OR 写，以及其他属性
@@ -338,7 +338,7 @@ struct iov_iter {
 ####    `struct kiocb`结构体
 `struct kiocb` 结构体则是用来封装文件 IO 相关操作的状态和进度信息
 
-```CPP
+```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/fs.h#L274
 struct kiocb {
 	struct file		*ki_filp;  // 要读取的文件 struct file 结构（指向open文件创建的file结构）
@@ -358,12 +358,113 @@ struct kiocb {
 
 ![msghdr-to-ioviter]()
 
+##	0x	常用操作函数
+
+####	copy_to_iter && copy_from_iter
+
+-	`copy_to_iter`：从内核缓冲区拷贝到迭代器指定的目标
+-	`copy_from_iter`：从迭代器指定的源拷贝到内核缓冲区
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/lib/iov_iter.c#L555
+size_t copy_to_iter(const void *addr, size_t bytes, struct iov_iter *i)
+{
+	const char *from = addr;
+	if (unlikely(i->type & ITER_PIPE))
+		return copy_pipe_to_iter(addr, bytes, i);
+	iterate_and_advance(i, bytes, v,
+		__copy_to_user(v.iov_base, (from += v.iov_len) - v.iov_len,
+			       v.iov_len),
+		memcpy_to_page(v.bv_page, v.bv_offset,
+			       (from += v.bv_len) - v.bv_len, v.bv_len),
+		memcpy(v.iov_base, (from += v.iov_len) - v.iov_len, v.iov_len)
+	)
+
+	return bytes;
+}
+
+size_t copy_from_iter(void *addr, size_t bytes, struct iov_iter *i)
+{
+	char *to = addr;
+	if (unlikely(i->type & ITER_PIPE)) {
+		WARN_ON(1);
+		return 0;
+	}
+	iterate_and_advance(i, bytes, v,
+		__copy_from_user((to += v.iov_len) - v.iov_len, v.iov_base,
+				 v.iov_len),
+		memcpy_from_page((to += v.bv_len) - v.bv_len, v.bv_page,
+				 v.bv_offset, v.bv_len),
+		memcpy((to += v.iov_len) - v.iov_len, v.iov_base, v.iov_len)
+	)
+
+	return bytes;
+}
+```
+
+这里最关键的是调用`iterate_and_advance`，主要功能如下：
+
+1.	遍历迭代器：根据迭代器类型处理不同数据源处理
+2.	自动更新位置：每次循环后自动推进迭代器位置
+3.	更新 `count`：递减剩余的字节数
+
+TODO
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/lib/iov_iter.c#L538
+#define iterate_and_advance(i, n, v, I, B, K) {			\
+	if (unlikely(i->count < n))				\
+		n = i->count;					\
+	if (i->count) {						\
+		size_t skip = i->iov_offset;			\
+		if (unlikely(i->type & ITER_BVEC)) {		\
+			const struct bio_vec *bvec = i->bvec;	\
+			struct bio_vec v;			\
+			struct bvec_iter __bi;			\
+			iterate_bvec(i, n, v, __bi, skip, (B))	\
+			i->bvec = __bvec_iter_bvec(i->bvec, __bi);	\
+			i->nr_segs -= i->bvec - bvec;		\
+			skip = __bi.bi_bvec_done;		\
+		} else if (unlikely(i->type & ITER_KVEC)) {	\
+			const struct kvec *kvec;		\
+			struct kvec v;				\
+			iterate_kvec(i, n, v, kvec, skip, (K))	\
+			if (skip == kvec->iov_len) {		\
+				kvec++;				\
+				skip = 0;			\
+			}					\
+			i->nr_segs -= kvec - i->kvec;		\
+			i->kvec = kvec;				\
+		} else {					\
+			const struct iovec *iov;		\
+			struct iovec v;				\
+			iterate_iovec(i, n, v, iov, skip, (I))	\
+			if (skip == iov->iov_len) {		\
+				iov++;				\
+				skip = 0;			\
+			}					\
+			i->nr_segs -= iov - i->iov;		\
+			i->iov = iov;				\
+		}						\
+		i->count -= n;					\
+		i->iov_offset = skip;				\
+	}							\
+}
+```
+
 ##  0x  IO操作函数：用户态
+
+####	调用链
+`read`系统调用的调用链：
+
+```cpp
+
+```
 
 ####    writev 系统调用
 `writev` 是一种向文件描述符写入数据的系统调用，它允许从多个缓冲区一次性写入数据，原型如下：
 
-```CPP
+```cpp
 /*
 - fd：文件描述符，表示要写入的目标
 - iov：指向 iovec 结构体数组的指针
@@ -392,3 +493,4 @@ ssize_t writev(int fd, const struct iovec *iov, int iovcnt);
 -   [从 Linux 内核角度探秘 JDK NIO 文件读写本质](https://www.cnblogs.com/binlovetech/p/16661323.html)
 -   [The iov_iter interface](https://lwn.net/Articles/625077/)
 -   [文件IO系统调用内幕](https://lrita.github.io/2019/03/13/the-internal-of-file-syscall/#msync)
+-	[Linux I/O 原理和 Zero-copy 技术全面揭秘](https://zhuanlan.zhihu.com/p/308054212)

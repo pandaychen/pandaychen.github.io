@@ -210,9 +210,12 @@ struct mm_struct {
 ```cpp
 struct mm_struct {
     unsigned long task_size; /* size of task vm space */
+    unsigned long highest_vm_end;	/* highest vma end address */
     ......
 }
 ```
+
+`highest_vm_end`成员存储当前虚拟内存地址的最大地址
 
 ![task_size](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/task_size.png)
 
