@@ -43,8 +43,7 @@ BPF Map 是 eBPF 程序与用户态程序、以及 eBPF 程序之间共享数据
 2.  `Elements`：即真正需要存放的数据，也组织成链表
 
 ####    内核核心结构
-
-以下是内核 `kernel/bpf/hashtab.c` 中的核心结构体定义
+`struct bpf_htab`是内核哈希表的实现，内核 bpf map `struct bpf_map` 结构记录的只是通用 map 元数据（不区分 map 类型）。对于 hash map 来说，真正的数据是存储在哈希表 `struct bpf_htab` 里。以下是内核 `kernel/bpf/hashtab.c` 中的核心结构体定义
 
 ```c
 struct bucket {
@@ -52,22 +51,23 @@ struct bucket {
     raw_spinlock_t raw_lock;
 };
 
+// 哈希表（hash table）数据结构
 struct bpf_htab {
-    struct bpf_map map;
+    struct bpf_map map; // 这个 hash map 对应的 BPF map（元数据）
     struct bpf_mem_alloc ma;
     struct bpf_mem_alloc pcpu_ma;
-    struct bucket *buckets;
-    void *elems;
+    struct bucket *buckets; // 链表 + 锁
+    void *elems;            // 每个 elem 的结构：struct htab_elem + key + value
     union {
         struct pcpu_freelist freelist;
-        struct bpf_lru lru;
+        struct bpf_lru lru;     //LRU实现
     };
     struct htab_elem *__percpu *extra_elems;
     struct percpu_counter pcount;
-    atomic_t count;
-    u32 n_buckets;
-    u32 elem_size;
-    u32 hashrnd;
+    atomic_t count;             // element 数量
+    u32 n_buckets;              // buckets 数量
+    u32 elem_size;              // element 大小，单位 bytes
+    u32 hashrnd;                // 哈希随机数
     struct lock_class_key lockdep_key;
     int __percpu *map_locked[HASHTAB_MAP_LOCK_COUNT];
 };
@@ -115,6 +115,413 @@ graph TD
 -   `htab_elem` 通过 `hlist_nulls_node` 链接到 bucket 的哈希链表中
 -   `key[]` 是柔性数组成员（flexible array member），key 之后紧跟 value 数据
 -   对于 LRU 类型的 hash map，`htab_elem` 中会使用 `lru_node` 字段替代普通的 freelist 节点
+
+从`bpf_htab`的定义可以看出，这个哈希表支持下面的所有 hash map 类型（percpu、lru 等等）
+
+```
+BPF_MAP_TYPE_HASH
+BPF_MAP_TYPE_PERCPU_HASH
+BPF_MAP_TYPE_LRU_HASH
+BPF_MAP_TYPE_LRU_PERCPU_HASH
+BPF_MAP_TYPE_HASH_OF_MAPS
+```
+
+此外，这个结构体里有三段内存区域，分别存储 bucket 信息、 elements（hash+key+value 等）信息和额外的 elements 信息：
+
+```
+             +--+--+--+--+--+----------+
+buckets      |  |  |  |  |  | ...      |
+             +--+--+--+--+--+----------+
+             +-------+--------+--------+------------------------------+
+elems        |       |        |        | ...                          |
+             +-------+--------+--------+------------------------------+
+             +-------+--------+-----------------+
+extra_elemes |       |        | ...             | 只有 8 个空间，普通 hash map 用；PERCPU、LRU map 不用
+             +-------+--------+-----------------+
+```
+
+1、`struct bucket`：哈希槽（链表，不存放实际数据）
+
+Bucket 存放的只是链表和锁，并不存放实际数据
+
+```c
+// kernel/bpf/hashtab.c
+
+struct bucket {
+    struct hlist_nulls_head head;
+    union {
+        raw_spinlock_t raw_lock;
+        spinlock_t     lock;
+    };
+};
+```
+
+2、`struct htab_elem`：存放 hash+key+value 等数据（实际的存储数据），特别注意下面的字段
+
+-   `u32 hash`：对 key 进行哈希之后得到的哈希值
+-   `char key[]`：指针，在初始化时会指向 key+value 的**连续内存区域**
+
+```c
+struct htab_elem {
+    // 不同 hash map 类型特定的字段
+    union {
+        struct hlist_nulls_node hash_node; // 内核通用链表类型之一 hlist_nulls
+        struct {
+            void *padding;
+            union {
+                struct bpf_htab *htab;
+                struct pcpu_freelist_node fnode;
+                struct htab_elem *batch_flink;
+            };
+        };
+    };
+    union {
+        struct rcu_head rcu;
+        struct bpf_lru_node lru_node;
+    };
+
+    // 公共字段
+    u32 hash;                 // 哈希值
+    char key[] __aligned(8);  // 指针，指向接下来的 key+value 数据
+};
+```
+
+####    BPF_MAP_TYPE_HASH的操作函数实现
+1、操作函数回调的注册
+
+注册的操作方法（回调函数）集合如下
+
+```c
+// kernel/bpf/hashtab.c
+
+const struct bpf_map_ops htab_map_ops = {
+    .map_alloc_check   = htab_map_alloc_check,
+    .map_alloc         = htab_map_alloc,
+    .map_free          = htab_map_free,
+    .map_get_next_key  = htab_map_get_next_key,
+    .map_lookup_elem   = htab_map_lookup_elem,   // 查找
+    .map_update_elem   = htab_map_update_elem,   // 创建或更新
+    .map_delete_elem   = htab_map_delete_elem,   // 删除
+    .map_gen_lookup    = htab_map_gen_lookup,
+    .map_seq_show_elem = htab_map_seq_show_elem,
+    BATCH_OPS(htab),
+};
+```
+
+2、创建 map的函数：`struct bpf_map *htab_map_alloc()`
+
+```c
+// kernel/bpf/hashtab.c
+
+static struct bpf_map *htab_map_alloc(union bpf_attr *attr)
+实现在 kernel/bpf/hashtab.c， 调用栈：
+
+htab_map_alloc                                   # kernel/bpf/hashtab.c
+  |-htab = kzalloc(sizeof(*htab), GFP_USER)
+  |-bpf_map_init_from_attr(&htab->map, attr)     # 初始化 map 元数据；htab->map 就是 struct bpf_map
+  |
+  |-htab->n_buckets = ...
+  |-htab->elem_size = ...
+  |-bpf_map_charge_init(&htab->map.memory, cost) # 确保 map size 不会过大
+  |
+  | # 分配 bucket 内存
+  |-htab->buckets = bpf_map_area_alloc(size, numa_node)                        // kernel/bpf/syscall.c
+  |                  |-__bpf_map_area_alloc(size, numa_node, false)
+  |                     |-if condition
+  |                     |   kmalloc_node(GFP_USER)
+  |                     |-else
+  |                         __vmalloc_node_range(GFP_KERNEL)
+  |
+  |-htab->hashrnd = ...                          # 初始化哈希种子
+  |
+  |-if (prealloc) { # 提前为所有 elements 分配内存
+      prealloc_init(htab);
+        |-htab->elems = bpf_map_area_alloc(elem_size*n_entries, numa_node);
+        |-per-cpu and lru initiazations if needed
+
+      # 分配 extra 内存
+      if (!percpu && !lru)       // lru itself can remove the least used element, so
+        alloc_extra_elems(htab); // there is no need for an extra elem during map_update
+          |-__alloc_percpu_gfp(sizeof(struct htab_elem *), 8, GFP_USER);
+    }
+```
+
+从上面的流程易知，需要分配三段内存：
+
+-   `buckets` 空间，只是一个链表，里面存放了链表、锁等简单数据
+-   如果启用了预分配，为一次性为所有 elements 分配内存空间。预分配的优点是性能更高（不需要为每个 element 动态分配内存）
+-   extra_elems
+
+3、查询 map：`void *htab_map_lookup_elem()`
+
+-   根据 key 计算出一个哈希值 `hash`
+-   以 hash 作为数组索引，直接定位到对应的 bucket，`O(1)`
+-   顺序遍历 bucket 内的 `struct htab_elem` 元素，如果 `hash` 和 `key` 都相同，就返回对应的 `value` 其实地址；否则返回空。这里虽然是顺序遍历，但除非有哈希冲突，否则第一次就返回了
+
+传入参数是 bpf map 和 key，返回的是 value 的起始地址
+
+```c
+// kernel/bpf/hashtab.c
+
+// 返回 value 起始地址
+static void *htab_map_lookup_elem(struct bpf_map *map, void *key)
+{
+    struct htab_elem *l = __htab_map_lookup_elem(map, key);
+    if (l)
+        // l->key 指向的是 key+value 的地址，因此 l->key + key_size 指向的才是 value，
+        // 此外还需要考虑 key_size 对其 8 字节，因此得到下面一行代码：
+        return l->key + round_up(map->key_size, 8);
+
+    return NULL;
+}
+
+static void *__htab_map_lookup_elem(struct bpf_map *map, void *key)
+{
+    struct bpf_htab *htab = container_of(map, struct bpf_htab, map);
+
+    hash = htab_map_hash(key, key_size, htab->hashrnd);
+    head = select_bucket(htab, hash); // 以 hash 作为数组索引，直接定位到 bucket 起始地址，返回 bucket 内的链表头指针
+    // 简化之后：head = htab->buckets[hash]->head
+    return lookup_nulls_elem_raw(head, hash, key, key_size, htab->n_buckets);
+}
+
+// can be called without bucket lock. it will repeat the loop in
+// the unlikely event when elements moved from one bucket into another while link list is being walked
+static struct htab_elem *
+lookup_nulls_elem_raw(struct hlist_nulls_head *head, u32 hash, void *key, u32 key_size, u32 n_buckets)
+{
+    struct hlist_nulls_node *n; // 通用链表类型之一，与普通链表的区别是最后一个元素不是 NULL 指针，而是 'nulls' 元素
+    struct htab_elem *l;
+
+again:
+    // 顺序遍历 head 指向的（bucket）链表。
+    hlist_nulls_for_each_entry_rcu(l, n, head, hash_node)
+       if (l->hash == hash && !memcmp(&l->key, key, key_size)) // 哈希值和 key 都相同
+           return l;
+    // 为便于理解，以上代码展开和简化之后等价于下面的（伪）代码
+    // for (n=head; n!=nulls && l=(struct htab_elem *)n->hash_node; n=n->next)
+    //     if (l->hash == hash && !memcmp(&l->key, key, key_size)) // 哈希值和 key 都相同
+    //         return l;
+
+    if (get_nulls_value(n) != (hash & (n_buckets - 1)))
+        goto again;
+
+    return NULL;
+}
+```
+
+4、插入或更新 map：`int htab_map_update_elem()`，插入和更新都是执行此函数，返回值`0`表示succ，其他对应错误码
+
+```
+调用栈
+htab_map_update_elem
+ |-hash = htab_map_hash(key, key_size, htab->hashrnd)
+ |-b = __select_bucket(htab, hash)
+ |-l_old = lookup_nulls_elem_raw(head, hash, key, key_size, htab->n_buckets)
+ |
+ |-if l_old
+ |   copy_map_value_locked(map, l_old->key + round_up(key_size, 8), value, false)
+ |   return 0
+ |
+ |-l_old = lookup_elem_raw(head, hash, key, key_size);
+ |-check_flags(htab, l_old, map_flags);
+ |-l_new = alloc_htab_elem(htab, key, value, key_size, hash, false, false, l_old);
+ |          |-if prealloc
+ |          |   ...
+ |          |-else
+ |          |   atomic_inc_return(&htab->count)
+ |          |   l_new = kmalloc_node()
+ |          |
+ |          |-memcpy(l_new->key, key, key_size);
+ |          |-copy_map_value(&htab->map, l_new->key + round_up(key_size, 8), value);
+ |          |-l_new->hash = hash;
+ |          |-return l_new
+ |
+ |-hlist_nulls_add_head_rcu(&l_new->hash_node, head);
+ |
+ |-if l_old
+ |    hlist_nulls_del_rcu(&l_old->hash_node);
+ |    if (!htab_is_prealloc(htab))
+ |       free_htab_elem(htab, l_old);
+ |-return 0
+```
+
+实现代码如下：
+
+```c
+// kernel/bpf/hashtab.c
+
+/* Called from syscall or from eBPF program */
+static int htab_map_update_elem(struct bpf_map *map, void *key, void *value, u64 map_flags)
+{
+    struct bpf_htab *htab = container_of(map, struct bpf_htab, map);
+    struct htab_elem *l_new = NULL, *l_old;
+
+    key_size = map->key_size;
+    hash = htab_map_hash(key, key_size, htab->hashrnd); // 根据 key 计算出一个哈希值
+
+    struct bucket *b = __select_bucket(htab, hash);
+    head = &b->head;
+
+    if (unlikely(map_flags & BPF_F_LOCK)) { // BPF_F_LOCK: spin_lock-ed map_lookup/map_update, defined in include/uapi/linux/bpf.h
+        /* find an element without taking the bucket lock */
+        l_old = lookup_nulls_elem_raw(head, hash, key, key_size, htab->n_buckets);
+        ret = check_flags(htab, l_old, map_flags);
+        if (ret)
+            return ret;
+
+        if (l_old) { // 如果已经存在：获取 elem lock，然后原地更新 value
+            copy_map_value_locked(map, l_old->key + round_up(key_size, 8), value, false);
+            return 0;
+        }
+    }
+
+    // 至此，确认老记录不存在。
+    // 接下来：获取 bucket lock 然后再查询一次。99.9% 的概率仍然是查不到，但这一步必须做。
+    flags = htab_lock_bucket(htab, b);
+    l_old = lookup_elem_raw(head, hash, key, key_size);
+    check_flags(htab, l_old, map_flags);
+
+    if (unlikely(l_old && (map_flags & BPF_F_LOCK))) {
+        // first lookup without the bucket lock didn't find the element,
+        // but second lookup with the bucket lock found it.
+        // This case is highly unlikely, but has to be dealt with:
+        // grab the element lock in addition to the bucket lock and update element in place
+        copy_map_value_locked(map, l_old->key + round_up(key_size, 8), value, false);
+        ret = 0;
+        goto err;
+    }
+
+    // 分配新 element。内部：根据 map 是否是 prealloc 模式，处理逻辑会有所不同
+    l_new = alloc_htab_elem(htab, key, value, key_size, hash, false, false, l_old);
+
+    // 插到链表头，so that concurrent search will find it before old elem */
+    hlist_nulls_add_head_rcu(&l_new->hash_node, head);
+
+    // 如果老的还在，删掉
+    if (l_old) {
+        hlist_nulls_del_rcu(&l_old->hash_node);
+        if (!htab_is_prealloc(htab))
+            free_htab_elem(htab, l_old);
+    }
+    ret = 0;
+
+err:
+    htab_unlock_bucket(htab, b, flags);
+    return ret;
+}
+
+static struct htab_elem *
+alloc_htab_elem(struct bpf_htab *htab, void *key, void *value, u32 key_size, u32 hash,
+                     bool percpu, bool onallcpus, struct htab_elem *old_elem)
+{
+    u32 size = htab->map.value_size;
+    bool prealloc = htab_is_prealloc(htab);
+    struct htab_elem *l_new, **pl_new;
+    void __percpu *pptr;
+
+    if (prealloc) {
+        if (old_elem) {
+            pl_new = this_cpu_ptr(htab->extra_elems);
+            l_new = *pl_new;
+            htab_put_fd_value(htab, old_elem);
+            *pl_new = old_elem;
+        } else {
+            struct pcpu_freelist_node *l;
+
+            l = __pcpu_freelist_pop(&htab->freelist);
+            l_new = container_of(l, struct htab_elem, fnode);
+        }
+    } else {
+        if (atomic_inc_return(&htab->count) > htab->map.max_entries)
+            if (!old_elem) {
+                l_new = ERR_PTR(-E2BIG);
+                goto dec_count;
+            }
+        l_new = kmalloc_node(htab->elem_size, GFP_ATOMIC, htab->map.numa_node);
+        check_and_init_map_lock(&htab->map, l_new->key + round_up(key_size, 8));
+    }
+
+    memcpy(l_new->key, key, key_size);
+
+    if (percpu) {
+        ...
+    } else if (fd_htab_map_needs_adjust(htab)) {
+        size = round_up(size, 8);
+        memcpy(l_new->key + round_up(key_size, 8), value, size);
+    } else {
+        copy_map_value(&htab->map, l_new->key + round_up(key_size, 8), value);
+    }
+
+    l_new->hash = hash;
+    return l_new;
+dec_count:
+    atomic_dec(&htab->count);
+    return l_new;
+}
+```
+
+5、获取下一个 key：`int htab_map_get_next_key(map, key, void *next_key)`，通常用于用户态遍历map
+
+获取第一个 key：只能顺序遍历 buckets 及每个 buckets 内的各元素
+
+获取非第一个 key：
+
+-   根据 key 计算一个哈希值 `hash`
+-   以 `hash` 作为数组索引，直接定位到对应的 bucket
+-   在该 bucket 内查找给定 key；如果找到，按顺序返回下一个 key
+
+需要注意的是，下一个 key 可能在当前 bucket，也可能在下一个 bucket
+
+```c
+// kernel/bpf/hashtab.c
+
+/* Called from syscall */
+static int htab_map_get_next_key(struct bpf_map *map, void *key, void *next_key)
+{
+    struct bpf_htab *htab = container_of(map, struct bpf_htab, map);
+    struct htab_elem *l, *next_l;
+
+    key_size = map->key_size;
+
+    if (!key)
+        goto find_first_elem;
+
+    hash = htab_map_hash(key, key_size, htab->hashrnd);
+    head = select_bucket(htab, hash);
+
+    /* lookup the key */
+    l = lookup_nulls_elem_raw(head, hash, key, key_size, htab->n_buckets);
+    if (!l)
+        goto find_first_elem;
+
+    /* key was found, get next key in the same bucket */
+    next_l = hlist_nulls_entry_safe(hlist_nulls_next_rcu(&l->hash_node), struct htab_elem, hash_node);
+    if (next_l) { // if next elem in this hash list is non-zero, just return it
+        memcpy(next_key, next_l->key, key_size);
+        return 0;
+    }
+
+    /* no more elements in this hash list, go to the next bucket */
+    i = hash & (htab->n_buckets - 1);
+    i++;
+
+find_first_elem:
+    for (; i < htab->n_buckets; i++) { // iterate over buckets
+        head = select_bucket(htab, i);
+
+        /* pick first element in the bucket */
+        next_l = hlist_nulls_entry_safe(hlist_nulls_first_rcu(head), struct htab_elem, hash_node);
+        if (next_l) { // if it's not empty, just return it
+            memcpy(next_key, next_l->key, key_size);
+            return 0;
+        }
+    }
+
+    /* iterated over all buckets and all elements */
+    return -ENOENT;
+}
+```
 
 ####    PERCPU VS NON-PERCPU
 
