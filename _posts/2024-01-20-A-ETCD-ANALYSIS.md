@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      Etcd 工程解析（一）
+title:      Etcd 工程解析（一）（TODO）
 subtitle:   整体模块拆解
 date:       2024-01-20
 author:     pandaychen
@@ -42,3 +42,4 @@ tags:
 -   [etcd Raft 库解析](https://www.codedump.info/post/20180922-etcd-raft/)
 -   [Kubernetes 控制平面组件：etcd](https://burningmyself.gitee.io/kubernetes/k8s_etcd/)
 -   [etcd 教程 (四)---etcd 架构及其实现简单分析](https://www.lixueduan.com/posts/etcd/04-etcd-architecture/)
+-   [Raft算法原理](https://www.codedump.info/post/20180921-raft/)
