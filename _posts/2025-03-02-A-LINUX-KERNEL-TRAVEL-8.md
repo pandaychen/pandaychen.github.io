@@ -51,6 +51,30 @@ tags:
 -	当 NAPI poll() 未正在运行或不在这个调度周期内，收到的包会触发 IRQ，然后内核来启动 poll() 再收包（下面要讨论的`igb_msix_ring`硬件中断处理函数的流程）
 -	**NAPI 存在的意义是无需硬件中断通知就可以接收网络数据**。NAPI 的轮询循环（poll loop）是受硬件中断（IRQ）触发而运行起来的。NAPI 功能启用，但默认是没有工作的，直到第一个包到达的时候，网卡触发的一个硬件将它唤醒。当然内核也有其他的情况导致NAPI 功能也会被关闭，直到下一个硬中断再次将它唤起
 
+NAPI 在中断模式和轮询模式之间的状态切换：
+
+```mermaid
+stateDiagram-v2
+    [*] --> IRQMode: 网卡启动/NAPI初始化
+
+    IRQMode: 中断模式(IRQ Mode)
+    note right of IRQMode
+        硬中断已开启
+        等待数据包触发IRQ
+    end note
+
+    PollMode: 轮询模式(Poll Mode)
+    note right of PollMode
+        硬中断已关闭
+        NAPI poll循环收包
+    end note
+
+    IRQMode --> PollMode: 数据到达触发IRQ<br/>igb_msix_ring→napi_schedule<br/>禁用网卡IRQ
+    PollMode --> PollMode: poll未用完budget<br/>但仍有数据(继续轮询)
+    PollMode --> IRQMode: poll返回work < weight<br/>napi_complete_done<br/>重新开启网卡IRQ
+    PollMode --> IRQMode: budget/time_limit耗尽<br/>net_rx_action退出<br/>重新触发softirq后续处理
+```
+
 ####	网卡收包：一个例子
 本小节使用以太网的物理网卡结合一个UDP packet的接收过程为例子描述下内核收包过程，如下：
 
@@ -263,8 +287,8 @@ tags:
 
 在数据包从网卡到达应用层的过程中，会经历两次数据复制，这里对性能是有影响的：
 
--	第一次：将包从网卡通过 DMA 复制到 ringbuffer（图中第 `3` 步）
--	第二次：从 ringbuffer 复制到 `skb` 结构体（图中第 `6` 步）
+-	第一次：将包从网卡通过 DMA 复制到 RingBuffer（阶段1中的第 `2` 步，图中第 `3` 步）
+-	第二次：从 RingBuffer 复制到 `skb` 结构体（阶段2中的第 `9`/`10` 步，即驱动`poll`函数从RingBuffer取数据并构建`sk_buff`，图中第 `6` 步）
 
 ![rx](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/rx-overview.png)
 
@@ -276,7 +300,7 @@ tags:
 -   `struct sk_buff`：内核中使用的套接字缓冲区[结构体](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/skbuff.h#L566)，套接字结构体用于表示一个网络连接对应的本地接口的网络信息，而`sk_buff`结构则是该网络连接对应的数据包的存储
 
 ####    struct sk_buff结构： 套接字缓冲区
-对于ebpf应用开发者而言，最关注的结构莫过于`sk_buff`了。`sk_buff`用来管理和控制接收OR发送数据包的信息，各层协议都依赖于`sk_buff`而存在。内核中`sk_buff`结构体在各层协议之间传输不是用拷贝`sk_buff`结构体，而是通过增加协议头和移动指针来操作的。如果是从L4传输到L2，则是通过往`sk_buff`结构体中增加该层协议头来操作；如果是从L4到L2，则是通过移动`sk_buff`结构体中的data指针来实现，不会删除各层协议头
+对于ebpf应用开发者而言，最关注的结构莫过于`sk_buff`了。`sk_buff`用来管理和控制接收OR发送数据包的信息，各层协议都依赖于`sk_buff`而存在。内核中`sk_buff`结构体在各层协议之间传输不是用拷贝`sk_buff`结构体，而是通过增加协议头和移动指针来操作的。如果是发送方向（从L4传输到L2），则是通过往`sk_buff`结构体中增加该层协议头来操作（`skb_push`）；如果是接收方向（从L2到L4），则是通过移动`sk_buff`结构体中的data指针来实现（`skb_pull`），不会删除各层协议头
 
 
 ```C
@@ -785,6 +809,302 @@ struct sock_common {
 
 从传输层到链路层，它是存放数据的通用结构，为了保持高效率，数据在传递过程中尽量不发生额外的拷贝。因此，从高层到低层的时候，会不断地在数据前加头，因此每一层的协议都会调用`skb_reserve`，为自己的报头预留空间。至于从低层到高层，去掉低层报头的方式就是移动一下指针，指向高层头，非常简洁
 
+####    核心数据结构：以UDP数据包接收为例
+
+本小节以一个完整的UDP数据包接收过程为例，详细说明内核中各层协议头部结构的定义、在`sk_buff`中如何引用、以及各核心数据结构之间的关系
+
+1、UDP数据包在各层的封装关系
+
+一个UDP数据包在网络上传输时，其二层帧结构（Frame Check Sequence 帧校验序列）如下：
+
+```TEXT
++------------------+----------------+----------------+---------+-----+
+| Ethernet Header  |   IP Header    |  UDP Header    | Payload | FCS |
+|     (14 Bytes)   |  (20 Bytes)    |   (8 Bytes)    |         |     |
++------------------+----------------+----------------+---------+-----+
+      L2                  L3               L4            L7
+```
+
+2、各层头部结构的内核定义
+
+2.1、以太网帧头`struct ethhdr`
+
+```cpp
+//file: include/uapi/linux/if_ether.h
+#define ETH_ALEN    6       // MAC地址长度
+#define ETH_HLEN    14      // 以太网头部总长度
+
+struct ethhdr {
+    unsigned char   h_dest[ETH_ALEN];   // 目的MAC地址（6字节）
+    unsigned char   h_source[ETH_ALEN]; // 源MAC地址（6字节）
+    __be16          h_proto;            // 上层协议类型（2字节），如0x0800表示IPv4
+} __attribute__((packed));
+```
+
+2.2、IP头部`struct iphdr`
+
+```cpp
+//file: include/uapi/linux/ip.h
+struct iphdr {
+#if defined(__LITTLE_ENDIAN_BITFIELD)
+    __u8    ihl:4,          // 首部长度（单位4字节），通常为5即20字节
+            version:4;      // IP版本，IPv4为4
+#elif defined(__BIG_ENDIAN_BITFIELD)
+    __u8    version:4,
+            ihl:4;
+#endif
+    __u8    tos;            // 服务类型（Type of Service）
+    __be16  tot_len;        // IP数据包总长度（含头部）
+    __be16  id;             // 标识符，用于分片重组
+    __be16  frag_off;       // 分片偏移和标志位
+    __u8    ttl;            // 生存时间
+    __u8    protocol;       // 上层协议号，UDP=17，TCP=6
+    __sum16 check;          // 头部校验和
+    __be32  saddr;          // 源IP地址
+    __be32  daddr;          // 目的IP地址
+    /* 可选字段（如果ihl>5则存在） */
+};
+```
+
+2.3、UDP头部`struct udphdr`
+
+```cpp
+//file: include/uapi/linux/udp.h
+struct udphdr {
+    __be16  source;     // 源端口号
+    __be16  dest;       // 目的端口号
+    __be16  len;        // UDP数据报长度（含头部8字节）
+    __sum16 check;      // 校验和
+};
+```
+
+3、`sk_buff`如何引用各层头部
+
+内核通过`sk_buff`中的三个偏移量字段来定位各层头部的位置（相对于`skb->head`的偏移）：
+
+```cpp
+//file: include/linux/skbuff.h
+__u16   transport_header;   // 传输层头部偏移（UDP/TCP头）
+__u16   network_header;     // 网络层头部偏移（IP头）
+__u16   mac_header;         // 链路层头部偏移（以太网头）
+```
+
+内核提供了便捷的宏/内联函数来获取各层头部指针：
+
+```cpp
+//file: include/linux/skbuff.h
+static inline struct ethhdr *eth_hdr(const struct sk_buff *skb)
+{
+    return (struct ethhdr *)skb_mac_header(skb);
+}
+
+//file: include/linux/ip.h
+static inline struct iphdr *ip_hdr(const struct sk_buff *skb)
+{
+    return (struct iphdr *)skb_network_header(skb);
+}
+
+//file: include/linux/udp.h
+static inline struct udphdr *udp_hdr(const struct sk_buff *skb)
+{
+    return (struct udphdr *)skb_transport_header(skb);
+}
+
+// 底层实现：偏移量 + head指针
+static inline unsigned char *skb_mac_header(const struct sk_buff *skb)
+{
+    return skb->head + skb->mac_header;
+}
+
+static inline unsigned char *skb_network_header(const struct sk_buff *skb)
+{
+    return skb->head + skb->network_header;
+}
+
+static inline unsigned char *skb_transport_header(const struct sk_buff *skb)
+{
+    return skb->head + skb->transport_header;
+}
+```
+
+4、**接收方向上各层头部的设置与剥离过程**
+
+在数据包接收方向，各层头部偏移量的设置时机如下：
+
+```cpp
+// 步骤1：网卡驱动层 - 设置mac_header
+// 在 eth_type_trans() 中完成
+//file: net/ethernet/eth.c
+__be16 eth_type_trans(struct sk_buff *skb, struct net_device *dev)
+{
+    struct ethhdr *eth;
+    // 设置mac_header偏移量为当前data位置
+    skb_reset_mac_header(skb);
+    // data指针前移ETH_HLEN(14字节)，跳过以太网头
+    skb_pull_inline(skb, ETH_HLEN);
+    eth = eth_hdr(skb);
+    // 根据目的MAC设置pkt_type
+    if (unlikely(is_multicast_ether_addr(eth->h_dest))) {
+        if (ether_addr_equal_64bits(eth->h_dest, dev->broadcast))
+            skb->pkt_type = PACKET_BROADCAST;
+        else
+            skb->pkt_type = PACKET_MULTICAST;
+    } else if (unlikely(!ether_addr_equal_64bits(eth->h_dest, dev->dev_addr))) {
+        skb->pkt_type = PACKET_OTHERHOST;
+    }
+    return eth->h_proto;    // 返回上层协议类型
+}
+
+// 步骤2：IP层 - 设置network_header
+//file: net/ipv4/ip_input.c
+int ip_rcv(struct sk_buff *skb, ...)
+{
+    // 设置network_header偏移量
+    skb_reset_network_header(skb);
+    // ... 校验IP头 ...
+}
+
+// 步骤3：传输层 - 设置transport_header
+//file: net/ipv4/udp.c  (在__udp4_lib_rcv中)
+// IP层处理完后，通过pskb_may_pull确保传输层头部可访问
+// skb_set_transport_header在ip_local_deliver_finish中隐式完成
+```
+
+5、`sk_buff`在接收方向上的指针变化过程
+
+```mermaid
+flowchart TD
+    subgraph Stage1["阶段1: 驱动层构建skb"]
+        A["skb_put(skb, pkt_len)<br/>tail后移，标记数据范围"]
+        A --> B["data指向: 以太网头起始位置"]
+    end
+
+    subgraph Stage2["阶段2: eth_type_trans"]
+        C["skb_reset_mac_header(skb)<br/>mac_header = data - head"]
+        C --> D["skb_pull(skb, ETH_HLEN=14)<br/>data前移14字节"]
+        D --> E["data指向: IP头起始位置"]
+    end
+
+    subgraph Stage3["阶段3: ip_rcv"]
+        F["skb_reset_network_header(skb)<br/>network_header = data - head"]
+        F --> G["验证IP头合法性"]
+    end
+
+    subgraph Stage4["阶段4: ip_local_deliver_finish"]
+        H["skb_pull(skb, ip_hdrlen)<br/>data前移20字节"]
+        H --> I["skb_reset_transport_header(skb)<br/>transport_header = data - head"]
+        I --> J["data指向: UDP头起始位置"]
+    end
+
+    subgraph Stage5["阶段5: udp_rcv"]
+        K["解析UDP头: source/dest/len"]
+        K --> L["skb_pull(skb, UDP_HLEN=8)<br/>data前移8字节"]
+        L --> M["data指向: 应用层Payload"]
+    end
+
+    Stage1 --> Stage2
+    Stage2 --> Stage3
+    Stage3 --> Stage4
+    Stage4 --> Stage5
+```
+
+各阶段对应的`sk_buff`内存布局变化：
+
+```TEXT
+驱动层（初始状态）:
+    head                                                          end
+    |                                                              |
+    v                                                              v
+    +--+------------------+----------------+--------+---------+----+
+    |  | Ethernet Header  |   IP Header    |UDP Hdr | Payload |    |
+    +--+------------------+----------------+--------+---------+----+
+    ^   ^                                                     ^
+    |   |                                                     |
+    |   data                                                  tail
+    |
+    headroom(skb_reserve预留)
+
+eth_type_trans之后:
+    head                                                          end
+    |                                                              |
+    v                                                              v
+    +--+------------------+----------------+--------+---------+----+
+    |  | Ethernet Header  |   IP Header    |UDP Hdr | Payload |    |
+    +--+------------------+----------------+--------+---------+----+
+        ^                  ^                                   ^
+        |                  |                                   |
+        mac_header         data                                tail
+
+ip_rcv/ip_local_deliver之后:
+    head                                                          end
+    |                                                              |
+    v                                                              v
+    +--+------------------+----------------+--------+---------+----+
+    |  | Ethernet Header  |   IP Header    |UDP Hdr | Payload |    |
+    +--+------------------+----------------+--------+---------+----+
+        ^                  ^                ^                   ^
+        |                  |                |                   |
+        mac_header         network_header   data/transport_hdr  tail
+
+udp_rcv处理之后:
+    head                                                          end
+    |                                                              |
+    v                                                              v
+    +--+------------------+----------------+--------+---------+----+
+    |  | Ethernet Header  |   IP Header    |UDP Hdr | Payload |    |
+    +--+------------------+----------------+--------+---------+----+
+        ^                  ^                ^         ^         ^
+        |                  |                |         |         |
+        mac_header         network_header   transport data      tail
+                                            _header
+```
+
+6、`fd -> file -> socket -> sock -> sk_receive_queue -> sk_buff` 完整关系
+
+```mermaid
+flowchart LR
+    subgraph UserSpace["用户空间"]
+        FD["fd (int)"]
+    end
+
+    subgraph KernelVFS["内核VFS层"]
+        FDTable["fdtable"]
+        File["struct file<br/>.f_op = socket_file_ops<br/>.private_data = socket"]
+    end
+
+    subgraph SocketLayer["Socket层"]
+        Socket["struct socket<br/>.type = SOCK_DGRAM<br/>.ops = inet_dgram_ops<br/>.sk = sock指针<br/>.file = file指针"]
+    end
+
+    subgraph NetworkLayer["网络层"]
+        Sock["struct sock<br/>.sk_receive_queue<br/>.sk_wq (等待队列)<br/>.sk_prot = udp_prot<br/>.sk_data_ready"]
+    end
+
+    subgraph BufferQueue["接收队列"]
+        SKB1["sk_buff #1"]
+        SKB2["sk_buff #2"]
+        SKB3["sk_buff #3"]
+    end
+
+    FD --> FDTable
+    FDTable --> File
+    File -->|"private_data"| Socket
+    Socket -->|"sk"| Sock
+    Sock -->|"sk_receive_queue"| SKB1
+    SKB1 -->|"next"| SKB2
+    SKB2 -->|"next"| SKB3
+    SKB1 -->|"skb->sk"| Sock
+```
+
+上图中各层的职责分工：
+- `fd`：用户空间的文件描述符，通过`fdtable`找到`struct file`
+- `struct file`：VFS层对象，`private_data`指向`struct socket`，`f_op`为`socket_file_ops`
+- `struct socket`：BSD socket抽象层，`ops`为协议方法集（如`inet_dgram_ops`），面向用户空间接口
+- `struct sock`：网络层核心对象，包含收发队列、协议状态、回调函数等，面向内核协议栈
+- `sk_buff`：数据包载体，通过双链表组织在`sk_receive_queue`中，`skb->sk`反向指向所属的`sock`
+
+其中`skb->sk`反向引用的意义在于：当数据包在协议栈中传递时（如发送路径中需要查询socket选项、或者释放skb时需要更新socket内存计数`sk_wmem_alloc`），可以通过`skb`直接定位到对应的socket而无需额外查找
+
 ##	0x03	可观测：内核收包的主要过程
 
 ####	准备工作
@@ -852,20 +1172,25 @@ static int __igb_open(struct net_device *netdev, bool resuming)
 
 其中协议栈注册主要完成了各层协议处理函数的注册，如内核实现网络层的ip协议，传输层的tcp/udp协议等，这些协议对应的实现函数分别是`ip_rcv()`/`tcp_v4_rcv()`/`udp_rcv()`，内核调用`inet_init`后开始网络协议栈注册。通过`inet_init`将上述函数注册到了`inet_protos`和`ptype_base`数据结构中
 
-![inet_init]()
+<!--inet_init协议注册关系图，展示inet_protos和ptype_base的数据结构关系-->
 
 ```cpp
 //file: net/ipv4/af_inet.c
 //udp_protocol结构体中的handler是udp_rcv，tcp_protocol结构体中的handler是tcp_v4_rcv
 //通过inet_add_protocol被初始化到数据结构中
 static struct packet_type ip_packet_type __read_mostly = {
-
     .type = cpu_to_be16(ETH_P_IP),
-    .func = ip_rcv,};static const struct net_protocol udp_protocol = {
+    .func = ip_rcv,
+};
+
+static const struct net_protocol udp_protocol = {
     .handler =  udp_rcv,
     .err_handler =  udp_err,
     .no_policy =    1,
-    .netns_ok = 1,};static const struct net_protocol tcp_protocol = {
+    .netns_ok = 1,
+};
+
+static const struct net_protocol tcp_protocol = {
     .early_demux    =   tcp_v4_early_demux,
     .handler    =   tcp_v4_rcv,
     .err_handler    =   tcp_v4_err,
@@ -924,6 +1249,62 @@ static inline struct list_head *ptype_head(const struct packet_type *pt){
 小结下，上述逻辑中`inet_protos`记录了udp，tcp处理函数的地址，`ptype_base`存储了`ip_rcv()`函数的处理地址，软中断中会通过`ptype_base`找到`ip_rcv`函数地址，进而将ip包正确地送到`ip_rcv()`函数中执行，进而在`ip_rcv`中将会通过`inet_protos`结构定位到tcp或者udp的处理函数，再而把包转发给`udp_rcv()`或`tcp_v4_rcv()`函数。另外，在`ip_rcv`、`tcp_v4_rcv`、`udp_rcv`等函数中可以了解更详细的处理细节，比如`ip_rcv`中会处理netfilter和iptables过滤规则， netfilter 或 iptables 规则，这些规则都是在软中断的上下文中执行的，会加大网络延迟（规则复杂且数目较多）
 
 ####	接收数据的主要流程（核心）
+
+下面给出内核收包从网卡到应用层的完整调用链总览：
+
+```mermaid
+flowchart TD
+    subgraph HardIRQ["硬中断上下文"]
+        A["网卡DMA数据到RingBuffer"] --> B["网卡触发硬中断IRQ"]
+        B --> C["igb_msix_ring()"]
+        C --> D["napi_schedule()"]
+        D --> E["____napi_schedule()<br/>将napi加入poll_list<br/>触发NET_RX_SOFTIRQ"]
+    end
+
+    subgraph SoftIRQ["软中断上下文 (ksoftirqd)"]
+        F["__do_softirq()"] --> G["net_rx_action()"]
+        G --> H["napi_poll() → igb_poll()"]
+        H --> I["igb_clean_rx_irq()"]
+        I --> J["igb_fetch_rx_buffer()<br/>从RingBuffer取数据构建skb"]
+        J --> K["napi_gro_receive()"]
+        K --> L["netif_receive_skb()"]
+        L --> M["__netif_receive_skb_core()"]
+    end
+
+    subgraph ProtoStack["协议栈处理 (仍在软中断上下文)"]
+        N["ptype_all: AF_PACKET抓包点"] 
+        O["deliver_skb → ip_rcv()"]
+        O --> P["NF_INET_PRE_ROUTING"]
+        P --> Q["ip_rcv_finish → 路由查找"]
+        Q --> R["ip_local_deliver()"]
+        R --> S["NF_INET_LOCAL_IN"]
+        S --> T["ip_local_deliver_finish()"]
+        T --> U["udp_rcv() / tcp_v4_rcv()"]
+    end
+
+    subgraph UDPLayer["UDP处理"]
+        V["__udp4_lib_rcv()"]
+        V --> W["__udp4_lib_lookup_skb() 查找socket"]
+        W --> X["udp_queue_rcv_skb()"]
+        X --> Y["__udp_enqueue_schedule_skb()"]
+        Y --> Z["__skb_queue_tail(sk_receive_queue)"]
+        Z --> AA["sk->sk_data_ready() 唤醒进程"]
+    end
+
+    subgraph AppLayer["应用层"]
+        BB["进程被唤醒/epoll事件通知"]
+        BB --> CC["recvfrom → udp_recvmsg()"]
+        CC --> DD["__skb_recv_datagram()"]
+        DD --> EE["skb_copy_datagram_iter() 拷贝到用户空间"]
+    end
+
+    E --> F
+    M --> N
+    M --> O
+    U --> V
+    AA --> BB
+```
+
 1、硬中断处理
 
 首先数据帧从网线到达网卡的接收队列上，网卡在分配给自己的RingBuffer中寻找可用的内存位置，找到后DMA引擎会把数据DMA到这块Ringbuffer中（该过程对CPU无感）。当DMA操作完成以后，网卡会向CPU发起一个硬中断，通知CPU有数据帧到达。igb网卡的硬中断注册的处理函数是[`igb_msix_ring`](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L5782)，这里硬中断里只完成简单必要的工作，剩下的大部分逻辑都是转交给软中断处理。`igb_msix_ring`的逻辑仅仅记录了一个寄存器，修改了一下CPU的`poll_list`，然后发出软中断即完成
@@ -931,6 +1312,7 @@ static inline struct list_head *ptype_head(const struct packet_type *pt){
 硬中断期间是不能再进行另外的硬中断的，不能嵌套。所以硬中断处理函数（handler）执行时，会屏蔽部分或全部（新的）硬中断。这就要求硬中断要尽快处理，然后关闭这次硬中断，这样下次硬中断才能再进来；另一方面，中断被屏蔽的时间越长，丢失事件的可能性也就越大；如果一次硬中断时间过长，RingBuffer 会被塞满导致丢包。因此所有耗时的操作都应该从硬中断处理逻辑中剥离出来，硬中断因此能尽可能快地执行，然后再重新打开。所以软中断就是针对这一目的设计的
 
 ![hardirq]()
+<!--硬中断处理流程图-->
 
 -   `igb_write_itr`：记录一下硬件中断频率
 -   硬中断触发，调用`napi_schedule->__napi_schedule->____napi_schedule->__raise_softirq_irqoff`：触发软中断
@@ -1010,6 +1392,7 @@ smpboot_thread_fn
 ksoftirqd中两个线程函数`ksoftirqd_should_run`和`run_ksoftirqd`的主要逻辑如下：
 
 ![kfngxl]()
+<!--ksoftirqd线程函数主要逻辑图-->
 
 -   `ksoftirqd_should_run`：读取`local_softirq_pending`函数的结果（硬中断也调用此函数，硬中断位置会修改写入标记），如果硬中断中设置了`NET_RX_SOFTIRQ`，接下来会真正进入线程函数中`run_ksoftirqd`处理
 -   `run_ksoftirqd`函数：在软中断线程初始化时，就会注册`run_ksoftirqd()`函数。首先调用`local_irq_disable()`，`local_irq_disable()`是个宏，会展开成处理器架构相关的函数，**功能是关闭所在 CPU 的所有硬中断**，接下来，判断如果有 pending softirq，则执行`__do_softirq()` 处理软中断，软中断流程完成后，然后重新打开所在 CPU 的硬中断，然后返回；否则直接打开所在 CPU 的硬中断，然后返回
@@ -1283,6 +1666,36 @@ out_unlock:
 
 4、 接下来，如果处理时间超时或处理的报文数到了最多允许处理的个数的场景，说明还有 NAPI 上有报文需要处理，调度软中断。否则，说明这次软中断处理完全部的NAPI上的需要处理的报文，不再需要调度软中断了
 
+`net_rx_action`核心逻辑流程：
+
+```mermaid
+flowchart TD
+    Start["net_rx_action()入口"] --> Init["获取当前CPU的softnet_data<br/>设置time_limit = jiffies+2<br/>设置budget = netdev_budget"]
+    Init --> DisableIRQ["local_irq_disable()<br/>将sd->poll_list移到本地list"]
+    DisableIRQ --> EnableIRQ["local_irq_enable()"]
+    EnableIRQ --> CheckEmpty{"list为空?"}
+
+    CheckEmpty -->|"是"| CheckRPS{"有RPS IPI等待<br/>或repoll非空?"}
+    CheckRPS -->|"否"| GoOut["goto out"]
+    CheckRPS -->|"是"| Break["break"]
+
+    CheckEmpty -->|"否"| GetNAPI["从list取第一个napi_struct"]
+    GetNAPI --> CallPoll["budget -= napi_poll(n, &repoll)<br/>调用驱动poll函数收包"]
+
+    CallPoll --> CheckBudget{"budget<=0<br/>或time超时?"}
+    CheckBudget -->|"是"| Squeeze["sd->time_squeeze++<br/>break"]
+    CheckBudget -->|"否"| CheckEmpty
+
+    Squeeze --> Merge["合并poll_list和repoll"]
+    Break --> Merge
+    Merge --> CheckPollList{"sd->poll_list非空?"}
+    CheckPollList -->|"是"| RaiseSoftIRQ["__raise_softirq_irqoff<br/>重新触发NET_RX_SOFTIRQ"]
+    CheckPollList -->|"否"| EnableIRQ2["net_rps_action_and_irq_enable"]
+    RaiseSoftIRQ --> EnableIRQ2
+    EnableIRQ2 --> GoOut
+    GoOut --> End["返回"]
+```
+
 在`net_rx_action`流程中涉及到的几个关键数据结构：
 
 -	`napi_struct`，包含`poll_list`（链入 CPU 的轮询队列）、`poll`（指向设备驱动的轮询函数）、`weight`（单次轮询最大包数）
@@ -1332,6 +1745,7 @@ static int igb_poll(struct napi_struct *napi, int budget)
 ```
 
 ![net_rx_action]()
+<!--net_rx_action与napi_poll配合流程图-->
 
 继续走读下收包核心函数`igb_poll`，其重点工作是对[`igb_clean_rx_irq`](https://elixir.bootlin.com/linux/v4.11.8/source/drivers/net/ethernet/intel/igb/igb_main.c#L7157)的调用，`igb_clean_rx_irq`的主要工作：
 
@@ -1481,11 +1895,11 @@ static gro_result_t napi_skb_finish(gro_result_t ret, struct sk_buff *skb)
 `netif_receive_skb->__netif_receive_skb_core`函数会根据packet的协议调用注册的协议处理函数处理，在`__netif_receive_skb_core`函数，`__netif_receive_skb_core`取出protocol，它会从数据包中取出协议信息，然后遍历注册在这个协议上的回调函数列表
 
 -	tcpdump的抓包点逻辑
--	`list_for_each_entry_rcu`用于遍历由RCU保护的链表，目的是将网络数据包（sk_buff）分发给注册的协议处理程序（如抓包工具tcpdump或协议栈）,在`__netif_receive_skb_core`中，list_for_each_entry_rcu被用于两个场景（代码片段如下）
+-	`list_for_each_entry_rcu`用于遍历由RCU保护的链表，目的是将网络数据包（sk_buff）分发给注册的协议处理程序（如抓包工具tcpdump或协议栈）,在`__netif_receive_skb_core`中，`list_for_each_entry_rcu`被用于两个场景（代码片段如下）
 	-	遍历`ptype_all`链表，将数据包发送给所有注册的全局协议处理程序，由于可能有多个处理程序注册到`ptype_all`（例如多个抓包实例），所以需循环逐个检查设备是否匹配（`ptype->dev == skb->dev`）并分发数据包
 	-	遍历`ptype_base`哈希链表：根据数据包的类型（如IPv4、ARP）分发到对应的协议栈处理程序，由于同一协议类型可能有多个处理程序（如内核协议栈和用户态工具），需遍历所有可能的匹配项
 
-![]()
+<!--__netif_receive_skb_core协议分发逻辑图-->
 
 ```cpp
 static int __netif_receive_skb_core(struct sk_buff *skb, bool pfmemalloc)
@@ -1698,7 +2112,107 @@ int udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 }
 ```
 
-`sock_owned_by_user`函数的场景是TODO
+`sock_owned_by_user`函数用于判断当前socket是否正被用户进程持有（即用户进程正在对该socket执行系统调用），其核心机制是通过`sk->sk_lock.owned`字段来判断的：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/net/sock.h#L1513
+static inline bool sock_owned_by_user(const struct sock *sk)
+{
+	sock_owned_by_me(sk);
+    return sk->sk_lock.owned;
+}
+```
+
+这里涉及到内核中socket锁的分层设计（`socket_lock_t`），该锁同时服务于进程上下文和软中断上下文两个场景：
+
+```cpp
+//file: include/net/sock.h
+typedef struct {
+    spinlock_t      slock;      // 自旋锁，软中断上下文使用
+    int             owned;      // 标记：1表示被用户进程持有
+    wait_queue_head_t wq;       // 等待队列
+} socket_lock_t;
+```
+
+**场景说明**：当用户进程调用如`recvfrom`/`sendmsg`等socket系统调用时，会通过`lock_sock`获取socket的所有权：
+
+```cpp
+//file: net/core/sock.c
+void lock_sock(struct sock *sk)
+{
+    lock_sock_nested(sk, 0);
+}
+
+void lock_sock_nested(struct sock *sk, int subclass)
+{
+    might_sleep();
+    spin_lock_bh(&sk->sk_lock.slock);
+    if (sk->sk_lock.owned)
+        __lock_sock(sk);            // 如果已被占有，当前进程睡眠等待
+    sk->sk_lock.owned = 1;          // 标记为用户进程持有
+    spin_unlock(&sk->sk_lock.slock);
+}
+```
+
+当软中断（如`udp_queue_rcv_skb`）发现`sock_owned_by_user`为`true`时，说明此刻用户进程正在操作该socket，软中断不能直接操作`sk_receive_queue`（避免竞争），转而将`skb`放入`sk->sk_backlog`队列暂存。当用户进程完成操作后调用`release_sock`时，会处理积压在backlog中的数据包：
+
+```cpp
+//file: net/core/sock.c
+void release_sock(struct sock *sk)
+{
+    spin_lock_bh(&sk->sk_lock.slock);
+    if (sk->sk_backlog.tail)
+        __release_sock(sk);         // 处理backlog队列中的skb
+    sk->sk_lock.owned = 0;          // 释放所有权
+    if (waitqueue_active(&sk->sk_lock.wq))
+        wake_up(&sk->sk_lock.wq);   // 唤醒等待获取锁的进程
+    spin_unlock_bh(&sk->sk_lock.slock);
+}
+
+static void __release_sock(struct sock *sk)
+{
+    struct sk_buff *skb, *next;
+
+    // 循环处理backlog队列中的所有skb
+    while ((skb = sk->sk_backlog.head) != NULL) {
+        sk->sk_backlog.head = sk->sk_backlog.tail = NULL;
+        spin_unlock_bh(&sk->sk_lock.slock);
+
+        do {
+            next = skb->next;
+            prefetch(next);
+            skb->next = NULL;
+            // sk_backlog_rcv对于UDP就是__udp_queue_rcv_skb
+            // 将skb从backlog移到sk_receive_queue
+            sk_backlog_rcv(sk, skb);
+            skb = next;
+        } while (skb != NULL);
+
+        spin_lock_bh(&sk->sk_lock.slock);
+    }
+}
+```
+
+```mermaid
+sequenceDiagram
+    participant UserProcess as 用户进程
+    participant SoftIRQ as 软中断
+    participant Socket as struct sock
+
+    UserProcess->>Socket: lock_sock(sk) 设置 owned=1
+    Note over UserProcess,Socket: 用户进程正在操作socket
+
+    SoftIRQ->>Socket: udp_queue_rcv_skb(sk, skb)
+    SoftIRQ->>Socket: sock_owned_by_user(sk) == true
+    SoftIRQ->>Socket: sk_add_backlog(sk, skb) 放入backlog队列
+
+    UserProcess->>Socket: release_sock(sk)
+    Socket->>Socket: __release_sock() 处理backlog
+    Socket->>Socket: sk_backlog_rcv(sk,skb) 移入sk_receive_queue
+    Socket->>Socket: owned=0 释放所有权
+```
+
+小结：这种设计巧妙地避免了在软中断和用户进程之间使用重量级锁来保护`sk_receive_queue`。软中断只需要获取轻量的`slock`自旋锁来检查`owned`标记并操作backlog队列，而不需等待用户进程释放socket
 
 继续看下`__udp_queue_rcv_skb->__udp_enqueue_schedule_skb`的实现：
 
@@ -1722,6 +2236,32 @@ int __udp_enqueue_schedule_skb(struct sock *sk, struct sk_buff *skb)
 	//......	
 }
 EXPORT_SYMBOL_GPL(__udp_enqueue_schedule_skb);
+```
+
+UDP收包入队的完整流程图：
+
+```mermaid
+flowchart TD
+    A["udp_rcv(skb)"] --> B["__udp4_lib_rcv(skb, udptable)"]
+    B --> C["__udp4_lib_lookup_skb()<br/>根据src/dst IP:Port查找socket"]
+    C --> D{"找到对应的sock?"}
+    D -->|"否"| E["icmp_send(ICMP_DEST_UNREACH)<br/>丢弃skb"]
+    D -->|"是"| F["udp_queue_rcv_skb(sk, skb)"]
+
+    F --> G{"sk_rcvqueues_full?<br/>接收队列是否满"}
+    G -->|"是"| H["drop: 丢弃skb<br/>sk->sk_drops++"]
+    G -->|"否"| I["bh_lock_sock(sk)"]
+
+    I --> J{"sock_owned_by_user(sk)?"}
+    J -->|"否: 用户未占用"| K["__udp_queue_rcv_skb(sk, skb)"]
+    J -->|"是: 用户正在操作"| L["sk_add_backlog(sk, skb)<br/>放入backlog队列"]
+
+    K --> M["__udp_enqueue_schedule_skb()"]
+    M --> N["__skb_queue_tail(sk_receive_queue, skb)"]
+    N --> O["sk->sk_data_ready(sk)<br/>唤醒等待进程/触发epoll"]
+
+    L --> P["bh_unlock_sock(sk)"]
+    P --> Q["用户进程release_sock时<br/>backlog → sk_receive_queue"]
 ```
 
 至此，软中断的一轮接收报文及处理过程结束，`run_ksoftirqd`逻辑中`__do_softirq`处理完成，继续下面的流程
@@ -1856,8 +2396,352 @@ EXPORT_SYMBOL(__skb_recv_datagram);
 
 ![rx-overview](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/rx-overview.png)
 
+##	0x05	阻塞接收与非阻塞接收
 
-##	0x05	主要hook点
+本章节详细分析应用层进程通过不同方式接收数据时，内核内部的处理路径差异。以UDP的`recvfrom`为例，主要有下面三种场景：
+
+1.	阻塞模式
+2.	非阻塞模式
+3.	epoll模式
+
+####	阻塞接收（Blocking Receive）
+
+当用户进程调用`recvfrom`且不设置`MSG_DONTWAIT`标志时，如果socket接收队列为空，进程会进入睡眠状态等待数据到来
+
+1、超时时间计算
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/core/datagram.c#L270
+struct sk_buff *__skb_recv_datagram(struct sock *sk, unsigned int flags,
+                    void (*destructor)(struct sock *sk,
+                               struct sk_buff *skb),
+                    int *peeked, int *off, int *err)
+{
+    struct sk_buff *skb, *last;
+    long timeo;
+
+    // 根据flags计算等待超时时间
+    // 如果flags包含MSG_DONTWAIT，timeo=0（非阻塞）
+    // 否则timeo = sk->sk_rcvtimeo（可通过SO_RCVTIMEO设置，默认MAX_SCHEDULE_TIMEOUT即无限等待）
+    timeo = sock_rcvtimeo(sk, flags & MSG_DONTWAIT);
+
+    do {
+        skb = __skb_try_recv_datagram(sk, flags, destructor, peeked,
+                          off, err, &last);
+        if (skb)
+            return skb;
+
+        if (*err != -EAGAIN)
+            break;
+    } while (timeo &&
+        !__skb_wait_for_more_packets(sk, err, &timeo, last));
+
+    return NULL;
+}
+```
+
+```cpp
+//file: include/net/sock.h
+static inline long sock_rcvtimeo(const struct sock *sk, bool noblock)
+{
+    // noblock为true时返回0（非阻塞），否则返回socket设置的接收超时
+    return noblock ? 0 : sk->sk_rcvtimeo;
+}
+```
+
+2、进程睡眠等待：`__skb_wait_for_more_packets`
+
+当接收队列为空且允许等待时，进程通过此函数进入睡眠：
+
+```cpp
+//file: net/core/datagram.c
+int __skb_wait_for_more_packets(struct sock *sk, int *err,
+                long *timeo_p, const struct sk_buff *skb)
+{
+    int error;
+    DEFINE_WAIT_FUNC(wait, receiver_wake_function);
+
+    // 将当前进程加入socket的等待队列 sk->sk_wq
+    prepare_to_wait_exclusive(sk_sleep(sk), &wait, TASK_INTERRUPTIBLE);
+
+    /* Socket errors? */
+    error = sock_error(sk);
+    if (error)
+        goto out_err;
+
+    // 再次检查接收队列是否有数据（避免竞态）
+    if (sk->sk_receive_queue.prev != skb)
+        goto out;
+
+    error = -EAGAIN;
+    if (!*timeo_p)
+        goto out_err;
+
+    /* handle signals */
+    if (signal_pending(current))
+        goto interrupted;
+
+    error = 0;
+    // 进程调度出去，进入睡眠状态
+    // 超时或被唤醒后返回
+    *timeo_p = schedule_timeout(*timeo_p);
+out:
+    finish_wait(sk_sleep(sk), &wait);
+    return error;
+interrupted:
+    error = sock_intr_errno(*timeo_p);
+out_err:
+    *err = error;
+    finish_wait(sk_sleep(sk), &wait);
+    return error;
+}
+```
+
+其中`sk_sleep(sk)`返回的是`sk->sk_wq->wait`等待队列头：
+
+```cpp
+//file: include/net/sock.h
+static inline wait_queue_head_t *sk_sleep(struct sock *sk)
+{
+    BUILD_BUG_ON(offsetof(struct socket_wq, wait) != 0);
+    return &rcu_dereference_raw(sk->sk_wq)->wait;
+}
+```
+
+3、数据到达后唤醒进程：`sk_data_ready`（可以[epoll内核实现](https://pandaychen.github.io/2025/05/22/A-LINUX-KERNEL-TRAVEL-13/)一文对比下）
+
+当软中断将数据包放入`sk_receive_queue`后，会调用`sk->sk_data_ready`回调函数。对于UDP socket，该回调在创建时被初始化为`sock_def_readable`：
+
+```cpp
+//file: net/core/sock.c
+// socket初始化时设置
+void sock_init_data(struct socket *sock, struct sock *sk)
+{
+    // ...
+    sk->sk_data_ready = sock_def_readable;
+    // ...
+}
+
+// 默认的数据就绪回调
+static void sock_def_readable(struct sock *sk)
+{
+    struct socket_wq *wq;
+
+    rcu_read_lock();
+    wq = rcu_dereference(sk->sk_wq);
+    // 检查等待队列上是否有等待者
+    if (skwq_has_sleeper(wq))
+        // 唤醒等待队列上的进程
+        wake_up_interruptible_sync_poll(&wq->wait, POLLIN | POLLPRI |
+                        POLLRDNORM | POLLRDBAND);
+    // 同时通知异步通知（fasync）机制
+    sk_wake_async(sk, SOCK_WAKE_WAITD, POLL_IN);
+    rcu_read_unlock();
+}
+```
+
+4、阻塞接收完整时序图
+
+```mermaid
+sequenceDiagram
+    participant App as 用户进程
+    participant Kernel as 内核(sys_recvfrom)
+    participant Socket as struct sock
+    participant SoftIRQ as 软中断(ksoftirqd)
+    participant NIC as 网卡
+
+    App->>Kernel: recvfrom(fd, buf, len, 0)
+    Kernel->>Socket: __skb_try_recv_datagram()
+    Note over Socket: sk_receive_queue为空
+    Socket-->>Kernel: 返回NULL
+
+    Kernel->>Socket: __skb_wait_for_more_packets()
+    Kernel->>Socket: prepare_to_wait(sk_wq, TASK_INTERRUPTIBLE)
+    Note over App: 进程状态: TASK_INTERRUPTIBLE (睡眠)
+    Kernel->>Kernel: schedule_timeout(timeo)
+    Note over App: 进程被调度出CPU
+
+    NIC->>SoftIRQ: 数据包到达，DMA+硬中断+软中断
+    SoftIRQ->>Socket: __udp_enqueue_schedule_skb(sk, skb)
+    SoftIRQ->>Socket: __skb_queue_tail(sk_receive_queue, skb)
+    SoftIRQ->>Socket: sk->sk_data_ready(sk)
+    Socket->>Socket: sock_def_readable()
+    Socket->>App: wake_up_interruptible(sk_wq)
+    Note over App: 进程状态: TASK_RUNNING (被唤醒)
+
+    App->>Kernel: schedule_timeout返回
+    Kernel->>Socket: finish_wait()
+    Kernel->>Socket: __skb_try_recv_datagram() 再次尝试
+    Socket-->>Kernel: 返回skb
+    Kernel->>App: skb_copy_datagram_iter() 拷贝到用户空间
+    App->>App: recvfrom返回，数据在buf中
+```
+
+####	非阻塞接收（Non-blocking Receive）
+
+当用户进程调用`recvfrom`时设置了`MSG_DONTWAIT`标志，或者socket通过`fcntl`设置了`O_NONBLOCK`标志时，如果没有数据可读则立即返回错误
+
+1、非阻塞模式的判断路径
+
+```cpp
+......
+// 在inet_recvmsg中，flags & MSG_DONTWAIT 会被传递给udp_recvmsg
+err = sk->sk_prot->recvmsg(sk, msg, size, flags & MSG_DONTWAIT,
+                   flags & ~MSG_DONTWAIT, &addr_len);
+
+// 最终在__skb_recv_datagram中：
+timeo = sock_rcvtimeo(sk, flags & MSG_DONTWAIT);
+// MSG_DONTWAIT为1时，timeo = 0
+
+do {
+    skb = __skb_try_recv_datagram(...);
+    if (skb)
+        return skb;
+    if (*err != -EAGAIN)
+        break;
+} while (timeo &&   // timeo=0，循环条件为false，直接退出
+    !__skb_wait_for_more_packets(sk, err, &timeo, last));
+
+return NULL;  // 返回NULL，err = -EAGAIN
+......
+```
+
+当`timeo == 0`时，循环体执行一次后条件判断`timeo && ...`为`false`，直接退出循环返回`NULL`。上层函数会将`-EAGAIN`（等价于`-EWOULDBLOCK`）返回给用户空间，用户进程收到`errno = EAGAIN`表示当前没有数据可读
+
+2、`O_NONBLOCK`标志的传递路径
+
+当socket设置了`O_NONBLOCK`标志时，即使`recvfrom`的flags参数不包含`MSG_DONTWAIT`，也会走非阻塞路径：
+
+```cpp
+//file: net/socket.c
+// sys_recvfrom → sock_recvmsg → sock_recvmsg_nosec
+// 在实际调用时，如果file设置了O_NONBLOCK，会合并到flags中
+if (sock->file->f_flags & O_NONBLOCK)
+    flags |= MSG_DONTWAIT;
+```
+
+####	epoll模式下的接收
+
+epoll是Linux高性能网络编程中最常用的IO多路复用机制，其与socket收包的协作核心在于`sk_data_ready`回调
+
+1、epoll监听socket的注册过程
+
+当调用`epoll_ctl(epfd, EPOLL_CTL_ADD, sockfd, &event)`时，内核会将一个回调函数`ep_poll_callback`挂到socket的等待队列上：
+
+```cpp
+//file: fs/eventpoll.c
+// epoll_ctl -> ep_insert
+static int ep_insert(struct eventpoll *ep, struct epoll_event *event,
+             struct file *tfile, int fd, int full_check)
+{
+    struct epitem *epi;
+    struct ep_pqueue epq;
+
+    // 分配epitem
+    epi = kmem_cache_alloc(epi_cache, GFP_KERNEL);
+    // ...
+
+    // 设置回调函数
+    epq.epi = epi;
+    init_poll_funcptr(&epq.pt, ep_ptable_queue_proc);
+
+    // 调用socket的poll方法，在此过程中会将ep_poll_callback
+    // 注册到socket的等待队列sk->sk_wq上
+    revents = ep_item_poll(epi, &epq.pt);
+    // ...
+}
+
+// 注册到socket等待队列的回调函数
+static void ep_ptable_queue_proc(struct file *file, wait_queue_head_t *whead,
+                 poll_table *pt)
+{
+    struct epitem *epi = ep_item_from_epqueue(pt);
+    struct eppoll_entry *pwq;
+
+    pwq = kmem_cache_alloc(pwq_cache, GFP_KERNEL);
+    // 设置唤醒回调为ep_poll_callback
+    init_waitqueue_func_entry(&pwq->wait, ep_poll_callback);
+    pwq->whead = whead;
+    pwq->base = epi;
+    // 将等待项加入socket的等待队列
+    add_wait_queue(whead, &pwq->wait);
+}
+```
+
+2、数据到达时的epoll唤醒流程
+
+当软中断将数据包放入`sk_receive_queue`并调用`sk_data_ready -> sock_def_readable -> wake_up_interruptible`时，会触发socket等待队列上注册的`ep_poll_callback`：
+
+```cpp
+//file: fs/eventpoll.c
+static int ep_poll_callback(wait_queue_t *curr, unsigned mode, int wake_flags,
+                void *key)
+{
+    struct epitem *epi = ep_item_from_wait(curr);
+    struct eventpoll *ep = epi->ep;
+
+    spin_lock_irqsave(&ep->lock, flags);
+
+    // 将就绪的epitem加入eventpoll的就绪列表rdllist
+    if (!ep_is_linked(&epi->rdllink)) {
+        list_add_tail(&epi->rdllink, &ep->rdllist);
+    }
+
+    // 唤醒在epoll_wait上等待的进程
+    if (waitqueue_active(&ep->wq))
+        wake_up_locked(&ep->wq);
+    // 同时唤醒通过epoll fd进行poll的进程
+    if (waitqueue_active(&ep->poll_wait))
+        pwake++;
+
+    spin_unlock_irqrestore(&ep->lock, flags);
+
+    if (pwake)
+        ep_poll_safewake(&ep->poll_wait);
+
+    return 1;
+}
+```
+
+3、epoll模式下的完整数据接收流程
+
+```mermaid
+sequenceDiagram
+    participant App as 用户进程
+    participant Epoll as epoll实例
+    participant Socket as struct sock
+    participant SoftIRQ as 软中断
+
+    Note over App: 1. 注册阶段
+    App->>Epoll: epoll_ctl(ADD, sockfd, EPOLLIN)
+    Epoll->>Socket: ep_poll_callback注册到sk_wq
+
+    Note over App: 2. 等待阶段
+    App->>Epoll: epoll_wait(epfd, events, timeout)
+    Note over App: rdllist为空，进程睡眠在ep->wq上
+
+    Note over SoftIRQ: 3. 数据到达
+    SoftIRQ->>Socket: __udp_enqueue_schedule_skb(sk, skb)
+    SoftIRQ->>Socket: sk->sk_data_ready(sk)
+    Socket->>Socket: sock_def_readable()
+    Socket->>Epoll: wake_up → ep_poll_callback()
+    Epoll->>Epoll: 将epitem加入rdllist
+    Epoll->>App: wake_up(ep->wq) 唤醒进程
+
+    Note over App: 4. 读取阶段
+    App->>App: epoll_wait返回就绪事件
+    App->>Socket: recvfrom(sockfd, buf, MSG_DONTWAIT)
+    Note over Socket: sk_receive_queue有数据
+    Socket-->>App: 返回数据（非阻塞，立即完成）
+```
+
+4、epoll模式的关键特性
+
+-	**边缘触发（ET）vs 水平触发（LT）**：LT模式下，只要`sk_receive_queue`中有数据，每次`epoll_wait`都会返回该socket的可读事件；ET模式下，只在状态变化（从无数据到有数据）时通知一次
+-	**非阻塞配合**：epoll模式下通常将socket设置为`O_NONBLOCK`，这样`recvfrom`不会阻塞，配合epoll事件驱动实现高效IO
+-	**`sk_data_ready`是桥梁**：无论是阻塞模式唤醒睡眠进程，还是epoll模式触发事件通知，都是通过`sk_data_ready`回调实现的。区别在于等待队列上挂的回调函数不同，**阻塞模式挂的是`autoremove_wake_function`，epoll模式挂的是`ep_poll_callback`**
+
+##	0x06	主要hook点
 从上图中标注的关键节点，列举下内核接收包主要的hooks，如下：
 
 1、[`tracepoint:net:netif_receive_skb`](https://elixir.bootlin.com/linux/v4.11.6/source/net/core/dev.c#L4296)
@@ -1872,7 +2756,7 @@ int netif_receive_skb(struct sk_buff *skb)
 EXPORT_SYMBOL(netif_receive_skb);
 ```
 
-2、`tracepoint:tcp:tcp_retransmit_skb`：TCP状态切换
+2、`tracepoint:tcp:tcp_retransmit_skb`：TCP重传事件
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_output.c#L2824
@@ -1886,7 +2770,279 @@ int tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb, int segs)
 }
 ```
 
-##  0x06  参考
+3、`kprobe:ip_rcv`：IP层接收入口
+
+```cpp
+//file: net/ipv4/ip_input.c
+int ip_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt, struct net_device *orig_dev)
+```
+
+可观测信息：通过`skb`参数可解析IP头部（源/目的IP、协议号、TTL等），通过`dev`可获取接收网卡设备信息。该hook点位于netfilter `PREROUTING`链之前，适合统计IP层接收包量、协议分布
+
+4、`kprobe:udp_rcv`：UDP协议层接收入口
+
+```cpp
+//file: net/ipv4/udp.c
+int udp_rcv(struct sk_buff *skb)
+```
+
+可观测信息：此时`skb`已经过IP层校验，可通过`udp_hdr(skb)`解析UDP源/目的端口、数据长度，关联hook点为`kprobe:__udp4_lib_lookup_skb`可观测socket查找过程
+
+5、`kprobe:tcp_v4_rcv`：TCP协议层接收入口
+
+```cpp
+//file: net/ipv4/tcp_ipv4.c
+int tcp_v4_rcv(struct sk_buff *skb)
+```
+
+可观测信息：TCP包进入传输层的入口，可观测TCP头部信息（序列号、确认号、标志位等），结合`inet_lookup`可追踪socket匹配
+
+6、`kprobe:__netif_receive_skb_core`：协议栈分发核心函数
+
+```cpp
+//file: net/core/dev.c
+static int __netif_receive_skb_core(struct sk_buff *skb, bool pfmemalloc)
+```
+
+可观测信息：数据包从驱动层进入协议栈的关键入口。此处可观测`skb->protocol`（L3协议类型）、`skb->dev`（接收设备）、`skb->pkt_type`（包类型），是统计网卡级别收包量和协议分布的理想位置
+
+7、`tracepoint:napi:napi_poll`：NAPI轮询事件
+
+```cpp
+//内核通过TRACE_EVENT定义
+//参数：napi_struct *napi, int work, int budget
+```
+
+可观测信息：每次NAPI poll调用后触发，`work`表示本次处理的包数，`budget`表示配额。当`work == budget`说明流量较大，NAPI需要继续轮询。可用于监控网卡收包压力和NAPI调度频率
+
+8、`kprobe:napi_gro_receive`：GRO合并处理入口
+
+```cpp
+//file: net/core/dev.c
+gro_result_t napi_gro_receive(struct napi_struct *napi, struct sk_buff *skb)
+```
+
+可观测信息：驱动将`skb`提交给协议栈前的GRO处理入口，可统计每个NAPI实例的包提交速率
+
+9、`kprobe:sock_queue_rcv_skb` / `kprobe:__udp_enqueue_schedule_skb`：数据包入socket接收队列
+
+```cpp
+//file: net/core/sock.c
+int sock_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
+
+//file: net/ipv4/udp.c
+int __udp_enqueue_schedule_skb(struct sock *sk, struct sk_buff *skb)
+```
+
+可观测信息：数据包最终进入socket接收队列的时刻，可通过`sk`获取socket信息（端口、地址），结合`sk->sk_rcvbuf`和`sk->sk_rmem_alloc`监控接收缓冲区使用率
+
+10、`kprobe:skb_copy_datagram_iter`：数据从内核态拷贝到用户态
+
+```cpp
+//file: net/core/datagram.c
+int skb_copy_datagram_iter(const struct sk_buff *skb, int offset,
+                           struct iov_iter *to, int len)
+```
+
+可观测信息：用户进程读取数据时的内核态到用户态拷贝操作，可统计应用层实际消费的数据量和频率
+
+11、`kprobe:consume_skb` / `kprobe:kfree_skb`：skb释放/丢弃
+
+```cpp
+//file: net/core/skbuff.c
+void consume_skb(struct sk_buff *skb)    // 正常消费释放
+void kfree_skb(struct sk_buff *skb)      // 异常丢弃
+```
+
+可观测信息：`kfree_skb`表示数据包在协议栈中被丢弃（如队列满、校验失败等），是定位丢包点的关键hook。配合`tracepoint:skb:kfree_skb`可获取丢弃原因（`reason`参数）
+
+####	Hook点与收包流程对应关系
+
+```mermaid
+flowchart TD
+    A["网卡DMA到RingBuffer"] --> B["igb_msix_ring (硬中断)"]
+    B --> C["net_rx_action (软中断)"]
+    C --> D["napi_poll ← tracepoint:napi:napi_poll"]
+    D --> E["igb_clean_rx_irq"]
+    E --> F["napi_gro_receive ← kprobe:napi_gro_receive"]
+    F --> G["__netif_receive_skb_core ← kprobe"]
+    G --> H["ptype_all: AF_PACKET/tcpdump"]
+    G --> I["deliver_skb → ip_rcv ← kprobe:ip_rcv"]
+    I --> J["NF_INET_PRE_ROUTING"]
+    J --> K["ip_local_deliver"]
+    K --> L["NF_INET_LOCAL_IN"]
+    L --> M["udp_rcv ← kprobe:udp_rcv"]
+    M --> N["__udp_enqueue_schedule_skb ← kprobe"]
+    N --> O["sk_data_ready 唤醒进程"]
+    O --> P["recvfrom → skb_copy_datagram_iter ← kprobe"]
+    P --> Q["consume_skb ← kprobe:consume_skb"]
+```
+
+##  0x07  补充知识点
+
+####    softnet_data结构详解
+
+`softnet_data`是一个Per-CPU的数据结构，每个CPU都有一个独立的实例，用于管理该CPU上的网络收包状态：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/netdevice.h#L2737
+struct softnet_data {
+    struct list_head    poll_list;       // 待轮询的NAPI实例链表
+    struct sk_buff_head process_queue;   // 处理队列（RPS使用）
+    unsigned int        processed;       // 已处理计数
+    unsigned int        time_squeeze;    // 因budget/time耗尽退出的次数（调优指标）
+    unsigned int        cpu_collision;   // 发送时CPU碰撞次数
+    unsigned int        received_rps;    // 通过RPS接收的包数
+
+    struct sk_buff_head input_pkt_queue; // 输入包队列（RPS/非NAPI路径使用）
+    struct napi_struct  backlog;         // 虚拟NAPI（用于处理input_pkt_queue）
+
+    // ...
+    struct sk_buff      *completion_queue; // 待释放的skb队列
+    // ...
+};
+```
+
+各字段的使用场景：
+-   `poll_list`：NAPI核心队列。硬中断中通过`____napi_schedule`将设备的`napi_struct`挂到此链表，`net_rx_action`从此链表取NAPI实例进行轮询
+-   `input_pkt_queue`：当开启RPS（Receive Packet Steering）时，`enqueue_to_backlog`会将skb放入目标CPU的此队列；或者非NAPI驱动（如lo设备通过`netif_rx`）也会使用此队列
+-   `process_queue`：`input_pkt_queue`中的包在处理时会被移到`process_queue`中逐个处理
+-   `backlog`：一个虚拟的NAPI实例，其poll函数为`process_backlog`，用于处理`input_pkt_queue`中的数据包。当`enqueue_to_backlog`向`input_pkt_queue`添加skb时，会同时调度此虚拟NAPI
+-   `time_squeeze`：**关键调优指标**，表示`net_rx_action`因预算或时间耗尽而退出的次数。可通过`/proc/net/softnet_stat`的第二列观察
+
+####    GRO（Generic Receive Offloading）机制
+
+GRO是Linux内核在软件层面实现的包合并优化技术，目的是减少协议栈需要处理的包数量，降低CPU开销：
+
+1、工作原理
+
+GRO在网卡驱动调用`napi_gro_receive`时生效。它会检查新到达的包是否可以与之前暂存的包进行合并（例如，连续的TCP段可以合并成一个大包）：
+
+```cpp
+//file: net/core/dev.c
+gro_result_t napi_gro_receive(struct napi_struct *napi, struct sk_buff *skb)
+{
+    skb_gro_reset_offset(skb);
+    // dev_gro_receive尝试将skb与napi->gro_list中的包合并
+    return napi_skb_finish(dev_gro_receive(napi, skb), skb);
+}
+```
+
+2、合并条件（以TCP协议为例）
+
+-   同一个flow（相同五元组）
+-   连续的序列号
+-   相同的MAC/IP/TCP头部选项
+-   不含紧急数据或特殊标志
+
+3、与LRO（Large Receive Offload）的区别
+
+-   LRO在网卡硬件中实现，合并规则较粗糙，可能破坏包的语义（如修改头部信息），不适合转发场景
+-   GRO在内核软件层实现，合并规则严格，保持包的完整性，适合所有场景（包括路由转发）
+
+4、对UDP的处理：
+
+-   对于UDP，GRO的支持相对有限。在较新内核中支持UDP GRO（`UDP_GRO` socket选项），但在`4.11.6`内核版本中主要受益的是TCP流量
+
+####    RPS/RFS机制
+
+RPS（Receive Packet Steering）和RFS（Receive Flow Steering）是软件层面的多核负载均衡机制，用于将网络包分散到多个CPU处理：
+
+1、RPS的工作原理
+
+当网卡只有单队列或队列数少于CPU核数时，RPS可以在软件层面将不同flow的包分发到不同CPU处理：
+
+```cpp
+//file: net/core/dev.c
+static int enqueue_to_backlog(struct sk_buff *skb, int cpu,
+                  unsigned int *qtail)
+{
+    struct softnet_data *sd;
+    unsigned long flags;
+    unsigned int qlen;
+
+    sd = &per_cpu(softnet_data, cpu);
+
+    local_irq_save(flags);
+    rps_lock(sd);
+
+    // 检查input_pkt_queue是否已满
+    if (!netif_running(skb->dev))
+        goto drop;
+    qlen = skb_queue_len(&sd->input_pkt_queue);
+    if (qlen <= netdev_max_backlog) {
+        if (qlen) {
+enqueue:
+            // 将skb放入目标CPU的input_pkt_queue
+            __skb_queue_tail(&sd->input_pkt_queue, skb);
+            input_queue_tail_incr_save(sd, qtail);
+            rps_unlock(sd);
+            local_irq_restore(flags);
+            return NET_RX_SUCCESS;
+        }
+        // 队列为空，需要调度backlog NAPI
+        if (!__test_and_set_bit(NAPI_STATE_SCHED, &sd->backlog.state)) {
+            if (!rps_ipi_queued(sd))
+                ____napi_schedule(sd, &sd->backlog);
+        }
+        goto enqueue;
+    }
+
+drop:
+    // 队列满，丢包
+    sd->dropped++;
+    rps_unlock(sd);
+    local_irq_restore(flags);
+    kfree_skb(skb);
+    return NET_RX_DROP;
+}
+```
+
+2、RPS的CPU选择策略：RPS通过对数据包的hash值（基于源/目的IP和端口的四元组hash）来选择目标CPU，保证同一flow的包总是被同一个CPU处理（避免乱序）
+
+3、RFS的改进：RFS在RPS的基础上，进一步将包发送到应用程序线程所在的CPU，减少CPU之间的cache迁移开销
+
+4、何时使用RPS/RFS：
+
+-   网卡硬件队列数少于CPU核数时
+-   单队列网卡场景
+-   注意：如果网卡本身支持RSS（Receive Side Scaling，硬件多队列），通常优先使用RSS，因为硬件级别的分发开销更低
+
+####    关键性能调优参数（主要）
+
+| 参数 | 默认值 | 说明 | 调优场景 |
+|------|--------|------|---------|
+| `net.core.netdev_budget` | `300` | 单次`net_rx_action`处理的最大包数 | `time_squeeze`持续增高时调大 |
+| `net.core.netdev_budget_usecs` | `2000` | 单次`net_rx_action`的最大执行时间（μs） | 配合`netdev_budget`一起调整 |
+| `net.core.netdev_max_backlog` | `1000` | `input_pkt_queue`最大长度 | RPS场景或`softnet_stat`第二列增长时调大 |
+| `net.core.rmem_max` | `212992` | socket接收缓冲区最大值（bytes） | 高带宽UDP场景需要调大 |
+| `net.core.rmem_default` | `212992` | socket接收缓冲区默认值（bytes） | 同上 |
+| `net.ipv4.udp_mem` | 系统计算 | UDP全局内存限制（pages） | UDP大流量场景 |
+| RingBuffer大小 | 驱动默认 | 通过`ethtool -G eth0 rx N`调整 | `ifconfig`显示`overruns`增长时调大 |
+
+`/proc/net/softnet_stat` 各列含义（每行对应一个CPU）：
+
+```TEXT
+列1: sd->processed      - 该CPU处理的总帧数
+列2: sd->time_squeeze   - net_rx_action因budget/time耗尽退出的次数（重要！）
+列3: sd->dropped        - 因input_pkt_queue满而丢弃的包数（RPS/非NAPI路径）
+```
+
+```bash
+[root@VM-X-X-tencentos ~]# cat /proc/net/softnet_stat
+0290f2ae 00000000 00000008 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+02676c26 00000000 00000019 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+02c37c5f 00000000 00000004 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+02a8312b 00000000 00000007 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+```
+
+监控建议：
+-   持续监控`/proc/net/softnet_stat`第2列（`time_squeeze`），如果持续增长，表示软中断处理预算不够，应调大`netdev_budget`
+-   持续监控第3列（`dropped`），如果增长，调大`netdev_max_backlog`
+-   通过`ethtool -S eth0`查看网卡级别的丢包统计（如`rx_dropped`/`rx_missed_errors`），如果增长需要调大RingBuffer
+-   通过`cat /proc/interrupts | grep eth`观察硬中断的CPU分布，如果集中在单核需要调整IRQ亲和性
+
+##  0x08  参考
 -   [Monitoring and Tuning the Linux Networking Stack: Sending Data](https://blog.packagecloud.io/monitoring-tuning-linux-networking-stack-sending-data/)
 -   [Monitoring and Tuning the Linux Networking Stack: Receiving Data](https://blog.packagecloud.io/monitoring-tuning-linux-networking-stack-receiving-data/)
 -   [Linux网络 - 数据包的发送过程](https://segmentfault.com/a/1190000008926093)
