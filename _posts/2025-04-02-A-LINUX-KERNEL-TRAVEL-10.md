@@ -270,7 +270,7 @@ flowchart TD
 - `CHECKSUM_NONE`：内核需要完整计算校验和（软件方式）
 - `CHECKSUM_COMPLETE`/`CHECKSUM_UNNECESSARY`：用于接收方向
 
-##  0x03    核心数据结构拆解
+##  0x04    核心数据结构拆解
 
 本节以 UDP 发送为主线，详细分析协议栈发送路径涉及的核心数据结构及其层次关系
 
@@ -466,7 +466,7 @@ struct msghdr {
 };
 ```
 
-[iov_iter`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/uio.h#L30) 封装了用户空间数据缓冲区的迭代方式，内部引用 `struct iovec` 数组：
+[`iov_iter`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/uio.h#L30) 封装了用户空间数据缓冲区的迭代方式，内部引用 `struct iovec` 数组：
 
 ```cpp
 struct iov_iter {
@@ -498,11 +498,11 @@ struct iovec {
 
 ####	sk_buff
 
-见[前文]()
+见[前文](https://pandaychen.github.io/2025/03/02/A-LINUX-KERNEL-TRAVEL-8/#struct-sk_buff%E7%BB%93%E6%9E%84-%E5%A5%97%E6%8E%A5%E5%AD%97%E7%BC%93%E5%86%B2%E5%8C%BA)
 
 ####	sk_buff_head
 
-见[前文]()
+见[前文](https://pandaychen.github.io/2025/03/02/A-LINUX-KERNEL-TRAVEL-8/#struct-sk_buff%E7%BB%93%E6%9E%84-%E5%A5%97%E6%8E%A5%E5%AD%97%E7%BC%93%E5%86%B2%E5%8C%BA)
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/skbuff.h#L281
@@ -553,7 +553,7 @@ static inline struct sk_buff *tcp_send_head(const struct sock *sk)
 | IP 头 | `ip_local_out` → `__ip_local_out` | `net/ipv4/ip_output.c` | 由 `ip_setup_cork` / `__ip_make_skb` 时初始化，`__ip_local_out` 设置 `tot_len` 并计算校验和 |
 | 以太网头 | `dev_hard_header` / `neigh_hh_output` | `net/ethernet/eth.c` | `eth_header()` 填充 `dst_mac/src_mac/ethertype` |
 
-##  0x04    Socket 层：系统调用入口
+##  0x05    Socket 层：系统调用入口
 
 ####    协议族注册
 内核启动时，`inet_init` 函数注册 `AF_INET` 协议族并初始化 TCP/UDP/ICMP/RAW 协议栈。[`inetsw_array`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/af_inet.c#L1015) 定义了协议类型到操作函数集的映射：
@@ -692,7 +692,7 @@ int inet_sendmsg(struct socket *sock, struct msghdr *msg, size_t size)
 
 对于 UDP，`sk->sk_prot->sendmsg` 指向 `udp_sendmsg`；对于 TCP，指向 `tcp_sendmsg`
 
-##  0x05    传输层发送
+##  0x06    传输层发送
 
 ####    UDP 发送路径（主线）：udp_sendmsg 全流程
 
@@ -985,7 +985,7 @@ static int tcp_transmit_skb(struct sock *sk, struct sk_buff *skb, int clone_it,
 
 注意 TCP 使用 `ip_queue_xmit`（而非 `ip_send_skb`），因为 TCP 需要处理路由缓存、IP 选项等连接级别的信息
 
-##  0x06    网络层（IP层）发送处理
+##  0x07    网络层（IP层）发送处理
 
 IP 层负责添加 IP 头、查找路由、处理 netfilter 钩子、执行 IP 分片
 
@@ -1148,7 +1148,7 @@ static int ip_finish_output2(struct net *net, struct sock *sk, struct sk_buff *s
 
 `__ipv4_neigh_lookup_noref` 在邻居缓存中查找对应 IP 的 L2 地址。如果找不到，`__neigh_create` 在 ARP 表中创建新条目（可能触发 ARP 请求）。找到后通过 `dst_neigh_output` 进入邻居子系统
 
-##  0x07    邻居子系统
+##  0x08    邻居子系统
 
 邻居子系统（Neighbour Subsystem）负责将 L3 地址（IP）解析为 L2 地址（MAC），并构造以太网帧头
 
@@ -1282,7 +1282,7 @@ int eth_header(struct sk_buff *skb, struct net_device *dev,
 
 至此，skb 包含了完整的 以太网头 + IP头 + UDP头 + 用户数据
 
-##  0x08    网络设备子系统
+##  0x09    网络设备子系统
 
 网络设备子系统负责选择发送队列、执行流量控制（qdisc），并将数据传递给驱动
 
@@ -1507,7 +1507,7 @@ int sch_direct_xmit(struct sk_buff *skb, struct Qdisc *q,
 }
 ```
 
-##  0x09    软中断调度
+##  0x0A    软中断调度
 
 当 qdisc 处理配额耗尽或驱动返回 BUSY 导致数据重新入队时，通过软中断异步继续发送
 
@@ -1599,7 +1599,7 @@ static __latent_entropy void net_tx_action(struct softirq_action *h)
 
 重要提示：发送数据的总 CPU 时间 = 用户进程的系统时间（`sendmsg` 调用链直到驱动尝试发送） + softirq 时间（`NET_TX` 软中断中的重试发送）
 
-##  0x0A    dev_hard_start_xmit 与驱动发送
+##  0x0B    dev_hard_start_xmit 与驱动发送
 
 ####    dev_hard_start_xmit
 
@@ -1770,7 +1770,7 @@ DQL 是一种背压（back pressure）机制，防止过多数据堆积在设备
 
 DQL 参数通过 sysfs 可查看和调优：`/sys/class/net/<dev>/queues/tx-<N>/byte_queue_limits/`
 
-##  0x0B    发送完成与硬中断
+##  0x0C    发送完成与硬中断
 
 网卡 DMA 传输完成后，会触发硬件中断通知驱动清理资源
 
@@ -1923,7 +1923,7 @@ static bool igb_clean_tx_irq(struct igb_q_vector *q_vector)
 4. `netdev_tx_completed_queue`：通知 DQL 完成了多少字节
 5. `netif_wake_subqueue`：如果 TX ring 有足够空间且队列被停止了，重新唤醒
 
-##     0x0    内核数据发送
+##     0x0D    内核数据发送
 本小节补充下TCP的发送场景，基于TCP三次握手完成，通过`accept`获取到客户端的连接fd，基于这个fd发送数据的场景进行分析
 
 ####   1、accept 获取fd完成的布局
@@ -2507,7 +2507,7 @@ TODO
 
 TODO
 
-##  0x0C    监控与调优
+##  0x0E    监控与调优
 
 ####    UDP 协议层统计
 
@@ -2592,7 +2592,7 @@ $ sudo ifconfig eth0 txqueuelen 10000
 $ echo 1 > /sys/class/net/eth0/queues/tx-0/xps_cpus
 ```
 
-##  0x0D    参考
+##  0x0F    参考
 -   [Monitoring and Tuning the Linux Networking Stack: Sending Data](https://blog.packagecloud.io/monitoring-tuning-linux-networking-stack-sending-data/)
 -   [Monitoring and Tuning the Linux Networking Stack: Receiving Data](https://blog.packagecloud.io/monitoring-tuning-linux-networking-stack-receiving-data/)
 -   [Linux网络 - 数据包的发送过程](https://segmentfault.com/a/1190000008926093)
