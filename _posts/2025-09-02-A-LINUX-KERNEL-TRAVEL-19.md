@@ -138,7 +138,48 @@ static inline struct hlist_bl_head *d_hash(unsigned int hash)
 
 ####	dcache的主要操作函数
 
-1、`d_alloc`
+下面列出 dcache 核心操作函数的源码及锁机制分析。先给出整体的锁行为：
+
+| 函数 | lock | 引用计数影响 | 要点 |
+|------|--------|-------------|------|
+| `d_alloc` | 获取 `parent->d_lock` | parent `count++`，新 dentry `count=1` | 新 dentry 加入 `d_subdirs` |
+| `d_add` / `__d_add` | `inode->i_lock`（外）→ `dentry->d_lock`（内） | 无变动 | `d_seq` seqcount 保护 inode 写入；加入 hash table 和 alias 链表 |
+| `d_lookup` / `__d_lookup` | `rcu_read_lock` + 逐个 `spin_lock(d_lock)` | 找到时 `count++` | 外层 `rename_lock` seqlock 防 rename 并发的 false-negative |
+| `d_drop` / `__d_drop` | `dentry->d_lock` | 不变 | 从 hashtable 摘除，`d_seq` invalidate 通知 rcu-walk 重试 |
+| `d_delete` | `inode->i_lock` → `dentry->d_lock`（严格顺序） | 依据 `count==1` 分支 | `count==1` 直接 `unlink` inode（变 negative）；`count>1` 仅 drop |
+| `dget` | `lockref_get`（快速路径 `cmpxchg` 无锁，慢路径 `d_lock`） | `count++` | 纯引用计数增加 |
+| `dput` | 快速路径 `fast_dput`（`cmpxchg`），慢路径 `d_lock` | `count--` | 归零时 `dentry_kill` → 释放或放入 LRU |
+| `dentry_free` | 无锁（dentry 已完全隔离） | N/A | `call_rcu` 延迟释放，保证 rcu-walk 读者安全 |
+| `d_lru_*` 系列 | 需在已持有 `dentry->d_lock` 下调用 | 不变 | 操作 per-sb LRU list + per-cpu 计数器 |
+
+**dcache 全局锁层次（Lock Ordering）**：
+
+为避免死锁，内核要求所有 dcache 操作严格按以下顺序获取锁：
+
+```text
+rename_lock（全局 seqlock，最外层）
+  -> inode->i_lock
+    -> dentry->d_lock (parent)
+      -> dentry->d_lock (child, NESTED)
+```
+
+```mermaid
+graph LR
+    RL["rename_lock<br/>(全局 seqlock)"] --> IL["inode->i_lock"]
+    IL --> PDL["parent->d_lock"]
+    PDL --> CDL["child->d_lock<br/>(NESTED)"]
+
+    style RL fill:#f9f,stroke:#333
+    style IL fill:#fcc,stroke:#333
+    style PDL fill:#fcf,stroke:#333
+    style CDL fill:#cff,stroke:#333
+```
+
+1、`d_alloc`：分配一个新 dentry 并挂入父目录的子链表
+
+- **锁**：获取 `parent->d_lock`，保护 `d_subdirs` 链表的并发修改
+- **引用计数**：`__dget_dlock(parent)` 增加父 dentry 引用（因为新 child 持有 parent 指针）；新 dentry 自身 count 初始为 `1`（由 `__d_alloc` 中 `lockref_init` 设置）
+- **并发安全**：新 dentry 刚分配尚未对外可见，因此不需要对 child 加锁（代码注释：`don't need child lock because it is not subject to concurrency here`）
 
 ```c
 //https://elixir.bootlin.com/linux/v5.4.241/source/fs/dcache.c#L1758
@@ -147,14 +188,14 @@ struct dentry *d_alloc(struct dentry * parent, const struct qstr *name)
 	struct dentry *dentry = __d_alloc(parent->d_sb, name);
 	if (!dentry)
 		return NULL;
-	spin_lock(&parent->d_lock);
+	spin_lock(&parent->d_lock);       // 保护 parent->d_subdirs 链表
 	/*
 	 * don't need child lock because it is not subject
 	 * to concurrency here
 	 */
-	__dget_dlock(parent);
-	dentry->d_parent = parent;
-	list_add(&dentry->d_child, &parent->d_subdirs);
+	__dget_dlock(parent);              // parent 引用计数 +1
+	dentry->d_parent = parent;         // 建立父子关系
+	list_add(&dentry->d_child, &parent->d_subdirs);  // 加入父目录子链表
 	spin_unlock(&parent->d_lock);
 
 	return dentry;
@@ -162,14 +203,20 @@ struct dentry *d_alloc(struct dentry * parent, const struct qstr *name)
 EXPORT_SYMBOL(d_alloc);
 ```
 
-2、`d_add`
+2、`d_add` / `__d_add`：将 dentry 与 inode 关联，并加入 dcache hash table
+
+- **锁顺序**：`inode->i_lock`（外层，由 `d_add` 获取）→ `dentry->d_lock`（内层，由 `__d_add` 获取），严格遵循全局锁层次
+- **seqcount 保护**：`d_seq` 的 `raw_write_seqcount_begin/end` 包裹 inode 指针写入，使得并发的 rcu-walk 读者能检测到变更并重试
+- **hash table**：`__d_rehash(dentry)` 将 dentry 加入全局 hash table，使后续 `d_lookup` 可以找到它
+- **alias 链表**：`hlist_add_head(&dentry->d_u.d_alias, &inode->i_dentry)` 将 dentry 挂入 inode 的别名链表（支持硬链接场景：多个 dentry 指向同一 inode）
+- **引用计数**：不变动（调用方已通过 `d_alloc` 持有 dentry 引用）
 
 ```c
 void d_add(struct dentry *entry, struct inode *inode)
 {
 	if (inode) {
 		security_d_instantiate(entry, inode);
-		spin_lock(&inode->i_lock);
+		spin_lock(&inode->i_lock);   // 外层锁：保护 inode->i_dentry alias 链表
 	}
 	__d_add(entry, inode);
 }
@@ -179,51 +226,57 @@ static inline void __d_add(struct dentry *dentry, struct inode *inode)
 {
 	struct inode *dir = NULL;
 	unsigned n;
-	spin_lock(&dentry->d_lock);
+	spin_lock(&dentry->d_lock);          // 内层锁：保护 dentry 状态
 	if (unlikely(d_in_lookup(dentry))) {
 		dir = dentry->d_parent->d_inode;
-		n = start_dir_add(dir);
-		__d_lookup_done(dentry);
+		n = start_dir_add(dir);          // 获取目录 i_dir_seq 写锁
+		__d_lookup_done(dentry);         // 唤醒等待该 lookup 完成的线程
 	}
 	if (inode) {
 		unsigned add_flags = d_flags_for_inode(inode);
-		hlist_add_head(&dentry->d_u.d_alias, &inode->i_dentry);
-		raw_write_seqcount_begin(&dentry->d_seq);
-		__d_set_inode_and_type(dentry, inode, add_flags);
-		raw_write_seqcount_end(&dentry->d_seq);
+		hlist_add_head(&dentry->d_u.d_alias, &inode->i_dentry); // 加入 inode alias
+		raw_write_seqcount_begin(&dentry->d_seq);   // seqcount 写屏障开始
+		__d_set_inode_and_type(dentry, inode, add_flags); // 设置 d_inode 指针
+		raw_write_seqcount_end(&dentry->d_seq);     // seqcount 写屏障结束
 		fsnotify_update_flags(dentry);
 	}
-	__d_rehash(dentry);
+	__d_rehash(dentry);                  // 加入 dcache hash table
 	if (dir)
-		end_dir_add(dir, n);
+		end_dir_add(dir, n);             // 释放目录 i_dir_seq 写锁
 	spin_unlock(&dentry->d_lock);
 	if (inode)
-		spin_unlock(&inode->i_lock);
+		spin_unlock(&inode->i_lock);     // 释放外层 inode 锁
 }
 ```
 
-3、`d_lookup/`
+3、`d_lookup` / `__d_lookup`：在 dcache hash table 中查找指定名称的 dentry（ref-walk 模式）
+
+- **两层保护机制**：
+  - 外层 `d_lookup()`：使用全局 `rename_lock`（seqlock）检测并发 rename。如果在查找期间有 rename 发生（`read_seqretry` 返回 true），则重试整个查找，避免 rename 导致的 false-negative（dentry 被 move 到另一个 hash bucket）
+  - 内层 `__d_lookup()`：`rcu_read_lock()` 保护 hash 链表遍历 + 对每个候选 dentry 取 `spin_lock(d_lock)` 后再校验 parent/name/unhashed
+- **引用计数**：找到匹配 dentry 后在持 `d_lock` 期间直接 `count++`，返回"持有引用"的 dentry，调用方必须通过 `dput()` 释放
+- **性能特点**：每次查找都有 spin_lock/unlock 开销，在 SMP 高并发场景下会产生 cacheline bouncing
 
 ```c
-//https://elixir.bootlin.com/linux/v5.4.241/source/fs/dcache.c#L1758
+//https://elixir.bootlin.com/linux/v5.4.241/source/fs/dcache.c#L2308
 struct dentry *d_lookup(const struct dentry *parent, const struct qstr *name)
 {
 	struct dentry *dentry;
 	unsigned seq;
 
 	do {
-		seq = read_seqbegin(&rename_lock);
+		seq = read_seqbegin(&rename_lock);    // 读取 rename seqlock 序号
 		dentry = __d_lookup(parent, name);
 		if (dentry)
 			break;
-	} while (read_seqretry(&rename_lock, seq));
+	} while (read_seqretry(&rename_lock, seq)); // rename 发生则重试
 	return dentry;
 }
 
 struct dentry *__d_lookup(const struct dentry *parent, const struct qstr *name)
 {
 	unsigned int hash = name->hash;
-	struct hlist_bl_head *b = d_hash(hash);
+	struct hlist_bl_head *b = d_hash(hash);   // 定位 hash bucket
 	struct hlist_bl_node *node;
 	struct dentry *found = NULL;
 	struct dentry *dentry;
@@ -248,66 +301,70 @@ struct dentry *__d_lookup(const struct dentry *parent, const struct qstr *name)
 	 *
 	 * See Documentation/filesystems/path-lookup.txt for more details.
 	 */
-	rcu_read_lock();
-	
+	rcu_read_lock();                          // RCU 读侧临界区
+
 	hlist_bl_for_each_entry_rcu(dentry, node, b, d_hash) {
 
-		if (dentry->d_name.hash != hash)
+		if (dentry->d_name.hash != hash)      // 快速跳过 hash 不匹配项
 			continue;
 
-		spin_lock(&dentry->d_lock);
-		if (dentry->d_parent != parent)
+		spin_lock(&dentry->d_lock);           // 逐个候选加锁校验
+		if (dentry->d_parent != parent)       // 校验父目录
 			goto next;
-		if (d_unhashed(dentry))
-			goto next;
-
-		if (!d_same_name(dentry, parent, name))
+		if (d_unhashed(dentry))               // 校验未被摘除
 			goto next;
 
-		dentry->d_lockref.count++;
+		if (!d_same_name(dentry, parent, name)) // 校验名称完全匹配
+			goto next;
+
+		dentry->d_lockref.count++;            // 引用计数 +1
 		found = dentry;
 		spin_unlock(&dentry->d_lock);
 		break;
 next:
 		spin_unlock(&dentry->d_lock);
- 	}
- 	rcu_read_unlock();
+	}
+	rcu_read_unlock();
 
- 	return found;
+	return found;
 }
 ```
 
-4、`d_drop`
+4、`d_drop` / `__d_drop`：将 dentry 从 dcache hash table 中摘除（使其不可被 `d_lookup` 找到）
+
+- **锁**：`d_drop()` 获取 `dentry->d_lock`，`__d_drop()` 假设调用方已持有该锁
+- **seqcount invalidate**：`write_seqcount_invalidate(&dentry->d_seq)` 会使 `d_seq` 变为奇数值，通知所有并发的 rcu-walk 读者（`__d_lookup_rcu`）该 dentry 正在被修改，必须重试或回退到 ref-walk
+- **引用计数**：不变动，仅改变 dentry 在 hash table 中的可见性
+- **典型调用场景**：文件删除（`d_delete`）、rename（`d_move`）
 
 ```c
 //https://elixir.bootlin.com/linux/v5.4.241/source/fs/dcache.c#L504
-void d_drop(struct dentry *dentry)
-{
-	spin_lock(&dentry->d_lock);
-	__d_drop(dentry);
-	spin_unlock(&dentry->d_lock);
-}
-
 void __d_drop(struct dentry *dentry)
 {
 	if (!d_unhashed(dentry)) {
-		___d_drop(dentry);
-		dentry->d_hash.pprev = NULL;
-		write_seqcount_invalidate(&dentry->d_seq);
+		___d_drop(dentry);                        // 从 hash bucket 链表摘除
+		dentry->d_hash.pprev = NULL;              // 标记为 unhashed
+		write_seqcount_invalidate(&dentry->d_seq); // 通知 rcu-walk 读者
 	}
 }
 EXPORT_SYMBOL(__d_drop);
 
 void d_drop(struct dentry *dentry)
 {
-	spin_lock(&dentry->d_lock);
+	spin_lock(&dentry->d_lock);    // 获取 dentry 自身锁
 	__d_drop(dentry);
 	spin_unlock(&dentry->d_lock);
 }
 EXPORT_SYMBOL(d_drop);
 ```
 
-5、`d_delete`
+5、`d_delete`：删除一个 dentry（将其从 inode 断开或仅从 hash 摘除）
+
+- **锁顺序**：`inode->i_lock`（外层）→ `dentry->d_lock`（内层），这是全局统一的锁层次，所有涉及 inode+dentry 的操作都必须遵循此顺序，否则会死锁
+- **两种路径**：
+  - `count == 1`（仅当前持有者）：调用 `dentry_unlink_inode()`，将 dentry 变为 negative（断开与 inode 的关联），锁由 `dentry_unlink_inode` 内部释放
+  - `count > 1`（还有其他引用者）：仅 `__d_drop()` 从 hash 摘除，其他引用者后续 `dput()` 时自行清理
+- **引用计数**：不直接变动 count，但 `dentry_unlink_inode` 会 `dput` 导致后续引用释放
 
 ```c
 //https://elixir.bootlin.com/linux/v5.4.241/source/fs/dcache.c#L2432
@@ -315,16 +372,17 @@ void d_delete(struct dentry * dentry)
 {
 	struct inode *inode = dentry->d_inode;
 
-	spin_lock(&inode->i_lock);
-	spin_lock(&dentry->d_lock);
+	spin_lock(&inode->i_lock);       // 外层锁：保护 inode->i_dentry alias 链表
+	spin_lock(&dentry->d_lock);      // 内层锁：保护 dentry 状态
 	/*
 	 * Are we the only user?
 	 */
 	if (dentry->d_lockref.count == 1) {
 		dentry->d_flags &= ~DCACHE_CANT_MOUNT;
-		dentry_unlink_inode(dentry);
+		dentry_unlink_inode(dentry);  // 断开 inode 关联，dentry 变 negative
+		// 注意：dentry_unlink_inode 内部会释放两把锁
 	} else {
-		__d_drop(dentry);
+		__d_drop(dentry);             // 仅从 hash 摘除
 		spin_unlock(&dentry->d_lock);
 		spin_unlock(&inode->i_lock);
 	}
@@ -332,19 +390,30 @@ void d_delete(struct dentry * dentry)
 EXPORT_SYMBOL(d_delete);
 ```
 
-6、`dget`
+6、`dget`：增加 dentry 引用计数
+
+- **锁机制**：`lockref_get()` 实现了两级路径：
+  - **快速路径**（大多数情况）：使用 `cmpxchg` 原子指令直接修改 `lockref` 中的 count，完全无锁
+  - **慢路径**（竞争激烈时 cmpxchg 失败）：退化为 `spin_lock(&dentry->d_lock)` + count++ + `spin_unlock`
+- **引用计数**：无条件 count++
+- **使用场景**：当需要从已有 dentry 指针获取一个新的引用时调用（例如 `dentry->d_parent` 的引用获取）
 
 ```c
 //https://elixir.bootlin.com/linux/v5.4.241/source/include/linux/dcache.h#L318
 static inline struct dentry *dget(struct dentry *dentry)
 {
 	if (dentry)
-		lockref_get(&dentry->d_lockref);
+		lockref_get(&dentry->d_lockref);  // 快速路径: cmpxchg; 慢路径: spin_lock
 	return dentry;
 }
 ```
 
-7、`dput`
+7、`dput`：减少 dentry 引用计数，count 归零时触发清理
+
+- **快速路径** `fast_dput()`：在 `rcu_read_lock` 保护下尝试 `lockref_put_return`（cmpxchg），若 count > 1 且无特殊 flags 需要处理，直接减 count 返回，无需获取 `d_lock`
+- **慢路径**：`fast_dput` 失败时已持有 `dentry->d_lock`（内部通过 lockref 降级），然后调用 `retain_dentry()` 判断是否应保留在 LRU 中
+- **dentry_kill**：count 归零且不保留时，调用 `dentry_kill()` → `__dentry_kill()` 彻底释放 dentry；`dentry_kill` 返回 parent dentry 以支持 while 循环逐级向上 `dput` 父 dentry（自底向上回收链）
+- **循环结构**：`while (dentry)` 支持级联释放——当子 dentry 释放后，父 dentry 引用也减少，可能导致父 dentry 也被释放
 
 ```c
 //https://elixir.bootlin.com/linux/v5.4.241/source/fs/dcache.c#L840
@@ -354,7 +423,7 @@ void dput(struct dentry *dentry)
 		might_sleep();
 
 		rcu_read_lock();
-		if (likely(fast_dput(dentry))) {
+		if (likely(fast_dput(dentry))) {  // 快速路径：cmpxchg 减引用
 			rcu_read_unlock();
 			return;
 		}
@@ -362,54 +431,67 @@ void dput(struct dentry *dentry)
 		/* Slow case: now with the dentry lock held */
 		rcu_read_unlock();
 
-		if (likely(retain_dentry(dentry))) {
+		if (likely(retain_dentry(dentry))) { // 判断是否保留在 LRU
 			spin_unlock(&dentry->d_lock);
 			return;
 		}
 
-		dentry = dentry_kill(dentry);
+		dentry = dentry_kill(dentry);  // 释放 dentry，返回 parent 继续循环
 	}
 }
 EXPORT_SYMBOL(dput);
 ```
 
-8、`dentry_free`
+8、`dentry_free`：真正释放 dentry 内存
+
+- **无锁操作**：调用时 dentry 已完全从所有全局结构中隔离（hash table 已摘除、LRU 已移除、父子关系已断开），不会有并发访问
+- **RCU 延迟释放**：通过 `call_rcu()` 注册回调，在 RCU grace period 结束后才真正调用 `__d_free()` 释放 kmem_cache 内存。这是因为并发的 rcu-walk 读者（`__d_lookup_rcu`）可能正在无锁访问该 dentry，必须等待所有读者退出 `rcu_read_lock` 临界区
+- **DCACHE_NORCU 优化**：如果 dentry 设置了 `DCACHE_NORCU`（表示从未对 RCU 读者可见），可以直接释放，跳过 grace period 等待
+- **外部名称处理**：长文件名（超过 `DNAME_INLINE_LEN`）使用外部分配的 `external_name`，需要额外的引用计数管理
 
 ```c
 //https://elixir.bootlin.com/linux/v5.4.241/source/fs/dcache.c#L336
 static void dentry_free(struct dentry *dentry)
 {
-	WARN_ON(!hlist_unhashed(&dentry->d_u.d_alias));
+	WARN_ON(!hlist_unhashed(&dentry->d_u.d_alias)); // 断言已从 alias 摘除
 	if (unlikely(dname_external(dentry))) {
 		struct external_name *p = external_name(dentry);
 		if (likely(atomic_dec_and_test(&p->u.count))) {
-			call_rcu(&dentry->d_u.d_rcu, __d_free_external);
+			call_rcu(&dentry->d_u.d_rcu, __d_free_external); // RCU 延迟释放(含外部名)
 			return;
 		}
 	}
 	/* if dentry was never visible to RCU, immediate free is OK */
 	if (dentry->d_flags & DCACHE_NORCU)
-		__d_free(&dentry->d_u.d_rcu);
+		__d_free(&dentry->d_u.d_rcu);      // 直接释放，无需等待 grace period
 	else
-		call_rcu(&dentry->d_u.d_rcu, __d_free);
+		call_rcu(&dentry->d_u.d_rcu, __d_free); // 标准 RCU 延迟释放
 }
 ```
 
-9、`d_lru`系列方法
+9、`d_lru` 系列方法：管理 dentry 的 LRU 回收链表
+
+- **前置锁条件**：所有 `d_lru_*` 函数都要求调用方已持有 `dentry->d_lock`（通过 `D_FLAG_VERIFY` 宏断言 flags 状态来间接保证）
+- **per-sb LRU**：dentry 加入/移出的是所属超级块的 `s_dentry_lru`（`list_lru` 结构），而非全局链表，这使得 `umount` 时可以快速回收单个文件系统的所有缓存
+- **per-cpu 计数器**：`nr_dentry_unused` / `nr_dentry_negative` 使用 per-cpu 变量避免计数器竞争（`this_cpu_inc/dec`），全局读取时通过 `sum_over_cpus` 汇总
+- **isolate/shrink_move**：在 shrinker 回调（内存压力回收）中使用，需在全局 LRU lock 下调用
 
 ```c
 //https://elixir.bootlin.com/linux/v5.4.241/source/fs/dcache.c#L396
 #define D_FLAG_VERIFY(dentry,x) WARN_ON_ONCE(((dentry)->d_flags & (DCACHE_LRU_LIST | DCACHE_SHRINK_LIST)) != (x))
+
+// dentry 引用计数归零时加入 LRU（变为 unused 状态）
 static void d_lru_add(struct dentry *dentry)
 {
 	D_FLAG_VERIFY(dentry, 0);
 	dentry->d_flags |= DCACHE_LRU_LIST;
-	this_cpu_inc(nr_dentry_unused);
+	this_cpu_inc(nr_dentry_unused);          // per-cpu 无锁计数
 	if (d_is_negative(dentry))
 		this_cpu_inc(nr_dentry_negative);
 	WARN_ON_ONCE(!list_lru_add(&dentry->d_sb->s_dentry_lru, &dentry->d_lru));
 }
 
+// dentry 被重新引用时从 LRU 移除
 static void d_lru_del(struct dentry *dentry)
 {
 	D_FLAG_VERIFY(dentry, DCACHE_LRU_LIST);
@@ -420,6 +502,7 @@ static void d_lru_del(struct dentry *dentry)
 	WARN_ON_ONCE(!list_lru_del(&dentry->d_sb->s_dentry_lru, &dentry->d_lru));
 }
 
+// shrinker 回收过程中从 shrink list 移除
 static void d_shrink_del(struct dentry *dentry)
 {
 	D_FLAG_VERIFY(dentry, DCACHE_SHRINK_LIST | DCACHE_LRU_LIST);
@@ -428,6 +511,7 @@ static void d_shrink_del(struct dentry *dentry)
 	this_cpu_dec(nr_dentry_unused);
 }
 
+// 将 dentry 加入私有 shrink list（准备批量回收）
 static void d_shrink_add(struct dentry *dentry, struct list_head *list)
 {
 	D_FLAG_VERIFY(dentry, 0);
@@ -442,6 +526,7 @@ static void d_shrink_add(struct dentry *dentry, struct list_head *list)
  * LRU lists entirely, while shrink_move moves it to the indicated
  * private list.
  */
+// 从 LRU 完全隔离（shrinker 回调中使用）
 static void d_lru_isolate(struct list_lru_one *lru, struct dentry *dentry)
 {
 	D_FLAG_VERIFY(dentry, DCACHE_LRU_LIST);
@@ -452,6 +537,7 @@ static void d_lru_isolate(struct list_lru_one *lru, struct dentry *dentry)
 	list_lru_isolate(lru, &dentry->d_lru);
 }
 
+// 从 LRU 隔离并移入指定的私有 shrink list
 static void d_lru_shrink_move(struct list_lru_one *lru, struct dentry *dentry,
 			      struct list_head *list)
 {
@@ -504,6 +590,116 @@ struct dentry *d_lookup(const struct dentry *parent, const struct qstr *name)
 	return dentry;
 }
 ```
+
+####    `__d_lookup` 与 `__d_lookup_rcu` 的对比
+
+内核为 dcache 查找提供了两个近乎重复的实现函数，这并非代码冗余，而是针对不同场景的性能权衡。内核源码注释（[fs/dcache.c L2339](https://github.com/torvalds/linux/blob/v5.4/fs/dcache.c#L2339)）明确说明：
+
+> *"Note: There is significant duplication with __d_lookup_rcu which is required to prevent single threaded performance regressions especially on architectures where smp_rmb (in seqcounts) are costly. Keep the two functions in sync."*
+
+**核心区别对比表：**
+
+| 维度 | `__d_lookup` (ref-walk) | `__d_lookup_rcu` (rcu-walk) |
+|------|------------------------|---------------------------|
+| 调用上下文 | `d_lookup()` 包裹，可在任何进程上下文 | 仅在 rcu-walk 路径解析中（`link_path_walk` → `lookup_fast`） |
+| 锁机制 | `rcu_read_lock` + 对每个候选 dentry 逐个 `spin_lock(d_lock)` | 仅 `rcu_read_lock`，**无任何 spin_lock** |
+| 一致性保证 | 通过持 `d_lock` 后再校验 parent/name/unhashed | 通过 `d_seq`	（`seqcount`） 检测并发修改，读到脏数据时重试或回退 |
+| 引用计数 | 找到时立即 `count++`（返回"持有引用"的 dentry） | **不修改 count**，返回的 dentry 可能随时被释放（调用方必须后续 check d_seq） |
+| rename 处理 | 外层 `d_lookup()` 用 `rename_lock` seqlock 重试 | 靠 `d_seq` 检测，rename 会 invalidate seq |
+| 返回值语义 | 返回引用计数+1 的 dentry（或 NULL），调用方必须 `dput` | 返回"不稳定"的 dentry 指针 + seq 值，调用方必须校验 seq 后才能使用 |
+| 适用场景 | 需要长期持有 dentry 引用的操作（`open`、`rename`、`unlink`） | 高频只读路径解析（`stat`、`access`、`open` 的快速路径），大部分情况不会有写冲突 |
+| 性能特点 | 每次查找都有 spin_lock/unlock 开销 + cacheline bouncing | 完全无锁（store-free），SMP 扩展性极佳 |
+
+**`__d_lookup_rcu` 源码**（[fs/dcache.c L2339](https://github.com/torvalds/linux/blob/v5.4/fs/dcache.c#L2339)）：
+
+```c
+//for rcu-walk
+struct dentry *__d_lookup_rcu(const struct dentry *parent,
+                              const struct qstr *name,
+                              unsigned *seqp)
+{
+	u64 hashlen = name->hash_len;
+	const unsigned char *str = name->name;
+	struct hlist_bl_head *b = d_hash(hashlen_hash(hashlen));
+	struct hlist_bl_node *node;
+	struct dentry *dentry;
+
+	hlist_bl_for_each_entry_rcu(dentry, node, b, d_hash) {
+		unsigned seq;
+
+		if (dentry->d_name.hash_len != hashlen)     // 快速跳过
+			continue;
+
+		seq = raw_seqcount_begin(&dentry->d_seq);   // 读取 seqcount（不加锁）
+		if (dentry->d_parent != parent)             // 无锁校验 parent
+			continue;
+		if (d_unhashed(dentry))                     // 无锁校验 hash 状态
+			continue;
+
+		if (unlikely(parent->d_flags & DCACHE_OP_COMPARE)) {
+			// 文件系统自定义比较（如 case-insensitive）
+			if (dentry->d_name.hash != hashlen_hash(hashlen))
+				continue;
+			*seqp = seq;
+			switch (slow_dentry_cmp(parent, dentry, seq, name)) {
+			case D_COMP_OK:
+				return dentry;
+			case D_COMP_NOMATCH:
+				continue;
+			default:
+				return NULL;
+			}
+		}
+
+		if (dentry->d_name.hash_len != hashlen)     // re-check after seq read
+			continue;
+		*seqp = seq;                                // 将 seq 传回调用方
+		if (!dentry_cmp(dentry, str, hashlen_len(hashlen)))
+			return dentry;                          // 返回"不稳定"指针
+	}
+	return NULL;
+}
+```
+
+与 `__d_lookup` 的关键差异点：
+- **无 `spin_lock`**：整个遍历过程不获取任何 dentry 的 `d_lock`
+- **seqcount 代替锁**：通过 `raw_seqcount_begin` 读取 `d_seq`，返回给调用方（`*seqp = seq`），调用方后续通过 `read_seqcount_retry(&dentry->d_seq, seq)` 检测是否有并发写入
+- **不修改引用计数**：返回的 dentry 没有增加 count，可能在返回后立即被其他 CPU 释放
+
+**为何存在两套实现（而不是统一为一个）：**
+
+1. **架构相关的性能差异**：`seqcount` 中的 `smp_rmb()`（读内存屏障）在某些 CPU 架构（如早期 ARM、PowerPC）上开销显著，如果 ref-walk 也使用 seqcount 会导致单线程性能回退
+2. **历史演进**：rcu-walk 是 Linux 2.6.38 内核版本引入的路径解析优化（[commit 31e6b01f](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=31e6b01f4183)），目的是消除 SMP 系统上路径解析时的 lock contention
+3. **优雅降级**：如果 rcu-walk 期间检测到竞争（`d_seq` 变化），会回退（fallback）到 ref-walk 重新走完整锁路径，保证正确性
+
+**调用关系：**
+
+```mermaid
+graph TD
+    PathWalk["路径解析 (link_path_walk)"] --> RcuWalk["rcu-walk 模式<br/>（默认，高性能路径）"]
+    PathWalk --> RefWalk["ref-walk 模式<br/>（加锁路径，保证正确性）"]
+
+    RcuWalk --> LookupFast["lookup_fast()"]
+    LookupFast --> DLookupRcu["__d_lookup_rcu()<br/>无锁 + seqcount"]
+    DLookupRcu --> CheckSeq{"d_seq 一致?"}
+    CheckSeq -->|是| Continue["继续 rcu-walk<br/>（不增加引用计数）"]
+    CheckSeq -->|否| Fallback["回退到 ref-walk"]
+
+    RefWalk --> DLookup["d_lookup()"]
+    DLookup --> RenameCheck["rename_lock seqlock 保护"]
+    RenameCheck --> UnderLookup["__d_lookup()<br/>spin_lock + count++"]
+    UnderLookup --> GotRef["返回 count+1 的 dentry<br/>（调用方持有引用）"]
+
+    Fallback --> DLookup
+
+    style RcuWalk fill:#cfc,stroke:#333
+    style RefWalk fill:#fcc,stroke:#333
+    style Fallback fill:#ff9,stroke:#333
+```
+
+**性能对比示例**：在多核（如`64/128`core）服务器上，多线程并发执行 `stat("/path/to/file")` 时：
+- **ref-walk**：所有线程竞争 `dentry->d_lock`，吞吐量随核数增加而下降（锁争用导致 cacheline bouncing）
+- **rcu-walk**：完全无锁，吞吐量线性扩展。这也是为什么 `open()`/`stat()` 快速路径默认使用 rcu-walk 的原因
 
 ####    锁层次
 
@@ -894,10 +1090,50 @@ void __fsnotify_update_child_dentry_flags(struct inode *inode)
 }
 ```
 
-这里简单分析下上面这段代码的lock机制：
+**锁机制深度分析**：
 
+该函数使用了三层嵌套自旋锁，严格遵循全局锁层次：
 
-上面代码中**negative dentry 跳过，但遍历本身不跳过**这句话的意思是
+```text
+锁获取顺序：inode->i_lock（最外层）→ alias->d_lock（中间层）→ child->d_lock（最内层，NESTED）
+```
+
+| 锁 | 作用 | 持有时间 |
+|---|---|---|
+| `inode->i_lock` | 保护 `inode->i_dentry` alias 链表的遍历 | **整个函数执行期间不释放** |
+| `alias->d_lock` | 保护 `alias->d_subdirs` 子目录链表的遍历 | 单个 alias 遍历期间 |
+| `child->d_lock`（`spin_lock_nested` + `DENTRY_D_LOCK_NESTED`） | 保护 `child->d_flags` 的修改 | 仅设置/清除 flag 期间 |
+
+**关键问题**：`spin_lock_nested` 的 `DENTRY_D_LOCK_NESTED` 参数仅用于 `lockdep` 调试子系统区分同类锁的不同实例（避免误报死锁），不改变锁的行为本身。整个遍历期间：
+- `inode->i_lock` **从不释放**：任何其他需要该 inode 锁的操作（如 `d_add`、`d_delete`）都会阻塞
+- 自旋锁禁止抢占和睡眠：CPU 在整个遍历期间无法被调度器切换，其他进程无法在该 CPU 上运行
+- 如果 `d_subdirs` 链表有数千万个 dentry（常见于 negative dentry 堆积场景），遍历时间可达数秒，远超 `watchdog_thresh`（默认 `10s` 的一半 `5s`），触发 soft lockup
+
+锁嵌套的 Mermaid 图示：
+
+```mermaid
+graph TD
+    Enter["__fsnotify_update_child_dentry_flags(inode)"] --> LockInode["spin_lock(&inode->i_lock)"]
+    LockInode --> LoopAlias["遍历 inode->i_dentry alias 链表"]
+    LoopAlias --> LockAlias["spin_lock(&alias->d_lock)"]
+    LockAlias --> LoopChild["遍历 alias->d_subdirs 子 dentry 链表"]
+    LoopChild --> CheckInode{"child->d_inode != NULL?"}
+    CheckInode -->|否| NextChild["continue (跳过 flag 设置但不跳过遍历)"]
+    CheckInode -->|是| LockChild["spin_lock_nested(&child->d_lock, NESTED)"]
+    LockChild --> SetFlag["设置/清除 DCACHE_FSNOTIFY_PARENT_WATCHED"]
+    SetFlag --> UnlockChild["spin_unlock(&child->d_lock)"]
+    UnlockChild --> NextChild
+    NextChild --> LoopChild
+    LoopChild -->|遍历完| UnlockAlias["spin_unlock(&alias->d_lock)"]
+    UnlockAlias --> LoopAlias
+    LoopAlias -->|遍历完| UnlockInode["spin_unlock(&inode->i_lock)"]
+
+    style LockInode fill:#f66,stroke:#333
+    style UnlockInode fill:#6f6,stroke:#333
+    style LoopChild fill:#ff9,stroke:#333
+```
+
+上面代码中**negative dentry 跳过，但遍历本身不跳过**这句话的含义是：`list_for_each_entry` 宏会逐一访问链表中的每个 `child`（包括 negative dentry），只是 `if (!child->d_inode) continue` 跳过了对其 `d_flags` 的锁获取和修改操作，但链表指针的移动（遍历开销）无法跳过
 
 
 ####    问题的核心
