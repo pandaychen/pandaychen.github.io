@@ -413,7 +413,7 @@ static inline struct dentry *dget(struct dentry *dentry)
 - **快速路径** `fast_dput()`：在 `rcu_read_lock` 保护下尝试 `lockref_put_return`（cmpxchg），若 count > 1 且无特殊 flags 需要处理，直接减 count 返回，无需获取 `d_lock`
 - **慢路径**：`fast_dput` 失败时已持有 `dentry->d_lock`（内部通过 lockref 降级），然后调用 `retain_dentry()` 判断是否应保留在 LRU 中
 - **dentry_kill**：count 归零且不保留时，调用 `dentry_kill()` → `__dentry_kill()` 彻底释放 dentry；`dentry_kill` 返回 parent dentry 以支持 while 循环逐级向上 `dput` 父 dentry（自底向上回收链）
-- **循环结构**：`while (dentry)` 支持级联释放——当子 dentry 释放后，父 dentry 引用也减少，可能导致父 dentry 也被释放
+- **循环结构**：`while (dentry)` 支持级联释放：当子 dentry 释放后，父 dentry 引用也减少，可能导致父 dentry 也被释放
 
 ```c
 //https://elixir.bootlin.com/linux/v5.4.241/source/fs/dcache.c#L840
@@ -546,6 +546,187 @@ static void d_lru_shrink_move(struct list_lru_one *lru, struct dentry *dentry,
 	if (d_is_negative(dentry))
 		this_cpu_dec(nr_dentry_negative);
 	list_lru_isolate_move(lru, &dentry->d_lru, list);
+}
+```
+
+10、`d_move` / `__d_move`：在 dcache 中移动 dentry（实现 rename 语义）
+
+这是 dcache 中**锁操作最复杂**的函数，涉及全局 `rename_lock` 与多个 parent/child 的 `d_lock`以及两个 dentry 的 `d_seq` seqcount，理解它是理解整个 dcache 锁体系的关键
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/seqlock.h#L446
+static inline void write_seqlock(seqlock_t *sl)
+{
+	spin_lock(&sl->lock);
+	write_seqcount_begin(&sl->seqcount);
+}
+
+static inline void write_sequnlock(seqlock_t *sl)
+{
+	write_seqcount_end(&sl->seqcount);
+	spin_unlock(&sl->lock);
+}
+```
+
+- **`d_move` 外层锁**：`write_seqlock(&rename_lock)` 获取全局 rename seqlock 的**写端**，作用如下
+  - 所有并发 `d_lookup()` 中的 `read_seqretry(&rename_lock, seq)` 代码段将返回 true，迫使它们重试查找（避免 rename 跨 hash bucket 导致的 false-negative）
+  - rcu-walk 路径中 `__d_lookup_rcu` 的调用者在后续 seqcount 校验时会发现不一致
+
+- **`__d_move` 的前置条件**：调用方必须已持有 `rename_lock`、源/目标目录的 `i_mutex`（VFS 层保证），以及针对单个超级快（同文件系统）时的 `sb->s_vfs_rename_mutex`
+
+- **`__d_move` 内部的 d_lock 获取逻辑**，根据 dentry 与 target 的**父子层级关系**分三种情况，确保锁顺序一致避免死锁：
+
+| 情况 | 条件 | 加锁顺序 |
+|------|------|----------|
+| (a) dentry 是根 | `IS_ROOT(dentry)` | `target->d_parent->d_lock` |
+| (b) target 不是 `old_parent` 的后代 | `p == NULL` | `target->d_parent->d_lock` → `old_parent->d_lock`（NESTED） |
+| (c) target 是 `old_parent` 的后代 | `p != NULL` | `old_parent->d_lock` → `target->d_parent->d_lock`（NESTED，若 p != target） |
+
+最后统一获取 `dentry->d_lock`（level 2）和 `target->d_lock`（level 3）
+
+- **seqcount 保护**：在 `write_seqcount_begin/end` 之间修改 dentry 和 target 的核心字段，通知所有 rcu-walk 并发读者
+- **原子操作序列**：unhash both → 切换 parent 指针 → copy/swap 文件名 → rehash → seqcount end
+- **引用计数调整**：`dentry->d_parent->d_lockref.count++`（新 parent 引用加一）+ `old_parent->d_lockref.count--`（旧 parent 引用减一）
+
+**完整锁获取层次**：
+
+```
+rename_lock (全局 seqlock 写端，最外层)
+  → parent d_lock（1-2个，视情况用 spin_lock_nested 区分）
+    → dentry->d_lock (nested level 2)
+      → target->d_lock (nested level 3)
+        → dentry->d_seq + target->d_seq (seqcount write section)
+```
+
+**`__d_move` 操作流程**：
+
+```mermaid
+graph TD
+    Start["d_move(dentry, target)"] --> SeqLock["write_seqlock(&rename_lock)<br/>阻塞所有 d_lookup 读者"]
+    SeqLock --> CalcRelation["计算 dentry/target 的<br/>父子层级关系 (d_ancestor)"]
+    CalcRelation --> LockParents["按关系获取 parent d_lock<br/>(避免 ABBA 死锁)"]
+    LockParents --> LockDentry["spin_lock_nested(&dentry->d_lock, 2)"]
+    LockDentry --> LockTarget["spin_lock_nested(&target->d_lock, 3)"]
+    LockTarget --> SeqBegin["write_seqcount_begin<br/>(dentry->d_seq, target->d_seq)"]
+    SeqBegin --> Unhash["___d_drop(dentry) + ___d_drop(target)<br/>从 hash table 摘除"]
+    Unhash --> Switch["切换 parent 指针<br/>copy/swap 文件名<br/>调整引用计数"]
+    Switch --> Rehash["__d_rehash(dentry)<br/>重新加入 hash table"]
+    Rehash --> SeqEnd["write_seqcount_end<br/>(target->d_seq, dentry->d_seq)"]
+    SeqEnd --> Unlock["逆序释放所有锁"]
+    Unlock --> SeqUnlock["write_sequnlock(&rename_lock)"]
+```
+
+```c
+//https://elixir.bootlin.com/linux/v5.4.241/source/fs/dcache.c#L2804
+void d_move(struct dentry *dentry, struct dentry *target)
+{
+	write_seqlock(&rename_lock);   // 全局 rename seqlock 写端
+	__d_move(dentry, target, false);
+	write_sequnlock(&rename_lock);
+}
+EXPORT_SYMBOL(d_move);
+
+/*
+ * __d_move - move a dentry
+ * @dentry: entry to move
+ * @target: new dentry
+ * @exchange: exchange the two dentries
+ *
+ * Update the dcache to reflect the move of a file name. Negative
+ * dcache entries should not be moved in this way. Caller must hold
+ * rename_lock, the i_mutex of the source and target directories,
+ * and the sb->s_vfs_rename_mutex if they differ. See lock_rename().
+ */
+static void __d_move(struct dentry *dentry, struct dentry *target,
+		     bool exchange)
+{
+	struct dentry *old_parent, *p;
+	struct inode *dir = NULL;
+	unsigned n;
+
+	WARN_ON(!dentry->d_inode);
+	if (WARN_ON(dentry == target))
+		return;
+
+	BUG_ON(d_ancestor(target, dentry));
+	old_parent = dentry->d_parent;
+	p = d_ancestor(old_parent, target);  // 判断 target 是否在 old_parent 子树中
+
+	// ====== 第一阶段：获取 parent d_lock（按层级关系确定加锁顺序）======
+	if (IS_ROOT(dentry)) {
+		// 情况(a): dentry 是根，只需锁 target 的父
+		BUG_ON(p);
+		spin_lock(&target->d_parent->d_lock);
+	} else if (!p) {
+		// 情况(b): target 不在 old_parent 子树中（跨目录 rename）
+		// 按地址顺序或固定顺序加锁避免死锁
+		spin_lock(&target->d_parent->d_lock);
+		spin_lock_nested(&old_parent->d_lock, DENTRY_D_LOCK_NESTED);
+	} else {
+		// 情况(c): target 在 old_parent 子树中（同目录内 rename）
+		BUG_ON(p == dentry);
+		spin_lock(&old_parent->d_lock);  // 祖先先加锁
+		if (p != target)
+			spin_lock_nested(&target->d_parent->d_lock,
+					DENTRY_D_LOCK_NESTED);
+	}
+	// ====== 统一获取 dentry 和 target 自身的 d_lock ======
+	spin_lock_nested(&dentry->d_lock, 2);   // lockdep level 2
+	spin_lock_nested(&target->d_lock, 3);   // lockdep level 3
+
+	if (unlikely(d_in_lookup(target))) {
+		dir = target->d_parent->d_inode;
+		n = start_dir_add(dir);
+		__d_lookup_done(target);  // 唤醒等待 target lookup 完成的线程
+	}
+
+	// ====== 第二阶段：seqcount 写保护，通知 rcu-walk 读者 ======
+	write_seqcount_begin(&dentry->d_seq);
+	write_seqcount_begin_nested(&target->d_seq, DENTRY_D_LOCK_NESTED);
+
+	// ====== 第三阶段：原子修改 dcache 结构 ======
+	/* unhash both - 从 hash table 摘除 */
+	if (!d_unhashed(dentry))
+		___d_drop(dentry);
+	if (!d_unhashed(target))
+		___d_drop(target);
+
+	/* switch them in the tree - 切换父子关系和名称 */
+	dentry->d_parent = target->d_parent;  // dentry 移到 target 所在目录
+	if (!exchange) {
+		// 普通 rename：dentry 取代 target 的位置
+		copy_name(dentry, target);          // 复制 target 的文件名给 dentry
+		target->d_hash.pprev = NULL;        // target 标记为 unhashed
+		dentry->d_parent->d_lockref.count++;   // 新 parent 引用 +1
+		if (dentry != old_parent)
+			WARN_ON(!--old_parent->d_lockref.count); // 旧 parent 引用 -1
+	} else {
+		// renameat2(RENAME_EXCHANGE)：交换两个 dentry 的位置
+		target->d_parent = old_parent;
+		swap_names(dentry, target);
+		list_move(&target->d_child, &target->d_parent->d_subdirs);
+		__d_rehash(target);
+		fsnotify_update_flags(target);
+	}
+	list_move(&dentry->d_child, &dentry->d_parent->d_subdirs); // 移入新 parent 的子链表
+	__d_rehash(dentry);              // 重新加入 hash table（新的 hash 位置）
+	fsnotify_update_flags(dentry);
+	fscrypt_handle_d_move(dentry);
+
+	// ====== 第四阶段：结束 seqcount 写保护 ======
+	write_seqcount_end(&target->d_seq);   // 先结束 target（内层）
+	write_seqcount_end(&dentry->d_seq);   // 后结束 dentry（外层）
+
+	if (dir)
+		end_dir_add(dir, n);
+
+	// ====== 第五阶段：逆序释放 d_lock ======
+	if (dentry->d_parent != old_parent)
+		spin_unlock(&dentry->d_parent->d_lock);  // 新 parent（如果变了）
+	if (dentry != old_parent)
+		spin_unlock(&old_parent->d_lock);         // 旧 parent
+	spin_unlock(&target->d_lock);                    // target 自身
+	spin_unlock(&dentry->d_lock);                    // dentry 自身
 }
 ```
 
@@ -701,6 +882,311 @@ graph TD
 - **ref-walk**：所有线程竞争 `dentry->d_lock`，吞吐量随核数增加而下降（锁争用导致 cacheline bouncing）
 - **rcu-walk**：完全无锁，吞吐量线性扩展。这也是为什么 `open()`/`stat()` 快速路径默认使用 rcu-walk 的原因
 
+####    RCU-walk 到 ref-walk 的回退机制详解
+
+回顾下，以 `open("/a/b/c/d/e", O_RDONLY)` 为例，结合 Linux v5.4 内核源码（[fs/namei.c](https://github.com/torvalds/linux/blob/v5.4/fs/namei.c)）详细说明路径解析过程中 rcu-walk 回退到 ref-walk 的完整机制
+
+#####   整体调用架构
+
+```mermaid
+graph TD
+    UserOpen["用户态: open('/a/b/c/d/e')"] --> DoSysOpen["do_sys_open()"]
+    DoSysOpen --> DoFilpOpen["do_filp_open()"]
+    DoFilpOpen --> PathOpenat["path_openat()"]
+    PathOpenat --> FilenameLookup["filename_lookup()"]
+
+    FilenameLookup --> FirstTry["第一次: path_lookupat(LOOKUP_RCU)<br/>rcu-walk 模式"]
+    FirstTry --> LinkPathWalk["link_path_walk()<br/>逐个解析路径分量"]
+    LinkPathWalk --> WalkComp["walk_component()"]
+    WalkComp --> LookupFast["lookup_fast()"]
+    LookupFast --> DLookupRcu["__d_lookup_rcu()<br/>无锁查找"]
+
+    FirstTry -->|"-ECHILD"| SecondTry["第二次: path_lookupat(0)<br/>ref-walk 模式，从头重走"]
+    SecondTry -->|"-ESTALE"| ThirdTry["第三次: path_lookupat(LOOKUP_REVAL)<br/>强制 revalidate"]
+```
+
+核心入口代码（[fs/namei.c L2336](https://github.com/torvalds/linux/blob/v5.4/fs/namei.c#L2336)）：
+
+```c
+// filename_lookup() 的三级降级策略
+retval = path_lookupat(&nd, flags | LOOKUP_RCU, path);  // 第一次：rcu-walk
+if (unlikely(retval == -ECHILD))
+    retval = path_lookupat(&nd, flags, path);            // 第二次：ref-walk（从头重走）
+if (unlikely(retval == -ESTALE))
+    retval = path_lookupat(&nd, flags | LOOKUP_REVAL, path); // 第三次：强制 revalidate
+```
+
+#####   回退是"全局重走"还是"局部回退"？答案是两级机制
+
+内核设计了**两级回退策略**，优先尝试局部切换，失败才全局重走：
+
+| level层次 | 函数 | 行为 | 触发条件 |
+|------|------|------|---------|
+| 第一级（局部） | `unlazy_walk()` / `unlazy_child()` | **在当前（分量）的位置就地切换为 ref-walk** | dcache miss、需要磁盘 I/O、需要获取写锁 |
+| 第二级（全局） | `filename_lookup` 重调 `path_lookupat` | **从路径开头以 ref-walk 重新解析所有分量** | 局部切换失败（dentry 已被释放或 d_seq 已变） |
+
+**为什么需要两级**？
+- 大多数情况下，rcu-walk 失败仅仅是因为某个中间分量不在 dcache 中（需要读磁盘），此时 `unlazy_walk` 可以在当前位置成功切换为 ref-walk，后续分量走 `lookup_slow`，无需回到路径开头
+- 只有在真正存在并发写冲突（rename、unlink 等修改了某个 dentry）时，`unlazy_walk` 才会失败，此时才需要全局重走
+
+#####   场景一：dcache miss（局部成功切换）
+以`open`打开路径 `/a/b/c/d/e` 为例，假设 `/a/b` 在 dcache 中，但 `c` 不在：
+
+```mermaid
+sequenceDiagram
+    participant App as 用户进程
+    participant LPW as link_path_walk
+    participant LF as lookup_fast
+    participant RCU as __d_lookup_rcu
+    participant UL as unlazy_walk
+    participant LS as lookup_slow
+
+    App->>LPW: open("/a/b/c/d/e") [rcu-walk]
+    LPW->>LF: walk_component("a") [LOOKUP_RCU]
+    LF->>RCU: __d_lookup_rcu(root, "a")
+    RCU-->>LF: 找到 dentry_a, seq_a
+    Note over LF: d_seq 校验通过，继续 rcu-walk
+
+    LPW->>LF: walk_component("b") [LOOKUP_RCU]
+    LF->>RCU: __d_lookup_rcu(dentry_a, "b")
+    RCU-->>LF: 找到 dentry_b, seq_b
+    Note over LF: d_seq 校验通过，继续 rcu-walk
+
+    LPW->>LF: walk_component("c") [LOOKUP_RCU]
+    LF->>RCU: __d_lookup_rcu(dentry_b, "c")
+    RCU-->>LF: 返回 NULL (dcache miss)
+    LF->>UL: unlazy_walk(nd)
+    Note over UL: 验证 dentry_b 的 d_seq 未变<br/>lockref_get_not_dead 成功<br/>获得 dentry_b 的引用
+    UL-->>LF: 返回 0 (成功切换)
+    Note over LF: LOOKUP_RCU flag 已清除<br/>rcu_read_unlock() 已调用
+    LF-->>LPW: 返回 0 (需要 slow lookup)
+
+    LPW->>LS: lookup_slow("c", dentry_b) [ref-walk]
+    Note over LS: 调用文件系统 ->lookup<br/>可能读磁盘
+    LS-->>LPW: 返回 dentry_c
+
+    Note over LPW: 后续 d/e 以 ref-walk 继续解析
+```
+
+关键点：`unlazy_walk` 成功后，**已解析的 `a`、`b` 分量的引用已通过 `legitimize_path` 获取**（`count++`），后续 `c`、`d`、`e` 路径分量以 ref-walk 模式继续，无需回到路径开头
+
+#####   场景二：并发 rename（全局重走）
+
+假设所有分量都在 dcache 中，但解析到 `c` 时恰好有另一个 CPU 对 `c` 执行 rename：
+
+```mermaid
+sequenceDiagram
+    participant CPU1 as CPU1: open("/a/b/c/d/e")
+    participant CPU2 as CPU2: rename("c", "x")
+    participant LF as lookup_fast
+    participant RCU as __d_lookup_rcu
+    participant FL as filename_lookup
+
+    CPU1->>LF: walk_component("c") [rcu-walk]
+    LF->>RCU: __d_lookup_rcu(dentry_b, "c")
+    RCU-->>LF: 找到 dentry_c, seq_c=42
+
+    CPU2->>CPU2: d_move(dentry_c, target)<br/>write_seqcount_begin → d_seq 变为 43
+
+    LF->>LF: read_seqcount_retry(&dentry_c->d_seq, 42)
+    Note over LF: seq 已变 (42→43)，检测到并发写入
+    LF-->>CPU1: 返回 -ECHILD
+
+    Note over CPU1: walk_component → link_path_walk → path_lookupat<br/>全部返回 -ECHILD
+
+    FL->>FL: path_lookupat(&nd, flags, path)
+    Note over FL: 从 "/" 开始，以 ref-walk 模式<br/>重新解析 a/b/c/d/e<br/>(此时 rename 已完成)
+```
+
+**为什么全局重走而不是从 `c` 分量重试？** 因为 rcu-walk 期间**没有持有任何引用计数**，前面已经"解析"的分量 `a`、`b` 的 dentry 指针可能在 rcu-walk 失败的同时被并发 `dput` 释放。只有从头以 ref-walk 重走，每个分量都 `count++`（**持有引用计数**），才能保证安全
+
+#####   `unlazy_walk` 函数详解
+
+`unlazy_walk` 是上述"就地切换"逻辑的核心函数（[fs/namei.c L672](https://github.com/torvalds/linux/blob/v5.4/fs/namei.c#L672)），它尝试将当前 `nd->path`（rcu-walk 期间仅持有不稳定指针）转换为持有引用的安全状态：
+
+比如，在`lookup_fast`函数 rcu查找失败后，原地切换为ref-walk方式，关联[代码](https://elixir.bootlin.com/linux/v5.4.241/source/fs/namei.c#L1565)
+
+```c
+//lookup_fast rcu失败-->unlazy_walk
+static int unlazy_walk(struct nameidata *nd)
+{
+    struct dentry *parent = nd->path.dentry;
+
+    BUG_ON(!(nd->flags & LOOKUP_RCU));
+
+    nd->flags &= ~LOOKUP_RCU;             // 清除 rcu-walk 标志
+    if (unlikely(!legitimize_links(nd)))   // 验证符号链接栈中的 dentry
+        goto out1;
+    if (unlikely(!legitimize_path(nd, &nd->path, nd->seq)))  // 核心：验证当前路径
+        goto out;
+    if (unlikely(!legitimize_root(nd)))    // 验证根目录
+        goto out;
+    rcu_read_unlock();                     // 成功：退出 RCU 读临界区
+    BUG_ON(nd->inode != parent->d_inode);
+
+	// 重点：返回0，回到上层walk_component函数中的
+	/*
+		err = lookup_fast(nd, &path, &inode, &seq);
+		if (unlikely(err <= 0)) {
+			if (err < 0)
+				return err;
+			//lookup_fast返回0，则进入局部的ref-walk模式
+			path.dentry = lookup_slow(&nd->last, nd->path.dentry,
+						nd->flags);
+			.......
+		}
+	*/
+	//https://elixir.bootlin.com/linux/v5.4.241/source/fs/namei.c#L1797
+    return 0;
+
+out1:
+    nd->path.mnt = NULL;
+    nd->path.dentry = NULL;
+out:
+    rcu_read_unlock();
+    return -ECHILD;                        // 失败：需要全局重走
+}
+```
+
+`legitimize_path` 的核心逻辑：
+
+```c
+static bool legitimize_path(struct nameidata *nd,
+                            struct path *path, unsigned seq)
+{
+    int res = __legitimize_mnt(path->mnt, nd->m_seq);  // 验证挂载点
+    if (unlikely(res)) {
+        if (res > 0)
+            path->mnt = NULL;
+        path->dentry = NULL;
+        return false;
+    }
+    // 尝试获取 dentry 引用（如果 dentry 正在被释放则失败）
+    if (unlikely(!lockref_get_not_dead(&path->dentry->d_lockref))) {
+        path->dentry = NULL;
+        return false;
+    }
+    // 最终校验：d_seq 是否在获取引用期间被修改
+    return !read_seqcount_retry(&path->dentry->d_seq, seq);
+}
+```
+
+关键设计：**先 `lockref_get_not_dead`（原子 count++），再 `read_seqcount_retry`（验证 d_seq）**。如果 d_seq 校验失败，说明在获取引用的瞬间 dentry 被修改了，虽然持有了引用（不会被释放），但内容可能已经不正确，仍需全局重走
+
+#####   `unlazy_child` 函数详解
+
+`unlazy_child` 用于在已找到 child dentry 后，将 parent 和 child 一起切换为 ref-walk（[fs/namei.c L710](https://github.com/torvalds/linux/blob/v5.4/fs/namei.c#L710)）：
+
+关联`lookup_fast`函数中的`unlazy_child`[调用](https://elixir.bootlin.com/linux/v5.4.241/source/fs/namei.c#L1604)
+
+```c
+static int unlazy_child(struct nameidata *nd, struct dentry *dentry, unsigned seq)
+{
+    BUG_ON(!(nd->flags & LOOKUP_RCU));
+
+    nd->flags &= ~LOOKUP_RCU;
+    if (unlikely(!legitimize_links(nd)))
+        goto out2;
+    if (unlikely(!legitimize_mnt(nd->path.mnt, nd->m_seq)))
+        goto out2;
+    // 获取 parent (nd->path.dentry) 的引用
+    if (unlikely(!lockref_get_not_dead(&nd->path.dentry->d_lockref)))
+        goto out1;
+
+    /*
+     * 关键注释：child 的 seq 同时验证了 parent 和 child 两者，
+     * 因为是在获取 child seq 之前检查了 parent seq 的。
+     * 所以如果 child seq 仍然有效，parent 也一定有效。
+     */
+    // 获取 child (dentry) 的引用
+    if (unlikely(!lockref_get_not_dead(&dentry->d_lockref)))
+        goto out;
+    // 校验 child 的 d_seq 未变
+    if (unlikely(read_seqcount_retry(&dentry->d_seq, seq)))
+        goto out_dput;
+    // 验证根目录
+    if (unlikely(!legitimize_root(nd)))
+        goto out_dput;
+    rcu_read_unlock();
+    return 0;
+
+out2:
+    nd->path.mnt = NULL;
+out1:
+    nd->path.dentry = NULL;
+out:
+    rcu_read_unlock();
+    return -ECHILD;
+out_dput:
+    rcu_read_unlock();
+    dput(dentry);       // 已获取的引用需要释放
+    return -ECHILD;
+}
+```
+
+#####   `lookup_fast` 中的回退决策逻辑
+
+将上述函数串联起来，`lookup_fast`（[fs/namei.c L1546](https://github.com/torvalds/linux/blob/v5.4/fs/namei.c#L1546)）的 rcu-walk 路径是这样工作的：
+
+```c
+if (nd->flags & LOOKUP_RCU) {
+    unsigned seq;
+    dentry = __d_lookup_rcu(parent, &nd->last, &seq);
+
+    if (unlikely(!dentry)) {
+        // dcache miss：尝试就地切换为 ref-walk
+        if (unlazy_walk(nd))
+            return -ECHILD;   // 切换失败 → 全局重走
+        return 0;             // 切换成功 → 走 lookup_slow
+    }
+
+    // 找到了 dentry，校验一致性
+    *inode = d_backing_inode(dentry);
+    if (unlikely(read_seqcount_retry(&dentry->d_seq, seq)))
+        return -ECHILD;       // child d_seq 变了 → 全局重走
+
+    if (unlikely(__read_seqcount_retry(&parent->d_seq, nd->seq)))
+        return -ECHILD;       // parent d_seq 变了 → 全局重走
+
+    // d_revalidate 等后续操作...
+    if (unlazy_child(nd, dentry, seq))
+        return -ECHILD;       // 切换失败 → 全局重走
+}
+```
+
+#####   回退机制总结
+
+```mermaid
+flowchart TD
+    Start["路径解析开始<br/>filename_lookup()"] --> RcuWalk["以 rcu-walk 模式调用<br/>path_lookupat(LOOKUP_RCU)"]
+    RcuWalk --> Component["逐个解析路径分量<br/>walk_component → lookup_fast"]
+    Component --> Hit{"dcache 命中?"}
+
+    Hit -->|命中| SeqCheck{"d_seq 一致?"}
+    Hit -->|未命中| UnlazyWalk["unlazy_walk()<br/>尝试就地切换 ref-walk"]
+
+    SeqCheck -->|一致| NextComp["继续下一个分量<br/>(仍在 rcu-walk)"]
+    SeqCheck -->|不一致| ReturnECHILD["返回 -ECHILD"]
+
+    UnlazyWalk --> ULResult{"legitimize 成功?"}
+    ULResult -->|成功| SlowLookup["lookup_slow()<br/>ref-walk 继续剩余分量"]
+    ULResult -->|失败| ReturnECHILD
+
+    NextComp --> Component
+
+    ReturnECHILD --> GlobalRetry["filename_lookup 捕获 -ECHILD<br/>从头以 ref-walk 重走全部分量"]
+
+    SlowLookup --> Done["路径解析完成"]
+    GlobalRetry --> Done
+```
+
+总结下：
+
+1. rcu-walk 回退**不是**对单个分量的局部重试，而是"尝试就地切换 or 全局重走"的两级策略
+2. 就地切换（`unlazy_walk`/`unlazy_child`）成功时，仅剩余未解析的分量需要 ref-walk，已解析的分量通过 `legitimize_path` 获得了合法引用
+3. 就地切换失败时，**整条路径从头重走**（因为 rcu-walk 期间没有持有任何引用，已解析的 dentry 指针不可信）
+4. 在实际运行中，全局重走极为罕见（需要恰好在 rcu-walk 期间发生 rename/unlink），绝大多数情况要么 rcu-walk 全程成功，要么 dcache miss 时通过 `unlazy_walk` 局部切换
+
 ####    锁层次
 
 dcache 涉及多层锁，内核定义了严格的获取顺序以避免死锁：
@@ -712,6 +1198,72 @@ dentry->d_inode->i_lock        （最外层）
       dcache_hash_bucket lock
         s_roots lock              （最内层）
 ```
+
+####    dcache 锁的设计
+
+从宏观视角来看，内核对 dcache 锁体系的设计遵循**从外到内、从全局到局部、从粗粒度到细粒度**的分层原则，核心目标是**让最频繁的读路径几乎零开销，同时让不频繁的写路径有明确的死锁避免规则**
+
+**1. `rename_lock`（全局 seqlock），为何必须是全局锁？**
+
+rename 操作的本质是将一个 dentry 从 hashtable 的某个 bucket 摘除，再加入另一个 bucket（因为文件名变了，hash 值也会变）。如果仅对单个 bucket 加锁，并发的 `d_lookup` 可能恰好在遍历 old bucket 和 new bucket 之间的间隙执行。此时 dentry 既不在 old bucket 也不在 new bucket，导致 **false-negative**（明明存在的文件找不到）
+
+所以内核设计了全局锁解决了这个问题，但为什么选 seqlock 而非 rwlock/mutex呢？
+
+| 锁类型 | 读端行为 | 写端行为 | 适用场景 |
+|--------|---------|---------|---------|
+| rwlock | 读端修改共享计数器（原子操作） | 等待所有读者退出 | 读写均频繁 |
+| mutex | 读端获取锁（可能睡眠） | 获取互斥锁 | 需要睡眠的场景 |
+| **seqlock** | **读端不修改任何共享状态**（仅读两次序号对比） | 递增序号 | **读极频繁、写极稀少** |
+
+在实际系统中，`d_lookup` 的调用频率比 rename 高出数个数量级（每次路径解析的每个分量都需要 lookup，而 rename 是极低频操作）。seqlock 的读端**完全不修改任何共享 cacheline**，SMP 扩展性最佳。代价是写端发生时读端需要重试，但由于 rename 极稀有，重试概率可忽略
+
+**`rename_lock` 与 `d_seq`（per-dentry seqcount）的分工**：
+
+| 保护对象 | 锁 | 粒度 |
+|----------|-----|------|
+| hash table 全局一致性（跨 bucket 移动） | `rename_lock` | 全局唯一 |
+| 单个 dentry 字段的一致性读取（`d_name`、`d_parent`、`d_inode`） | `d_seq` | per-dentry |
+
+`rename_lock` 确保 `d_lookup` 遍历 hash 链时不会错过正在被移动的 dentry；`d_seq` 确保 rcu-walk 读取单个 dentry 的多个字段时得到一致的快照
+
+**2. `inode->i_lock`锁：为何位于 `d_lock` 的外层？**
+
+`inode->i_lock` 保护的核心数据是 `inode->i_dentry`（alias 链表是所有指向该 inode 的 dentry 的链表，支持硬链接）。操作如 `d_add`（将新 dentry 挂入 alias 链表）或 `d_delete`（从 alias 链表摘除）都需要同时操作 inode 的 alias 链表和 dentry 自身的状态
+
+锁层次规则是：**先锁包含者（inode），再锁被包含者（dentry）**。因为遍历 alias 链表时需要先稳定 inode，然后才能安全访问链表中的每个 dentry。如果反过来（先锁 dentry 再锁 inode），会导致 ABBA 死锁
+
+**3. `d_lock`（parent 和 child 两级）：per-dentry 细粒度并发**
+
+- **parent 的 `d_lock`**：保护 `d_subdirs` 链表（子 dentry 的添加和移除）
+- **child 的 `d_lock`**：保护 dentry 自身字段（`d_flags`、`d_name`、`d_parent`、`d_lockref`）
+
+为什么要区分 parent/child？因为很多操作（如 `d_alloc` 加入子链表、`__fsnotify_update_child_dentry_flags` 遍历子 dentry）需要**同时持有父和子的 `d_lock`**。它们是同一类型的锁（都是 `struct dentry` 内嵌的 spinlock），如果不加区分，lockdep 会误报 AA 死锁。通过 `spin_lock_nested(&child->d_lock, DENTRY_D_LOCK_NESTED)` 告知 lockdep 这是不同层级的同类锁实例
+
+per-dentry 的细粒度锁意味着**不同目录下的并发操作互不阻塞**，即在 `/home/user1/` 下创建文件不会阻塞 `/var/log/` 下的文件删除
+
+**4. 设计哲学总结——读写路径的锁使用对比**
+
+```mermaid
+graph TD
+    subgraph readPath [高频读路径: stat/open 快速路径]
+        R1["rcu_read_lock()<br/>(不修改任何共享状态)"] --> R2["__d_lookup_rcu<br/>(无 spin_lock)"]
+        R2 --> R3["校验 d_seq seqcount<br/>(无写操作)"]
+        R3 --> R4["成功: 零锁开销完成<br/>失败: 回退到 ref-walk"]
+    end
+
+    subgraph writePath [低频写路径: rename/unlink/mkdir]
+        W1["rename_lock 写端<br/>(全局 seqlock)"] --> W2["inode->i_lock<br/>(保护 alias 链表)"]
+        W2 --> W3["parent->d_lock<br/>(保护 d_subdirs)"]
+        W3 --> W4["child->d_lock (NESTED)<br/>(保护 dentry 字段)"]
+        W4 --> W5["write_seqcount (d_seq)<br/>(通知 rcu-walk 读者)"]
+    end
+```
+
+这种设计确保了：
+- **99%+ 的路径解析操作**（`stat`、`open`、`access`）通过 rcu-walk 完成，不需要任何锁
+- **写操作**有清晰的锁层次规则：rename_lock → inode->i_lock → parent d_lock → child d_lock → d_seq
+- **写操作通过 seqcount 机制**通知读者重试，而非阻塞读者
+- **per-dentry 细粒度锁**保证不同目录树分支的操作可以完全并行
 
 
 ##  0x02    dcache 增长机制分析
