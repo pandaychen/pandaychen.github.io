@@ -3290,7 +3290,8 @@ struct nf_hook_ops {
 // ip_rcv() 中
 return NF_HOOK(NFPROTO_IPV4, NF_INET_PRE_ROUTING, skb, dev, NULL,
                ip_rcv_finish);
-// 执行过程：遍历PREROUTING上的所有钩子（conntrack_in → raw → mangle → nat）
+// 执行过程：遍历PREROUTING上的所有钩子，按priority从小到大依次执行：
+// raw(-300) → conntrack_in(-200) → mangle(-150) → nat/DNAT(-100)
 // 全部NF_ACCEPT后 → 调用 ip_rcv_finish() → 路由决策
 
 // INPUT hook：确认是发往本机的包
