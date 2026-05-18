@@ -446,7 +446,25 @@ typedef unsigned long pgoff_t;  // 页索引类型
 
 此外，再回顾一下，在radix树（IDR树）中，key就是`index`（页索引），而value就是`struct page*`即页面指针
 
-TODO：`stuct page*`和`struct page`的关系
+**`struct page*` 与 `struct page` 的关系（FLATMEM）**如下：
+
+`struct page` 是内核为**每个物理页帧**维护的元数据结构体（约 `64` 字节），包含 `_refcount`、`flags`、`mapping`、`index`、`lru` 等，**不包含** `4KB` 数据本身。所有 `struct page` 实例连续存放在全局数组 `mem_map[]` 中
+
+```cpp
+// include/asm-generic/memory_model.h (v4.11.6, FLATMEM)
+#define __pfn_to_page(pfn)    (mem_map + (pfn))
+#define __page_to_pfn(page)   ((unsigned long)((page) - mem_map))
+
+// 用法示例：
+struct page *page = find_get_page(mapping, index);
+unsigned long pfn = page_to_pfn(page);       // 从 mem_map 偏移算出页帧号
+// page 对应的 4KB 数据位于物理地址 pfn << PAGE_SHIFT
+// CPU 访问该数据须通过 kmap_atomic(page) / page_address(page) 转为内核虚拟地址
+```
+
+因此 radix 树 value 存的是**管理结构体指针**（指向 `mem_map[pfn]`），不能直接解引用 `struct page*` 当数据缓冲区。读文件数据必须先 `kmap_atomic` 转为内核 VA，再 `copy_page_to_iter`
+
+TODO：文本
 
 ####	page_ok标签
 `page_ok`标签处表示当前页面已准备就绪，可以进行用户空间拷贝。这个标签处理单个页面的读取完成，包括：
@@ -870,6 +888,248 @@ int add_to_page_cache_lru(struct page *page, struct address_space *mapping,
 
 所以，这里有个细节是，虽然每个文件（inode）对应的`address_space`有自己的私有radix树，但所有的页面page都会链接到全局的LRU链表中，使得内核可以进行全局回收
 
+####	pagecache_get_page 主要调用链分析
+
+本小节，将上面涉及的 `find_get_page` -> `pagecache_get_page` -> radix 树查找/插入 -> 预读分配等关键子函数串联起来
+
+**（1）`radix_tree_lookup_slot`：RCU 无锁查找**
+
+`find_get_entry` 在 `rcu_read_lock()` 临界区内调用 `radix_tree_lookup_slot`。返回值是**指向 slot 的指针** `void **pagep`，而非直接的 `struct page*`。slot 里存储的 `void *` 可能是正常 page 指针，也可能是 exceptional entry（被回收页的 shadow 或 tmpfs 的 swap entry）
+
+```cpp
+// https://elixir.bootlin.com/linux/v4.11.6/source/lib/radix-tree.c#L1061
+// 在 radix 树中按 index 查找，返回 &slot（指向存储条目的指针的地址）
+void **radix_tree_lookup_slot(struct radix_tree_root *root, unsigned long index);
+
+// find_get_entry 中的使用（mm/filemap.c#L1169）
+pagep = radix_tree_lookup_slot(&mapping->page_tree, offset);
+if (pagep) {
+    // 从 slot 中安全取出 page 指针（配合 RCU）
+    page = radix_tree_deref_slot(pagep);
+    if (unlikely(!page))
+        goto out;
+    // 判断是否为 exceptional entry（shadow entry / swap entry）
+    if (radix_tree_exception(page)) {
+        if (radix_tree_deref_retry(page))
+            goto repeat;       // 并发修改，需要重试
+        goto out;              // shadow entry：最近被回收页的占位
+    }
+    // 正常 page：投机性增加引用计数
+    head = compound_head(page);
+    if (!page_cache_get_speculative(head))
+        goto repeat;           // 引用获取失败（page 正被释放），重试
+    // 校验 slot 未被并发替换
+    if (unlikely(page != *pagep)) {
+        put_page(head);
+        goto repeat;
+    }
+}
+```
+
+要点如下：
+
+-	`rcu_read_lock()` 保证查找期间树节点不被释放，但 slot 内容可并发变化
+-	`page_cache_get_speculative` 使用原子操作尝试递增引用，避免持有 tree_lock
+-	`radix_tree_exceptional_entry(page)` 在 `pagecache_get_page` 中把 exceptional 视为"无有效 page"，走 `no_page` 分支
+
+**（2）`__page_cache_alloc`：分配物理页帧**
+
+当 radix 树中不存在对应 `index` 的 page（`pagecache_get_page` 的 `FGP_CREAT` 分支或预读路径 `__do_page_cache_readahead`），需要分配一块**真实物理内存**
+
+```cpp
+// https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/pagemap.h#L204
+// include/linux/pagemap.h (v4.11.6)
+static inline struct page *__page_cache_alloc(gfp_t gfp)
+{
+    return alloc_pages(gfp, 0);   // order=0，从 buddy 分配器分配单个 4KB 物理页
+}
+
+// 预读路径中的用法 (mm/readahead.c#L150)
+page = __page_cache_alloc(gfp_mask);
+if (!page)
+    break;
+page->index = page_offset;       // 设置页在文件中的索引
+```
+
+`alloc_pages` 返回的 `struct page` 已经关联了 PFN（页帧号），但**页内数据此时为未定义内容**，需要后续 `readpage` / BIO 从磁盘 DMA 写入后再 `SetPageUptodate`
+
+**（3）`__add_to_page_cache_locked`：插入 radix 树**
+
+`add_to_page_cache_lru` 内部调用此`__add_to_page_cache_locked`函数，将 page 真正挂到文件的 page cache 中(即插入到radix树中)
+
+```cpp
+// https://elixir.bootlin.com/linux/v4.11.6/source/mm/filemap.c#L608
+static int __add_to_page_cache_locked(struct page *page,
+        struct address_space *mapping, pgoff_t offset,
+        gfp_t gfp_mask, void **shadowp)
+{
+    int error;
+    // page 的元数据关联
+    page->mapping = mapping;    // 反向指针：page -> 所属文件的 address_space
+    page->index = offset;       // 页在文件中的索引（和 radix 树 key 一致）
+    // 在 mapping->page_tree（radix 树）中插入 offset -> page
+    error = __radix_tree_create(&mapping->page_tree, offset, 0,
+                                &node, &slot);
+    if (!error) {
+        mapping->nrpages++;     // 该文件的缓存页计数 +1
+        // 处理 shadow entry（用于 refault distance 统计）
+        if (shadowp)
+            *shadowp = __radix_tree_lookup(&mapping->page_tree, offset, ...);
+        __radix_tree_replace(&mapping->page_tree, node, slot, page, ...);
+    }
+    return error;
+}
+```
+
+稍微解读下上述代码的逻辑：
+
+TODO
+
+**（4）`lru_cache_add`：加入全局 LRU 链表**
+
+```cpp
+// https://elixir.bootlin.com/linux/v4.11.6/source/mm/swap.c#L422
+void lru_cache_add(struct page *page)
+{
+    // 不直接操作全局 LRU，而是放入当前 CPU 的 pagevec 缓冲
+    struct pagevec *pvec = &get_cpu_var(lru_add_pvec);
+    get_page(page);
+    if (!pagevec_add(pvec, page))
+        __pagevec_lru_add(pvec);  // pagevec 满了，批量 drain 到 LRU
+    put_cpu_var(lru_add_pvec);
+}
+```
+
+per-CPU `pagevec`（默认 `PAGEVEC_SIZE` 个 page 的小[数组](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/pagevec.h#L17)）起到批量缓冲作用，避免每次插入都竞争全局 `zone->lru_lock`，`__pagevec_lru_add` 最终把页加入 `inactive` 链表
+
+**（5）预读路径中的 `list_add(&page->lru, &page_pool)` + `read_pages`**
+
+在 `__do_page_cache_readahead` 中，新分配的 page **不会立即**调用 `add_to_page_cache_lru`，而是先挂到本地临时链表 `page_pool`：
+
+```cpp
+// mm/readahead.c#L150 核心循环（局部）
+int __do_page_cache_readahead(struct address_space *mapping, struct file *filp,
+			pgoff_t offset, unsigned long nr_to_read,
+			unsigned long lookahead_size){
+......
+LIST_HEAD(page_pool);
+for (page_idx = 0; page_idx < nr_to_read; page_idx++) {
+    pgoff_t page_offset = offset + page_idx;
+    // 先检查是否已在 page cache 中
+    page = radix_tree_lookup(&mapping->page_tree, page_offset);
+    if (page && !radix_tree_exceptional_entry(page))
+        continue;                              // 已在 cache，跳过
+
+    page = __page_cache_alloc(gfp_mask);       // 分配物理页
+    page->index = page_offset;
+    list_add(&page->lru, &page_pool);          // ★ 临时链到 page_pool
+    if (page_idx == nr_to_read - lookahead_size)
+        SetPageReadahead(page);                // ★ 标记预读触发页
+    ret++;
+}
+if (ret)
+	//https://elixir.bootlin.com/linux/v4.11.6/source/mm/readahead.c#L199
+    read_pages(mapping, filp, &page_pool, ret, gfp_mask);
+    // read_pages 内部对每个 page:
+    //   add_to_page_cache_lru(page, mapping, page->index, gfp)  // 插入 radix + LRU
+    //   mapping->a_ops->readpage(filp, page)                     // 触发磁盘 I/O
+......
+}
+```
+
+这样设计的原因是，先批量分配再加标记，再一次性提交 I/O（`read_pages`函数），配合 `blk_start_plug/blk_finish_plug` 使多个 BIO 请求可以合并，减少磁盘调度开销
+
+`read_pages`函数用于从ext4文件系统批量读取pages数据，详细的分析见后文
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/readahead.c#L111
+static int read_pages(struct address_space *mapping, struct file *filp,
+		struct list_head *pages, unsigned int nr_pages, gfp_t gfp)
+{
+	struct blk_plug plug;
+	unsigned page_idx;
+	int ret;
+
+	blk_start_plug(&plug);
+
+	if (mapping->a_ops->readpages) {
+		//调用ext4文件系统的readpages方法，批量
+		ret = mapping->a_ops->readpages(filp, mapping, pages, nr_pages);
+		/* Clean up the remaining pages */
+		put_pages_list(pages);
+		goto out;
+	}
+
+	for (page_idx = 0; page_idx < nr_pages; page_idx++) {
+		struct page *page = lru_to_page(pages);
+		list_del(&page->lru);
+		if (!add_to_page_cache_lru(page, mapping, page->index, gfp))
+			mapping->a_ops->readpage(filp, page);
+		put_page(page);
+	}
+	ret = 0;
+
+out:
+	blk_finish_plug(&plug);
+
+	return ret;
+}
+```
+
+**（6）`SetPageReadahead` 宏与 `PG_readahead`**
+
+```cpp
+// include/linux/page-flags.h (v4.11.6)
+// PG_readahead 与 PG_reclaim 共享同一 bit（enum pageflags 中 PG_reclaim = 18）
+// 通过上下文区分：预读分配时设置 = PG_readahead；页回收路径设置 = PG_reclaim
+#define SetPageReadahead(page)    set_bit(PG_reclaim, &(page)->flags)
+#define PageReadahead(page)       test_bit(PG_reclaim, &(page)->flags)
+#define ClearPageReadahead(page)  clear_bit(PG_reclaim, &(page)->flags)
+```
+
+-	`page_cache_async_readahead` 入口会 `ClearPageReadahead(page)`，防止重复触发
+-	若 page 正在 writeback 且被标记了 `PG_reclaim`（回收上下文），此时 `PageWriteback(page)` 为真，`page_cache_async_readahead` 会直接 `return`，避免与回收语义冲突
+
+**page cache 管理链路串联图：**
+
+```mermaid
+flowchart TB
+    subgraph lookup["查找路径"]
+        A1["find_get_page(mapping, index)"] --> A2["pagecache_get_page(mapping, offset, 0, 0)"]
+        A2 --> A3["find_get_entry"]
+        A3 --> A4["rcu_read_lock + radix_tree_lookup_slot"]
+        A4 --> A5["radix_tree_deref_slot"]
+        A5 --> A6{"exceptional entry?"}
+        A6 -->|否| A7["page_cache_get_speculative 增加引用"]
+        A6 -->|是| A8["视为未命中"]
+        A7 --> A9["返回 struct page*"]
+    end
+
+    subgraph alloc["分配路径 (预读/no_cached_page)"]
+        A8 --> B1["__page_cache_alloc -> alloc_pages"]
+        B1 --> B2["page->index = page_offset"]
+        B2 --> B3{"预读批量?"}
+        B3 -->|是| B4["list_add to page_pool"]
+        B3 -->|否| B5["add_to_page_cache_lru"]
+        B4 --> B6{"page_idx == nr-lookahead?"}
+        B6 -->|是| B7["SetPageReadahead"]
+        B6 -->|否| B8["继续循环"]
+        B4 --> B9["read_pages 批量提交"]
+        B9 --> B5
+    end
+
+    subgraph insert["radix 插入 + LRU"]
+        B5 --> C1["__add_to_page_cache_locked"]
+        C1 --> C2["radix_tree_insert: index -> page"]
+        C1 --> C3["page->mapping = mapping"]
+        B5 --> C4["lru_cache_add"]
+        C4 --> C5["per-CPU pagevec 缓冲"]
+        C5 --> C6["__pagevec_lru_add -> inactive 链表"]
+    end
+
+    insert --> D1["readpage: 磁盘 I/O 填充数据"]
+```
+
 ##	0x03	循环处理每一页
 
 ####	流程图
@@ -1011,15 +1271,78 @@ page_ok:
 
 ##	0x04	页缓存命中/未命中处理
 
-TODO
+`do_generic_file_read` 主循环中，每次以 `index` 为 key 调用 `find_get_page(mapping, index)`，其返回值决定后续走**命中**还是**未命中**分支。核心判定逻辑如下（对应前文 `do_generic_file_read` 源码）：
 
-####	页缓存命中
+```cpp
+// mm/filemap.c do_generic_file_read 主循环核心分支
+page = find_get_page(mapping, index);
+if (!page) {
+    // ---- 未命中路径 ----
+    page_cache_sync_readahead(mapping, ra, filp, index, last_index - index);
+    page = find_get_page(mapping, index);     // 预读后再次查找
+    if (unlikely(page == NULL))
+        goto no_cached_page;                  // 仍无：逐页兜底分配
+}
+// ---- 命中路径 ----
+if (PageReadahead(page)) {
+    page_cache_async_readahead(mapping, ra, filp, page, index, last_index - index);
+}
+if (!PageUptodate(page)) {
+    // 页存在但数据未就绪（I/O 进行中或曾出错）
+    error = wait_on_page_locked_killable(page);
+    ...
+    goto page_not_up_to_date;
+}
+goto page_ok;   // 数据就绪，拷贝到用户空间
+```
 
-TODO
+####	页缓存命中的说明
 
-####	未命中
+**命中**指 `find_get_page` 在 `mapping->page_tree` 的 radix 树中找到有效 `struct page*`（非 exceptional entry），且引用计数已通过 `page_cache_get_speculative` 递增
 
-TODO
+命中后有三种子状态：
+
+1.	`PageReadahead(page)` 为真：当前页是预读标记页，触发 `page_cache_async_readahead` 在后台启动下一轮预读（进程不阻塞），然后继续检查数据就绪状态
+2.	`PageUptodate(page)` 为真：跳转 `page_ok`，直接执行 `copy_page_to_iter` 拷贝数据到用户空间
+3.	`!PageUptodate(page)`：说明 I/O 尚未完成（如预读刚提交 BIO 还没回来），进程在 `wait_on_page_locked_killable` / `lock_page_killable` 处阻塞，等待 `mpage_end_io` 回调 `SetPageUptodate` + `unlock_page` 唤醒
+
+命中时**不涉及**新 page 分配与 radix 插入，仅可能触发异步预读（扩大后续窗口）
+a
+####	未命中的几种情况说明
+
+**未命中**分两层处理：
+
+**第一层：`!page`条件，radix 树中无此 index**
+
+```cpp
+if (!page) {
+    // 触发同步预读，批量分配 + 磁盘 I/O
+    page_cache_sync_readahead(mapping, ra, filp, index, last_index - index);
+    page = find_get_page(mapping, index);   // 预读完成后 page 通常已在 radix 树中
+    if (unlikely(page == NULL))
+        goto no_cached_page;                // 极端情况：预读后仍无（内存紧张等）
+}
+```
+
+`page_cache_sync_readahead` -> `__do_page_cache_readahead`：批量 `__page_cache_alloc`、`list_add` 到 `page_pool`、`read_pages` 提交 ext4/BIO。预读返回后再次查找，page 已在 radix 树中，但 `PG_uptodate` 可能仍为 `0`（BIO 进行中）
+
+**第二层：`no_cached_page`标签：预读后仍无 page**
+
+```cpp
+no_cached_page:
+    page = page_cache_alloc_cold(mapping);   // __page_cache_alloc(mapping_gfp_mask | __GFP_COLD)
+    if (!page) { error = -ENOMEM; goto out; }
+    error = add_to_page_cache_lru(page, mapping, index,
+            mapping_gfp_constraint(mapping, GFP_KERNEL));
+    if (error) {
+        put_page(page);
+        if (error == -EEXIST) { error = 0; goto find_page; }  // 竞争：其他线程已添加
+        goto out;
+    }
+    goto readpage;  // mapping->a_ops->readpage(filp, page) 单页磁盘读取
+```
+
+这是**逐页兜底路径**：本地分配单页，`add_to_page_cache_lru` 插入 radix + LRU，再调用文件系统 `readpage` 从磁盘填充
 
 ##	0x05	预读机制
 
@@ -2232,7 +2555,17 @@ flowchart TB
 
 源码引用（`find_get_page` -> `pagecache_get_page` -> `find_get_entry` -> `radix_tree_lookup_slot`）已在前文详述
 
-此处重点强调：`struct page*` 是元数据指针，不是数据地址，TODO
+此处重点强调：`struct page*` 是元数据指针，不是数据地址。与物理页帧数据的对应关系：
+
+```cpp
+// 从 struct page* 获取物理页帧数据的地址（v4.11.6）
+unsigned long pfn = page_to_pfn(page);           // 页帧号 = page - mem_map
+void *kaddr = page_address(page);                // x86_64: __va(pfn << PAGE_SHIFT)
+// kaddr 是内核虚拟地址，指向 4KB 文件数据
+// 直接映射区公式: kaddr = (void *)(PAGE_OFFSET + (pfn << PAGE_SHIFT))
+```
+
+`page_to_pfn(page)` 本质是 `page - mem_map`（数组偏移），`page_address` 在 x86_64 下通过 `__va` 宏做线性偏移得到内核 VA。这一步不涉及 MMU 页表查询
 
 ####	阶段 2：从 page 获取实际数据（kmap_atomic 地址转换）
 
@@ -2618,7 +2951,7 @@ flowchart LR
 
 需要注意的关键区别：`read()` 路径数据经过一次拷贝（page cache -> 用户缓冲区），而 `mmap()` 文件映射是将 page cache 的物理页直接映射到用户地址空间，实现零拷贝访问。匿名映射完全不涉及 page cache 和文件 I/O
 
-##	0x0A	readpage 到 BIO 的完整路径
+##	0x0A	readpage 到 BIO 的完整路径：磁盘数据如何写入物理页
 
 当 page cache 未命中且预读/readpage 需要从磁盘加载数据时，内核通过以下路径提交 I/O 请求（以 ext4 为例）：
 
@@ -2639,6 +2972,267 @@ do_generic_file_read
 ```
 
 `blk_start_plug` / `blk_finish_plug` 机制用于将多个 BIO 请求合并后一次性提交给块设备调度器，减少调度开销。`read_pages` 函数优先使用 `readpages`（批量接口），如果文件系统未实现则逐页调用 `readpage`
+
+当 page cache 未命中或预读需要填充 page 时，文件数据从 ext4 所在块设备进入**已分配的物理页帧**。这条路径与后续 `copy_page_to_iter`（CPU 拷贝到用户空间）有**本质区别**，前者由 DMA 硬件直接写物理内存，后者由 CPU 经 MMU 翻译为虚拟地址
+
+####	调用栈总览
+
+```mermaid
+flowchart TB
+    subgraph vfs_mm["VFS / MM 层"]
+        A["do_generic_file_read: readpage / read_pages"] --> B["struct page 已分配, PG_locked"]
+    end
+
+    subgraph fs_mpage["ext4 + mpage 层"]
+        B --> C["ext4_readpage / ext4_readpages"]
+        C --> D["mpage_readpage / mpage_readpages"]
+        D --> E["do_mpage_readpage"]
+        E --> F["构造 struct bio"]
+        F --> G["bio_add_page: page + offset + len"]
+    end
+
+    subgraph block["块设备层"]
+        G --> H["submit_bio READ"]
+        H --> I["generic_make_request"]
+        I --> J["驱动: dma_map_page 获取 DMA 地址"]
+        J --> K["DMA 控制器: 磁盘 -> 物理内存"]
+    end
+
+    subgraph done["完成回调"]
+        K --> L["mpage_end_io (中断/软中断)"]
+        L --> M["SetPageUptodate"]
+        M --> N["unlock_page: 唤醒等待进程"]
+        N --> O["do_generic_file_read 继续: page_ok"]
+        O --> P["copy_page_to_iter: 拷贝到用户空间"]
+    end
+```
+
+####	ext4_readpage -> mpage 层（v4.11.6 源码）
+
+```cpp
+// fs/ext4/inode.c#L3224 — ext4 的 readpage 实现
+static int ext4_readpage(struct file *file, struct page *page)
+{
+    int ret = -EAGAIN;
+    // ... 加密相关检查 ...
+    // 最终转发到通用 mpage 层
+    ret = mpage_readpage(page, ext4_get_block);
+    // ext4_get_block: 将文件逻辑块号转换为磁盘物理扇区号
+    return ret;
+}
+
+// fs/mpage.c#L393 — 单页读取入口
+int mpage_readpage(struct page *page, get_block_t get_block)
+{
+    struct bio *bio = NULL;
+    sector_t last_block_in_bio = 0;
+    struct buffer_head map_bh;
+    unsigned long first_logical_block = 0;
+
+    map_bh.b_state = 0;
+    map_bh.b_size = 0;
+    // do_mpage_readpage 负责：
+    //   1. 调用 get_block 获取磁盘扇区号
+    //   2. 构造 bio 并添加 page
+    //   3. 若 bio 满或无法合并，提交 bio
+    bio = do_mpage_readpage(bio, page, 1,
+            &last_block_in_bio, &map_bh,
+            &first_logical_block, get_block);
+    if (bio)
+        mpage_bio_submit(READ, bio);   // 提交剩余 bio
+    return 0;
+}
+```
+
+####	do_mpage_readpage：构造 BIO
+
+```cpp
+// fs/mpage.c (v4.11.6 核心逻辑节选)
+static struct bio *do_mpage_readpage(struct bio *bio, struct page *page,
+        unsigned nr_pages, sector_t *last_block_in_bio,
+        struct buffer_head *map_bh, unsigned long *first_logical_block,
+        get_block_t get_block)
+{
+    // 1. 调用 get_block 将文件逻辑块号映射为磁盘扇区号
+    //    map_bh->b_blocknr = 磁盘物理块号
+    //    map_bh->b_size = 连续块的总字节数
+
+    // 2. 尝试将 page 合并到现有 bio（连续扇区合并 I/O）
+    if (bio && (*last_block_in_bio != blocks[0] - 1))
+        bio = mpage_bio_submit(READ, bio);  // 不连续，先提交现有 bio
+
+    // 3. 若 bio 为 NULL，分配新 bio
+    if (bio == NULL) {
+        bio = mpage_alloc(bdev, blocks[0] << (blkbits - 9),
+                    min_t(int, nr_pages, BIO_MAX_PAGES), GFP_KERNEL);
+        // bio->bi_bdev = bdev;           // 目标块设备
+        // bio->bi_iter.bi_sector = ...;  // 起始扇区号
+    }
+
+    // 4. ★ 关键：将 page 加入 bio 的 scatter-gather 列表
+    length = first_hole << blkbits;
+    if (bio_add_page(bio, page, length, 0) < length) {
+        bio = mpage_bio_submit(READ, bio);  // 当前 bio 已满
+        goto alloc_new;
+    }
+
+    // bio_add_page 内部将 page 登记到 bio->bi_io_vec[]:
+    //   bvec->bv_page   = page;     // ★ struct page* 指向物理页帧
+    //   bvec->bv_offset = 0;        // 页内偏移
+    //   bvec->bv_len    = length;   // 长度（通常 4096）
+
+    // 5. 记录 page 的最后扇区号，供下一个 page 判断连续性
+    *last_block_in_bio = blocks[blocks_per_page - 1];
+    return bio;
+}
+```
+
+`bio_add_page` 的核心是把 `struct page*`、offset、len 组成 `struct bio_vec` 存入 `bio->bi_io_vec[]`。**I/O 目标是物理页帧**，不是虚拟地址
+
+####	submit_bio 与 DMA 传输
+
+```cpp
+// block/blk-core.c (v4.11.6)
+void submit_bio(int rw, struct bio *bio)
+{
+    bio->bi_rw |= rw;
+    // ... 统计 ...
+    generic_make_request(bio);
+    // -> 请求队列 -> I/O 调度器(cfq/deadline/noop) -> 设备驱动
+}
+```
+
+块设备驱动接收到请求后的典型步骤：
+
+```cpp
+// 设备驱动内部（以 SCSI/NVMe 为例，简化）
+// 1. 从 bio_vec 中取出 page，获取 DMA 地址
+dma_addr_t dma_addr = dma_map_page(dev, bvec->bv_page,
+                                    bvec->bv_offset, bvec->bv_len,
+                                    DMA_FROM_DEVICE);
+// dma_map_page 在 x86 上本质是 page_to_phys(page) + offset
+// 即物理地址，不经过 MMU/TLB
+
+// 2. 编程磁盘控制器：从磁盘 LBA 读取数据，DMA 写入 dma_addr
+//    DMA 控制器直接操作物理内存，CPU 不参与数据搬运
+
+// 3. I/O 完成后，中断通知 CPU
+dma_unmap_page(dev, dma_addr, bvec->bv_len, DMA_FROM_DEVICE);
+// 4. 调用 bio->bi_end_io 完成回调
+```
+
+**关键点：磁盘 -> page cache 的数据搬运是 DMA 硬件直写物理内存，CPU 不执行 `memcpy` / `rep movsb`，不经过 MMU 页表翻译**
+
+####	mpage_end_io：I/O 完成回调
+
+```cpp
+// fs/mpage.c (v4.11.6)
+static void mpage_end_io(struct bio *bio)
+{
+    struct bio_vec *bv;
+    int i;
+
+    // 遍历 bio 中每个 bio_vec 对应的 page
+    bio_for_each_segment_all(bv, bio, i) {
+        struct page *page = bv->bv_page;
+        // 将 page 标记为 uptodate 或 error
+        page_endio(page, bio_data_dir(bio), bio->bi_error);
+    }
+    bio_put(bio);
+}
+
+// mm/page_io.c — page_endio 核心逻辑
+void page_endio(struct page *page, int rw, int err)
+{
+    if (!rw) {  // 读操作
+        if (!err) {
+            SetPageUptodate(page);       // ★ 标记数据有效
+        } else {
+            ClearPageUptodate(page);
+            SetPageError(page);
+        }
+        unlock_page(page);              // ★ 唤醒 wait_on_page_locked 的读者
+    }
+}
+```
+
+`unlock_page` 会唤醒在 `do_generic_file_read` 中 `wait_on_page_locked_killable(page)` 处阻塞的进程，使其继续执行到 `page_ok` 标签
+
+####	read_pages 与 blk_plug 批量提交
+
+```cpp
+// mm/readahead.c#L111 (v4.11.6)
+static int read_pages(struct address_space *mapping, struct file *filp,
+        struct list_head *pages, unsigned int nr_pages, gfp_t gfp)
+{
+    struct blk_plug plug;
+    unsigned page_idx;
+    int ret;
+
+    blk_start_plug(&plug);   // ★ 开始攒 I/O 请求
+
+    if (mapping->a_ops->readpages) {
+        // ext4 实现了 readpages（批量接口），一次处理多个 page
+        ret = mapping->a_ops->readpages(filp, mapping, pages, nr_pages);
+        put_pages_list(pages);
+        goto out;
+    }
+
+    // 文件系统未实现 readpages，逐页提交
+    for (page_idx = 0; page_idx < nr_pages; page_idx++) {
+        struct page *page = lru_to_page(pages);
+        list_del(&page->lru);
+        if (!add_to_page_cache_lru(page, mapping, page->index, gfp))
+            mapping->a_ops->readpage(filp, page);
+        put_page(page);
+    }
+    ret = 0;
+
+out:
+    blk_finish_plug(&plug);  // ★ 一次性提交所有攒的 I/O 到调度器
+    return ret;
+}
+```
+
+`blk_start_plug` / `blk_finish_plug` 会把多次 `submit_bio` 攒到当前线程的 `plug list` 中，`blk_finish_plug` 时一次性送入 I/O 调度器排序合并，减少磁盘寻道
+
+####	磁盘->物理页 vs 物理页->用户缓冲区：两条 "拷贝" 路径对比
+
+一次完整的 `read(fd, buf, 4096)` 涉及两次数据搬运，机制完全不同：
+
+| 维度 | 路径A：磁盘 -> 物理页（readpage/BIO/DMA） | 路径B：物理页 -> 用户缓冲区（copy_page_to_iter） |
+| --- | --- | --- |
+| 触发时机 | page cache 未命中 / 预读 | `page_ok` 且 `PageUptodate` |
+| 数据搬运方式 | **DMA 控制器**直写物理内存 | **CPU** 执行 `rep movsb` / `rep movsq` |
+| 地址类型 | 物理地址（`dma_map_page` 转换） | 内核 VA（源）+ 用户 VA（目标） |
+| MMU / 页表参与 | **不参与**，DMA 绕过 MMU | **必须参与**，CPU 的每次内存访问都经 MMU 翻译 |
+| 缺页中断 | 无 | 用户缓冲区未映射时可触发 #PF -> `handle_mm_fault` |
+| 同步性 | 异步 BIO 提交；进程在 `lock_page` 处阻塞等 | 同步于 `read` 系统调用上下文 |
+| page 状态变化 | `PG_locked` -> `SetPageUptodate` + `unlock_page` | 无状态变化（仅 `get_page`/`put_page` 引用管理） |
+| 数据方向 | 块设备 -> page cache 物理页 | page cache -> 进程用户空间 |
+
+```mermaid
+flowchart LR
+    subgraph pathA["路径A: 磁盘 -> 物理页"]
+        D1["ext4 磁盘块"] -->|"BIO + DMA"| D2["物理页帧 (PFN)"]
+        D2 --> D3["SetPageUptodate"]
+    end
+
+    subgraph pathB["路径B: 物理页 -> 用户空间"]
+        P1["kmap_atomic: 内核VA"] -->|"CPU rep movsb"| P2["MMU 查用户页表"]
+        P2 --> P3["用户 buf 虚拟地址"]
+    end
+
+    D3 -->|"page_ok"| P1
+```
+
+**串联一次 `read` 的完整数据流：**
+
+1.	**路径 A**：`__do_page_cache_readahead` 分配 page -> `read_pages` -> ext4 `readpage` -> BIO -> DMA 将磁盘数据写入物理页帧 -> `mpage_end_io` 设置 `PG_uptodate` 并 `unlock_page`
+2.	**路径 B**：`copy_page_to_iter` -> `kmap_atomic(page)` 得到内核 VA -> `__copy_to_user(buf, kaddr+offset, len)` 由 CPU 拷贝到用户 `malloc` 缓冲区（若 PTE 不存在则触发缺页建立映射）
+3.	用户态 `read` 返回后读 `buf`：通常不再缺页（路径 B 已建立 PTE 并写入数据）
+
+因此：**预读/读盘阶段不涉及用户页表**；**只有交付给用户缓冲区时才触发 MMU 页表查询和可能的缺页中断**
 
 ####	mark_page_accessed 与 LRU 回收
 
@@ -2704,9 +3298,20 @@ out:
 }
 ```
 
-####	do_generic_file_read中的页表转换
+####	do_generic_file_read 中的页表转换总结
 
-TODO
+`do_generic_file_read` 整条执行路径中，**不同阶段对 MMU / 页表的依赖程度截然不同**：
+
+| 阶段 | 关键函数 | x86_64 页表操作 | 说明 |
+| --- | --- | --- | --- |
+| 查找 page | `find_get_page` / radix 树遍历 | **无** | 仅操作内核数据结构指针，不读写 page 内数据 |
+| 分配 page | `__page_cache_alloc` | **无** | buddy 分配器返回 `struct page*`，不建立额外映射 |
+| 磁盘填充 | `readpage` -> BIO -> DMA 写入 | **无** | DMA 使用物理地址，绕过 CPU 的 MMU（见 0x0A） |
+| 读取页数据 | `kmap_atomic(page)` | **无**（x86_64） | 直接映射区线性 VA 计算，不修改 PTE |
+| 拷贝到用户 | `__copy_to_user(buf, kaddr, len)` | **查询用户页表** | CPU `rep movsb` 写用户 VA，MMU 翻译可能触发 #PF |
+| 缺页处理 | `handle_mm_fault` (若 #PF) | **写入用户页表** | 分配物理页 + 建立用户 PTE |
+
+结论：整条 read 路径中，**只有最后交付给用户空间时**（`__copy_to_user`）才真正涉及 MMU 页表查询与可能的缺页中断。磁盘到 page cache 的路径完全与用户页表无关
 
 ####	read_pages
 
