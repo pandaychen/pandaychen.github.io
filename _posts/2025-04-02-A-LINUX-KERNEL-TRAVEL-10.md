@@ -531,9 +531,9 @@ struct sock {
 }
 ```
 
-这两个成员的关系如下图所示：
+这两个成员的关系详见 [TCP 发送路径内核源码深度分析](https://pandaychen.github.io/2026/05/11/A-TCP-SENDING-PATH-DEEP-DIVE/)
 
-![todo]()
+![TODO]()
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/net/tcp.h#L1565
@@ -542,8 +542,6 @@ static inline struct sk_buff *tcp_send_head(const struct sock *sk)
 	return sk->sk_send_head;
 }
 ```
-
-
 
 ####    以 UDP 包为例：各层协议头的构造位置
 
@@ -1923,14 +1921,19 @@ static bool igb_clean_tx_irq(struct igb_q_vector *q_vector)
 4. `netdev_tx_completed_queue`：通知 DQL 完成了多少字节
 5. `netif_wake_subqueue`：如果 TX ring 有足够空间且队列被停止了，重新唤醒
 
-##     0x0D    内核数据发送
+##     0x0D    TCP 协议栈发送场景（补充）
+
+本小节简要说明 TCP 发送场景的整体结构，基于 TCP 三次握手完成，通过 `accept` 获取到客户端的连接 fd，基于这个 fd 发送数据
+
+####    TCP 完整通信过程
+
 本小节补充下TCP的发送场景，基于TCP三次握手完成，通过`accept`获取到客户端的连接fd，基于这个fd发送数据的场景进行分析
 
 ####   1、accept 获取fd完成的布局
 
-TODO
+![accept-layout]()
 
-####   2、send* 系统调用
+####   2、send* 系列系统调用
 不管是`send`、`sendto`、[`sendmsg`](https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L1921)等系统调用，最终都会调用`sock_sendmsg`，主要完成：
 
 1. 通过fd在内核中定位到对应的 socket/sock 结构对象，在这个对象里记录着各种协议栈的函数地址（在生成fd的时候就已经初始化好了）
@@ -2009,6 +2012,7 @@ int inet_sendmsg(......)
 内核协议栈 `inet_sendmsg` 会关联对应 socket 上的具体协议发送函数，对于 TCP 协议而言就是 `tcp_sendmsg`（通过 socket 内核对象定位到），注意到`tcp_sendmsg`的参数`sk`，说明其用于处理某个具体的socket/sock的数据发送功能，`tcp_sendmsg`的核心功能如下：
 
 ```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp.c#L1127
 int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -2019,7 +2023,7 @@ int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 	bool process_backlog = false;
 	bool sg;
 	long timeo;
-	/* 加锁，避免与软中断的冲突 */
+	// 加锁，避免与软中断的冲突
 	lock_sock(sk);
 
 	flags = msg->msg_flags;
