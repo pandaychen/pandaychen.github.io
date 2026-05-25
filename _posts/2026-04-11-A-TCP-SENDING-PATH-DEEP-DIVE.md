@@ -1020,16 +1020,16 @@ stateDiagram-v2
     [*] --> Open
 
     Open --> Disorder : "收到dupACK或SACK\n(tcp_fastretrans_alert)"
-    Open --> Loss : "RTO超时\ntcp_enter_loss:\nsnd_cwnd=1\nsnd_ssthresh=max(cwnd/2,2)"
+    Open --> Loss : "RTO超时\ntcp_enter_loss\nsnd_cwnd=1\nsnd_ssthresh=max(cwnd/2,2)"
 
     Disorder --> Open : "正常ACK恢复\n(tcp_try_undo_dsack)"
-    Disorder --> Recovery : "累计dupACK>=阈值\ntcp_enter_recovery:\nsnd_ssthresh=cwnd/2\nhigh_seq=snd_nxt"
+    Disorder --> Recovery : "累计dupACK>=阈值\ntcp_enter_recovery\nsnd_ssthresh=cwnd/2\nhigh_seq=snd_nxt"
     Disorder --> Loss : "RTO超时"
 
-    Recovery --> Open : "high_seq被确认\ntcp_try_undo_recovery:\nsnd_cwnd恢复或保持"
+    Recovery --> Open : "high_seq被确认\ntcp_try_undo_recovery\nsnd_cwnd恢复或保持"
     Recovery --> Loss : "RTO超时\ntcp_enter_loss"
 
-    Loss --> Open : "所有重传被确认\ntcp_try_undo_loss:\nsnd_cwnd恢复"
+    Loss --> Open : "所有重传被确认\ntcp_try_undo_loss\nsnd_cwnd恢复"
 ```
 
 **Open** 状态（正常传输）：
