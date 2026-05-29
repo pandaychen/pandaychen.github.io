@@ -94,7 +94,7 @@ flowchart TD
 
 核心要点：
 -   **发送路径**：`tcp_sendmsg` 只负责将用户数据拷贝到 `sk_write_queue`，真正的发送决策在 `tcp_write_xmit` 中完成，受拥塞窗口（`snd_cwnd`）、发送窗口（`snd_wnd`）和 Nagle 算法三重门控
--   **ACK 驱动**：TCP 发送是 ACK 驱动的闭环——`tcp_ack` 收到确认后推进 `snd_una`、释放 skb、更新拥塞窗口，从而允许 `tcp_write_xmit` 发送更多数据
+-   **ACK 驱动**：TCP 发送是 ACK 驱动的闭环，`tcp_ack` 收到确认后推进 `snd_una`、释放 skb、更新拥塞窗口，从而允许 `tcp_write_xmit` 发送更多数据
 -   **skb 生命周期**：skb 在 `tcp_sendmsg` 中创建并加入 `sk_write_queue`，`tcp_transmit_skb` 发送时 clone 一份（原始 skb 保留用于可能的重传），直到 `tcp_clean_rtx_queue` 收到 ACK 后才释放原始 skb
 
 ##  0x02    accept 完成后的 tcp_sock 状态布局
@@ -583,9 +583,11 @@ static void tcp_push(struct sock *sk, int flags, int mss_now,
 `__tcp_push_pending_frames` 直接调用 `tcp_write_xmit`：
 
 ```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_output.c#L2440
 void __tcp_push_pending_frames(struct sock *sk, unsigned int cur_mss,
                    int nonagle)
 {
+    // 
     if (tcp_write_xmit(sk, cur_mss, nonagle, 0,
                sk_gfp_mask(sk, GFP_ATOMIC)))
         tcp_check_probe_timer(sk);
@@ -624,7 +626,7 @@ flowchart TD
     P --> DONE
 ```
 
-####    门控一：tcp_cwnd_test —— 拥塞窗口检查
+####    门控一：tcp_cwnd_test（拥塞窗口检查）
 
 ```cpp
 // net/ipv4/tcp_output.c
@@ -669,7 +671,7 @@ static inline unsigned int tcp_left_out(const struct tcp_sock *tp)
 
 当 `in_flight >= snd_cwnd` 时，拥塞窗口不允许发送更多数据
 
-####    门控二：tcp_snd_wnd_test —— 发送窗口检查
+####    门控二：tcp_snd_wnd_test（发送窗口检查）
 
 ```cpp
 // net/ipv4/tcp_output.c
@@ -694,7 +696,7 @@ static inline u32 tcp_wnd_end(const struct tcp_sock *tp)
 
 检查 skb 的数据是否在发送窗口范围内。发送窗口 = `[snd_una, snd_una + snd_wnd)`，如果 `end_seq > snd_una + snd_wnd`，则超出对端接收能力
 
-####    门控三：tcp_nagle_test —— Nagle 算法
+####    门控三：tcp_nagle_test（Nagle 算法）
 
 ```cpp
 // net/ipv4/tcp_output.c
@@ -1319,7 +1321,7 @@ sequenceDiagram
 
 ##  0x09    滑动窗口详解
 
-TCP 滑动窗口是流量控制的核心，确保发送方不会压垮接收方的缓冲区。窗口机制涉及发送窗口和接收窗口两个维度
+TCP 滑动窗口是流量控制的核心，确保发送方不会压垮接收方的缓冲区。窗口机制涉及发送窗口和接收窗口两个维度（分这两者进行讨论）
 
 ####    发送侧窗口字段
 
@@ -1534,6 +1536,10 @@ new_measure:
     tp->rcvq_space.time = tcp_time_stamp;
 }
 ```
+
+##  0x0 ack包与滑动窗口的总结
+
+TODO
 
 ##  0x0A    Nagle 算法与发送时机
 
@@ -1750,8 +1756,8 @@ $ sudo sysctl -w net.ipv4.tcp_limit_output_bytes=524288
 
 ##  0x0C    参考
 
--   [内核之旅（十）：内核数据包发送](https://pandaychen.github.io/2025/04/02/A-LINUX-KERNEL-TRAVEL-10/) —— UDP/TCP 共享的通用发送路径（IP层 → 设备层 → 驱动）
--   [内核之旅（十二）：内核视角下的 TCP 完整通信过程](https://pandaychen.github.io/2025/04/25/A-LINUX-KERNEL-TRAVEL-12/) —— TCP 三次握手、数据传输、四次挥手、重传机制、CUBIC 算法
+-   [内核之旅（十）：内核数据包发送](https://pandaychen.github.io/2025/04/02/A-LINUX-KERNEL-TRAVEL-10/)
+-   [内核之旅（十二）：内核视角下的 TCP 完整通信过程](https://pandaychen.github.io/2025/04/25/A-LINUX-KERNEL-TRAVEL-12/)
 -   [Monitoring and Tuning the Linux Networking Stack: Sending Data](https://blog.packagecloud.io/monitoring-tuning-linux-networking-stack-sending-data/)
 -   [[内核源码] 网络协议栈 - write (tcp) 发送数据](https://wenfh2020.com/2021/08/19/kernel-tcp-write/)
 -   [TCP的发送系列 - tcp_sendmsg()的实现](https://www.cnblogs.com/aiwz/p/6333235.html)
