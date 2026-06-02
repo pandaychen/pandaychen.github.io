@@ -1,7 +1,7 @@
 ---
 layout:     post
-title:  Linux 内核之旅（十二）：内核视角下的三次握手
-subtitle:   
+title:  Linux 内核之旅（十二）：内核视角下的 TCP 完整通信过程
+subtitle:   协议栈视角下的三次握手
 date:       2025-04-25
 author:     pandaychen
 header-img:
@@ -12,7 +12,7 @@ tags:
 ---
 
 ##  0x00    前言
-本文从内核视角来跟踪下客户端与服务端的三次握手的流程，代码基于 [v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include) 版本
+本文从内核视角来跟踪TCP的完整通信过程（三次握手、数据传输、四次挥手），包含客户端与服务端双端方向的内核调用链及状态迁移内核实现追踪。代码基于 [v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include) 版本
 
 ![tcp-fsm](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/tcpfsm.png)
 
@@ -90,6 +90,10 @@ struct tcp_sock *tp = alloc_tcp_sock();
 struct inet_connection_sock *icsk = (struct inet_connection_sock *)tp;  
 struct sock *sk = (struct sock *)icsk;  // 最终转为通用sock
 ```
+
+####	半连接队列 vs 全连接队列（结构）
+
+TODO
 
 ####	inetsw_array
 
@@ -199,7 +203,7 @@ __sys_socket
                 |-- rcu_assign_pointer(fdt->fd[fd], file)
 ```
 
-![socket-api-flow]()
+<!--TODO: socket-api-flow 图待补充-->
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/af_inet.c#L1014
@@ -449,7 +453,7 @@ struct file *sock_alloc_file(struct socket *sock, int flags, const char *dname)
 
 注意到上面`sock_alloc_file`函数的最后，会把`file->private_data`设置为`struct socket*`变量，由于socket也是文件，所以基于VFS的这套框架，各个成员有如下关系：
 
-![socket-relation]()
+<!--TODO: socket-relation 图待补充-->
 
 
 这里多说一句，内核在`accept`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L1489)中也会创建`struct socket`结构，这两个具体的执行流程是不同的
@@ -474,16 +478,9 @@ struct file *sock_alloc_file(struct socket *sock, int flags, const char *dname)
 int listen(int sockfd, int backlog);
 ```
 
-####    listen实现：2.6内核
-
-####    listen实现：4.11内核
-
-
-####    
-
 `listen`[系统调用](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/af_inet.c#L194)的主要作用就是申请和初始化接收队列，包括全连接队列（链表）和半连接队列（hash表），如图
 
-![listen]()
+<!--TODO: listen 队列结构图待补充-->
 
 
 ```cpp
@@ -590,7 +587,13 @@ int inet_hash(struct sock *sk) {
 ####   listen中hashtable的逻辑
 在开始之前，先梳理下这里用到的若干关键数据结构：
 
-TODO
+-	`inet_hashinfo`：TCP全局哈希表管理结构，包含`ehash`（ESTABLISHED连接哈希表）、`listening_hash`（LISTEN状态哈希表）和`bhash`（端口绑定哈希表）
+-	`inet_listen_hashbucket`：listen哈希表的桶结构，每个桶用自旋锁保护
+-	`inet_ehash_bucket`：ehash的桶结构，存储所有非LISTEN状态的sock，包括半连接（`TCP_NEW_SYN_RECV`）
+
+在4.11.6内核中，listen socket通过`inet_hash`函数加入`listening_hash`表，而半连接对象（`request_sock`）在创建后通过`inet_ehash_insert`加入全局`ehash`表，与`ESTABLISHED`状态的sock共用同一哈希表
+
+TODO：内核实现
 
 [`inet_csk_listen_start`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/inet_connection_sock.c#L864)，其中`icsk->icsk_accept_queue` 定义在 `inet_connection_sock`（类型为`request_sock_queue`），是内核用来接收客户端请求的主要数据结构，其中包含了重要的全连接队列`request_sock`结构成员`rskq_accept_head`和`rskq_accept_tail`，这里**注意对于全连接队列来说，在它上面不需要进行复杂的查找工作，accept 的时候只是先进先出处理就好了，因此全连接队列通过 `rskq_accept_head` 和 `rskq_accept_tail` 以链表的形式来管理**，而半连接队列由于需要快速的查找，所以使用hash表来实现
 
@@ -675,7 +678,7 @@ void __init tcp_init(void)
 ```
 
 ##	0x04	client：connect实现（发起三次握手）
-客户端通过 `connect` 发起连接请求（发送SYN包），`connect`系统调用及设计到的接口实例化的代码如下：
+客户端通过 `connect` 发起连接请求（发送SYN包），`connect`系统调用及涉及到的接口实例化的代码如下：
 
 ```cpp
 /* sockfd: socket 函数返回的套接字描述符
@@ -684,22 +687,6 @@ void __init tcp_init(void)
  * return: 正确返回 0，否则返回 -1
  */
 int connect(int sockfd, const struct sockaddr *servaddr, socklen_t addrlen);
-
-/* include/linux/net.h */
-struct socket {
-    socket_state       state;
-    short              type;
-    ......
-    struct sock        *sk;
-    const struct proto_ops  *ops;
-};
-
-/* include/net/sock.h */
-struct proto {
-    ......
-    int (*connect)(struct sock *sk, struct sockaddr *uaddr, int addr_len);
-    ......
-};
 
 /* net/ipv4/tcp_ipv4.c */
 struct proto tcp_prot = {
@@ -715,22 +702,283 @@ const struct proto_ops inet_stream_ops = {
     .connect = inet_stream_connect,
     ......
 };
-
-/* af_inet.c */
-static struct inet_protosw inetsw_array[] = {
-    {
-        .type =       SOCK_STREAM,
-        .protocol =   IPPROTO_TCP,
-        .prot =       &tcp_prot,       //tcp_prot实例化
-        .ops =        &inet_stream_ops,
-        .flags =      INET_PROTOSW_PERMANENT | INET_PROTOSW_ICSK,
-    },
-    ......
-};
 ```
 
+####	connect 的调用链
+
+```text
+#------------------- 用户态 ---------------------------
+connect(fd, addr, addrlen)
+#------------------- 内核态 ---------------------------
+SYSCALL_DEFINE3(connect, ...)
+    |-- sockfd_lookup_light(fd)         # 通过fd查找socket结构
+    |-- sock->ops->connect()            # inet_stream_connect
+        |-- __inet_stream_connect()
+            |-- sk->sk_prot->connect()  # tcp_v4_connect
+                |-- ip_route_connect()  # 路由查找
+                |-- inet_hash_connect() # 分配本地端口
+                |-- tcp_set_state(sk, TCP_SYN_SENT)
+                |-- tcp_connect(sk)     # 构造并发送SYN包
+                    |-- tcp_connect_init()
+                    |-- tcp_transmit_skb()
+                    |-- inet_csk_reset_xmit_timer()  # 启动重传定时器
+            |-- inet_wait_for_connect() # 阻塞等待连接完成
+```
+
+####	inet_stream_connect
+
+`inet_stream_connect`是`connect`系统调用在TCP协议中的socket层入口，核心工作是调用协议层的connect函数并处理阻塞等待：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/af_inet.c#L567
+int __inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
+			  int addr_len, int flags)
+{
+	struct sock *sk = sock->sk;
+	int err;
+	long timeo;
+
+	switch (sock->state) {
+	default:
+		err = -EINVAL;
+		goto out;
+	case SS_CONNECTED:
+		err = -EISCONN;
+		goto out;
+	case SS_CONNECTING:
+		break;
+	case SS_UNCONNECTED:
+		err = -EISCONN;
+		if (sk->sk_state != TCP_CLOSE)
+			goto out;
+		// 调用协议层 connect：tcp_v4_connect
+		err = sk->sk_prot->connect(sk, uaddr, addr_len);
+		if (err < 0)
+			goto out;
+		// socket 层状态设置为 SS_CONNECTING
+		sock->state = SS_CONNECTING;
+		err = -EINPROGRESS;
+		break;
+	}
+
+	timeo = sock_sndtimeo(sk, flags & O_NONBLOCK);
+
+	if ((1 << sk->sk_state) & (TCPF_SYN_SENT | TCPF_SYN_RECV)) {
+		// 非阻塞模式直接返回 -EINPROGRESS（高性能编程）
+
+		// 非阻塞模式下需要等待握手结束才返回（低性能）
+		if (!timeo || !inet_wait_for_connect(sk, timeo, true))
+			goto out;
+		err = sock_intr_errno(timeo);
+		if (signal_pending(current))
+			goto out;
+	}
+
+	if (sk->sk_state == TCP_CLOSE)
+		goto sock_error;
+
+	sock->state = SS_CONNECTED;
+	err = 0;
+out:
+	return err;
+	......
+}
+```
+
+####	tcp_v4_connect 核心实现
+继续，[`tcp_v4_connect`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_ipv4.c#L152) 是TCP协议connect的核心函数，负责设置目标地址、查找路由、分配本地端口、设置状态并触发SYN包发送
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_ipv4.c#L152
+int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
+{
+	struct sockaddr_in *usin = (struct sockaddr_in *)uaddr;
+	struct inet_sock *inet = inet_sk(sk);
+	struct tcp_sock *tp = tcp_sk(sk);
+	__be16 orig_sport, orig_dport;
+	__be32 daddr, nexthop;
+	struct flowi4 *fl4;
+	struct rtable *rt;
+	int err;
+
+	// 地址合法性检查
+	if (addr_len < sizeof(struct sockaddr_in))
+		return -EINVAL;
+	if (usin->sin_family != AF_INET)
+		return -EAFNOSUPPORT;
+
+	// 目标地址和下一跳地址
+	nexthop = daddr = usin->sin_addr.s_addr;
+	inet_opt = rcu_dereference_protected(inet->inet_opt, ...);
+	if (inet_opt && inet_opt->opt.srr) {
+		if (!daddr)
+			return -EINVAL;
+		nexthop = inet_opt->opt.faddr;
+	}
+
+	orig_sport = inet->inet_sport;
+	orig_dport = usin->sin_port;
+
+	// 路由查找：确定出口设备和源IP
+	fl4 = &inet->cork.fl.u.ip4;
+	rt = ip_route_connect(fl4, nexthop, inet->inet_saddr,
+			      RT_CONN_FLAGS(sk), sk->sk_bound_dev_if,
+			      IPPROTO_TCP, orig_sport, orig_dport, sk);
+	if (IS_ERR(rt)) {
+		err = PTR_ERR(rt);
+		goto failure;
+	}
+
+	if (!inet_opt || !inet_opt->opt.srr)
+		daddr = fl4->daddr;
+
+	// 设置源地址（如果未绑定）
+	if (!inet->inet_saddr)
+		inet->inet_saddr = fl4->saddr;
+	sk_rcv_saddr_set(sk, inet->inet_saddr);
+
+	// 设置目的地址和端口
+	inet->inet_dport = usin->sin_port;
+	sk_daddr_set(sk, daddr);
+
+	tp->rx_opt.ts_recent = 0;
+	tp->rx_opt.ts_recent_stamp = 0;
+
+	// 设置发送窗口初始值
+	if (likely(!tp->repair)) {
+		if (!tp->write_seq)
+			tp->write_seq = secure_tcp_sequence_number(
+				inet->inet_saddr, inet->inet_daddr,
+				inet->inet_sport, usin->sin_port);
+		tp->tsoffset = secure_tcp_ts_off(inet->inet_saddr,
+						 inet->inet_daddr);
+	}
+
+	inet->inet_id = tp->write_seq ^ jiffies;
+
+	// 分配本地端口并加入 ehash
+	err = inet_hash_connect(&tcp_death_row, sk);
+	if (err)
+		goto failure;
+
+	sk_set_txhash(sk);
+	rt = ip_route_newports(fl4, rt, orig_sport, orig_dport,
+			       inet->inet_sport, inet->inet_dport, sk);
+	if (IS_ERR(rt)) {
+		err = PTR_ERR(rt);
+		goto failure;
+	}
+
+	sk->sk_gso_type = SKB_GSO_TCPV4;
+	sk_setup_caps(sk, &rt->dst);
+
+	if (!tp->write_seq && likely(!tp->repair))
+		tp->write_seq = secure_tcp_sequence_number(
+			inet->inet_saddr, inet->inet_daddr,
+			inet->inet_sport, inet->inet_dport);
+
+	// 设置 TCP 状态为 TCP_SYN_SENT
+	tcp_set_state(sk, TCP_SYN_SENT);
+
+	// 调用 tcp_connect 构建并发送 SYN 包
+	err = tcp_connect(sk);
+	if (err)
+		goto failure;
+
+	rt = NULL;
+	return 0;
+
+failure:
+	tcp_set_state(sk, TCP_CLOSE);
+	ip_rt_put(rt);
+	sk->sk_route_caps = 0;
+	inet->inet_dport = 0;
+	return err;
+}
+```
+
+####	tcp_connect：构造并发送SYN包
+
+[`tcp_connect`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_output.c#L3392) 负责初始化TCP连接参数、构造SYN报文并发送
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_output.c#L3392
+int tcp_connect(struct sock *sk)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	struct sk_buff *buff;
+	int err;
+
+	// 初始化连接参数：窗口大小、MSS等
+	tcp_connect_init(sk);
+
+	// 分配 SYN 包的 skb
+	buff = sk_stream_alloc_skb(sk, 0, sk->sk_allocation, true);
+	if (unlikely(!buff))
+		return -ENOBUFS;
+
+	// 设置 SYN 标志
+	tcp_init_nondata_skb(buff, tp->write_seq++, TCPHDR_SYN);
+	tp->retrans_stamp = tcp_time_stamp;
+
+	// 将 SYN 包加入发送队列
+	tcp_connect_queue_skb(sk, buff);
+	tcp_ecn_send_syn(sk, buff);
+
+	// 发送 SYN 包（通过 tcp_transmit_skb）
+	err = tp->fastopen_req ? tcp_send_syn_data(sk, buff) :
+	      tcp_transmit_skb(sk, buff, 1, sk->sk_allocation);
+	if (err == -ECONNREFUSED)
+		return err;
+
+	tp->snd_nxt = tp->write_seq;
+	tp->pushed_seq = tp->write_seq;
+	TCP_INC_STATS(sock_net(sk), TCP_MIB_ACTIVEOPENS);
+
+	// 启动重传定时器，超时时间为 TCP_TIMEOUT_INIT（1秒）
+	inet_csk_reset_xmit_timer(sk, ICSK_TIME_RETRANS,
+				  inet_csk(sk)->icsk_rto, TCP_RTO_MAX);
+	return 0;
+}
+```
+
+`tcp_connect` 执行完成后，客户端TCP状态已变为`TCP_SYN_SENT`，SYN包已发送，重传定时器已启动。如果在超时时间内未收到SYN+ACK响应，内核将触发重传
+
+####	connect 的阻塞等待：inet_wait_for_connect
+
+当socket为**阻塞模式**时，`connect`会通过`inet_wait_for_connect`等待连接完成（即收到SYN+ACK后状态变为`TCP_ESTABLISHED`），这同样是内核等待队列机制的典型应用：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/af_inet.c#L540
+static long inet_wait_for_connect(struct sock *sk, long timeo, bool writebias)
+{
+	DEFINE_WAIT_FUNC(wait, woken_wake_function);
+
+	add_wait_queue(sk_sleep(sk), &wait);
+	sk->sk_write_pending += writebias;
+
+	while ((1 << sk->sk_state) & (TCPF_SYN_SENT | TCPF_SYN_RECV)) {
+		release_sock(sk);
+		timeo = wait_woken(&wait, TASK_INTERRUPTIBLE, timeo);
+		lock_sock(sk);
+		if (signal_pending(current) || !timeo)
+			break;
+	}
+	remove_wait_queue(sk_sleep(sk), &wait);
+	sk->sk_write_pending -= writebias;
+	return timeo;
+}
+```
+
+当服务端的SYN+ACK包到达时，客户端通过`tcp_rcv_synsent_state_process`将状态设置为`TCP_ESTABLISHED`，随后唤醒在等待队列上的进程
+
+####	ebpf with connect()
+
+TODO
+
 ##	0x05	server：接收客户端的SYN包
-在服务器端，所有的 TCP 报文都经过网卡及软中断，进入到 `tcp_v4_rcv`函数，在该函数中根据网络包（skb）TCP 头信息中的目的 IP 信息查到当前在 listen 的 socket（关联`__inet_lookup_skb`函数），然后继续进入 `tcp_v4_do_rcv` 处理握手过程，服务端收到客户端发送的 SYN 包后，将状态修改为 `TCP_NEW_SYN_RECV`，为了节省资源，并没有为 `struct sock` 分配空间，而是创建轻量级的连接请求数据结构 `struct request_sock`
+
+在服务器端，所有的 TCP 报文都经过网卡及软中断（SYN包也不例外），进入到 `tcp_v4_rcv`函数，在该函数中根据网络包（skb）TCP 头信息中的目的 IP 信息查到当前在 listen 的 socket（关联`__inet_lookup_skb`函数），然后继续进入 `tcp_v4_do_rcv` 处理握手过程，服务端收到客户端发送的 SYN 包后，将状态修改为 `TCP_NEW_SYN_RECV`，为了节省资源，并没有为 `struct sock` 分配空间，而是创建轻量级的连接请求数据结构 `struct request_sock`
 
 这里涉及到几个关键点：
 1.  状态机切换
@@ -1148,7 +1396,7 @@ reset:
     ...
 }
 
-
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L5875
 int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb) {
     ...
     switch (sk->sk_state) {
@@ -1215,7 +1463,42 @@ struct request_sock *inet_reqsk_alloc(const struct request_sock_ops *ops,
 }
 ```
 
-`af_ops->send_synack`对应的是 TODO
+`af_ops->send_synack`对应的是[`tcp_v4_send_synack`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_ipv4.c#L899)函数，负责构造 SYN+ACK 报文并通过IP层发送给客户端
+
+
+TODO
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_ipv4.c#L860
+static int tcp_v4_send_synack(const struct sock *sk, struct dst_entry *dst,
+			      struct flowi *fl,
+			      struct request_sock *req,
+			      struct tcp_fastopen_cookie *foc,
+			      enum tcp_synack_type synack_type)
+{
+	const struct inet_request_sock *ireq = inet_rsk(req);
+	struct flowi4 fl4;
+	int err = -1;
+	struct sk_buff *skb;
+
+	/* First, grab a route. */
+	if (!dst && (dst = inet_csk_route_req(sk, &fl4, req)) == NULL)
+		return -1;
+
+	skb = tcp_make_synack(sk, dst, req, foc, synack_type);
+
+	if (skb) {
+		__tcp_v4_send_check(skb, ireq->ir_loc_addr, ireq->ir_rmt_addr);
+
+		err = ip_build_and_send_pkt(skb, sk, ireq->ir_loc_addr,
+					    ireq->ir_rmt_addr,
+					    ireq->opt);
+		err = net_xmit_eval(err);
+	}
+
+	return err;
+}
+```
 
 ####   状态迁移的可观测
 额外补充，新版本内核（如`6.16`）提供了一个[观测点](https://elixir.bootlin.com/linux/v6.16-rc6/source/net/ipv4/af_inet.c#L1343)`tracepoint:sock:inet_sock_set_state`，可以用来获取TCP状态的变迁
@@ -1429,7 +1712,7 @@ else if { tcp_child_process(sk, nsk, skb) } // case 3: nsk 为新创建的子 so
 else { ... } //case 4 ：创建子socket成功 && 加全连接队列成功
 ```
 
-1、case1，当`nsk == NULL`时，说明无法创建子 socket，可能原因为packet非法或者全连接队列已满`sk_acceptq_is_full(sk)==true`，如果为全连接队列满导致，则参考`tcp_check_req`中标签`listen_overflow`的处理。默认内核的行为如下：
+1、**case1**，当`nsk == NULL`时，说明无法创建子 socket，可能原因为packet非法或者全连接队列已满`sk_acceptq_is_full(sk)==true`，如果为全连接队列满导致，则参考`tcp_check_req`中标签`listen_overflow`的处理。默认内核的行为如下：
 
 ```cpp
 reqsk_put(req);       // 释放半连接对象（request_sock）
@@ -1438,21 +1721,21 @@ goto discard_and_relse; // 丢弃数据包，释放资源
 
 可增大 `net.core.somaxconn` 和 `listen()` 的 `backlog` 参数，避免队列溢出
 
-2、case2，当`nsk == sk`时（`nsk` 等于原监听 socket `sk`），触发原因为收到重复或无效 ACK，比如收到重复 ACK报文，半连接队列中无匹配的 `request_sock`，但 ACK 序列号合法，可能是重传导致；另一种情况是开启了SYN Cookie 验证通过，未创建半连接对象，需重新生成 `request_sock`，默认内核的行为如下：
+2、**case2**，当`nsk == sk`时（`nsk` 等于原监听 socket `sk`），触发原因为收到重复或无效 ACK，比如收到重复 ACK报文，半连接队列中无匹配的 `request_sock`，但 ACK 序列号合法，可能是重传导致；另一种情况是开启了SYN Cookie 验证通过，未创建半连接对象，需重新生成 `request_sock`，默认内核的行为如下：
 
 ```cpp
 reqsk_put(req); // 释放当前临时 req（非必需对象）
 // 继续用监听 socket 处理后续数据包
 ```
 
-3、case3，当 `nsk != sk`且`tcp_child_process`返回非`0`表示成功创建子 Socket，但`tcp_child_process`失败，内核默认行为：
+3、**case3**，当 `nsk != sk`且`tcp_child_process`返回非`0`表示成功创建子 Socket，但`tcp_child_process`失败，内核默认行为：
 
 ```cpp
 tcp_v4_send_reset(nsk, skb); // 向客户端发送 RST
 goto discard_and_relse;       // 释放资源
 ```
 
-4、case4，`nsk != sk`且`tcp_child_process`调用成功，此时内核会将子 socket 状态从 `TCP_SYN_RECV` 转为 `TCP_ESTABLISHED`（连接已经先前就移入了全连接队列），随后唤醒因 `accept()` 阻塞进程
+4、**case4**，`nsk != sk`且`tcp_child_process`调用成功，此时内核会将子 socket 状态从 `TCP_SYN_RECV` 转为 `TCP_ESTABLISHED`（连接已经先前就移入了全连接队列），随后唤醒因 `accept()` 阻塞进程
 
 ```cpp
 /*
@@ -1464,7 +1747,7 @@ fastopen：是否启用 TCP Fast Open
 */
 struct sock *tcp_check_req(struct sock *sk, struct sk_buff *skb,
                struct request_sock *req,
-               bool fastopen, bool *req_stolen)
+               bool fastopen)
 {
 	struct sock *child;
     ......
@@ -1527,7 +1810,9 @@ embryonic_reset:
 }
 ```
 
-`tcp_v4_syn_recv_sock`函数是处理第三次握手ACK包的核心函数，负责创建子套接字并完成连接状态迁移，其核心流程为：
+####	tcp_v4_syn_recv_sock实现
+
+`tcp_v4_syn_recv_sock`函数是处理第三次握手ACK包的核心函数，**负责创建子套接字并完成连接状态迁移**，其核心流程为：
 
 1.	创建子套接字`newsk`：调用`tcp_create_openreq_child(sk, req, skb)`克隆监听套接字，基于监听套接字 `sk` 和半连接对象 `req` 创建子套接字 `newsk`
 2.	初始化子套接字成员，从半连接对象 `req` 中提取客户端和服务端 IP/端口，初始化子套接字`newsk`，初始化顺序为`inet_csk_clone_lock->sk_clone_lock->sk_prot_alloc`
@@ -1691,7 +1976,7 @@ int tcp_v4_rcv(struct sk_buff *skb) {
         if (!tcp_filter(sk, skb)) {
             ...
             // 修改 TCP 状态为：TCP_SYN_RECV
-            nsk = tcp_check_req(sk, skb, req, false, &req_stolen);
+            nsk = tcp_check_req(sk, skb, req, false);
         }
         ......
         if (nsk == sk) {
@@ -1749,13 +2034,78 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb) {
 
 2. 子socket，即`child`关联的sock等待队列，在同步阻塞模式下，可以用于唤醒等待数据传输的进程
 
-####	重要：__inet_lookup_listener的实现逻辑
+####	重要： __inet_lookup_skb 与 __inet_lookup_listener 的实现逻辑
+
+`__inet_lookup_skb`是`tcp_v4_rcv`中查找目标sock的关键函数，其查找逻辑为先查`ehash`（ESTABLISHED连接），再查`listening_hash`（LISTEN状态）：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/net/inet_hashtables.h#L350
+static inline struct sock *__inet_lookup_skb(struct inet_hashinfo *hashinfo,
+					     struct sk_buff *skb,
+					     int doff,
+					     const __be16 sport,
+					     const __be16 dport,
+					     bool *refcounted)
+{
+	struct sock *sk = skb_steal_sock(skb);
+	if (sk)
+		return sk;
+	// 先查 ehash（已建立连接），再查 listening_hash
+	return __inet_lookup(dev_net(skb_dst(skb)->dev), hashinfo, skb,
+			     doff, iph->saddr, sport, iph->daddr, dport,
+			     inet_iif(skb), refcounted);
+}
+
+// __inet_lookup 内部调用链：
+// 1. __inet_lookup_established() - 查询ehash表
+// 2. __inet_lookup_listener() - 查询listening_hash表
+```
+
 TODO
 
-####	重要：sock对象的创建
-这里来说明下此握手阶段的sock对象创建与系统调用`socket()`的sock对象创建的不同之处
+`__inet_lookup_listener`根据目的IP和端口在`listening_hash`表中查找匹配的listen socket，支持精确匹配（绑定特定IP）和通配匹配（绑定`INADDR_ANY`）：
 
-在服务端收到客户端第一个SYN包时，`tcp_v4_rcv->tcp_child_process->tcp_child_process->tcp_child_process` 的[过程](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_ipv4.c#L1434)，通过`icsk->icsk_af_ops->conn_request(sk, skb)`创建半连接队列hashtable表项（最终调用的函数为`inet_reqsk_alloc`），这个半连接表项对应的结构为[`inet_reqsk_alloc`](https://elixir.bootlin.com/linux/v4.11.6/source/include/net/request_sock.h#L49)，并非一个完整的`struct sock`对象
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/inet_hashtables.c#L204
+struct sock *__inet_lookup_listener(struct net *net,
+				    struct inet_hashinfo *hashinfo,
+				    struct sk_buff *skb, int doff,
+				    const __be32 saddr, __be16 sport,
+				    const __be32 daddr, const unsigned short hnum,
+				    const int dif)
+{
+	unsigned int hash = inet_lhashfn(net, hnum);
+	struct inet_listen_hashbucket *ilb = &hashinfo->listening_hash[hash];
+	int score, hiscore = 0, matches = 0, reuseport = 0;
+	struct sock *sk, *result = NULL;
+
+	// 遍历 listening_hash 桶中的 sock
+	sk_for_each_rcu(sk, &ilb->head) {
+		// 计算匹配得分（IP、端口、网络命名空间等）
+		score = compute_score(sk, net, hnum, daddr, dif);
+		if (score > hiscore) {
+			result = sk;
+			hiscore = score;
+			reuseport = sk->sk_reuseport;
+			if (reuseport) {
+				// SO_REUSEPORT 支持：多个listen socket绑定同一端口
+				matches = 1;
+			}
+		} else if (score == hiscore && reuseport) {
+			matches++;
+			// 使用哈希选择其中一个socket（负载均衡）
+			if (reciprocal_scale(hash, matches) == 0)
+				result = sk;
+		}
+	}
+	return result;
+}
+```
+
+####	重要：sock对象的创建的区别
+这里说明下此握手阶段的sock对象创建与系统调用`socket()`的sock对象创建的不同之处
+
+在服务端收到客户端第一个SYN包时，`tcp_v4_rcv->tcp_v4_do_rcv->tcp_rcv_state_process->tcp_v4_conn_request->tcp_conn_request` 的[过程](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_ipv4.c#L1434)，通过`icsk->icsk_af_ops->conn_request(sk, skb)`创建半连接队列hashtable表项（最终调用的函数为`inet_reqsk_alloc`），这个半连接表项对应的结构为[`request_sock`](https://elixir.bootlin.com/linux/v4.11.6/source/include/net/request_sock.h#L49)，并非一个完整的`struct sock`对象
 
 当服务端收到客户端第三次ACK时且正常完成握手后，才会把这个`inet_reqsk_alloc`结构升级为正常的`struct sock`，关联调用链为`tcp_v4_syn_recv_sock->tcp_create_openreq_child->inet_csk_clone_lock->sk_clone_lock`
 
@@ -1799,7 +2149,7 @@ out:
 
 ![acceptfd_relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/kfngxl/epoll-nowm/acceptfd_relation-1.png)
 
-先回想一下`struct socket`的[结构]()，其中包含了非常重要的`sock`成员，也是 socket 的核心内核对象，其中发送队列、接收队列、等待队列等核心数据结构都位于此
+先回想一下`struct socket`的[结构](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/net.h#L111)，其中包含了非常重要的`sock`成员，也是 socket 的核心内核对象，其中发送队列、接收队列、等待队列等核心数据结构都位于此
 
 ```cpp
 struct socket {
@@ -1856,7 +2206,7 @@ const struct proto_ops inet_stream_ops = {
 }
 ```
 
-2、调用`sock_alloc_file`函数：为新 `socket` 对象申请 `file`（初始化`struct socket`的`file`成员），`sock_alloc_file` 又会调用 `alloc_file`对`struct file`结构进行初始化，注意在 `alloc_file` 方法中，把 `socket_file_ops` 函数集合设置到 `file->f_op`了，最后注意到**在accept里创建的新 `socket` 里的 `file->f_op->poll` 函数指向的是 `sock_poll`** TODO
+2、调用`sock_alloc_file`函数：为新 `socket` 对象申请 `file`（初始化`struct socket`的`file`成员），`sock_alloc_file` 又会调用 `alloc_file`对`struct file`结构进行初始化，注意在 `alloc_file` 方法中，把 `socket_file_ops` 函数集合设置到 `file->f_op`了，最后注意到**在accept里创建的新 `socket` 里的 `file->f_op->poll` 函数指向的是 `sock_poll`**，这对于epoll机制非常重要，当 `epoll_ctl` 注册该fd时，内核会调用`file->f_op->poll`即`sock_poll`来获取当前就绪事件并注册回调
 
 ```cpp
 struct file *sock_alloc_file(struct socket *sock, int flags, 
@@ -1934,22 +2284,6 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 这里介绍下`sockfd_lookup_light`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L489)，在`accept`系统调用中，参数`fd`指向的是listen的socket，该socket包含的VFS结构指向已经基本完整，所以从该函数的作用就是从进程->进程打开的fd->`struct file`->`file.private_data`拿到`struct socket`结构对象
 
 ```cpp
-static struct socket *sockfd_lookup_light(int fd, int *err, int *fput_needed){
-	struct fd f = fdget(fd);
-	struct socket *sock;
-
-	*err = -EBADF;
-	if (f.file) {
-		// call sock_from_file
-		sock = sock_from_file(f.file, err);
-		if (likely(sock)) {
-			*fput_needed = f.flags;
-			return sock;
-		}
-		fdput(f);
-	}
-	
-
 //https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L489
 static struct socket *sockfd_lookup_light(int fd, int *err, int *fput_needed)
 {
@@ -1978,10 +2312,10 @@ struct socket *sock_from_file(struct file *file, int *err){
 ```
 
 ####	accept 的核心逻辑：inet_csk_accept
-`inet_csk_accept`主要实现了tcp协议accept操作，其主要功能是从已经完成三次握手的全连接队列（对于成员是`struct inet_connection_sock`的`icsk_accept_queue`[成员](https://elixir.bootlin.com/linux/v4.11.6/source/include/net/inet_connection_sock.h#L91)）中取控制块，如果没有已经完成的连接，则需要根据（socket）阻塞标记来来区分对待，若非阻塞则直接返回，若阻塞则需要在一定时间范围内阻塞等待。这里有两个关键的子流程：
+`inet_csk_accept`主要实现了tcp协议`accept`操作，其主要功能是从已经完成三次握手的全连接队列（对于成员是`struct inet_connection_sock`的`icsk_accept_queue`[成员](https://elixir.bootlin.com/linux/v4.11.6/source/include/net/inet_connection_sock.h#L91)）中取控制块，如果没有已经完成的连接，则需要根据（socket）阻塞标记来来区分对待，若非阻塞则直接返回，若阻塞则需要在一定时间范围内阻塞等待。这里有两个关键的子流程：
 
--	`inet_csk_wait_for_connect`：
--	`reqsk_queue_remove`：
+-	`inet_csk_wait_for_connect`：TODO
+-	`reqsk_queue_remove`：TODO
 
 ```cpp
 struct sock *inet_csk_accept(struct sock *sk, int flags, int *err, bool kern){
@@ -2122,7 +2456,9 @@ static inline struct request_sock *reqsk_queue_remove(struct request_sock_queue 
 }
 ```
 
-####	`struct sock`创建的区别（TODO）
+####	`struct sock`创建的区别
+
+下面对比`socket()`系统调用与三次握手中创建sock对象的差异。`socket()`通过`inet_create->sock_init_data`初始化，此时传入的`struct socket`非NULL，所以`sk->sk_wq`会被设置为socket的等待队列；而三次握手中通过`sk_clone_lock`克隆的子sock，其`sk_wq`初始为NULL（`sk_set_socket(newsk, NULL)`），直到`accept`中调用`sock_graft`时才与新的`struct socket`关联
 
 ```cpp
 void sock_init_data(struct socket *sock, struct sock *sk)
@@ -2170,7 +2506,7 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 `tcp_rcv_established`的逻辑比较复杂，其核心逻辑是通过快速路径（Fast Path） 和 慢速路径（Slow Path）的分流机制优化数据处理效率，首先了解下：
 
 -	`tcp_queue_rcv`：负责将数据包加入接收队列
--	`tcp_data_queue`：TODO
+-	`tcp_data_queue`：负责处理接收到的数据段排序，包括顺序数据入队、乱序数据管理（`out_of_order_queue`）和重复数据检测
 
 在`tcp_rcv_established`中可以看到数据成功接收时唤醒逻辑，大致为数据入队后立即调用 `sk_data_ready` 回调函数：
 
@@ -2183,9 +2519,54 @@ sk->sk_data_ready(sk, 0);  // 触发唤醒
 
 ####	fast path VS slow path
 
-TODO
+快速路径（Fast Path）和慢速路径（Slow Path）是`tcp_rcv_established`中的核心分流机制，其设计目的是：对于绝大多数正常的、按序到达的数据包（热路径），通过最少的判断和处理步骤完成接收，减少CPU开销；只有异常或复杂情况才进入完整处理流程
 
+**快速路径触发条件**（以下条件需同时满足）：
+1. `tcp_flag_word(th) & TCP_HP_BITS) == tp->pred_flags`：TCP头部标志位匹配预期（通常为纯ACK或纯数据包，无RST/SYN/FIN/URG）
+2. `TCP_SKB_CB(skb)->seq == tp->rcv_nxt`：数据包序列号等于期望的下一个接收序列号（包按序到达）
+3. `!after(TCP_SKB_CB(skb)->ack_seq, tp->snd_nxt)`：ACK序列号合法（不确认尚未发送的数据）
 
+**`pred_flags`预测标志**的计算：
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/net/tcp.h#L664
+static inline void tcp_fast_path_on(struct tcp_sock *tp)
+{
+	__tcp_fast_path_on(tp, tp->snd_wnd >> tp->rx_opt.snd_wscale);
+}
+
+static inline void __tcp_fast_path_on(struct tcp_sock *tp, u32 snd_wnd)
+{
+	// pred_flags 编码了期望的TCP头部格式：
+	// 头部长度 + 窗口大小 + 无特殊标志
+	tp->pred_flags = htonl((tp->tcp_header_len << 26) |
+			       ntohl(TCP_FLAG_ACK) |
+			       snd_wnd);
+}
+
+// 快速路径关闭条件
+static inline void tcp_fast_path_check(struct sock *sk)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	// 如果接收队列中有乱序数据或接收窗口为0，关闭快速路径
+	if (skb_queue_empty(&tp->out_of_order_queue) &&
+	    tp->rcv_wnd &&
+	    atomic_read(&sk->sk_rmem_alloc) < sk->sk_rcvbuf)
+		tcp_fast_path_on(tp);
+	else
+		tp->pred_flags = 0; // 强制进入慢速路径
+}
+```
+
+**慢速路径触发场景**：
+- 乱序包到达（`seq != rcv_nxt`）
+- 收到窗口更新
+- 有乱序队列中的数据待处理
+- SACK选项处理
+- 紧急数据（URG指针）
+- 时间戳校验失败（PAWS检查不通过）
+- 接收缓冲区不足
+
+**内核设计目的**：在高吞吐传输场景中，>95%的包是按序到达的纯数据/ACK包，快速路径避免了完整的TCP状态机处理（如乱序队列检查、SACK解析等），将关键路径的CPU开销降到最低
 
 ```cpp
 void tcp_rcv_established(struct sock *sk, struct sk_buff *skb,
@@ -2357,7 +2738,1559 @@ static int __must_check tcp_queue_rcv(struct sock *sk, struct sk_buff *skb, int 
 }
 ```
 
-##	0x0A	总结
+##	0x0A	唤醒机制：同步阻塞 VS epoll
+
+在前文描述了sock结构体时，介绍了两个关键成员：`sk_wq`（套接字等待队列）和`sk_data_ready`（数据就绪回调函数），这二者共同完成了内核管理I/O事件的核心机制，下面梳理下在同步阻塞I/O和epoll多路复用场景的区别
+
+-	`struct socket_wq sk_wq`：即socket/sock的等待队列头，用于管理因等待I/O事件（如数据到达）而阻塞的进程或回调项；这个成员在同步阻塞模式中存储用户进程的等待项`wait_queue_t`结构；在epoll模式中存储epoll注册的回调项（epoll模式中又分为listenfd与acceptfd两种）
+-	`sk_data_ready`：函数指针，默认指向`sock_def_readable`的内核实现，当数据到达套接字接收队列（`sk_receive_queue`）时、或者TCP三次握手完成时被调用，用于触发事件通知，其核心行为是检查`sk_wq`并唤醒其中的等待项
+
+####	同步阻塞场景：进程直接挂起
+
+举例来说，当用户进程调用`recv()`且无数据可读时，内核会将当前被阻塞的进程加入sock的`sk_wq`队列，然后内核通过`DEFINE_WAIT`创建等待项，其`.private`成员会指向当前进程，`.func`成员会被设置为`autoremove_wake_function`（即唤醒后移除），接着调用`add_wait_queue`将该等待项插入`sk_wq`，完成后内核会将该进程状态设为`TASK_INTERRUPTIBLE`并让出CPU（发生第一次上下文切换）
+
+当数据到达时的唤醒流程是，软中断处理数据包 -> 放入`sk_receive_queue` -> 调用`sk_data_ready(sk)`，即调用`sock_def_readable`，默认的`sock_def_readable`的步骤是先检查（遍历）`sk_wq`的等待项队列，调用等待项的`.func`（`autoremove_wake_function`）-> 直接唤醒进程并移出队列（又发生了一次上下文切换）
+
+所以从上述步骤可以了解，这种模式由于要进行两次进程上下文切换（挂起+唤醒），每次耗时`3–5μs`，单进程仅能处理一个连接，性能较差
+
+```cpp
+// 默认回调函数 sock_def_readable 的实现
+// 事件触发：协议栈调用 sk_data_ready(sk)
+static void sock_def_readable(struct sock *sk) {
+    struct socket_wq *wq;
+    rcu_read_lock();
+    wq = rcu_dereference(sk->sk_wq); // 获取 sk_wq 队列
+    if (wq_has_sleeper(wq)) {
+		// 队列检查：检查 sk_wq 中是否有阻塞进程
+        // 唤醒操作：唤醒队列中的进程（POLLIN 表示可读事件）
+		// 遍历 sk_wq 中的等待项，执行其回调函数（如 autoremove_wake_function）唤醒进程
+		// 唤醒策略：传入参数 nr_exclusive=1，表示仅唤醒一个进程（避免惊群效应）
+        wake_up_interruptible_sync_poll(&wq->wait, POLLIN | POLLPRI);
+    }
+    sk_wake_async(sk, SOCK_WAKE_WAITD, POLL_IN); // 发送异步信号（如 SIGIO）
+    rcu_read_unlock();
+}
+```
+
+####	epoll I/O多路复用场景：事件驱动与回调转发
+
+**epoll通过改造`sk_wq`和`sk_data_ready`的协作实现高效多路复用**，步骤拆解如下
+
+-	epoll注册改造`sk_wq`：`epoll_ctl(EPOLL_CTL_ADD)`为每个socket添加特殊等待项，即`.private = NULL`（不关联进程）以及`.func = ep_poll_callback`（epoll自定义回调），此等待项通过`eppoll_entry`结构关联到epoll的红黑树节点`epitem`
+-	数据到达触发epoll回调：当数据就绪时，内核仍然会调用`sk_data_ready`，随后步骤调用`sock_def_readable` -> 遍历`sk_wq` -> 执行`ep_poll_callback`
+
+而`ep_poll_callback`的核心步骤为：
+
+1.	将就绪的`epitem`加入`epoll`就绪队列`rdllist`
+2.	检查`eventpoll`自身的等待队列，唤醒因`epoll_wait`阻塞的用户进程
+3.	用户进程被唤醒后，批量处理就绪事件：`epoll_wait`从`rdllist`获取所有就绪事件，仅需一次系统调用即可处理海量连接
+4.	在高并发场景下，epoll_wait机制会持续占用CPU达到处理高并发请求的场景，性能非常高
+
+
+小结下，`sk_wq`与`sk_data_ready`的关系本质是**事件发布-订阅模型**，同步阻塞模式下是进程直接订阅，导致高开销，而epoll通过回调中转和事件批量交付，实现高性能IO多路复用
+
+从内核的这种解耦与分层设计来看，保证了`sk_data_ready`的统一性，无论何种模式，数据到达时均调用同一回调，但根据`sk_wq`的内容动态适配行为，对同步阻塞模式是唤醒进程->进程主动读数据，对epoll模式是触发回调 -> 事件入队 -> 用户进程批量处理，`sk_wq`与`sk_data_ready`的关系本质是**事件发布-订阅模型**，同步阻塞模式下是进程直接订阅，导致高开销，而epoll通过回调中转和事件批量交付，实现高性能IO多路复用
+
+-	订阅者：`sk_wq`管理订阅该事件的实体（进程或epoll实例），作为事件订阅中心，隔离内核协议栈与上层模型
+-	发布者：`sk_data_ready`在数据到达时发布事件
+
+##	0x0B	数据传输：发送路径 tcp_sendmsg
+
+用户进程调用`send()`/`write()`发送数据时，最终会通过系统调用进入内核的`tcp_sendmsg`函数。发送路径的核心调用链如下：
+
+```text
+send()/write()
+    |-- sock_sendmsg()
+        |-- sock->ops->sendmsg()  # inet_sendmsg
+            |-- sk->sk_prot->sendmsg()  # tcp_sendmsg
+                |-- skb_entail()  # 数据拷贝到发送队列
+                |-- tcp_push()
+                    |-- __tcp_push_pending_frames()
+                        |-- tcp_write_xmit()
+                            |-- tcp_transmit_skb()  # 构造TCP头并发送
+                                |-- icsk->icsk_af_ops->queue_xmit()  # ip_queue_xmit
+```
+
+核心流程图如下：
+
+```mermaid
+flowchart TD
+    A["用户态: send/write"] --> B["sys_sendto / sys_write"]
+    B --> C["sock_sendmsg"]
+    C --> D["inet_sendmsg"]
+    D --> E["tcp_sendmsg"]
+    E --> F{"发送缓冲区是否有空间?"}
+    F -->|"有空间"| G["拷贝数据到 skb"]
+    F -->|"无空间"| H["sk_stream_wait_memory<br/>阻塞等待"]
+    H --> F
+    G --> I["tcp_push"]
+    I --> J["tcp_write_xmit"]
+    J --> K{"发送窗口检查<br/>tcp_snd_wnd_test<br/>tcp_cwnd_test"}
+    K -->|"允许发送"| L["tcp_transmit_skb"]
+    K -->|"窗口不足"| M["等待ACK释放窗口"]
+    L --> N["ip_queue_xmit"]
+    N --> O["网络设备发送"]
+```
+
+####	tcp_sendmsg 核心实现
+
+[`tcp_sendmsg`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp.c#L1148) 负责将用户态数据拷贝到内核发送缓冲区（`sk_write_queue`），并触发发送
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp.c#L1148
+int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	struct sk_buff *skb;
+	int flags, err, copied = 0;
+	int mss_now = 0, size_goal, copied_syn = 0;
+	long timeo;
+
+	lock_sock(sk);
+
+	// 检查连接状态
+	flags = msg->msg_flags;
+	timeo = sock_sndtimeo(sk, flags & MSG_DONTWAIT);
+
+	// 等待连接建立完成
+	if ((1 << sk->sk_state) & ~(TCPF_ESTABLISHED | TCPF_CLOSE_WAIT))
+		if ((err = sk_stream_wait_connect(sk, &timeo)) != 0)
+			goto do_error;
+
+	// 获取当前MSS和发送目标大小
+	mss_now = tcp_send_mss(sk, &size_goal, flags);
+
+	while (msg_data_left(msg)) {
+		int copy = 0;
+		int max = size_goal;
+
+		// 获取发送队列尾部skb
+		skb = tcp_write_queue_tail(sk);
+		if (tcp_send_head(sk)) {
+			// 计算当前skb还能容纳的数据量
+			copy = max - skb->len;
+		}
+
+		if (copy <= 0) {
+new_segment:
+			// 需要分配新的skb
+			if (!sk_stream_memory_free(sk))
+				goto wait_for_sndbuf;
+
+			skb = sk_stream_alloc_skb(sk, select_size(sk, sg),
+						  sk->sk_allocation, skb_queue_empty(&sk->sk_write_queue));
+			if (!skb)
+				goto wait_for_memory;
+
+			// 将新skb加入发送队列尾部
+			skb_entail(sk, skb);
+			copy = size_goal;
+			max = size_goal;
+		}
+
+		if (copy > msg_data_left(msg))
+			copy = msg_data_left(msg);
+
+		// 数据拷贝：从用户空间拷贝到skb
+		if (skb_availroom(skb) > 0) {
+			// 线性区域有空间，直接拷贝
+			copy = min_t(int, copy, skb_availroom(skb));
+			err = skb_add_data_nocache(sk, skb, &msg->msg_iter, copy);
+		} else {
+			// 线性区域满了，使用分页区域
+			bool merge = true;
+			int i = skb_shinfo(skb)->nr_frags;
+			// ...分页拷贝逻辑
+			err = skb_copy_to_page_nocache(sk, &msg->msg_iter, skb,
+						       pfrag->page, pfrag->offset,
+						       copy);
+		}
+
+		if (unlikely(err)) {
+			// 拷贝失败处理
+			goto do_fault;
+		}
+
+		tp->write_seq += copy;
+		TCP_SKB_CB(skb)->end_seq += copy;
+		tcp_skb_pcount_set(skb, 0);
+		copied += copy;
+
+		// 判断是否触发发送
+		if (forced_push(tp)) {
+			tcp_mark_push(tp, skb);
+			// 触发发送
+			__tcp_push_pending_frames(sk, mss_now, TCP_NAGLE_PUSH);
+		} else if (skb == tcp_send_head(sk))
+			tcp_push_one(sk, mss_now);
+		continue;
+
+wait_for_sndbuf:
+		set_bit(SOCK_NOSPACE, &sk->sk_socket->flags);
+wait_for_memory:
+		// 阻塞等待发送缓冲区有空间
+		err = sk_stream_wait_memory(sk, &timeo);
+		if (err)
+			goto do_error;
+		mss_now = tcp_send_mss(sk, &size_goal, flags);
+	}
+
+out:
+	// 最后一次尝试发送所有pending数据
+	if (copied)
+		tcp_push(sk, flags, mss_now, tp->nonagle, size_goal);
+	release_sock(sk);
+	return copied + copied_syn;
+
+do_fault:
+	......
+do_error:
+	......
+}
+```
+
+####	tcp_write_xmit：发送控制核心
+
+[`tcp_write_xmit`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_output.c#L2149) 是TCP发送的核心控制函数，负责从发送队列中取出skb，进行窗口检查、拥塞控制检查，然后调用`tcp_transmit_skb`实际发送
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_output.c#L2149
+static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
+			   int push_one, gfp_t gfp)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	struct sk_buff *skb;
+	unsigned int tso_segs, sent_pkts;
+	int cwnd_quota;
+
+	sent_pkts = 0;
+
+	// 遍历发送队列中待发送的skb
+	while ((skb = tcp_send_head(sk))) {
+		unsigned int limit;
+
+		tso_segs = tcp_init_tso_segs(skb, mss_now);
+
+		// 拥塞窗口检查：还能发送多少段
+		cwnd_quota = tcp_cwnd_test(tp, skb);
+		if (!cwnd_quota) {
+			// 拥塞窗口不允许发送更多数据
+			if (push_one == 2)
+				cwnd_quota = 1;
+			else
+				break;
+		}
+
+		// 发送窗口检查
+		if (unlikely(!tcp_snd_wnd_test(tp, skb, mss_now)))
+			break;
+
+		// Nagle算法检查
+		if (tso_segs == 1) {
+			if (unlikely(!tcp_nagle_test(tp, skb, mss_now,
+						    (tcp_skb_is_last(sk, skb) ?
+						     nonagle : TCP_NAGLE_PUSH))))
+				break;
+		}
+
+		// TSO分段
+		limit = mss_now;
+		if (tso_segs > 1 && !tcp_urg_mode(tp))
+			limit = tcp_mss_split_point(sk, skb, mss_now,
+						    min_t(unsigned int,
+							  cwnd_quota,
+							  sk->sk_gso_max_segs),
+						    nonagle);
+
+		if (skb->len > limit &&
+		    unlikely(tso_fragment(sk, skb, limit, mss_now, gfp)))
+			break;
+
+		if (unlikely(tcp_transmit_skb(sk, skb, 1, gfp)))
+			break;
+
+		// 更新发送队列头指针
+		tcp_event_new_data_sent(sk, skb);
+		tcp_minshall_update(tp, mss_now, skb);
+		sent_pkts += tcp_skb_pcount(skb);
+
+		if (push_one)
+			break;
+	}
+
+	if (likely(sent_pkts)) {
+		if (tcp_in_cwnd_reduction(sk))
+			tp->prr_out += sent_pkts;
+		// 设置/重置重传定时器
+		tcp_cwnd_validate(sk);
+		return false;
+	}
+	// 没有发送任何数据（窗口满等）
+	return !tp->packets_out && tcp_send_head(sk);
+}
+```
+
+####	tcp_transmit_skb：构造TCP报文
+
+[`tcp_transmit_skb`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_output.c#L949) 负责为skb添加TCP头部，计算校验和，并调用IP层发送
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_output.c#L949
+static int tcp_transmit_skb(struct sock *sk, struct sk_buff *skb, int clone_it,
+			    gfp_t gfp_mask)
+{
+	const struct inet_connection_sock *icsk = inet_csk(sk);
+	struct tcp_sock *tp = tcp_sk(sk);
+	struct tcp_skb_cb *tcb = TCP_SKB_CB(skb);
+	struct tcphdr *th;
+	int err;
+
+	// 克隆skb（发送队列中保留原始skb用于可能的重传）
+	if (clone_it) {
+		skb = skb_clone(skb, gfp_mask);
+		if (unlikely(!skb))
+			return -ENOBUFS;
+	}
+
+	// 构造TCP头部
+	skb_push(skb, tcp_header_size);
+	skb_reset_transport_header(skb);
+
+	th = (struct tcphdr *)skb->data;
+	th->source = inet->inet_sport;
+	th->dest = inet->inet_dport;
+	th->seq = htonl(tcb->seq);
+	th->ack_seq = htonl(tp->rcv_nxt);  // 捎带ACK
+	// 设置头部长度和标志位
+	tcp_options_write((__be32 *)(th + 1), tp, &opts);
+	th->window = htons(min(tp->rcv_wnd, 65535U));  // 通告接收窗口
+	th->check = 0;
+	th->urg_ptr = 0;
+
+	// 计算校验和
+	icsk->icsk_af_ops->send_check(sk, skb);
+
+	// 调用IP层发送
+	err = icsk->icsk_af_ops->queue_xmit(sk, skb, &inet->cork.fl);
+	// 对于IPv4，queue_xmit = ip_queue_xmit
+
+	if (likely(err <= 0))
+		return err;
+
+	tcp_enter_cwr(sk);
+	return net_xmit_eval(err);
+}
+```
+
+##	0x0C	数据传输：接收路径 tcp_recvmsg
+
+用户进程调用`recv()`/`read()`接收数据时，最终进入`tcp_recvmsg`。接收路径的核心调用链：
+
+```text
+recv()/read()
+    |-- sock_recvmsg()
+        |-- sock->ops->recvmsg()  # inet_recvmsg
+            |-- sk->sk_prot->recvmsg()  # tcp_recvmsg
+                |-- skb_copy_datagram_msg()  # 从sk_receive_queue拷贝到用户空间
+```
+
+核心流程图如下：
+
+```mermaid
+flowchart TD
+    A["用户态: recv/read"] --> B["sys_recvfrom / sys_read"]
+    B --> C["sock_recvmsg"]
+    C --> D["inet_recvmsg"]
+    D --> E["tcp_recvmsg"]
+    E --> F{"sk_receive_queue<br/>有数据?"}
+    F -->|"有"| G["skb_copy_datagram_msg<br/>拷贝到用户空间"]
+    F -->|"无"| H["sk_wait_data<br/>阻塞等待"]
+    H -->|"数据到达唤醒"| F
+    G --> I["更新 tp->copied_seq"]
+    I --> J{"还需要更多数据?<br/>MSG_WAITALL"}
+    J -->|"是"| F
+    J -->|"否"| K["tcp_cleanup_rbuf<br/>发送窗口更新ACK"]
+    K --> L["返回已拷贝字节数"]
+```
+
+####	tcp_recvmsg 核心实现
+
+[`tcp_recvmsg`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp.c#L1594) 从接收队列中读取数据并拷贝到用户空间
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp.c#L1594
+int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int nonblock,
+		int flags, int *addr_len)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	int copied = 0;
+	u32 peek_seq;
+	u32 *seq;
+	unsigned long used;
+	int err;
+	int target;
+	long timeo;
+	struct sk_buff *skb, *last;
+
+	lock_sock(sk);
+
+	err = -ENOTCONN;
+	if (sk->sk_state == TCP_LISTEN)
+		goto out;
+
+	timeo = sock_rcvtimeo(sk, nonblock);
+
+	// target: 最少需要读取的字节数
+	// 如果设置了MSG_WAITALL，则target=len；否则target=1
+	target = sock_rcvlowat(sk, flags & MSG_WAITALL, len);
+
+	seq = &tp->copied_seq;  // 已拷贝的序列号
+
+	do {
+		u32 offset;
+
+		// 遍历接收队列
+		skb_queue_walk(&sk->sk_receive_queue, skb) {
+			last = skb;
+			offset = *seq - TCP_SKB_CB(skb)->seq;
+			if (offset < skb->len)
+				goto found_ok_skb;
+			// 检查FIN
+			if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
+				goto found_fin_ok;
+		}
+
+		// 接收队列为空，检查是否还有数据未到
+		if (copied >= target)
+			break;  // 已满足最低需求
+
+		if (copied) {
+			if (sk->sk_err || sk->sk_state == TCP_CLOSE ||
+			    (sk->sk_shutdown & RCV_SHUTDOWN) || !timeo ||
+			    signal_pending(current))
+				break;
+		}
+
+		// 阻塞等待数据到达
+		if (!timeo) {
+			copied = -EAGAIN;
+			break;
+		}
+
+		// 先清理接收缓冲区，可能发送窗口更新ACK
+		tcp_cleanup_rbuf(sk, copied);
+
+		// 等待数据
+		sk_wait_data(sk, &timeo, last);
+		continue;
+
+found_ok_skb:
+		// 计算本次可拷贝的数据量
+		used = skb->len - offset;
+		if (len < used)
+			used = len;
+
+		// 拷贝数据到用户空间
+		err = skb_copy_datagram_msg(skb, offset, msg, used);
+		if (err) {
+			if (!copied)
+				copied = -EFAULT;
+			break;
+		}
+
+		*seq += used;
+		copied += used;
+		len -= used;
+
+		// 释放已读取的skb
+		tcp_rcv_space_adjust(sk);
+
+		if (!(flags & MSG_PEEK)) {
+			// 非PEEK模式下释放已读完的skb
+			sk_eat_skb(sk, skb);
+		}
+
+		continue;
+
+found_fin_ok:
+		++*seq;
+		break;
+	} while (len > 0);
+
+out:
+	// 发送窗口更新
+	tcp_cleanup_rbuf(sk, copied);
+	release_sock(sk);
+	return copied;
+}
+```
+
+####	tcp_data_queue：接收数据排序
+
+[`tcp_data_queue`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L4389) 是慢速路径中处理接收数据的核心函数，负责数据排序、乱序处理和重复检测：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L4389
+static void tcp_data_queue(struct sock *sk, struct sk_buff *skb)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	int eaten = -1;
+	bool fragstolen = false;
+
+	// 顺序数据：序列号等于期望的下一个
+	if (TCP_SKB_CB(skb)->seq == tp->rcv_nxt) {
+		if (tcp_receive_window(tp) == 0)
+			goto out_of_window;
+
+		// 尝试快速路径直接拷贝到用户空间
+		if (tp->ucopy.task == current &&
+		    tp->copied_seq == tp->rcv_nxt && tp->ucopy.len &&
+		    sock_owned_by_user(sk) && !tp->urg_data) {
+			// 直接拷贝到用户空间缓冲区（DMA-like优化）
+			......
+		}
+
+		if (eaten <= 0) {
+queue_and_out:
+			// 加入接收队列
+			eaten = tcp_queue_rcv(sk, skb, 0, &fragstolen);
+		}
+		// 更新rcv_nxt
+		tcp_rcv_nxt_update(tp, TCP_SKB_CB(skb)->end_seq);
+
+		// 检查乱序队列：之前乱序到达的包现在可能变为有序
+		if (!skb_queue_empty(&tp->out_of_order_queue)) {
+			tcp_ofo_queue(sk);  // 从乱序队列移入接收队列
+		}
+
+		// 检查FIN
+		if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
+			tcp_fin(sk);
+
+		// 发送ACK检查
+		if (!inet_csk_ack_scheduled(sk))
+			goto no_ack;
+		......
+		return;
+	}
+
+	// 乱序数据处理
+	if (!after(TCP_SKB_CB(skb)->end_seq, tp->rcv_nxt)) {
+		// 数据完全重复，丢弃
+		tcp_drop(sk, skb);
+		tcp_dsack_set(sk, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq);
+		goto out;
+	}
+
+	// 加入乱序队列 out_of_order_queue
+	tcp_data_queue_ofo(sk, skb);
+}
+```
+
+##	0x0D	TCP 状态图变迁总览
+
+####	4.11.6 内核 TCP 状态机
+
+内核 4.11.6 版本中TCP状态定义（含`TCP_NEW_SYN_RECV`）：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/net/tcp_states.h
+enum {
+	TCP_ESTABLISHED = 1,
+	TCP_SYN_SENT,
+	TCP_SYN_RECV,
+	TCP_FIN_WAIT1,
+	TCP_FIN_WAIT2,
+	TCP_TIME_WAIT,
+	TCP_CLOSE,
+	TCP_CLOSE_WAIT,
+	TCP_LAST_ACK,
+	TCP_LISTEN,
+	TCP_CLOSING,
+	TCP_NEW_SYN_RECV,  // 4.x内核新增
+	TCP_MAX_STATES
+};
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> TCP_CLOSE
+    TCP_CLOSE --> TCP_LISTEN : "listen()<br/>inet_csk_listen_start"
+    TCP_CLOSE --> TCP_SYN_SENT : "connect()<br/>tcp_v4_connect"
+
+    TCP_LISTEN --> TCP_NEW_SYN_RECV : "收到SYN<br/>inet_reqsk_alloc"
+    TCP_NEW_SYN_RECV --> TCP_SYN_RECV : "收到ACK<br/>tcp_check_req->inet_csk_clone_lock"
+
+    TCP_SYN_SENT --> TCP_ESTABLISHED : "收到SYN+ACK<br/>tcp_rcv_synsent_state_process"
+    TCP_SYN_RECV --> TCP_ESTABLISHED : "tcp_rcv_state_process<br/>tcp_set_state"
+
+    TCP_ESTABLISHED --> TCP_FIN_WAIT1 : "close()<br/>tcp_close->tcp_send_fin"
+    TCP_ESTABLISHED --> TCP_CLOSE_WAIT : "收到FIN<br/>tcp_fin"
+
+    TCP_FIN_WAIT1 --> TCP_FIN_WAIT2 : "收到ACK<br/>tcp_rcv_state_process"
+    TCP_FIN_WAIT1 --> TCP_CLOSING : "收到FIN<br/>tcp_rcv_state_process"
+    TCP_FIN_WAIT1 --> TCP_TIME_WAIT : "收到FIN+ACK<br/>tcp_time_wait"
+
+    TCP_FIN_WAIT2 --> TCP_TIME_WAIT : "收到FIN<br/>tcp_time_wait"
+    TCP_CLOSING --> TCP_TIME_WAIT : "收到ACK<br/>tcp_time_wait"
+
+    TCP_CLOSE_WAIT --> TCP_LAST_ACK : "close()<br/>tcp_close->tcp_send_fin"
+    TCP_LAST_ACK --> TCP_CLOSE : "收到ACK<br/>tcp_done"
+    TCP_TIME_WAIT --> TCP_CLOSE : "2MSL超时<br/>inet_twsk_kill"
+```
+
+####	各阶段状态变迁与触发函数对照表
+
+| 状态变迁 | 触发事件 | 内核函数 | 方向 |
+|---------|---------|---------|------|
+| CLOSE -> LISTEN | listen() | `inet_csk_listen_start` | Server |
+| CLOSE -> SYN_SENT | connect() | `tcp_v4_connect->tcp_set_state` | Client |
+| LISTEN -> NEW_SYN_RECV | 收到SYN | `inet_reqsk_alloc` | Server |
+| NEW_SYN_RECV -> SYN_RECV | 收到ACK | `inet_csk_clone_lock` | Server |
+| SYN_SENT -> ESTABLISHED | 收到SYN+ACK | `tcp_finish_connect` | Client |
+| SYN_RECV -> ESTABLISHED | 处理ACK | `tcp_rcv_state_process` | Server |
+| ESTABLISHED -> FIN_WAIT1 | close() | `tcp_close->tcp_send_fin` | 主动关闭方 |
+| ESTABLISHED -> CLOSE_WAIT | 收到FIN | `tcp_fin` | 被动关闭方 |
+| FIN_WAIT1 -> FIN_WAIT2 | 收到ACK | `tcp_rcv_state_process` | 主动关闭方 |
+| FIN_WAIT2 -> TIME_WAIT | 收到FIN | `tcp_time_wait` | 主动关闭方 |
+| CLOSE_WAIT -> LAST_ACK | close() | `tcp_close->tcp_send_fin` | 被动关闭方 |
+| LAST_ACK -> CLOSE | 收到ACK | `tcp_done` | 被动关闭方 |
+| TIME_WAIT -> CLOSE | 2MSL超时 | `inet_twsk_kill` | 主动关闭方 |
+
+##	0x0E	TCP 重传机制
+
+TCP重传是保证可靠传输的核心机制。内核实现了多种重传策略：超时重传（RTO-based）、快速重传（Fast Retransmit）和基于SACK的选择重传
+
+```mermaid
+flowchart TD
+    A["数据发送<br/>tcp_transmit_skb"] --> B["启动重传定时器<br/>tcp_rearm_rto"]
+    B --> C{"收到ACK?"}
+    C -->|"是"| D["tcp_ack<br/>tcp_clean_rtx_queue"]
+    C -->|"超时未收到"| E["tcp_retransmit_timer"]
+    E --> F["tcp_retransmit_skb<br/>重传最早未确认的包"]
+    F --> G["指数退避<br/>icsk->icsk_rto <<= 1"]
+    G --> H{"重传次数 > 上限?"}
+    H -->|"否"| B
+    H -->|"是"| I["tcp_write_err<br/>报告连接超时"]
+
+    D --> J{"连续3个dupACK?"}
+    J -->|"是"| K["tcp_fastretrans_alert<br/>快速重传"]
+    K --> L["tcp_retransmit_skb<br/>立即重传丢失的包"]
+    J -->|"否"| M["正常处理"]
+```
+
+####	超时重传：tcp_retransmit_timer
+
+当重传定时器超时触发时，内核调用[`tcp_retransmit_timer`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_timer.c#L170)
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_timer.c#L170
+void tcp_retransmit_timer(struct sock *sk)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	struct inet_connection_sock *icsk = inet_csk(sk);
+
+	if (!tp->packets_out)
+		goto out;
+
+	// 检查是否超过重传上限
+	if (icsk->icsk_retransmits && !tp->snd_wnd &&
+	    !sock_flag(sk, SOCK_DEAD)) {
+		// 零窗口探测超时
+		......
+	}
+
+	// 尝试重传
+	if (tcp_retransmit_skb(sk, tcp_write_queue_head(sk), 1) > 0) {
+		// 重传失败（如内存不足），重置定时器稍后重试
+		inet_csk_reset_xmit_timer(sk, ICSK_TIME_RETRANS,
+					  min(icsk->icsk_rto, TCP_RESOURCE_PROBE_INTERVAL),
+					  TCP_RTO_MAX);
+		goto out;
+	}
+
+	// RTO指数退避（Exponential Backoff）
+	icsk->icsk_backoff++;
+	icsk->icsk_retransmits++;
+
+	// 重传超过上限（net.ipv4.tcp_retries2，默认15次）
+	if (icsk->icsk_retransmits >= sysctl_tcp_retries2) {
+		tcp_write_err(sk);  // 报告连接超时，通知应用层
+		return;
+	}
+
+	// 进入Loss状态，重置拥塞窗口
+	tcp_enter_loss(sk);
+
+	// 设置新的超时时间（指数退避）
+	icsk->icsk_rto = min(icsk->icsk_rto << 1, TCP_RTO_MAX);
+	inet_csk_reset_xmit_timer(sk, ICSK_TIME_RETRANS, icsk->icsk_rto, TCP_RTO_MAX);
+}
+```
+
+####	tcp_retransmit_skb：执行重传
+
+[`tcp_retransmit_skb`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_output.c#L2765) 负责实际重传一个skb
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_output.c#L2765
+int tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb, int segs)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	int err = __tcp_retransmit_skb(sk, skb, segs);
+
+	if (err == 0) {
+		// 重传成功
+		TCP_SKB_CB(skb)->sacked |= TCPCB_RETRANS;
+		tp->retrans_out += tcp_skb_pcount(skb);
+	}
+	// 更新统计
+	if (tp->undo_retrans < 0)
+		tp->undo_retrans = 0;
+	tp->undo_retrans += tcp_skb_pcount(skb);
+	return err;
+}
+```
+
+####	RTO 计算
+
+RTO（Retransmission Timeout）基于RTT（Round Trip Time）的测量动态调整。内核使用Jacobson/Karels算法
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L720
+static void tcp_rtt_estimator(struct sock *sk, long mrtt_us)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	long m = mrtt_us;
+	u32 srtt = tp->srtt_us;
+
+	if (srtt != 0) {
+		// SRTT = SRTT + 1/8 * (RTT - SRTT)
+		m -= (srtt >> 3);
+		srtt += m;
+		if (m < 0) {
+			m = -m;
+			m -= (tp->mdev_us >> 2);
+			if (m > 0)
+				m >>= 3;
+		} else {
+			m -= (tp->mdev_us >> 2);
+		}
+		// RTTVAR = RTTVAR + 1/4 * (|RTT - SRTT| - RTTVAR)
+		tp->mdev_us += m;
+		if (tp->mdev_us > tp->mdev_max_us) {
+			tp->mdev_max_us = tp->mdev_us;
+			if (tp->mdev_max_us > tp->rttvar_us)
+				tp->rttvar_us = tp->mdev_max_us;
+		}
+	} else {
+		// 首次RTT测量
+		srtt = m << 3;
+		tp->mdev_us = m << 1;
+		tp->rttvar_us = max(tp->mdev_us, tcp_rto_min_us(sk));
+		tp->mdev_max_us = tp->rttvar_us;
+	}
+	tp->srtt_us = max(1U, srtt);
+}
+
+// RTO = SRTT + 4 * RTTVAR
+static inline void tcp_set_rto(struct sock *sk)
+{
+	const struct tcp_sock *tp = tcp_sk(sk);
+	inet_csk(sk)->icsk_rto = __tcp_set_rto(tp);
+	tcp_bound_rto(sk);  // 限制在 [TCP_RTO_MIN, TCP_RTO_MAX] 之间
+}
+```
+
+####	快速重传：tcp_fastretrans_alert
+
+当收到`3`个重复ACK时触发快速重传，无需等待RTO超时。核心处理在[`tcp_fastretrans_alert`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L2700)
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L2700
+static void tcp_fastretrans_alert(struct sock *sk, const int acked,
+				  bool is_dupack, int *ack_flag, int *rexmit)
+{
+	struct inet_connection_sock *icsk = inet_csk(sk);
+	struct tcp_sock *tp = tcp_sk(sk);
+
+	// 拥塞状态机
+	switch (icsk->icsk_ca_state) {
+	case TCP_CA_Open:
+		// 正常状态，检查是否需要进入Recovery
+		if (is_dupack)
+			tp->dup_ack_counter++;
+		if (tp->dup_ack_counter >= tp->reordering) {
+			// 达到快速重传阈值（默认3个dupACK）
+			tcp_enter_recovery(sk, false);
+			// 标记需要重传
+			*rexmit = REXMIT_NEW;
+		}
+		break;
+
+	case TCP_CA_Recovery:
+		// Recovery状态，继续进行选择性重传
+		if (tcp_try_undo_recovery(sk))
+			return;
+		// PRR算法控制发送速率
+		*rexmit = REXMIT_NEW;
+		break;
+
+	case TCP_CA_Loss:
+		// Loss状态（超时重传后）
+		tcp_try_undo_loss(sk, false);
+		break;
+	}
+}
+```
+
+####	SACK（选择性确认）
+
+SACK允许接收方告知发送方哪些数据段已经成功接收，使发送方仅重传真正丢失的段。内核在`tcp_sacktag_write_queue`中处理SACK信息：
+
+```c
+// SACK处理的核心逻辑（简化）
+// 当收到带SACK选项的ACK时，tcp_ack->tcp_sacktag_write_queue
+// 标记发送队列中哪些skb已被接收方确认（TCPCB_SACKED_ACKED）
+// 哪些是确认有丢失的（hole），需要重传
+```
+
+关键sysctl参数：
+- `net.ipv4.tcp_retries1`：放弃前的软重传次数（默认`3`），超过后通知IP层更新路由
+- `net.ipv4.tcp_retries2`：放弃前的硬重传次数（默认`15`），超过后断开连接
+- `net.ipv4.tcp_sack`：是否启用SACK（默认`1`）
+
+##	0x0F	TCP 拥塞控制
+
+TCP拥塞控制防止发送方向网络注入过多数据导致网络崩溃。内核实现了可插拔的拥塞控制框架，默认算法为CUBIC
+
+```mermaid
+stateDiagram-v2
+    [*] --> Open : "正常传输"
+    Open --> Disorder : "收到dupACK/SACK"
+    Disorder --> Recovery : "达到重传阈值<br/>tcp_enter_recovery"
+    Disorder --> Open : "恢复正常"
+    Recovery --> Open : "所有丢失包确认<br/>tcp_try_undo_recovery"
+    Recovery --> Loss : "RTO超时<br/>tcp_enter_loss"
+    Open --> Loss : "RTO超时<br/>tcp_enter_loss"
+    Loss --> Open : "重传全部确认<br/>tcp_try_undo_loss"
+```
+
+####	拥塞控制框架
+
+内核通过`struct tcp_congestion_ops`定义拥塞控制算法的接口：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/net/tcp.h#L952
+struct tcp_congestion_ops {
+	struct list_head	list;
+	u32 key;
+	u32 flags;
+	// 初始化
+	void (*init)(struct sock *sk);
+	// 释放
+	void (*release)(struct sock *sk);
+	// 每收到一个ACK时调用，更新拥塞窗口
+	void (*cong_avoid)(struct sock *sk, u32 ack, u32 acked);
+	// 设置慢启动阈值
+	u32  (*ssthresh)(struct sock *sk);
+	// 拥塞控制主函数（新接口，CUBIC使用）
+	void (*cong_control)(struct sock *sk, const struct rate_sample *rs);
+	// 拥塞窗口撤销
+	u32  (*undo_cwnd)(struct sock *sk);
+	// 状态变更通知
+	void (*set_state)(struct sock *sk, u8 new_state);
+	// PKT事件（如ECN等）
+	void (*pkts_acked)(struct sock *sk, const struct ack_sample *sample);
+	char name[TCP_CA_NAME_MAX];
+	struct module *owner;
+};
+```
+
+拥塞控制初始化在连接建立时调用：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_cong.c#L177
+void tcp_init_congestion_control(struct sock *sk)
+{
+	const struct inet_connection_sock *icsk = inet_csk(sk);
+	// 调用算法的init函数
+	if (icsk->icsk_ca_ops->init)
+		icsk->icsk_ca_ops->init(sk);
+	// 标记为打开状态
+	if (tcp_ca_needs_ecn(sk))
+		INET_ECN_xmit(sk);
+	else
+		INET_ECN_dontxmit(sk);
+	icsk->icsk_ca_initialized = 1;
+}
+```
+
+####	慢启动与拥塞避免
+
+[`tcp_cong_avoid`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L3401) 在每次收到有效ACK时被调用
+
+```cpp
+static void tcp_cong_avoid(struct sock *sk, u32 ack, u32 acked)
+{
+	const struct inet_connection_sock *icsk = inet_csk(sk);
+
+	// 调用注册的拥塞控制算法
+	icsk->icsk_ca_ops->cong_avoid(sk, ack, acked);
+	// 限制cwnd不超过最大值
+	tp->snd_cwnd_stamp = tcp_time_stamp;
+}
+```
+
+以Reno算法为例说明基本逻辑：
+
+```cpp
+// 慢启动：cwnd < ssthresh 时，每收到一个ACK，cwnd += 1（指数增长）
+// 拥塞避免：cwnd >= ssthresh 时，每个RTT，cwnd += 1（线性增长）
+void tcp_reno_cong_avoid(struct sock *sk, u32 ack, u32 acked)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+
+	if (!tcp_is_cwnd_limited(sk))
+		return;
+
+	if (tcp_in_slow_start(tp)) {
+		// 慢启动阶段
+		acked = tcp_slow_start(tp, acked);
+		if (!acked)
+			return;
+	}
+	// 拥塞避免阶段
+	tcp_cong_avoid_ai(tp, tp->snd_cwnd, acked);
+}
+
+// 慢启动实现
+u32 tcp_slow_start(struct tcp_sock *tp, u32 acked)
+{
+	u32 cwnd = min(tp->snd_cwnd + acked, tp->snd_ssthresh);
+	acked -= cwnd - tp->snd_cwnd;
+	tp->snd_cwnd = min(cwnd, tp->snd_cwnd_clamp);
+	return acked;
+}
+```
+
+####	快速恢复与进入Recovery
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L2590
+static void tcp_enter_recovery(struct sock *sk, bool ece_ack)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	int mib_idx;
+
+	// 记录进入Recovery时的状态
+	tp->prior_ssthresh = tcp_current_ssthresh(sk);
+	tcp_init_undo(tp);
+
+	// 设置新的ssthresh（通常为cwnd的一半）
+	tp->snd_ssthresh = inet_csk(sk)->icsk_ca_ops->ssthresh(sk);
+	// 设置Recovery点
+	tp->high_seq = tp->snd_nxt;
+	tp->prr_delivered = 0;
+	tp->prr_out = 0;
+
+	// 进入Recovery状态
+	inet_csk(sk)->icsk_ca_state = TCP_CA_Recovery;
+}
+
+// Loss状态进入（RTO超时）
+void tcp_enter_loss(struct sock *sk)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	struct inet_connection_sock *icsk = inet_csk(sk);
+
+	// 标记所有发送队列中的skb为丢失
+	tcp_timeout_mark_lost(sk);
+
+	// cwnd重置为1
+	tp->snd_cwnd = 1;
+	tp->snd_cwnd_cnt = 0;
+	tp->snd_ssthresh = icsk->icsk_ca_ops->ssthresh(sk);
+
+	tcp_set_ca_state(sk, TCP_CA_Loss);
+	tp->high_seq = tp->snd_nxt;
+
+	// 重置重传计数
+	tcp_ecn_queue_cwr(tp);
+}
+```
+
+####	CUBIC 算法
+
+CUBIC是Linux默认的拥塞控制算法（`net.ipv4.tcp_congestion_control = cubic`），其核心思想是使用三次函数（cubic function）来计算拥塞窗口，使得窗口增长速率与上次发生丢包时的窗口大小相关
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_cubic.c
+// W(t) = C * (t - K)^3 + Wmax
+// K = cubic_root(Wmax * beta / C)
+// C: 缩放常数
+// Wmax: 上次丢包时的窗口大小
+// beta: 乘性减少因子（默认0.7）
+
+static void cubictcp_cong_avoid(struct sock *sk, u32 ack, u32 acked)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	struct bictcp *ca = inet_csk_ca(sk);
+
+	if (!tcp_is_cwnd_limited(sk))
+		return;
+
+	if (tcp_in_slow_start(tp)) {
+		// 慢启动使用超级慢启动
+		if (hystart && after(ack, ca->end_seq))
+			bictcp_hystart_reset(sk);
+		acked = tcp_slow_start(tp, acked);
+		if (!acked)
+			return;
+	}
+	// CUBIC的拥塞避免
+	bictcp_update(ca, tp->snd_cwnd, acked);
+	tcp_cong_avoid_ai(tp, ca->cnt, acked);
+}
+```
+
+##	0x10	TCP 窗口机制
+
+TCP通过滑动窗口实现流量控制，确保发送方不会压垮接收方的缓冲区。窗口机制涉及发送窗口、接收窗口和拥塞窗口三个维度
+
+####	有效发送窗口
+
+发送方实际能发送的数据量由三个窗口共同决定：
+
+```text
+有效窗口 = min(cwnd, rwnd) - (snd_nxt - snd_una)
+         = min(拥塞窗口, 接收窗口) - 已发送未确认的数据量
+```
+
+```cpp
+// 发送窗口检查
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_output.c#L1560
+static bool tcp_snd_wnd_test(const struct tcp_sock *tp,
+			     const struct sk_buff *skb,
+			     unsigned int cur_mss)
+{
+	u32 end_seq = TCP_SKB_CB(skb)->end_seq;
+
+	if (skb->len > cur_mss)
+		end_seq = TCP_SKB_CB(skb)->seq + cur_mss;
+
+	// snd_una + snd_wnd 即发送窗口的右边界
+	return !after(end_seq, tcp_wnd_end(tp));
+}
+
+static inline u32 tcp_wnd_end(const struct tcp_sock *tp)
+{
+	return tp->snd_una + tp->snd_wnd;
+}
+
+// 拥塞窗口检查
+static unsigned int tcp_cwnd_test(const struct tcp_sock *tp,
+				  const struct sk_buff *skb)
+{
+	u32 in_flight, cwnd;
+
+	in_flight = tcp_packets_in_flight(tp);  // 在途数据包数
+	cwnd = tp->snd_cwnd;
+	if (in_flight < cwnd)
+		return (cwnd - in_flight);  // 还能发送的包数
+	return 0;
+}
+```
+
+####	接收窗口通告
+
+接收方通过`tcp_select_window`计算并通告接收窗口大小：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_output.c#L248
+static u16 tcp_select_window(struct sock *sk)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	u32 old_win = tp->rcv_wnd;
+	u32 cur_win = tcp_receive_window(tp);
+	u32 new_win = __tcp_select_window(sk);
+
+	// 窗口不能缩小（RFC规定）
+	if (new_win < cur_win) {
+		// 右边界不能回退
+		new_win = ALIGN(cur_win, 1 << tp->rx_opt.rcv_wscale);
+	}
+	tp->rcv_wnd = new_win;
+	tp->rcv_wup = tp->rcv_nxt;
+
+	// 窗口缩放
+	return min(new_win, 65535U) >> tp->rx_opt.rcv_wscale;
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_output.c#L213
+u32 __tcp_select_window(struct sock *sk)
+{
+	struct inet_connection_sock *icsk = inet_csk(sk);
+	struct tcp_sock *tp = tcp_sk(sk);
+	int mss = icsk->icsk_ack.rcv_mss;
+	int free_space = tcp_space(sk);  // 当前可用接收缓冲区
+	int allowed_space = tcp_full_space(sk);
+	int full_space = min_t(int, tp->window_clamp, allowed_space);
+	int window;
+
+	if (free_space < (full_space >> 1)) {
+		// 可用空间不足一半时，避免SWS
+		icsk->icsk_ack.quick = 0;
+		if (free_space < mss)
+			return 0;  // 通告零窗口
+	}
+
+	// 通告窗口为可用空间（向下对齐MSS）
+	window = tp->rcv_wnd;
+	if (window <= free_space - mss || window > free_space)
+		window = (free_space / mss) * mss;
+
+	return window;
+}
+```
+
+####	接收窗口自动调整
+
+`tcp_rcv_space_adjust`根据实际接收速率动态调整接收缓冲区大小
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L580
+void tcp_rcv_space_adjust(struct sock *sk)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	int time;
+	int copied;
+
+	time = tcp_time_stamp - tp->rcvq_space.time;
+	if (time < (tp->rcv_rtt_est.rtt >> 3) || tp->rcv_rtt_est.rtt == 0)
+		return;
+
+	// 计算这段时间内的接收速率
+	copied = tp->copied_seq - tp->rcvq_space.seq;
+	if (copied <= tp->rcvq_space.space)
+		goto new_measure;
+
+	// 增大接收缓冲区
+	if (sysctl_tcp_moderate_rcvbuf &&
+	    !(sk->sk_userlocks & SOCK_RCVBUF_LOCK)) {
+		int rcvwin, rcvmem, rcvbuf;
+
+		rcvwin = (copied << 1) + 16 * tp->advmss;
+		// 需要为每个包预留struct sk_buff开销
+		rcvmem = SKB_TRUESIZE(tp->advmss + MAX_TCP_HEADER);
+		while (googletcp_space_from_win(sk, rcvwin) < rcvmem)
+			rcvwin += tp->advmss;
+
+		rcvbuf = min(rcvwin / googletcp_space_overhead(sk),
+			     sysctl_tcp_rmem[2]);
+		if (rcvbuf > sk->sk_rcvbuf) {
+			sk->sk_rcvbuf = rcvbuf;
+			tp->window_clamp = rcvwin;
+		}
+	}
+	tp->rcvq_space.space = copied;
+
+new_measure:
+	tp->rcvq_space.seq = tp->copied_seq;
+	tp->rcvq_space.time = tcp_time_stamp;
+}
+```
+
+####	零窗口探测
+
+当接收方通告窗口为`0`时，发送方启动Persist Timer进行零窗口探测
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_timer.c#L296
+static void tcp_probe_timer(struct sock *sk)
+{
+	struct inet_connection_sock *icsk = inet_csk(sk);
+	struct tcp_sock *tp = tcp_sk(sk);
+
+	if (tp->packets_out || !tcp_send_head(sk)) {
+		icsk->icsk_probes_out = 0;
+		return;
+	}
+
+	// 超过探测上限，报告错误
+	if (icsk->icsk_probes_out > sysctl_tcp_retries2) {
+		tcp_write_err(sk);
+		return;
+	}
+
+	// 发送窗口探测包（1字节数据）
+	tcp_send_probe0(sk);
+}
+
+// 窗口探测在tcp_ack中检测到窗口更新时解除：
+// 当收到ACK且窗口>0时，tcp_may_update_window会更新snd_wnd
+```
+
+####	Nagle算法
+
+Nagle算法减少小包发送，与窗口机制配合使用
+
+```cpp
+// Nagle检查：在tcp_write_xmit中调用
+static inline bool tcp_nagle_test(const struct tcp_sock *tp,
+				  const struct sk_buff *skb,
+				  unsigned int cur_mss, int nonagle)
+{
+	// TCP_NODELAY关闭Nagle
+	if (nonagle & TCP_NAGLE_PUSH)
+		return true;
+
+	// 没有未确认的数据，直接发送
+	if (!tp->packets_out)
+		return true;
+
+	// 数据填满一个MSS，直接发送
+	if (skb->len >= cur_mss)
+		return true;
+
+	// 有小包且有未确认数据，延迟发送（Nagle）
+	return false;
+}
+```
+
+##	0x11	四次挥手的过程
+
+TCP连接的关闭涉及四次挥手，内核通过`tcp_close`/`tcp_shutdown`发起主动关闭，通过`tcp_fin`处理被动关闭
+
+```mermaid
+sequenceDiagram
+    participant C as 客户端-主动关闭
+    participant S as 服务端-被动关闭
+
+    Note over C: ESTABLISHED
+    Note over S: ESTABLISHED
+
+    C->>S: FIN (tcp_close->tcp_send_fin)
+    Note over C: FIN_WAIT_1
+
+    S->>C: ACK (自动回复)
+    Note over S: CLOSE_WAIT
+    Note over C: FIN_WAIT_2
+
+    Note over S: 应用层close()
+    S->>C: FIN (tcp_close->tcp_send_fin)
+    Note over S: LAST_ACK
+
+    C->>S: ACK (tcp_send_ack)
+    Note over C: TIME_WAIT
+    Note over S: CLOSED (tcp_done)
+
+    Note over C: 等待2MSL后关闭<br/>inet_twsk_kill
+    Note over C: CLOSED
+```
+
+####	主动关闭：tcp_close
+
+[`tcp_close`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp.c#L2079) 是用户调用`close()`时的TCP层处理函数
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp.c#L2079
+void tcp_close(struct sock *sk, long timeout)
+{
+	struct sk_buff *skb;
+	int data_was_unread = 0;
+	int state;
+
+	lock_sock(sk);
+	sk->sk_shutdown = SHUTDOWN_MASK;
+
+	if (sk->sk_state == TCP_LISTEN) {
+		// LISTEN状态直接关闭
+		tcp_set_state(sk, TCP_CLOSE);
+		inet_csk_listen_stop(sk);
+		goto adjudge_to_death;
+	}
+
+	// 清空接收队列中未读数据
+	while ((skb = __skb_dequeue(&sk->sk_receive_queue)) != NULL) {
+		u32 len = TCP_SKB_CB(skb)->end_seq - TCP_SKB_CB(skb)->seq;
+		if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
+			len--;
+		data_was_unread += len;
+		__kfree_skb(skb);
+	}
+
+	// 如果有未读数据，发送RST而非正常FIN
+	if (data_was_unread) {
+		tcp_set_state(sk, TCP_CLOSE);
+		tcp_send_active_reset(sk, sk->sk_allocation);
+	} else if (sock_flag(sk, SOCK_LINGER) && !sk->sk_lingertime) {
+		// SO_LINGER且linger=0，也发送RST
+		tcp_disconnect(sk, 0);
+	} else if (tcp_close_state(sk)) {
+		// 正常关闭：发送FIN
+		tcp_send_fin(sk);
+	}
+
+	// 等待FIN_WAIT_2超时或进入TIME_WAIT
+	......
+
+adjudge_to_death:
+	// 孤儿socket处理
+	sock_hold(sk);
+	sock_orphan(sk);
+	release_sock(sk);
+
+	// 设置TIME_WAIT或者直接关闭
+	......
+}
+```
+
+####	发送FIN：tcp_send_fin
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_output.c#L2856
+void tcp_send_fin(struct sock *sk)
+{
+	struct sk_buff *skb, *tskb = tcp_write_queue_tail(sk);
+	struct tcp_sock *tp = tcp_sk(sk);
+
+	// 尝试在发送队列最后一个skb上附加FIN标志
+	if (tskb && (tcp_send_head(sk) || tcp_under_memory_pressure(sk))) {
+coalesce:
+		TCP_SKB_CB(tskb)->tcp_flags |= TCPHDR_FIN;
+		TCP_SKB_CB(tskb)->end_seq++;
+		tp->write_seq++;
+		// 如果该skb尚未发送，会随数据一起发送
+		if (tcp_send_head(sk) != NULL) {
+			return;
+		}
+	} else {
+		// 需要分配新的skb发送纯FIN
+		skb = alloc_skb_fclone(MAX_TCP_HEADER, sk->sk_allocation);
+		if (unlikely(!skb)) {
+			// 内存不足，退回到附加模式
+			if (tskb)
+				goto coalesce;
+			return;
+		}
+		tcp_init_nondata_skb(skb, tp->write_seq,
+				     TCPHDR_ACK | TCPHDR_FIN);
+		tcp_queue_skb(sk, skb);
+	}
+	// 触发发送
+	__tcp_push_pending_frames(sk, tcp_current_mss(sk), TCP_NAGLE_OFF);
+}
+```
+
+####	接收FIN处理：tcp_fin
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L4104
+void tcp_fin(struct sock *sk)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+
+	// 调度延迟ACK
+	inet_csk_schedule_ack(sk);
+
+	sk->sk_shutdown |= RCV_SHUTDOWN;
+	sock_set_flag(sk, SOCK_DONE);
+
+	switch (sk->sk_state) {
+	case TCP_SYN_RECV:
+	case TCP_ESTABLISHED:
+		// 进入CLOSE_WAIT
+		tcp_set_state(sk, TCP_CLOSE_WAIT);
+		// 延迟ACK
+		inet_csk(sk)->icsk_ack.pingpong = 1;
+		break;
+
+	case TCP_CLOSE_WAIT:
+	case TCP_CLOSING:
+		break;
+
+	case TCP_LAST_ACK:
+		break;
+
+	case TCP_FIN_WAIT1:
+		// 收到对端FIN但自己的FIN还没被确认
+		tcp_set_state(sk, TCP_CLOSING);
+		break;
+
+	case TCP_FIN_WAIT2:
+		// 正常四次挥手：进入TIME_WAIT
+		tcp_time_wait(sk, TCP_TIME_WAIT, 0);
+		break;
+	}
+
+	// 唤醒等待读取的进程
+	if (!sock_flag(sk, SOCK_DEAD)) {
+		sk->sk_state_change(sk);
+		/* Do not send POLL_HUP for half duplex close. */
+		if (sk->sk_shutdown == SHUTDOWN_MASK ||
+		    sk->sk_state == TCP_CLOSE)
+			sk_wake_async(sk, SOCK_WAKE_WAITD, POLL_HUP);
+		else
+			sk_wake_async(sk, SOCK_WAKE_WAITD, POLL_IN);
+	}
+}
+```
+
+####	TIME_WAIT管理
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_minisocks.c#L265
+void tcp_time_wait(struct sock *sk, int state, int timeo)
+{
+	const struct inet_connection_sock *icsk = inet_csk(sk);
+	const struct tcp_sock *tp = tcp_sk(sk);
+	struct inet_timewait_sock *tw;
+
+	// 分配轻量级的TIME_WAIT结构（不占用完整sock）
+	tw = inet_twsk_alloc(sk, &tcp_death_row, state);
+	if (tw) {
+		struct tcp_timewait_sock *tcptw = tcp_twsk((struct sock *)tw);
+
+		// 保存必要的TCP状态用于处理迟到包
+		tcptw->tw_rcv_nxt = tp->rcv_nxt;
+		tcptw->tw_snd_nxt = tp->snd_nxt;
+		tcptw->tw_rcv_wnd = tcp_receive_window(tp);
+		tcptw->tw_ts_offset = tp->tsoffset;
+		tcptw->tw_ts_recent = tp->rx_opt.ts_recent;
+		tcptw->tw_ts_recent_stamp = tp->rx_opt.ts_recent_stamp;
+
+		// 设置超时时间（2MSL，通常60秒）
+		if (timeo < rto)
+			timeo = rto;
+		tw->tw_timeout = timeo;
+
+		// 加入TIME_WAIT管理表
+		inet_twsk_schedule(tw, timeo);
+		// 将原始sock从ehash中替换为tw
+		inet_twsk_hashdance(tw, sk, &tcp_hashinfo);
+	}
+
+	// 释放原始sock
+	tcp_done(sk);
+}
+```
+
+TIME_WAIT状态存在的意义是：
+1. 确保最后一个ACK能到达对端（如果丢失，对端会重传FIN）
+2. 等待网络中残留的属于此连接的旧数据包过期，避免干扰相同四元组的新连接
+
+TODO，一个有趣的case
+
+##	0x12	总结：完整生命周期内核调用链
+
+下面给出TCP完整通信过程的综合视图，涵盖系统调用、内核函数调用链和状态迁移：
+
+```mermaid
+sequenceDiagram
+    participant CA as 客户端应用层
+    participant CK as 客户端内核
+    participant Net as 网络
+    participant SK as 服务端内核
+    participant SA as 服务端应用层
+
+    Note over SA: socket() -> inet_create<br/>State: TCP_CLOSE
+
+    SA->>SK: bind() -> inet_bind
+    SA->>SK: listen() -> inet_csk_listen_start
+    Note over SK: State: TCP_LISTEN
+
+    Note over CA: socket() -> inet_create<br/>State: TCP_CLOSE
+
+    rect rgb(200, 230, 255)
+        Note over CA,SA: === 三次握手 ===
+        CA->>CK: connect() -> tcp_v4_connect
+        Note over CK: State: TCP_SYN_SENT
+        CK->>Net: SYN (tcp_connect->tcp_transmit_skb)
+        Net->>SK: tcp_v4_rcv -> tcp_v4_do_rcv
+        SK->>SK: tcp_rcv_state_process[TCP_LISTEN]<br/>-> tcp_conn_request -> inet_reqsk_alloc
+        Note over SK: State: TCP_NEW_SYN_RECV<br/>(request_sock)
+        SK->>Net: SYN+ACK (tcp_v4_send_synack)
+        Net->>CK: tcp_v4_rcv -> tcp_rcv_state_process[TCP_SYN_SENT]
+        CK->>CK: tcp_rcv_synsent_state_process<br/>-> tcp_finish_connect
+        Note over CK: State: TCP_ESTABLISHED
+        CK->>Net: ACK (tcp_send_ack)
+        Net->>SK: tcp_v4_rcv[TCP_NEW_SYN_RECV]<br/>-> tcp_check_req -> tcp_v4_syn_recv_sock
+        SK->>SK: inet_csk_clone_lock<br/>inet_csk_complete_hashdance
+        Note over SK: State: TCP_SYN_RECV
+        SK->>SK: tcp_child_process<br/>-> tcp_rcv_state_process[TCP_SYN_RECV]
+        Note over SK: State: TCP_ESTABLISHED
+        SK->>SA: parent->sk_data_ready 唤醒
+        SA->>SK: accept() -> inet_csk_accept
+    end
+
+    rect rgb(230, 255, 230)
+        Note over CA,SA: === 数据传输 ===
+        CA->>CK: send() -> tcp_sendmsg
+        CK->>CK: tcp_write_xmit -> tcp_transmit_skb
+        CK->>Net: DATA
+        Net->>SK: tcp_v4_rcv -> tcp_v4_do_rcv
+        SK->>SK: tcp_rcv_established[Fast Path]<br/>-> tcp_queue_rcv
+        SK->>SA: sk->sk_data_ready 唤醒
+        SA->>SK: recv() -> tcp_recvmsg<br/>-> skb_copy_datagram_msg
+        SK->>Net: ACK (tcp_ack_snd_check)
+        Net->>CK: tcp_v4_rcv -> tcp_rcv_established<br/>-> tcp_ack -> tcp_clean_rtx_queue
+    end
+
+    rect rgb(255, 230, 230)
+        Note over CA,SA: === 四次挥手 ===
+        CA->>CK: close() -> tcp_close
+        CK->>CK: tcp_send_fin
+        Note over CK: State: TCP_FIN_WAIT1
+        CK->>Net: FIN
+        Net->>SK: tcp_v4_rcv -> tcp_rcv_established<br/>-> tcp_data_queue -> tcp_fin
+        Note over SK: State: TCP_CLOSE_WAIT
+        SK->>Net: ACK
+        Net->>CK: tcp_rcv_state_process[FIN_WAIT1]
+        Note over CK: State: TCP_FIN_WAIT2
+        SA->>SK: close() -> tcp_close
+        SK->>SK: tcp_send_fin
+        Note over SK: State: TCP_LAST_ACK
+        SK->>Net: FIN
+        Net->>CK: tcp_v4_rcv -> tcp_time_wait
+        Note over CK: State: TCP_TIME_WAIT
+        CK->>Net: ACK (tcp_send_ack)
+        Net->>SK: tcp_rcv_state_process[LAST_ACK]<br/>-> tcp_done
+        Note over SK: State: TCP_CLOSE
+        Note over CK: 2MSL后 inet_twsk_kill
+        Note over CK: State: TCP_CLOSE
+    end
+```
+
+####	tcp_v4_rcv 状态分发总览
+
+```mermaid
+flowchart TD
+    A["tcp_v4_rcv<br/>IP层上送TCP报文"] --> B["__inet_lookup_skb<br/>查找目标sock"]
+    B --> C{"sk->sk_state?"}
+
+    C -->|"TCP_TIME_WAIT"| D["tcp_timewait_state_process"]
+    C -->|"TCP_NEW_SYN_RECV"| E["tcp_check_req<br/>处理第三次握手ACK"]
+    E --> E1["tcp_v4_syn_recv_sock<br/>创建child sock"]
+    E1 --> E2["inet_csk_complete_hashdance<br/>加入全连接队列"]
+    E2 --> E3["tcp_child_process<br/>TCP_SYN_RECV->ESTABLISHED"]
+
+    C -->|"TCP_LISTEN"| F["tcp_v4_do_rcv"]
+    F --> F1["tcp_rcv_state_process"]
+    F1 --> F2["tcp_conn_request<br/>创建半连接，发SYN+ACK"]
+
+    C -->|"TCP_ESTABLISHED"| G["tcp_v4_do_rcv"]
+    G --> G1["tcp_rcv_established<br/>快速/慢速路径"]
+
+    C -->|"其他状态"| H["tcp_v4_do_rcv"]
+    H --> H1["tcp_rcv_state_process<br/>状态机处理"]
+
+    G1 --> I{"pred_flags匹配<br/>且seq==rcv_nxt?"}
+    I -->|"是"| J["Fast Path<br/>tcp_queue_rcv"]
+    I -->|"否"| K["Slow Path<br/>tcp_data_queue"]
+```
+
+##	0x13	总结
 
 ####	 socket  VS	accept
 在分析三次握手源码时产生的疑问：`socket`系统调用创建`struct socket`结构，与`accept`系统调用创建的`struct socket`结构，作用上有哪些不同？
@@ -2372,65 +4305,46 @@ static int __must_check tcp_queue_rcv(struct sock *sk, struct sk_buff *skb, int 
 
 2、通过 `accept()` 创建的新套接字关联的 `struct sock` 是三次握手期间内核已经创建的（非 `accept()` 新建），其队列作用完全不同，主要过程描述如下：
 
--	新建连接的 `struct sock` 在握手完成时[创建]()，并加入监听套接字的 `icsk_accept_queue` 即全连接队列，`accept()` 函数仅将其取出，并与新 `struct socket` 结构绑定
+-	新建连接的 `struct sock` 在握手完成时创建，并加入监听套接字的 `icsk_accept_queue` 即全连接队列，`accept()` 函数仅将其取出，并与新 `struct socket` 结构绑定
 -	此接收队列（`sk_receive_queue`）的核心作用是存储客户端发送的数据包，用户调用 `recv()` 时从此队列读取数据
 -	发送队列（`sk_write_queue`）的作用是缓存待发送给客户端的数据，由协议栈逐步发送
 -	等待队列（`sk_sleep`）会管理因 `recv()` 或 `send()` 阻塞的进程（如缓冲区空/满时）
 
 因此在`accept()`系统调用新建的`struct socket`并关联的`struct sock`结构对应的队列是作为数据传输的载体，这些队列是实际数据收发的核心通道，与监听套接字的预留队列有本质区别
 
-####	唤醒机制：同步阻塞	VS epoll
-在前文描述了sock结构体时，介绍了两个关键成员：`sk_wq`（套接字等待队列）和`sk_data_ready`（数据就绪回调函数），这二者共同完成了内核管理I/O事件的核心机制，下面梳理下在同步阻塞I/O和epoll多路复用场景的区别
+####	本文涉及到核心内核函数
 
--	`struct socket_wq sk_wq`：即socket/sock的等待队列头，用于管理因等待I/O事件（如数据到达）而阻塞的进程或回调项；这个成员在同步阻塞模式中存储用户进程的等待项`wait_queue_t`结构；在epoll模式中存储epoll注册的回调项（epoll模式中又分为listenfd与acceptfd两种）
--	`sk_data_ready`：函数指针，默认指向`sock_def_readable`的内核实现，当数据到达套接字接收队列（`sk_receive_queue`）时、或者TCP三次握手完成时被调用，用于触发事件通知，其核心行为是检查`sk_wq`并唤醒其中的等待项
+| 分类 | 函数 | 作用 |
+|------|------|------|
+| **连接建立** | `tcp_v4_connect` | 客户端发起连接 |
+| | `tcp_conn_request` | 服务端处理SYN，创建半连接 |
+| | `tcp_check_req` | 验证第三次握手ACK |
+| | `tcp_v4_syn_recv_sock` | 创建子socket |
+| | `inet_csk_complete_hashdance` | 加入全连接队列 |
+| | `inet_csk_accept` | 从全连接队列取出连接 |
+| **数据发送** | `tcp_sendmsg` | 用户数据→内核缓冲区 |
+| | `tcp_write_xmit` | 发送窗口控制、分段发送 |
+| | `tcp_transmit_skb` | 构造TCP头、发送到IP层 |
+| **数据接收** | `tcp_v4_rcv` | TCP报文入口 |
+| | `tcp_rcv_established` | ESTABLISHED状态接收 |
+| | `tcp_data_queue` | 数据排序、乱序处理 |
+| | `tcp_queue_rcv` | 数据入接收队列 |
+| | `tcp_recvmsg` | 内核缓冲区→用户空间 |
+| **重传** | `tcp_retransmit_timer` | 超时重传触发 |
+| | `tcp_retransmit_skb` | 执行重传 |
+| | `tcp_fastretrans_alert` | 快速重传处理 |
+| **拥塞控制** | `tcp_cong_avoid` | 慢启动/拥塞避免 |
+| | `tcp_enter_recovery` | 进入快速恢复 |
+| | `tcp_enter_loss` | 进入Loss状态 |
+| **窗口** | `tcp_select_window` | 计算接收窗口通告值 |
+| | `tcp_snd_wnd_test` | 发送窗口检查 |
+| | `tcp_cwnd_test` | 拥塞窗口检查 |
+| **连接关闭** | `tcp_close` | 主动关闭 |
+| | `tcp_send_fin` | 发送FIN |
+| | `tcp_fin` | 接收FIN处理 |
+| | `tcp_time_wait` | 进入TIME_WAIT |
 
-1、同步阻塞场景下的等待与唤醒机制：进程直接挂起
-
-举例来说，当用户进程调用`recv()`且无数据可读时，内核会将当前被阻塞的进程加入sock的`sk_wq`队列，然后内核通过`DEFINE_WAIT`创建等待项，其`.private`成员会指向当前进程，`.func`成员会被设置为`autoremove_wake_function`（即唤醒后移除），接着调用`add_wait_queue`将该等待项插入`sk_wq`，完成后内核会将该进程状态设为`TASK_INTERRUPTIBLE`并让出CPU（发生第一次上下文切换）
-
-当数据到达时的唤醒流程是，软中断处理数据包 -> 放入`sk_receive_queue` -> 调用`sk_data_ready(sk)`，即调用`sock_def_readable`，默认的`sock_def_readable`的步骤是先检查（遍历）`sk_wq`的等待项队列，调用等待项的`.func`（`autoremove_wake_function`）-> 直接唤醒进程并移出队列（又发生了一次上下文切换）
-
-所以从上述步骤可以了解，这种模式由于要进行两次进程上下文切换（挂起+唤醒），每次耗时`3–5μs`，单进程仅能处理一个连接，性能较差
-
-```cpp
-// 默认回调函数 sock_def_readable 的实现
-// 事件触发：协议栈调用 sk_data_ready(sk)
-static void sock_def_readable(struct sock *sk) {
-    struct socket_wq *wq;
-    rcu_read_lock();
-    wq = rcu_dereference(sk->sk_wq);  // 获取 sk_wq 队列
-    if (wq_has_sleeper(wq)) {         // 队列检查：检查 sk_wq 中是否有阻塞进程
-        // 唤醒操作：唤醒队列中的进程（POLLIN 表示可读事件）
-		// 遍历 sk_wq 中的等待项，执行其回调函数（如 autoremove_wake_function）唤醒进程
-		// 唤醒策略：传入参数 nr_exclusive=1，表示仅唤醒一个进程（避免惊群效应）
-        wake_up_interruptible_sync_poll(&wq->wait, POLLIN | POLLPRI);
-    }
-    sk_wake_async(sk, SOCK_WAKE_WAITD, POLL_IN); // 发送异步信号（如 SIGIO）
-    rcu_read_unlock();
-}
-```
-
-2、epoll I/O多路复用场景下的等待唤醒机制：事件驱动与回调转发
-
-**epoll通过改造`sk_wq`和`sk_data_ready`的协作实现高效多路复用**，步骤拆解如下
-
--	epoll注册改造`sk_wq`：`epoll_ctl(EPOLL_CTL_ADD)`为每个socket添加特殊等待项，即`.private = NULL`（不关联进程）以及`.func = ep_poll_callback`（epoll自定义回调），此等待项通过`eppoll_entry`结构关联到epoll的红黑树节点`epitem`
--	数据到达触发epoll回调：当数据就绪时，内核仍然会调用`sk_data_ready`，随后步骤调用`sock_def_readable` -> 遍历`sk_wq` -> 执行`ep_poll_callback`
-
-而`ep_poll_callback`的核心步骤为：
-
-1.	将就绪的`epitem`加入`epoll`就绪队列`rdllist`
-2.	检查`eventpoll`自身的等待队列，唤醒因`epoll_wait`阻塞的用户进程
-3.	用户进程被唤醒后，批量处理就绪事件：`epoll_wait`从`rdllist`获取所有就绪事件，仅需一次系统调用即可处理海量连接
-4.	在高并发场景下，epoll_wait机制会持续占用CPU达到处理高并发请求的场景，性能非常高
-
-小结下，从内核的这种解耦与分层设计来看，保证了`sk_data_ready`的统一性，无论何种模式，数据到达时均调用同一回调，但根据`sk_wq`的内容动态适配行为，对同步阻塞模式是唤醒进程->进程主动读数据，对epoll模式是触发回调 -> 事件入队 -> 用户进程批量处理，`sk_wq`与`sk_data_ready`的关系本质是**事件发布-订阅模型**，同步阻塞模式下是进程直接订阅，导致高开销，而epoll通过回调中转和事件批量交付，实现高性能IO多路复用
-
--	订阅者：`sk_wq`管理订阅该事件的实体（进程或epoll实例），作为事件订阅中心，隔离内核协议栈与上层模型
--	发布者：`sk_data_ready`在数据到达时发布事件
-
-##  0x0B 参考
+##  0x14 参考
 -	<<深入理解Linux网络>>
 -   [深入理解Linux TCP的三次握手](https://mp.weixin.qq.com/s/vlrzGc5bFrPIr9a7HIr2eA)
 -   [为什么服务端程序都需要先 listen 一下](https://mp.weixin.qq.com/s/hv2tmtVpxhVxr6X-RNWBsQ)
@@ -2440,3 +4354,5 @@ static void sock_def_readable(struct sock *sk) {
 -	[[内核源码] 网络协议栈 - connect (tcp)](https://wenfh2020.com/2021/08/07/linux-kernel-connect/)
 -   [[内核源码] 网络协议栈 - listen (tcp)](https://wenfh2020.com/2021/07/21/kernel-sys-listen/)
 -   [[内核源码] 网络协议栈 - socket (tcp)](https://wenfh2020.com/2021/07/13/kernel-sys-socket/)
+-	[TCP拥塞控制算法](https://www.kernel.org/doc/html/latest/networking/tcp-congestion-control.html)
+-	[Linux TCP实现分析](https://blog.csdn.net/zhangskd/category_1169998.html)
