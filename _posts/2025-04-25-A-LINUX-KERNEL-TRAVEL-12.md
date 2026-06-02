@@ -93,7 +93,69 @@ struct sock *sk = (struct sock *)icsk;  // 最终转为通用sock
 
 ####	半连接队列 vs 全连接队列（结构）
 
-TODO
+TODO：结合内核代码，详细分析下相关的结构以及主要的操作函数，最好给个结构体
+
+-	[`inet_hashinfo`](https://elixir.bootlin.com/linux/v4.11.6/source/include/net/inet_hashtables.h#L120)：TCP全局哈希表管理结构，包含`ehash`（ESTABLISHED连接哈希表）、`listening_hash`（LISTEN状态哈希表）和`bhash`（端口绑定哈希表）
+-	[`inet_listen_hashbucket`](https://elixir.bootlin.com/linux/v4.11.6/source/include/net/inet_hashtables.h#L112)：listen哈希表的桶结构，每个桶用自旋锁保护
+-	[`inet_ehash_bucket`](https://elixir.bootlin.com/linux/v4.11.6/source/include/net/inet_hashtables.h#L42)：ehash的桶结构，存储所有非LISTEN状态的sock，包括半连接（`TCP_NEW_SYN_RECV`）
+
+1、
+
+```c
+struct inet_hashinfo {
+	/* This is for sockets with full identity only.  Sockets here will
+	 * always be without wildcards and will have the following invariant:
+	 *
+	 *          TCP_ESTABLISHED <= sk->sk_state < TCP_CLOSE
+	 *
+	 */
+	struct inet_ehash_bucket	*ehash;
+	spinlock_t			*ehash_locks;
+	unsigned int			ehash_mask;
+	unsigned int			ehash_locks_mask;
+
+	/* Ok, let's try this, I give up, we do need a local binding
+	 * TCP hash as well as the others for fast bind/connect.
+	 */
+	struct inet_bind_hashbucket	*bhash;
+
+	unsigned int			bhash_size;
+	/* 4 bytes hole on 64 bit */
+
+	struct kmem_cache		*bind_bucket_cachep;
+
+	/* All the above members are written once at bootup and
+	 * never written again _or_ are predominantly read-access.
+	 *
+	 * Now align to a new cache line as all the following members
+	 * might be often dirty.
+	 */
+	/* All sockets in TCP_LISTEN state will be in here.  This is the only
+	 * table where wildcard'd TCP sockets can exist.  Hash function here
+	 * is just local port number.
+	 */
+	struct inet_listen_hashbucket	listening_hash[INET_LHTABLE_SIZE]
+					____cacheline_aligned_in_smp;
+};
+```
+
+2、
+
+```c
+struct inet_listen_hashbucket {
+	spinlock_t		lock;
+	struct hlist_head	head;
+};
+```
+
+3、
+
+```c
+struct inet_ehash_bucket {
+	struct hlist_nulls_head chain;
+};
+```
+
 
 ####	inetsw_array
 
@@ -975,6 +1037,8 @@ static long inet_wait_for_connect(struct sock *sk, long timeo, bool writebias)
 ####	ebpf with connect()
 
 TODO
+
+阻塞、非阻塞情况下，ebpf的返回值处理方式
 
 ##	0x05	server：接收客户端的SYN包
 
@@ -2526,6 +2590,10 @@ sk->sk_data_ready(sk, 0);  // 触发唤醒
 2. `TCP_SKB_CB(skb)->seq == tp->rcv_nxt`：数据包序列号等于期望的下一个接收序列号（包按序到达）
 3. `!after(TCP_SKB_CB(skb)->ack_seq, tp->snd_nxt)`：ACK序列号合法（不确认尚未发送的数据）
 
+简言之，快速路径只包含下面两种报文：
+-	纯数据包（带有 ACK 标记）
+-	纯确认包（只有 ACK 标记，没有数据）
+
 **`pred_flags`预测标志**的计算：
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/net/tcp.h#L664
@@ -4028,7 +4096,7 @@ void tcp_close(struct sock *sk, long timeout)
 		// SO_LINGER且linger=0，也发送RST
 		tcp_disconnect(sk, 0);
 	} else if (tcp_close_state(sk)) {
-		// 正常关闭：发送FIN
+		// 正常关闭：发送FIN（主动关闭的一端）
 		tcp_send_fin(sk);
 	}
 
@@ -4047,6 +4115,7 @@ adjudge_to_death:
 ```
 
 ####	发送FIN：tcp_send_fin
+继续，`tcp_send_fin`发送FIN包的逻辑
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_output.c#L2856
@@ -4084,6 +4153,50 @@ coalesce:
 ```
 
 ####	接收FIN处理：tcp_fin
+由于FIN 标志位在 TCP 序列号中占用了 `1` 个字节的空间，代表了对端发送数据的终点线。因此，内核必须等到它在接收序列中变成**连续的下一字节**时才能处理，在4.11.6版本中，对应两处处理逻辑如下
+
+1、[场景一](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L4644)：`tcp_data_queue`函数中，即按序到达的终点。这是最常见的路径，此时对端发送的 FIN 报文（可能携带了最后一部分数据，也可能不带）到达本地时，其起始序列号正好等于本地期望接收的下一个序列号（`tp->rcv_nxt == TCP_SKB_CB(skb)->seq`）
+
+```
+网卡驱动软中断 -> tcp_v4_rcv()
+                -> tcp_v4_do_rcv()
+                     -> tcp_rcv_established() [快速路径或慢速路径]
+                          -> tcp_data_queue()
+                               -> tcp_fin()
+```
+
+当数据包进入 `tcp_data_queue` 后，内核会先[处理](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L4638)该报文里可能携带的常规用户数据（将其放入接收队列 `sk_receive_queue` 中）。处理完数据段后，内核会通过以下代码检查检查控制标记：
+
+```c
+// net/ipv4/tcp_input.c - tcp_data_queue()
+// 因为这个包是按序到达的，内核处理完可能存在的数据 payload 后，直接调用 tcp_fin() 来终结接收通道
+if (TCPH_F(th) & TCP_FLAG_FIN)
+    tcp_fin(sk, skb);
+```
+
+2、[场景二](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L4356)：`tcp_ofo_queue`乱序队列处理。网络环境复杂时，对端发送的 FIN 包可能会先到达本地（或者前面的某些数据包在网络中丢失，触发了重传）。此时，内核绝对不会立刻调用 `tcp_fin`，否则会导致数据丢失，回顾下内核对乱序报文的处理：
+
+-	2.1、（乱序入队）当 FIN 包先到时，由于 `TCP_SKB_CB(skb)->seq > tp->rcv_nxt`，它在 `tcp_data_queue` 中无法匹配，内核会将其分流至 `tcp_data_queue_ofo()`，将其挂在乱序红黑树 `tp->out_of_order_queue` 上
+-	2.2、（空洞填补）随后，那些迟到的（或重传）数据包到达，这些包补齐了序列号的空洞，使得 `tp->rcv_nxt` 一路向前推进；接着触发串联及完成，当空洞被补齐之后，内核会调用 `tcp_ofo_queue()` 来扫描这个红黑树，试图把连续的乱序包转正搬移到正式的接收队列中
+
+在 `tcp_ofo_queue` 函数处理中，循环遍历红黑树节点、合并连续的 sk_buff 时，如果戳到了当年那个提前接收入队列的 FIN 包，`tcp_fin`逻辑就会被触发
+
+```c
+// net/ipv4/tcp_input.c - tcp_ofo_queue()
+while ((skb = skb_peek(&tp->out_of_order_queue)) != NULL) {
+    ......
+    // 检查这个乱序包是否已经可以和当前的 rcv_nxt 接上了
+    if (before(TCP_SKB_CB(skb)->seq, tp->rcv_nxt)) {
+        ......
+        // 如果这个转正的包带有 FIN 标记
+        if (TCPH_F(tcp_hdr(skb)) & TCP_FLAG_FIN) {
+            _skb_unlink(skb, &tp->out_of_order_queue);
+            tcp_fin(sk, skb); // 在这里终结
+            break; 
+        }
+    }
+}
+```
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L4104
@@ -4137,6 +4250,15 @@ void tcp_fin(struct sock *sk)
 }
 ```
 
+####	主动关闭tcp_close VS 被动关闭：内核侧的区别
+
+TODO
+
+一、 主动关闭路径：tcp_close() （自上而下）
+
+二、 被动关闭路径：收到 FIN 或 RST （自下而上）
+
+
 ####	TIME_WAIT管理
 
 ```cpp
@@ -4180,7 +4302,7 @@ TIME_WAIT状态存在的意义是：
 1. 确保最后一个ACK能到达对端（如果丢失，对端会重传FIN）
 2. 等待网络中残留的属于此连接的旧数据包过期，避免干扰相同四元组的新连接
 
-TODO，一个有趣的case
+一个有趣的case
 
 ##	0x12	总结：完整生命周期内核调用链
 
@@ -4327,7 +4449,7 @@ flowchart TD
 | | `tcp_transmit_skb` | 构造TCP头、发送到IP层 |
 | **数据接收** | `tcp_v4_rcv` | TCP报文入口 |
 | | `tcp_rcv_established` | ESTABLISHED状态接收 |
-| | `tcp_data_queue` | 数据排序、乱序处理 |
+| | `tcp_data_queue` | 数据排序、乱序处理（`tcp_data_queue`是 TCP 慢速路径的核心处理引擎） |
 | | `tcp_queue_rcv` | 数据入接收队列 |
 | | `tcp_recvmsg` | 内核缓冲区→用户空间 |
 | **重传** | `tcp_retransmit_timer` | 超时重传触发 |
