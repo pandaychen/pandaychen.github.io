@@ -44,9 +44,9 @@ int main(int argc, char const *argv[])
 
 ```cpp
 int main(){
- fd = socket(AF_INET,SOCK_STREAM, 0);
- connect(fd, ...);
- ...
+	fd = socket(AF_INET,SOCK_STREAM, 0);
+	connect(fd, ...);
+ 	......
 }
 ```
 
@@ -91,71 +91,237 @@ struct inet_connection_sock *icsk = (struct inet_connection_sock *)tp;
 struct sock *sk = (struct sock *)icsk;  // 最终转为通用sock
 ```
 
-####	半连接队列 vs 全连接队列（结构）
+####	inet_connection_sock结构
 
-TODO：结合内核代码，详细分析下相关的结构以及主要的操作函数，最好给个结构体
-
--	[`inet_hashinfo`](https://elixir.bootlin.com/linux/v4.11.6/source/include/net/inet_hashtables.h#L120)：TCP全局哈希表管理结构，包含`ehash`（ESTABLISHED连接哈希表）、`listening_hash`（LISTEN状态哈希表）和`bhash`（端口绑定哈希表）
--	[`inet_listen_hashbucket`](https://elixir.bootlin.com/linux/v4.11.6/source/include/net/inet_hashtables.h#L112)：listen哈希表的桶结构，每个桶用自旋锁保护
--	[`inet_ehash_bucket`](https://elixir.bootlin.com/linux/v4.11.6/source/include/net/inet_hashtables.h#L42)：ehash的桶结构，存储所有非LISTEN状态的sock，包括半连接（`TCP_NEW_SYN_RECV`）
-
-1、
+TODO
 
 ```c
+struct inet_connection_sock {
+	/* inet_sock has to be the first member! */
+	struct inet_sock	  icsk_inet;
+	struct request_sock_queue icsk_accept_queue;	//全连队列
+	struct inet_bind_bucket	  *icsk_bind_hash;
+	unsigned long		  icsk_timeout;
+ 	struct timer_list	  icsk_retransmit_timer;
+ 	struct timer_list	  icsk_delack_timer;
+	__u32			  icsk_rto;
+	__u32			  icsk_pmtu_cookie;
+	const struct tcp_congestion_ops *icsk_ca_ops;
+	const struct inet_connection_sock_af_ops *icsk_af_ops;
+	unsigned int		  (*icsk_sync_mss)(struct sock *sk, u32 pmtu);
+	__u8			  icsk_ca_state:6,
+				  icsk_ca_setsockopt:1,
+				  icsk_ca_dst_locked:1;
+	__u8			  icsk_retransmits;
+	__u8			  icsk_pending;
+	__u8			  icsk_backoff;
+	__u8			  icsk_syn_retries;
+	__u8			  icsk_probes_out;
+	__u16			  icsk_ext_hdr_len;
+	struct {
+		__u8		  pending;	 /* ACK is pending			   */
+		__u8		  quick;	 /* Scheduled number of quick acks	   */
+		__u8		  pingpong;	 /* The session is interactive		   */
+		__u8		  blocked;	 /* Delayed ACK was blocked by socket lock */
+		__u32		  ato;		 /* Predicted tick of soft clock	   */
+		unsigned long	  timeout;	 /* Currently scheduled timeout		   */
+		__u32		  lrcvtime;	 /* timestamp of last received data packet */
+		__u16		  last_seg_size; /* Size of last incoming segment	   */
+		__u16		  rcv_mss;	 /* MSS used for delayed ACK decisions	   */ 
+	} icsk_ack;
+	struct {
+		int		  enabled;
+
+		/* Range of MTUs to search */
+		int		  search_high;
+		int		  search_low;
+
+		/* Information on the current probe. */
+		int		  probe_size;
+
+		u32		  probe_timestamp;
+	} icsk_mtup;
+	u32			  icsk_user_timeout;
+
+	u64			  icsk_ca_priv[88 / sizeof(u64)];
+#define ICSK_CA_PRIV_SIZE      (11 * sizeof(u64))
+};
+```
+
+####	半连接队列 vs 全连接队列（结构）
+
+在4.11.6内核中，TCP连接管理涉及三种核心哈希表/队列结构，它们分别服务于不同阶段的连接查找与管理。相比2.6内核，半连接对象不再使用独立的哈希表，而是直接插入全局`ehash`
+
+```mermaid
+flowchart TB
+    subgraph inet_hashinfo_struct ["inet_hashinfo (TCP全局哈希管理)"]
+        direction TB
+        ehash["ehash<br/>ESTABLISHED连接哈希表<br/>存储: ESTABLISHED/SYN_RECV/TIME_WAIT<br/>以及半连接 request_sock"]
+        lhash["listening_hash<br/>LISTEN状态哈希表<br/>哈希键: 本地端口号<br/>固定32个桶"]
+        bhash["bhash<br/>端口绑定哈希表<br/>用于bind()时的端口查重"]
+    end
+
+    subgraph accept_queue ["request_sock_queue (per-listener)"]
+        direction LR
+        head["rskq_accept_head"] --> req1["req_sock 1"]
+        req1 --> req2["req_sock 2"]
+        req2 --> req3["req_sock N"]
+        req3 --> tail["rskq_accept_tail"]
+    end
+
+    SYN["收到SYN"] -->|"inet_csk_reqsk_queue_hash_add"| ehash
+    ACK["收到第三次ACK"] -->|"inet_csk_reqsk_queue_add"| accept_queue
+    ACCEPT["accept()"] -->|"reqsk_queue_remove"| accept_queue
+    LISTEN["listen()"] -->|"inet_hash"| lhash
+    ESTABLISHED["连接建立"] -->|"inet_ehash_insert"| ehash
+```
+
+**1、`inet_hashinfo`**：TCP全局哈希表管理结构，在内核启动时（`tcp_init`）分配，全局只有一个实例`tcp_hashinfo`
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/net/inet_hashtables.h#L120
 struct inet_hashinfo {
-	/* This is for sockets with full identity only.  Sockets here will
-	 * always be without wildcards and will have the following invariant:
-	 *
-	 *          TCP_ESTABLISHED <= sk->sk_state < TCP_CLOSE
-	 *
-	 */
-	struct inet_ehash_bucket	*ehash;
-	spinlock_t			*ehash_locks;
-	unsigned int			ehash_mask;
-	unsigned int			ehash_locks_mask;
+	// ehash：存储所有具有完整四元组的sock（含半连接request_sock）
+	// 状态范围：TCP_ESTABLISHED <= sk_state < TCP_CLOSE
+	struct inet_ehash_bucket	*ehash;         // 哈希桶数组
+	spinlock_t			*ehash_locks;           // 分段锁数组（减少锁竞争）
+	unsigned int			ehash_mask;         // 哈希掩码（桶数-1，用于取模）
+	unsigned int			ehash_locks_mask;   // 锁数组掩码
 
-	/* Ok, let's try this, I give up, we do need a local binding
-	 * TCP hash as well as the others for fast bind/connect.
-	 */
+	// bhash：端口绑定哈希表，bind()时检查端口是否冲突
 	struct inet_bind_hashbucket	*bhash;
-
 	unsigned int			bhash_size;
-	/* 4 bytes hole on 64 bit */
 
 	struct kmem_cache		*bind_bucket_cachep;
 
-	/* All the above members are written once at bootup and
-	 * never written again _or_ are predominantly read-access.
-	 *
-	 * Now align to a new cache line as all the following members
-	 * might be often dirty.
-	 */
-	/* All sockets in TCP_LISTEN state will be in here.  This is the only
-	 * table where wildcard'd TCP sockets can exist.  Hash function here
-	 * is just local port number.
-	 */
+	// listening_hash：存储所有TCP_LISTEN状态的sock
+	// 哈希键仅为本地端口号，固定大小 INET_LHTABLE_SIZE=32
+	// 放在独立cacheline，因为写入频率较高
 	struct inet_listen_hashbucket	listening_hash[INET_LHTABLE_SIZE]
 					____cacheline_aligned_in_smp;
 };
 ```
 
-2、
+**2、`inet_listen_hashbucket`**：listen哈希表的桶结构，每个桶用自旋锁保护，链表串联同一端口的listen sock
 
 ```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/net/inet_hashtables.h#L112
 struct inet_listen_hashbucket {
-	spinlock_t		lock;
-	struct hlist_head	head;
+	spinlock_t		lock;       // 保护本桶的自旋锁
+	struct hlist_head	head;   // 链表头，串联listen sock
 };
 ```
 
-3、
+**3、`inet_ehash_bucket`**：ehash的桶结构。使用`hlist_nulls_head`（末尾带`NULL`标记的哈希链表），支持RCU无锁读取。4.11.6中半连接（`TCP_NEW_SYN_RECV`状态的`request_sock`）与`ESTABLISHED`等状态的sock共用此表
 
 ```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/net/inet_hashtables.h#L42
 struct inet_ehash_bucket {
-	struct hlist_nulls_head chain;
+	struct hlist_nulls_head chain;  // nulls哈希链表头
 };
 ```
 
+**4、全连接队列结构 `request_sock_queue`**（每个listen sock一个），通过单链表管理已完成三次握手的连接：
+
+位于`struct inet_connection_sock`结构 (icsk) 定义的成员，表示面向连接的高级抽象
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/net/request_sock.h#L161
+struct request_sock_queue {
+	spinlock_t		rskq_lock;          // 保护队列的自旋锁
+	u8			rskq_defer_accept;      // TCP_DEFER_ACCEPT选项
+	u32			synflood_warned;        // SYN洪水告警标记
+
+	atomic_t		qlen;               // 半连接计数（pending状态）
+	atomic_t		young;              // 未重传过SYN+ACK的半连接数
+
+	struct request_sock	*rskq_accept_head;  // 全连接队列头指针
+	struct request_sock	*rskq_accept_tail;  // 全连接队列尾指针
+	struct fastopen_queue	fastopenq;      // TCP Fast Open队列
+};
+```
+
+####	ehash 的初始化与参数因子
+
+ehash在内核启动时由[`tcp_init`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp.c#L3378)分配，大小受系统内存和`thash_entries`启动参数影响：
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp.c#L3378
+void __init tcp_init(void)
+{
+	// 分配ehash，大小取决于系统内存
+	// thash_entries可通过内核启动参数指定
+	// 每128KB内存对应一个slot（第4个参数17表示2^17=128K）
+	tcp_hashinfo.ehash =
+		alloc_large_system_hash("TCP established",
+					sizeof(struct inet_ehash_bucket),
+					thash_entries,
+					17, /* one slot per 128 KB of memory */
+					0,
+					NULL,
+					&tcp_hashinfo.ehash_mask,  // 输出：桶数-1
+					0,
+					thash_entries ? 0 : 512 * 1024);
+	// 初始化每个桶的链表头
+	for (i = 0; i <= tcp_hashinfo.ehash_mask; i++)
+		INIT_HLIST_NULLS_HEAD(&tcp_hashinfo.ehash[i].chain, i);
+
+	// 分配分段锁（锁数量远小于桶数量，多个桶共享一把锁）
+	if (inet_ehash_locks_alloc(&tcp_hashinfo))
+		panic("TCP: failed to alloc ehash_locks");
+	// ...
+}
+```
+
+关键参数因子：
+-	`ehash_mask`：值为桶数量减`1`，用于哈希取模（`hash & ehash_mask`），桶数量总是`2`的幂次
+-	`ehash_locks`：分段锁数组，锁数量通常远小于桶数量（如`1024`把锁对应`65536`个桶），多个相邻桶共享一把锁以减少内存开销，同时降低锁竞争
+-	`thash_entries`内核启动参数：可在`/proc/cmdline`中设置`thash_entries=N`覆盖默认的ehash大小，适用于高并发场景需要更大哈希表的情况
+
+####	ehash 的核心操作函数：inet_ehash_insert
+
+[`inet_ehash_insert`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/inet_hashtables.c#L386)负责将sock插入ehash，同时检测是否已有相同四元组的连接（防止重复）：
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/inet_hashtables.c#L386
+bool inet_ehash_insert(struct sock *sk, struct sock *osk)
+{
+	struct inet_hashinfo *hashinfo = sk->sk_prot->h.hashinfo;
+	struct hlist_nulls_head *list;
+	struct inet_ehash_bucket *head;
+	spinlock_t *lock;
+	bool ret = true;
+
+	// 根据四元组计算哈希值，定位桶和对应的锁
+	head = inet_ehash_bucket(hashinfo, sk->sk_hash);
+	list = &head->chain;
+	lock = inet_ehash_lockp(hashinfo, sk->sk_hash);
+
+	spin_lock(lock);
+	if (osk) {
+		// 替换旧sock（如TIME_WAIT回收场景）
+		WARN_ON_ONCE(sk->sk_hash != osk->sk_hash);
+		ret = sk_nulls_del_node_init_rcu(osk);
+	}
+	if (ret)
+		__sk_nulls_add_node_rcu(sk, list);  // RCU方式插入链表头
+	spin_unlock(lock);
+	return ret;
+}
+```
+
+####	队列操作函数与触发时机
+
+| 操作 | 函数 | 触发时机 | 目标结构 |
+|------|------|---------|---------|
+| listen sock入表 | `inet_hash()` -> `__inet_hash()` | `listen()`系统调用 | `listening_hash` |
+| 半连接入表 | `inet_csk_reqsk_queue_hash_add()` | 收到SYN，创建`request_sock`后 | `ehash` |
+| 查找已建立连接 | `__inet_lookup_established()` | `tcp_v4_rcv`收包时 | `ehash` |
+| 查找listen sock | `__inet_lookup_listener()` | `tcp_v4_rcv`收包，ehash未命中时 | `listening_hash` |
+| 加入全连接队列 | `inet_csk_reqsk_queue_add()` | 第三次ACK处理，创建child sock后 | `accept_queue` |
+| 从全连接出队 | `reqsk_queue_remove()` | `accept()`系统调用 | `accept_queue` |
+| ESTABLISHED入表 | `inet_ehash_insert()` | child sock进入ESTABLISHED | `ehash` |
+| 从ehash删除 | `inet_unhash()` | 连接关闭（`tcp_done`） | `ehash` |
 
 ####	inetsw_array
 
@@ -216,6 +382,48 @@ struct proto tcp_prot = {
 }
 ```
 
+####	struct tcphdr：tcp header
+
+TODO
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/uapi/linux/tcp.h#L24
+struct tcphdr {
+	__be16	source;
+	__be16	dest;
+	__be32	seq;
+	__be32	ack_seq;
+#if defined(__LITTLE_ENDIAN_BITFIELD)
+	__u16	res1:4,
+		doff:4,
+		fin:1,
+		syn:1,
+		rst:1,
+		psh:1,
+		ack:1,
+		urg:1,
+		ece:1,
+		cwr:1;
+#elif defined(__BIG_ENDIAN_BITFIELD)
+	__u16	doff:4,
+		res1:4,
+		cwr:1,
+		ece:1,
+		urg:1,
+		ack:1,
+		psh:1,
+		rst:1,
+		syn:1,
+		fin:1;
+#else
+#error	"Adjust your <asm/byteorder.h> defines"
+#endif	
+	__be16	window;
+	__sum16	check;
+	__be16	urg_ptr;
+};
+```
+
 ##	0x02	server：socket实现
 当调用`socket`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L1258)创建`struct socket`结构时，在用户层视角只看到返回了一个文件描述符 fd，内核做了哪些事情？
 ```cpp
@@ -263,6 +471,24 @@ __sys_socket
             |-- __fd_install 
                 |-- fdt = rcu_dereference_sched(files->fdt)
                 |-- rcu_assign_pointer(fdt->fd[fd], file)
+```
+
+```mermaid
+flowchart TB
+    A["用户态: socket(AF_INET, SOCK_STREAM, 0)"] --> B["SYSCALL_DEFINE3(socket)"]
+    B --> C["sock_create"]
+    C --> D["__sock_create"]
+    D --> D1["sock_alloc<br/>分配 struct socket + inode"]
+    D1 --> D2["inet_create (PF_INET)"]
+    D2 --> D3["sk_alloc<br/>分配 struct sock (tcp_sock)"]
+    D3 --> D4["sock_init_data<br/>初始化sock基础字段"]
+    D4 --> D5["sk->sk_prot = tcp_prot<br/>绑定TCP协议操作集"]
+    D5 --> E["sock_map_fd"]
+    E --> E1["get_unused_fd_flags<br/>分配文件描述符fd"]
+    E1 --> E2["sock_alloc_file<br/>创建 struct file"]
+    E2 --> E3["file->private_data = socket<br/>关联file与socket"]
+    E3 --> E4["fd_install(fd, file)<br/>安装到进程fd表"]
+    E4 --> F["返回 fd 给用户态"]
 ```
 
 <!--TODO: socket-api-flow 图待补充-->
@@ -515,6 +741,34 @@ struct file *sock_alloc_file(struct socket *sock, int flags, const char *dname)
 
 注意到上面`sock_alloc_file`函数的最后，会把`file->private_data`设置为`struct socket*`变量，由于socket也是文件，所以基于VFS的这套框架，各个成员有如下关系：
 
+```mermaid
+flowchart LR
+    subgraph process ["进程空间"]
+        fd["fd (文件描述符)"]
+    end
+
+    subgraph vfs ["VFS层"]
+        file["struct file<br/>f_op = socket_file_ops<br/>private_data = socket"]
+        inode["struct inode<br/>(socket_alloc内嵌)"]
+    end
+
+    subgraph socketlayer ["Socket层"]
+        socket_s["struct socket<br/>type = SOCK_STREAM<br/>ops = inet_stream_ops<br/>file = file指针<br/>sk = sock指针"]
+    end
+
+    subgraph transport ["传输层"]
+        sock_s["struct sock / tcp_sock<br/>sk_prot = tcp_prot<br/>sk_socket = socket指针<br/>sk_wq = 等待队列"]
+    end
+
+    fd -->|"fdt->fd[fd]"| file
+    file -->|"private_data"| socket_s
+    file ---|"f_inode"| inode
+    inode ---|"socket_alloc内嵌"| socket_s
+    socket_s -->|"sk"| sock_s
+    socket_s -->|"file"| file
+    sock_s -->|"sk_socket"| socket_s
+```
+
 <!--TODO: socket-relation 图待补充-->
 
 
@@ -541,6 +795,37 @@ int listen(int sockfd, int backlog);
 ```
 
 `listen`[系统调用](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/af_inet.c#L194)的主要作用就是申请和初始化接收队列，包括全连接队列（链表）和半连接队列（hash表），如图
+
+```mermaid
+flowchart TB
+    subgraph listener ["listen socket (inet_connection_sock)"]
+        icsk["icsk_accept_queue<br/>(request_sock_queue)"]
+    end
+
+    subgraph halfconn ["半连接管理 (全局ehash)"]
+        direction LR
+        bucket0["ehash bucket 0"]
+        bucket1["ehash bucket 1"]
+        bucketN["ehash bucket N"]
+        bucket0 --> rs1["request_sock<br/>TCP_NEW_SYN_RECV<br/>四元组A"]
+        bucket1 --> rs2["request_sock<br/>TCP_NEW_SYN_RECV<br/>四元组B"]
+        bucket1 --> rs3["request_sock<br/>TCP_NEW_SYN_RECV<br/>四元组C"]
+    end
+
+    subgraph fullconn ["全连接队列 (per-listener链表)"]
+        direction LR
+        head["rskq_accept_head"] --> done1["completed<br/>request_sock 1"]
+        done1 --> done2["completed<br/>request_sock 2"]
+        done2 --> tail["rskq_accept_tail"]
+    end
+
+    SYN["SYN到达"] -->|"tcp_conn_request<br/>inet_csk_reqsk_queue_hash_add"| halfconn
+    halfconn -->|"第三次ACK<br/>tcp_v4_syn_recv_sock<br/>inet_csk_reqsk_queue_add"| fullconn
+    fullconn -->|"accept()<br/>reqsk_queue_remove"| APP["应用层获得新连接fd"]
+
+    icsk -.->|"qlen: 半连接计数"| halfconn
+    icsk -.->|"rskq_accept_head/tail"| fullconn
+```
 
 <!--TODO: listen 队列结构图待补充-->
 
@@ -655,7 +940,83 @@ int inet_hash(struct sock *sk) {
 
 在4.11.6内核中，listen socket通过`inet_hash`函数加入`listening_hash`表，而半连接对象（`request_sock`）在创建后通过`inet_ehash_insert`加入全局`ehash`表，与`ESTABLISHED`状态的sock共用同一哈希表
 
-TODO：内核实现
+下面结合内核源码详细分析listen中各个hashtable操作的实现细节
+
+**（1）`reqsk_queue_alloc`**：在4.11.6内核中仅初始化全连接队列的锁和计数器，不再为半连接预分配独立哈希表（半连接直接使用全局ehash）
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/core/request_sock.c#L28
+void reqsk_queue_alloc(struct request_sock_queue *queue)
+{
+	spin_lock_init(&queue->rskq_lock);
+	queue->rskq_accept_head = NULL;   // 全连接队列为空
+	// 注意：不再有 listen_opt 的分配（2.6内核有独立半连接哈希表）
+}
+```
+
+**（2）`inet_hash` / `__inet_hash`**：将listen sock插入`listening_hash`表
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/inet_hashtables.c#L468
+int __inet_hash(struct sock *sk, struct sock *osk)
+{
+	struct inet_hashinfo *hashinfo = sk->sk_prot->h.hashinfo;
+	struct inet_listen_hashbucket *ilb;
+	int err = 0;
+
+	if (sk->sk_state != TCP_LISTEN) {
+		// 非LISTEN状态，插入ehash
+		inet_ehash_nolisten(sk, osk);
+		return 0;
+	}
+
+	// LISTEN状态：插入listening_hash
+	// 哈希键仅为本地端口号
+	ilb = &hashinfo->listening_hash[inet_sk_listen_hashfn(sk)];
+	spin_lock(&ilb->lock);
+	// 检查是否有SO_REUSEPORT冲突
+	if (sk->sk_reuseport) {
+		err = inet_reuseport_add_sock(sk, ilb, false);
+		if (err)
+			goto unlock;
+	}
+	__sk_nulls_add_node_rcu(sk, &ilb->head);  // RCU插入链表
+	sock_prot_inuse_add(sock_net(sk), sk->sk_prot, 1);
+unlock:
+	spin_unlock(&ilb->lock);
+	return err;
+}
+```
+
+**（3）`inet_csk_reqsk_queue_hash_add`**：收到SYN后，将半连接`request_sock`加入ehash并启动SYN+ACK重传定时器
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/inet_connection_sock.c#L834
+void inet_csk_reqsk_queue_hash_add(struct sock *sk, struct request_sock *req,
+				   unsigned long timeout)
+{
+	reqsk_queue_hash_req(req, timeout);  // 设置定时器
+	inet_csk_reqsk_queue_added(sk);      // 更新半连接计数 qlen++
+}
+
+// 定时器设置与ehash插入
+static void reqsk_queue_hash_req(struct request_sock *req,
+				 unsigned long timeout)
+{
+	// 启动SYN+ACK重传定时器，超时时间为TCP_TIMEOUT_INIT（1秒）
+	req->num_retrans = 0;
+	req->num_timeout = 0;
+	req->sk = NULL;
+	setup_pinned_timer(&req->rsk_timer, reqsk_timer_handler,
+			   (unsigned long)req);
+	mod_timer(&req->rsk_timer, jiffies + timeout);
+
+	// 将request_sock插入全局ehash（四元组哈希）
+	inet_ehash_insert(req_to_sk(req), NULL);
+	// req_to_sk()将request_sock转为sock指针
+	// 此sock的sk_state为TCP_NEW_SYN_RECV
+}
+```
 
 [`inet_csk_listen_start`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/inet_connection_sock.c#L864)，其中`icsk->icsk_accept_queue` 定义在 `inet_connection_sock`（类型为`request_sock_queue`），是内核用来接收客户端请求的主要数据结构，其中包含了重要的全连接队列`request_sock`结构成员`rskq_accept_head`和`rskq_accept_tail`，这里**注意对于全连接队列来说，在它上面不需要进行复杂的查找工作，accept 的时候只是先进先出处理就好了，因此全连接队列通过 `rskq_accept_head` 和 `rskq_accept_tail` 以链表的形式来管理**，而半连接队列由于需要快速的查找，所以使用hash表来实现
 
@@ -1036,9 +1397,18 @@ static long inet_wait_for_connect(struct sock *sk, long timeo, bool writebias)
 
 ####	ebpf with connect()
 
-TODO
+在较新的内核版本（4.18+）中，内核通过`BPF_CGROUP_INET4_CONNECT` hook允许cgroup eBPF程序在`tcp_v4_connect`执行前拦截connect请求，可修改目标地址/端口（常用于透明代理、Service Mesh场景）。其调用位置在`__inet_stream_connect -> sk->sk_prot->connect`之前
 
-阻塞、非阻塞情况下，ebpf的返回值处理方式
+```c
+// 4.17+内核中的hook点（4.11.6不支持）
+// net/ipv4/af_inet.c - inet_stream_connect 调用链中
+BPF_CGROUP_RUN_PROG_INET4_CONNECT(sk, uaddr);
+// 该hook允许eBPF程序：
+// 1. 修改 uaddr 中的目标IP和端口
+// 2. 返回值控制：返回0允许连接，返回非0拒绝连接
+```
+
+对于阻塞/非阻塞socket，eBPF返回值的处理方式相同：均在`connect`系统调用入口处生效，若eBPF程序返回拒绝，则`connect`直接返回`-EPERM`，不会进入`tcp_v4_connect`。后续内核版本（5.x+）进一步扩展了`BPF_CGROUP_INET4_CONNECT`的能力，支持在sockaddr修改后重新路由查找
 
 ##	0x05	server：接收客户端的SYN包
 
@@ -1527,10 +1897,15 @@ struct request_sock *inet_reqsk_alloc(const struct request_sock_ops *ops,
 }
 ```
 
-`af_ops->send_synack`对应的是[`tcp_v4_send_synack`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_ipv4.c#L899)函数，负责构造 SYN+ACK 报文并通过IP层发送给客户端
+`af_ops->send_synack`对应的是[`tcp_v4_send_synack`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_ipv4.c#L860)函数，负责构造 SYN+ACK 报文并通过IP层发送给客户端。其核心流程分三步：**路由查找** -> **构造SYN+ACK报文** -> **校验和计算与发送**
 
-
-TODO
+```mermaid
+flowchart LR
+    A["tcp_v4_send_synack"] --> B["inet_csk_route_req<br/>路由查找"]
+    B --> C["tcp_make_synack<br/>构造SYN+ACK报文<br/>协商MSS/WS/SACK/TS"]
+    C --> D["__tcp_v4_send_check<br/>TCP校验和"]
+    D --> E["ip_build_and_send_pkt<br/>构造IP头并发送"]
+```
 
 ```c
 //https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_ipv4.c#L860
@@ -1545,24 +1920,103 @@ static int tcp_v4_send_synack(const struct sock *sk, struct dst_entry *dst,
 	int err = -1;
 	struct sk_buff *skb;
 
-	/* First, grab a route. */
+	// 第一步：路由查找（如果调用方未提供dst）
+	// inet_csk_route_req 根据 request_sock 中的目标IP查找路由
 	if (!dst && (dst = inet_csk_route_req(sk, &fl4, req)) == NULL)
 		return -1;
 
+	// 第二步：构造 SYN+ACK 报文（核心）
 	skb = tcp_make_synack(sk, dst, req, foc, synack_type);
 
 	if (skb) {
+		// 第三步：计算TCP校验和（伪首部：源IP + 目的IP + 协议 + TCP长度）
 		__tcp_v4_send_check(skb, ireq->ir_loc_addr, ireq->ir_rmt_addr);
 
+		// 第四步：构造IP头部并发送
 		err = ip_build_and_send_pkt(skb, sk, ireq->ir_loc_addr,
 					    ireq->ir_rmt_addr,
-					    ireq->opt);
+					    ireq->opt);  // IP选项
 		err = net_xmit_eval(err);
 	}
 
 	return err;
 }
 ```
+
+####	tcp_make_synack：SYN+ACK报文构造与选项协商
+
+[`tcp_make_synack`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_output.c#L3171)是构造SYN+ACK报文的核心函数，负责设置TCP头部各字段并进行**TCP选项协商**（MSS、Window Scale、SACK、Timestamp）：
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_output.c#L3171
+struct sk_buff *tcp_make_synack(const struct sock *sk, struct dst_entry *dst,
+				struct request_sock *req,
+				struct tcp_fastopen_cookie *foc,
+				enum tcp_synack_type synack_type)
+{
+	struct inet_request_sock *ireq = inet_rsk(req);
+	const struct tcp_sock *tp = tcp_sk(sk);
+	struct tcp_out_options opts;
+	struct sk_buff *skb;
+	struct tcphdr *th;
+	int tcp_header_size;
+	struct tcp_md5sig_key *md5 = NULL;
+
+	// 分配skb
+	skb = alloc_skb(MAX_TCP_HEADER, GFP_ATOMIC);
+	if (unlikely(!skb))
+		return NULL;
+
+	skb_reserve(skb, MAX_TCP_HEADER);
+
+	// 关键：TCP选项协商
+	// synack_options()会根据客户端SYN中请求的选项，
+	// 决定服务端响应哪些选项
+	memset(&opts, 0, sizeof(opts));
+	skb->ip_summed = CHECKSUM_PARTIAL;
+	// ...
+
+	// 构造TCP头部
+	tcp_header_size = tcp_synack_options(req, mss, skb, &opts, md5, foc)
+			  + sizeof(*th);
+	skb_push(skb, tcp_header_size);
+	skb_reset_transport_header(skb);
+
+	th = (struct tcphdr *)skb->data;
+	memset(th, 0, sizeof(struct tcphdr));
+	th->syn = 1;   // SYN标志
+	th->ack = 1;   // ACK标志
+	// 设置服务端ISN（初始序列号）
+	tcp_init_nondata_skb(skb, tcp_rsk(req)->snt_isn,
+			     TCPHDR_SYN | TCPHDR_ACK);
+
+	th->seq = htonl(TCP_SKB_CB(skb)->seq);
+	th->ack_seq = htonl(tcp_rsk(req)->rcv_nxt);  // 确认客户端的SYN
+
+	// 通告接收窗口
+	th->window = htons(min(req->rsk_rcv_wnd, 65535U));
+
+	// 写入协商的TCP选项
+	tcp_options_write((__be32 *)(th + 1), NULL, &opts);
+
+	th->doff = (tcp_header_size >> 2);  // 头部长度
+	// ...
+
+	return skb;
+}
+```
+
+`tcp_synack_options`中进行的**选项协商**逻辑：
+
+| TCP选项 | 协商规则 | 内核字段 |
+|---------|---------|---------|
+| **MSS** | 必选项，服务端根据出口MTU计算自己的MSS通告给客户端 | `opts->mss` |
+| **Window Scale** | 若客户端SYN携带WS选项，服务端选择合适的缩放因子响应 | `ireq->wscale_ok`, `ireq->snd_wscale` |
+| **SACK Permitted** | 若客户端SYN携带SACK选项且`sysctl_tcp_sack`启用，则响应 | `ireq->sack_ok` |
+| **Timestamp** | 若客户端SYN携带TS选项且`sysctl_tcp_timestamps`启用，则响应 | `ireq->tstamp_ok` |
+| **TCP Fast Open Cookie** | 若启用TFO且`foc`非空，在SYN+ACK中附带cookie | `foc` |
+
+SYN Cookie场景下的区别：当`synack_type == TCP_SYNACK_COOKIE`时，ISN（初始序列号）中编码了MSS、时间戳等信息，用于在不保存半连接状态的情况下验证后续ACK的合法性。此时不创建`request_sock`，也不启用Window Scale和SACK选项（因为无法保存状态）
 
 ####   状态迁移的可观测
 额外补充，新版本内核（如`6.16`）提供了一个[观测点](https://elixir.bootlin.com/linux/v6.16-rc6/source/net/ipv4/af_inet.c#L1343)`tracepoint:sock:inet_sock_set_state`，可以用来获取TCP状态的变迁
@@ -2125,7 +2579,65 @@ static inline struct sock *__inet_lookup_skb(struct inet_hashinfo *hashinfo,
 // 2. __inet_lookup_listener() - 查询listening_hash表
 ```
 
-TODO
+####	__inet_lookup_established 的实现
+
+[`__inet_lookup_established`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/inet_hashtables.c#L300)在ehash中查找与报文四元组精确匹配的sock，是`tcp_v4_rcv`收包时的第一步查找。查找流程：**计算四元组哈希** -> **定位桶** -> **遍历nulls链表** -> **精确匹配**
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/inet_hashtables.c#L300
+struct sock *__inet_lookup_established(struct net *net,
+				  struct inet_hashinfo *hashinfo,
+				  const __be32 saddr, const __be16 sport,
+				  const __be32 daddr, const u16 hnum,
+				  const int dif)
+{
+	INET_ADDR_COOKIE(acookie, saddr, daddr);
+	const __portpair ports = INET_COMBINED_PORTS(sport, hnum);
+	struct sock *sk;
+	const struct hlist_nulls_node *node;
+	// 计算四元组哈希值
+	unsigned int hash = inet_ehashfn(net, daddr, hnum, saddr, sport);
+	// 定位桶
+	unsigned int slot = hash & hashinfo->ehash_mask;
+	struct inet_ehash_bucket *head = &hashinfo->ehash[slot];
+
+begin:
+	// RCU无锁遍历桶链表
+	sk_nulls_for_each_rcu(sk, node, &head->chain) {
+		if (sk->sk_hash != hash)
+			continue;
+		// 精确匹配四元组：源IP、源端口、目的IP、目的端口、网络命名空间、网卡
+		if (likely(INET_MATCH(sk, net, acookie,
+				      saddr, daddr, ports, dif))) {
+			if (unlikely(!refcount_inc_not_zero(&sk->sk_refcnt)))
+				goto out;
+			// 二次校验（防止RCU读期间sock被释放后重新分配）
+			if (unlikely(!INET_MATCH(sk, net, acookie,
+						 saddr, daddr, ports, dif))) {
+				sock_gen_put(sk);
+				goto begin;
+			}
+			goto found;
+		}
+	}
+	// nulls检查：如果链表末尾的nulls值与slot不匹配
+	// 说明遍历期间发生了rehash，需要重新查找
+	if (get_nulls_value(node) != slot)
+		goto begin;
+out:
+	sk = NULL;
+found:
+	return sk;
+}
+```
+
+ehash的哈希函数`inet_ehashfn`基于四元组计算，使用Jenkins hash确保分布均匀：
+
+```c
+// 哈希计算（简化）
+// hash = jhash_3words(saddr, daddr, sport | (dport << 16), net_hash_mix(net))
+// 最终 slot = hash & ehash_mask
+```
 
 `__inet_lookup_listener`根据目的IP和端口在`listening_hash`表中查找匹配的listen socket，支持精确匹配（绑定特定IP）和通配匹配（绑定`INADDR_ANY`）：
 
@@ -2378,8 +2890,8 @@ struct socket *sock_from_file(struct file *file, int *err){
 ####	accept 的核心逻辑：inet_csk_accept
 `inet_csk_accept`主要实现了tcp协议`accept`操作，其主要功能是从已经完成三次握手的全连接队列（对于成员是`struct inet_connection_sock`的`icsk_accept_queue`[成员](https://elixir.bootlin.com/linux/v4.11.6/source/include/net/inet_connection_sock.h#L91)）中取控制块，如果没有已经完成的连接，则需要根据（socket）阻塞标记来来区分对待，若非阻塞则直接返回，若阻塞则需要在一定时间范围内阻塞等待。这里有两个关键的子流程：
 
--	`inet_csk_wait_for_connect`：TODO
--	`reqsk_queue_remove`：TODO
+-	`inet_csk_wait_for_connect`：当全连接队列为空时，将当前进程放入listen socket的等待队列（`sk_wq`）中休眠，直到被唤醒（新连接到达时由`sock_def_readable`唤醒）或超时。对于非阻塞socket则跳过此步骤直接返回`-EAGAIN`
+-	`reqsk_queue_remove`：从全连接队列的头部（`rskq_accept_head`）取出一个已完成三次握手的`request_sock`，更新头指针，并递减全连接队列计数。此操作在`icsk_accept_queue.rskq_lock`自旋锁保护下进行
 
 ```cpp
 struct sock *inet_csk_accept(struct sock *sk, int flags, int *err, bool kern){
@@ -4252,11 +4764,207 @@ void tcp_fin(struct sock *sk)
 
 ####	主动关闭tcp_close VS 被动关闭：内核侧的区别
 
-TODO
+TCP连接的关闭从内核视角可以明确区分为两条完全不同的路径：**主动关闭**（本端应用调用`close()`）和**被动关闭**（收到对端的FIN或者RST包），二者在入口函数、状态迁移、资源释放时机等方面存在显著差异
 
-一、 主动关闭路径：tcp_close() （自上而下）
+```mermaid
+flowchart LR
+    subgraph active ["主动关闭（自上而下）"]
+        direction TB
+        A1["应用层 close()"] --> A2["sys_close -> sock_close"]
+        A2 --> A3["inet_release -> tcp_close"]
+        A3 --> A4{接收队列有未读数据?}
+        A4 -->|有| A5["发送RST<br/>直接进入TCP_CLOSE"]
+        A4 -->|无| A6["tcp_send_fin<br/>发送FIN包"]
+        A6 --> A7["TCP_FIN_WAIT1"]
+        A7 --> A8["收到ACK -> TCP_FIN_WAIT2"]
+        A8 --> A9["收到FIN -> tcp_time_wait<br/>TCP_TIME_WAIT"]
+        A5 --> A10["tcp_done -> inet_unhash<br/>释放资源"]
+    end
 
-二、 被动关闭路径：收到 FIN 或 RST （自下而上）
+    subgraph passive ["被动关闭（自下而上）"]
+        direction TB
+        B1["网卡收包中断"] --> B2["tcp_v4_rcv"]
+        B2 --> B3["tcp_rcv_established"]
+        B3 --> B4["tcp_data_queue"]
+        B4 --> B5["tcp_fin()"]
+        B5 --> B6["TCP_CLOSE_WAIT<br/>唤醒应用层"]
+        B6 --> B7["应用层发现连接关闭<br/>调用close()"]
+        B7 --> B8["tcp_close -> tcp_send_fin"]
+        B8 --> B9["TCP_LAST_ACK"]
+        B9 --> B10["收到ACK -> tcp_done<br/>TCP_CLOSE"]
+    end
+```
+
+**一、主动关闭路径：tcp_close（自上而下过程）**
+
+主动关闭由应用层调用`close()`系统调用触发，调用链为：`sys_close` -> `filp_close` -> `fput` -> `__fput` -> `sock_close` -> `inet_release` -> [`tcp_close`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp.c#L2073)
+
+`tcp_close`的核心决策逻辑：
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp.c#L2073
+void tcp_close(struct sock *sk, long timeout)
+{
+	struct sk_buff *skb;
+	int data_was_unread = 0;
+
+	lock_sock(sk);
+	sk->sk_shutdown = SHUTDOWN_MASK;  // 标记双向关闭
+
+	if (sk->sk_state == TCP_LISTEN) {
+		// LISTEN状态：直接关闭，释放所有半连接和全连接
+		tcp_set_state(sk, TCP_CLOSE);
+		inet_csk_listen_stop(sk);  // 清理accept队列
+		goto adjudge_to_death;
+	}
+
+	// 清空接收缓冲区，统计未读数据量
+	while ((skb = __skb_dequeue(&sk->sk_receive_queue)) != NULL) {
+		u32 len = TCP_SKB_CB(skb)->end_seq - TCP_SKB_CB(skb)->seq;
+		if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
+			len--;
+		data_was_unread += len;
+		__kfree_skb(skb);
+	}
+
+	// 关键决策：是否有未读数据？
+	if (data_was_unread) {
+		// 有未读数据：发送RST而非FIN（告知对端数据丢失）
+		NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPABORTONCLOSE);
+		tcp_set_state(sk, TCP_CLOSE);
+		tcp_send_active_reset(sk, sk->sk_allocation);
+	} else if (sock_flag(sk, SOCK_LINGER) && !sk->sk_lingertime) {
+		// SO_LINGER且linger=0：立即RST
+		tcp_disconnect(sk, 0);
+	} else if (tcp_close_state(sk)) {
+		// 正常路径：发送FIN
+		// tcp_close_state()根据当前状态决定新状态：
+		//   ESTABLISHED -> FIN_WAIT1
+		//   CLOSE_WAIT  -> LAST_ACK
+		tcp_send_fin(sk);
+	}
+
+adjudge_to_death:
+	sock_hold(sk);
+	sock_orphan(sk);  // 与文件描述符解绑，设置SOCK_DEAD
+	release_sock(sk);
+
+	// 根据状态处理后续
+	local_bh_disable();
+	bh_lock_sock(sk);
+
+	if (sk->sk_state == TCP_FIN_WAIT2) {
+		if (tp->linger2 < 0) {
+			// 不等待FIN_WAIT2超时，直接关闭
+			tcp_set_state(sk, TCP_CLOSE);
+			tcp_send_active_reset(sk, GFP_ATOMIC);
+		} else {
+			// 等待对端FIN，tcp_fin_time()计算超时时间
+			int tmo = tcp_fin_time(sk);
+			if (tmo > TCP_TIMEWAIT_LEN) {
+				inet_csk_reset_keepalive_timer(sk, tmo - TCP_TIMEWAIT_LEN);
+			} else {
+				tcp_time_wait(sk, TCP_FIN_WAIT2, tmo);
+			}
+		}
+	}
+	// ...
+}
+```
+
+**二、被动关闭路径：收到FIN或RST（自下而上过程）**
+
+1、FIN场景，被动关闭由协议栈收包触发，调用链为：`tcp_v4_rcv` -> `tcp_v4_do_rcv` -> `tcp_rcv_established` -> `tcp_data_queue` -> [`tcp_fin`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L4104)
+
+`tcp_fin`的核心是根据当前状态进行状态迁移并唤醒应用层（参考前文）：
+- `ESTABLISHED` -> `CLOSE_WAIT`：最常见场景，唤醒阻塞在`recv`上的进程（返回`0`）
+- `FIN_WAIT1` -> `CLOSING`：同时关闭场景
+- `FIN_WAIT2` -> `TIME_WAIT`：正常四次挥手最后阶段
+
+被动关闭方只有在应用层调用`close()`后才会发送己方的FIN（从`CLOSE_WAIT`进入`LAST_ACK`），这是通过`tcp_close`中的`tcp_close_state(sk)`完成的
+
+2、RST场景，当 TCP 协议栈收到合法的 RST（Reset）包时，无论包是否在乱序队列中，最终都会调用到 `net/ipv4/tcp_input.c` 中的 `tcp_reset()` 函数，在这个函数中，最终会唤醒在用户态写的 `epoll_wait` 或是阻塞的 `read/write`逻辑
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L6106
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L3992
+/* When we get a reset we do this. */
+void tcp_reset(struct sock *sk)
+{
+	/* We want the right error as BSD sees it (and indeed as we do). */
+	switch (sk->sk_state) {
+	case TCP_SYN_SENT:
+		sk->sk_err = ECONNREFUSED;
+		break;
+	case TCP_CLOSE_WAIT:
+		sk->sk_err = EPIPE;
+		break;
+	case TCP_CLOSE:
+		return;
+	default:
+		sk->sk_err = ECONNRESET;
+	}
+	/* This barrier is coupled with smp_rmb() in tcp_poll() */
+	smp_wmb();
+
+	if (!sock_flag(sk, SOCK_DEAD)){
+		//重要！
+		sk->sk_error_report(sk);
+	}
+
+	tcp_done(sk);
+}
+```
+
+在上述代码中，负责将收到RST包并通知给应用层的核心枢纽，正是 `sk->sk_error_report(sk)` 这个回调函数。先分析这个函数实现，内核会做`3`步：
+
+1、归因：设置具体的错误码。内核会根据当前连接所处的状态，决定抛给应用层相应的错误码（`sk->sk_err`）
+
+-	如果连接还在 `TCP_SYN_SENT`（客户端正在建连就被 RST 掉），错误码被设置为 `ECONNREFUSED`（拒绝连接）
+-	如果连接处于 `TCP_CLOSE_WAIT`（半关闭状态），错误码被设置为 `EPIPE`（断开管道）
+-	绝大多数默认情况（比如 `ESTABLISHED` 状态下收到 RST），错误码被设置为经典的 `ECONNRESET`（Connection reset by peer）
+
+2、通知上层：调用`sk_error_report`。紧接着，如果这个 Socket 还没死透（没有被标记为 SOCK_DEAD），内核会调用`sk->sk_error_report(sk)`通知上层
+
+3、清理连接。通知完上层后，调用 `tcp_done(sk)`，将 Socket 状态机直接强行拽入 `TCP_CLOSE`，并清理所有的定时器
+
+`sk->sk_error_report`也是连接内核与用户态的桥梁，其本质上是一个函数指针。在最初通过 `socket()` 系统调用创建套接字初始化 `struct sock` 之时，内核（在 `sock_init_data` 函数中）会将它默认指向核心网络层的 `sock_def_error_report()` 函数
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/core/sock.c#L2385
+void sock_def_error_report(struct sock *sk)
+{
+    struct socket_wq *wq;
+	//触发 Wait Queue 唤醒
+    rcu_read_lock();
+    wq = rcu_dereference(sk->sk_wq);
+    // 关键点：唤醒等待在这个 socket 上的进程！
+    if (skwq_has_sleeper(wq)){
+		//wake_up_interruptible_poll 会去扫描挂载在这个 Socket 等待队列（sk->sk_wq）上的所有任务
+        wake_up_interruptible_poll(&wq->wait, POLLERR);
+	}
+    // 如果开启了异步 IO (FASYNC)，发送 SIGIO 信号
+    sk_wake_async(sk, SOCK_WAKE_IO, POLL_ERR);
+    rcu_read_unlock();
+}
+```
+
+在[Linux 内核之旅（十三）：epoll](https://pandaychen.github.io/2025/05/22/A-LINUX-KERNEL-TRAVEL-13/)详细分析过，对于内核epoll机制，epoll 会在这个等待队列里安插了一个钩子，当收到唤醒信号和 `POLLERR` 标志后，epoll 会把这个 fd 加入到它的就绪链表中。接着处于用户态的 `epoll_wait` 被唤醒，返回的 `events` 中会带上 `EPOLLERR`（可能同时伴随 `EPOLLIN` 和 `EPOLLHUP`）。此时业务代码如果去调用 `read(fd)` 或 `write(fd)`，由于连接状态已是 `TCP_CLOSE` 且 `sk->sk_err` 被赋了值，系统调用会立刻返回 `-1`，并且把进程的 `errno` 设置为之前存进去的 `ECONNRESET`
+
+**三、对比总结**
+
+| 维度 | 主动关闭 | 被动关闭 |
+|------|---------|---------|
+| **触发方** | 本端应用调用`close()` | 对端发送FIN包 |
+| **入口函数** | `tcp_close()`（自上而下） | `tcp_fin()`（自下而上） |
+| **首个状态迁移** | `ESTABLISHED -> FIN_WAIT1` | `ESTABLISHED -> CLOSE_WAIT` |
+| **FIN发送时机** | `tcp_close` -> `tcp_send_fin`（立即） | 等待应用层`close()`后发送 |
+| **TIME_WAIT归属** | 主动关闭方进入TIME_WAIT | 被动关闭方不进入TIME_WAIT |
+| **完整状态路径** | `ESTABLISHED -> FIN_WAIT1 -> FIN_WAIT2 -> TIME_WAIT -> CLOSE` | `ESTABLISHED -> CLOSE_WAIT -> LAST_ACK -> CLOSE` |
+| **资源释放** | TIME_WAIT期间使用轻量级`inet_timewait_sock`，2MSL后`inet_twsk_kill`释放 | 收到最后ACK后`tcp_done`直接释放完整sock |
+| **RST场景** | 有未读数据时发RST跳过正常挥手 | 收到RST直接`tcp_reset`进入CLOSE |
+| **socket与fd解绑** | `close`时立即`sock_orphan`解绑 | 收到FIN时仍保持fd关联，等应用层close |
+| **唤醒方式** | 无需唤醒（应用主动发起） | `tcp_fin`通过`sk_state_change`唤醒阻塞读 |
 
 
 ####	TIME_WAIT管理
