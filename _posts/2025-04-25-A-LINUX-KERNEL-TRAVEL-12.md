@@ -52,7 +52,7 @@ int main(){
 
 ##  0x01    基础知识
 
-####	socket/sock/inet_sock/inet_connection_sock 
+####	socket/sock/inet_sock/inet_connection_sock
 `struct socket` 是用于负责对（上层）给用户提供接口，并且和文件系统关联。而 `struct sock` 负责向下对接内核网络协议栈
 ![sock-relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/epoll/socket-family.png)
 
@@ -1408,11 +1408,23 @@ BPF_CGROUP_RUN_PROG_INET4_CONNECT(sk, uaddr);
 // 2. 返回值控制：返回0允许连接，返回非0拒绝连接
 ```
 
-对于阻塞/非阻塞socket，eBPF返回值的处理方式相同：均在`connect`系统调用入口处生效，若eBPF程序返回拒绝，则`connect`直接返回`-EPERM`，不会进入`tcp_v4_connect`。后续内核版本（5.x+）进一步扩展了`BPF_CGROUP_INET4_CONNECT`的能力，支持在sockaddr修改后重新路由查找
+对于阻塞/非阻塞socket，eBPF返回值的处理方式相同：均在`connect`系统调用入口处生效，若eBPF程序返回拒绝，则`connect`直接返回`-EPERM`，不会进入`tcp_v4_connect`
 
 ##	0x05	server：接收客户端的SYN包
 
 在服务器端，所有的 TCP 报文都经过网卡及软中断（SYN包也不例外），进入到 `tcp_v4_rcv`函数，在该函数中根据网络包（skb）TCP 头信息中的目的 IP 信息查到当前在 listen 的 socket（关联`__inet_lookup_skb`函数），然后继续进入 `tcp_v4_do_rcv` 处理握手过程，服务端收到客户端发送的 SYN 包后，将状态修改为 `TCP_NEW_SYN_RECV`，为了节省资源，并没有为 `struct sock` 分配空间，而是创建轻量级的连接请求数据结构 `struct request_sock`
+
+当 SYN 包从网卡驱动一路上升，通过 IP 层（`ip_local_deliver_finish`）分发到 TCP 的入口函数 `tcp_v4_rcv` 后，后续调用链如下：
+
+```
+tcp_v4_rcv()                           <-- TCP 总入口，负责全局哈希表查找
+  └── __inet_lookup_skb()              <-- 查找 icsk，此时匹配到处于 TCP_LISTEN 状态的套接字
+  └── tcp_v4_do_rcv()                  <-- 进入接收核心 dispatch
+        └── tcp_rcv_state_process()    <-- TCP 状态机引擎
+              └── tcp_v4_conn_request() <-- LISTEN 状态专属的连接请求处理函数（核心主战场）
+```
+
+在服务端，当网卡收到一个pure SYN 包时，内核的处理流程为软中断层分流与轻量级资源构建的过程，即用最低的内存占用来记录这次握手请求，并以最快的速度回复 SYN-ACK（同时可以全力防范 SYN Flood 攻击）
 
 这里涉及到几个关键点：
 1.  状态机切换
@@ -1441,6 +1453,34 @@ tcp_v4_rcv(struct sk_buff * skb)
 3、半连接队列管理与定时器设置（`tcp_v4_conn_request`）
 
 4、SYN+ACK 报文构造与发送（`tcp_v4_conn_request`）
+
+####	核心阶段：`tcp_v4_conn_request`-->`tcp_conn_request`
+本阶段的核心逻辑位于`tcp_v4_conn_request()--->tcp_conn_request()` [函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_ipv4.c#L1266)，包含四个阶段：
+
+1、第一阶段，防御性边界检查（丢弃与 Cookie 抉择），内核在真正为此连接分配内存之前，必须先执行前置检查
+
+-	全连接队列满检查（`sk_acceptq_is_full`）：内核会检查当前监听套接字的全连接队列（Accept Queue）是否已满。若满且用户没有开启 `sysctl_tcp_abort_on_overflow`，内核会直接丢弃这个 SYN 包（此时客户端会误以为丢包而重传 SYN）
+-	半连接队列满与 Syncookie 决策：内核检查半连接队列（SYN Queue）是否已满。若满但是开启了 Syncookie (`sysctl_tcp_syncookies == 1`)：内核会打上 `want_cookie = true` 的标记，继续往下走，但不会分配半连接节点；若满且没开 Syncookie，内核直接丢弃
+
+2、第二阶段，轻量级半连接结构`request_sock`创建与选项解析，通过检查后，内核开始记录这个客户端的相关属性：
+
+-	分配 `request_sock`：内核调用 `inet_reqsk_alloc()`。它不是真正的 sock结构体，仅仅用来记录握手阶段上下文的轻量级数据
+-	解析 TCP 选项 (`tcp_parse_options`)：内核去剥离 SYN 包里的 TCP Options 头部，提取出客户端带过来的重要属性，这些属性会被暂存到 `tcp_rsk(req)`（即把 `request_sock` 强转为 `tcp_request_sock`）的控制块中。如下：
+	-	MSS（最大报文段大小）
+	-	Window Scale（窗口放大因子）
+	-	SACK_PERM（是否支持选择性确认）
+	-	Timestamp（时间戳）
+
+3、第三阶段，构建路由与序号生成。内核准备回复SYN+ACK包前的计算工作：
+
+-	路由查找 (`tcp_v4_route_req`)：内核根据 SYN 包的源 IP、目的 IP 构建流向（Flow），去查本地路由表（FIB），确定回复 SYN-ACK 时应该走哪个网卡、下一跳地址等信息，并将路由缓存结果绑定到 req 上。如果查不到路由，直接释放 req 并丢包
+-	安全序号初始化 (`tcp_v4_init_sequence`)：如果不需要走 Syncookie 逻辑，内核会调用加密哈希算法（基于双方四元组、时间戳和一个内核随机的 `net_secret` 密钥），计算出一个高随机性的服务端初始序列号（ISN），防止 TCP 序列号欺骗攻击
+
+4、第四阶段，回复 SYN-ACK 与全局哈希挂载
+
+-	发送（回复） SYN-ACK 报文：调用 `af_ops->send_synack`（实际执行 `tcp_v4_send_synack`），将构建好的 SYN-ACK 包顺着刚才查出来的路由方向发回给客户端
+-	挂载到全局 ehash 表：在旧内核版本中，半连接套接字是挂在监听套接字私有的一个链表/哈希表里的。本文版本内核会直接把这个状态为 `TCP_SYN_RECV` 的 `request_sock` 塞进全局的建立连接哈希表（`ehash`）中，关联[逻辑](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L6413)。内核如此优化的目的是，**当客户端第三次握手的 ACK 回来时，软中断在 `tcp_v4_rcv` 入口查找 Socket 时，可以在 `ehash` 里直接精准命中这个 `request_sock`，而不需要再去查 Listen 锁，从而实现高并发下的完全无锁化（Lockless）接收
+-	激活重传定时器：在把 `request_sock` 存入哈希表的同时，调用 `inet_csk_reqsk_queue_added()`。这会初始化并启动一个重传定时器（通常初次是 `1` 秒）。如果客户端的第三次握手 ACK 迟迟不来，内核就会在这个定时器到期时，自动重传 SYN-ACK
 
 ####    tcp_v4_rcv的核心流程（ALL sk_state）
 先梳理下TCP报文在内核流转的主要代码以及不同状态的处理，函数调用链为`tcp_v4_rcv->tcp_v4_do_rcv->tcp_rcv_state_process`
@@ -2330,7 +2370,7 @@ embryonic_reset:
 
 ####	tcp_v4_syn_recv_sock实现
 
-`tcp_v4_syn_recv_sock`函数是处理第三次握手ACK包的核心函数，**负责创建子套接字并完成连接状态迁移**，其核心流程为：
+`tcp_v4_rcv--->tcp_check_req--->tcp_v4_syn_recv_sock`函数是处理第三次握手ACK包的核心函数，**负责创建子套接字并完成连接状态迁移**，其核心流程为：
 
 1.	创建子套接字`newsk`：调用`tcp_create_openreq_child(sk, req, skb)`克隆监听套接字，基于监听套接字 `sk` 和半连接对象 `req` 创建子套接字 `newsk`
 2.	初始化子套接字成员，从半连接对象 `req` 中提取客户端和服务端 IP/端口，初始化子套接字`newsk`，初始化顺序为`inet_csk_clone_lock->sk_clone_lock->sk_prot_alloc`
@@ -2837,6 +2877,7 @@ int inet_accept(struct socket *sock, struct socket *newsock, int flags, bool ker
 	struct sock *sk2 = sk1->sk_prot->accept(sk1, flags, &err, kern);
 
 	// 重要：struct sock与struct socket结构建立关联
+	// 在 inet_csk_accept 函数完成之后
 	sock_graft(sk2, newsock);
 
 	newsock->state = SS_CONNECTED;
@@ -2887,7 +2928,7 @@ struct socket *sock_from_file(struct file *file, int *err){
 }
 ```
 
-####	accept 的核心逻辑：inet_csk_accept
+####	accept 的核心逻辑： inet_csk_accept
 `inet_csk_accept`主要实现了tcp协议`accept`操作，其主要功能是从已经完成三次握手的全连接队列（对于成员是`struct inet_connection_sock`的`icsk_accept_queue`[成员](https://elixir.bootlin.com/linux/v4.11.6/source/include/net/inet_connection_sock.h#L91)）中取控制块，如果没有已经完成的连接，则需要根据（socket）阻塞标记来来区分对待，若非阻塞则直接返回，若阻塞则需要在一定时间范围内阻塞等待。这里有两个关键的子流程：
 
 -	`inet_csk_wait_for_connect`：当全连接队列为空时，将当前进程放入listen socket的等待队列（`sk_wq`）中休眠，直到被唤醒（新连接到达时由`sock_def_readable`唤醒）或超时。对于非阻塞socket则跳过此步骤直接返回`-EAGAIN`
@@ -3807,7 +3848,7 @@ out:
 
 ####	tcp_data_queue：接收数据排序
 
-[`tcp_data_queue`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L4389) 是慢速路径中处理接收数据的核心函数，负责数据排序、乱序处理和重复检测：
+[`tcp_data_queue`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L4389) 是**慢速路径中处理接收数据的核心函数**，负责数据排序、乱序处理和重复检测：
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L4389
