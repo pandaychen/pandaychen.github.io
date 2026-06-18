@@ -2562,7 +2562,7 @@ int tcp_v4_rcv(struct sk_buff *skb) {
 }
 ```
 
-重点看一下`tcp_child_process`的实现，该函数的主要作用是将新创建的子 socket 从协议栈移交至应用层，主要工作为：
+重点看一下`tcp_child_process`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_minisocks.c#L811)，该函数的主要作用是将新创建的子 socket 从协议栈移交至应用层，主要工作为：
 
 1. 处理子 socket 的状态迁移，当内核收到第三次 ACK 包后，`tcp_child_process` 通过调用 `tcp_rcv_state_process` 驱动子 socket 状态机，将其状态从 `TCP_SYN_RECV` 更新为 `TCP_ESTABLISHED`，即完成连接的协议栈层就绪，标志连接可传输数据
 2. 触发父进程唤醒（通知 `accept()`），若子 socket 状态从 `SYN_RECV` 成功迁移至 `ESTABLISHED`，函数会调用监听 socket（`parent`）的 `sk_data_ready()` 回调函数（默认为 `sock_def_readable`），唤醒阻塞在 `accept` 上的进程
