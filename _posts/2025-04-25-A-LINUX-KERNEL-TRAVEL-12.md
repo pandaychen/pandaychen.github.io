@@ -221,9 +221,9 @@ struct inet_ehash_bucket {
 };
 ```
 
-**4、全连接队列结构 `request_sock_queue`**（每个listen sock一个），通过单链表管理已完成三次握手的连接：
+**4、全连接队列结构 `request_sock_queue`**（注意：**每个listen sock一个**），通过单链表管理已完成三次握手的连接：
 
-位于`struct inet_connection_sock`结构 (icsk) 定义的成员，表示面向连接的高级抽象
+位于`struct inet_connection_sock`结构（icsk）定义的成员，表示面向连接的高级抽象
 
 ```c
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/net/request_sock.h#L161
@@ -426,6 +426,7 @@ struct tcphdr {
 
 ##	0x02	server：socket实现
 当调用`socket`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L1258)创建`struct socket`结构时，在用户层视角只看到返回了一个文件描述符 fd，内核做了哪些事情？
+
 ```cpp
 int socket(int domain, int type, int protocol);
 ```
@@ -472,6 +473,8 @@ __sys_socket
                 |-- fdt = rcu_dereference_sched(files->fdt)
                 |-- rcu_assign_pointer(fdt->fd[fd], file)
 ```
+
+流程图如下：
 
 ```mermaid
 flowchart TB
@@ -614,7 +617,7 @@ int sock_register(const struct net_proto_family *ops)
 }
 ```
 
-TCP协议对应的`family`字段是`AF_INET`，`pf->create`对应的函数即为`inet_create`，此外，在 `sk_alloc` 函数中，`struct inet_protosw *answer` 结构的 `tcp_prot` 赋值给了 `struct sock *sk` 的 `sk_prot` 成员（后续看到`sock`结构关联的`sk_prot`调用即参考`tcp_prot`结构的函数搜索即可）。核心逻辑如下：
+TCP协议对应的`family`字段是`AF_INET`，`pf->create`对应的函数即为`inet_create`，此外，在 `sk_alloc` 函数中，`struct inet_protosw *answer` 结构的 `tcp_prot` 赋值给了 `struct sock *sk` 的 `sk_prot` 成员（后续看到`sock`结构关联的`sk_prot`调用，即参考`tcp_prot`结构的函数搜索即可）。核心逻辑如下：
 
 ```cpp
 static int inet_create(struct net *net, struct socket *sock, int protocol,
@@ -794,7 +797,7 @@ flowchart LR
 int listen(int sockfd, int backlog);
 ```
 
-`listen`[系统调用](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/af_inet.c#L194)的主要作用就是申请和初始化接收队列，包括全连接队列（链表）和半连接队列（hash表），如图
+`listen`[系统调用](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/af_inet.c#L194)的主要作用就是**申请和初始化接收队列，包括全连接队列（链表）和半连接队列（hash表）**，如图
 
 ```mermaid
 flowchart TB
@@ -829,6 +832,7 @@ flowchart TB
 
 <!--TODO: listen 队列结构图待补充-->
 
+从`listen`系统调用出发：
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L1437
@@ -1479,11 +1483,11 @@ tcp_v4_rcv(struct sk_buff * skb)
 4、第四阶段，回复 SYN-ACK 与全局哈希挂载
 
 -	发送（回复） SYN-ACK 报文：调用 `af_ops->send_synack`（实际执行 `tcp_v4_send_synack`），将构建好的 SYN-ACK 包顺着刚才查出来的路由方向发回给客户端
--	挂载到全局 ehash 表：在旧内核版本中，半连接套接字是挂在监听套接字私有的一个链表/哈希表里的。本文版本内核会直接把这个状态为 `TCP_SYN_RECV` 的 `request_sock` 塞进全局的建立连接哈希表（`ehash`）中，关联[逻辑](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L6413)。内核如此优化的目的是，**当客户端第三次握手的 ACK 回来时，软中断在 `tcp_v4_rcv` 入口查找 Socket 时，可以在 `ehash` 里直接精准命中这个 `request_sock`，而不需要再去查 Listen 锁，从而实现高并发下的完全无锁化（Lockless）接收
+-	挂载到全局 ehash 表：在旧内核版本中，半连接套接字是挂在监听套接字私有的一个链表/哈希表里的。本文版本内核会直接把这个状态为 `TCP_SYN_RECV` 的 `request_sock` 塞进全局的建立连接哈希表（`ehash`）中，关联[逻辑](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L6413)。内核如此优化的目的是，**当客户端第三次握手的 ACK 回来时，软中断在 `tcp_v4_rcv` 入口查找 Socket 时，可以在 `ehash` 里直接精准命中这个 `request_sock`，而不需要再去查 Listen 锁，从而实现高并发下的完全无锁化（Lockless）接收**
 -	激活重传定时器：在把 `request_sock` 存入哈希表的同时，调用 `inet_csk_reqsk_queue_added()`。这会初始化并启动一个重传定时器（通常初次是 `1` 秒）。如果客户端的第三次握手 ACK 迟迟不来，内核就会在这个定时器到期时，自动重传 SYN-ACK
 
 ####    tcp_v4_rcv的核心流程（ALL sk_state）
-先梳理下TCP报文在内核流转的主要代码以及不同状态的处理，函数调用链为`tcp_v4_rcv->tcp_v4_do_rcv->tcp_rcv_state_process`
+本小节，先完整的梳理下TCP报文在内核流转的主要代码以及不同状态的处理，函数调用链为`tcp_v4_rcv->tcp_v4_do_rcv->tcp_rcv_state_process`
 
 ```cpp
 int tcp_v4_rcv(struct sk_buff *skb)
@@ -1816,6 +1820,8 @@ static int ip_local_deliver_finish(struct net *net, struct sock *sk, struct sk_b
 
 -   [`tcp_conn_request`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L6277)
 
+TODO：tcp_v4_rcv && tcp_v4_do_rcv 详细分析
+
 ```cpp
 int tcp_v4_rcv(struct sk_buff *skb) {
     struct sock *sk;
@@ -2071,8 +2077,8 @@ void inet_sk_set_state(struct sock *sk, int state)
 }
 ```
 
-##	0x06	client：响应SYN-ACK包
-客户端发送完SYN包，等待接收服务端的SYN+ACK，当该报文到来时，同样会进入到 `tcp_rcv_state_process` 函数中，默认阻塞（`inet_wait_for_connect`）的进程被唤醒处理 SYN+ACK（注意客户端当前socket 的状态是 `TCP_SYN_SENT`）。在正常三次握手的情况下，客户端将当前 TCP 状态改变为 `TCP_ESTABLISHED`，并给服务端返回的 SYN 包，发送对应的 ACK
+##	0x06	client：响应SYN-ACK包，发送三次握手的ACK包
+客户端发送完SYN包，等待接收服务端的SYN+ACK，当该（SYN+ACK）报文到来时，同样会进入到 `tcp_rcv_state_process` 函数中，默认阻塞（`inet_wait_for_connect`）的进程被唤醒处理 SYN+ACK（**注意客户端当前socket 的状态是 `TCP_SYN_SENT`**）。在正常三次握手的情况下，客户端将当前 TCP 状态改变为 `TCP_ESTABLISHED`，并给服务端返回的 SYN 包，发送对应的 ACK
 
 ####    主要逻辑
 `tcp_rcv_synsent_state_process`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L5647) 是客户端响应 SYN+ACK 的主要逻辑
@@ -2092,7 +2098,7 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb) {
     ...
     switch (sk->sk_state) {
         ...
-        case TCP_SYN_SENT:  //客户端处理SYN+ACK包
+        case TCP_SYN_SENT:  //客户端处理SYN+ACK包（客户端当前处于TCP_SYN_SENT状态）
             ...
             queued = tcp_rcv_synsent_state_process(sk, skb, th);
             ...
@@ -2202,9 +2208,16 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 
 即第二次握手（服务端收到SYN报文）TCP 状态是 `TCP_NEW_SYN_RECV`，第三次握手后，TCP 状态才是 `TCP_SYN_RECV`
 
+这里还有一个细节是：如果服务端开启了syncookies机制，那么这里的ACK包，有可能来自于
+
+1. 开启了syncookies机制时，syncookies对应的ACK报文
+2. 未开启时，正常的三次握手的ACK报文
+
+TODO
+
 ####    状态机切换
 
-1、`tcp_v4_rcv->tcp_check_req->tcp_v4_syn_recv_sock->inet_csk_complete_hashdance`：`tcp_check_req` 是处理 TCP 第三次握手（ACK 包）的核心函数，负责验证 ACK 合法性、创建child socket 并迁移连接状态，TCP状态由`TCP_NEW_SYN_RECV`切换为`TCP_SYN_RECV`。涉及到的核心函数流转如下
+1、`tcp_v4_rcv-->tcp_check_req-->tcp_v4_syn_recv_sock-->inet_csk_complete_hashdance`：`tcp_check_req` 是处理 TCP 第三次握手（ACK 包）的核心函数，负责验证 ACK 合法性、创建child socket 并迁移连接状态，TCP状态由`TCP_NEW_SYN_RECV`切换为`TCP_SYN_RECV`。涉及到的核心函数流转如下
 
 -	`__inet_lookup_skb`
 -	`tcp_check_req`
@@ -3073,6 +3086,8 @@ static inline struct request_sock *reqsk_queue_remove(struct request_sock_queue 
 }
 ```
 
+####	accept内核调用中的一个细节
+
 ####	`struct sock`创建的区别
 
 下面对比`socket()`系统调用与三次握手中创建sock对象的差异。`socket()`通过`inet_create->sock_init_data`初始化，此时传入的`struct socket`非NULL，所以`sk->sk_wq`会被设置为socket的等待队列；而三次握手中通过`sk_clone_lock`克隆的子sock，其`sk_wq`初始为NULL（`sk_set_socket(newsk, NULL)`），直到`accept`中调用`sock_graft`时才与新的`struct socket`关联
@@ -3093,9 +3108,13 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 ```
 
 ##	0x09	数据传输
+
+ok，经过上面的步骤，目前客户端与服务端都获得了一个可写（读）的fd，可以发送/接收数据
+
 回到`tcp_v4_rcv->tcp_v4_do_rcv`的处理过程中，数据接收的核心逻辑位于`tcp_rcv_established`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L5351)
 
 ```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_ipv4.c#L1403
 int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 {
 	struct sock *rsk;
@@ -3188,6 +3207,8 @@ static inline void tcp_fast_path_check(struct sock *sk)
 - 接收缓冲区不足
 
 **内核设计目的**：在高吞吐传输场景中，>95%的包是按序到达的纯数据/ACK包，快速路径避免了完整的TCP状态机处理（如乱序队列检查、SACK解析等），将关键路径的CPU开销降到最低
+
+todo：tcp_rcv_established详细分析
 
 ```cpp
 void tcp_rcv_established(struct sock *sk, struct sk_buff *skb,
@@ -3356,6 +3377,70 @@ static int __must_check tcp_queue_rcv(struct sock *sk, struct sk_buff *skb, int 
 		skb_set_owner_r(skb, sk);
 	}
 	return eaten;
+}
+```
+
+####	慢速路径的核心处理：tcp_data_queue（接收数据排序）
+
+[`tcp_data_queue`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L4389) 是**慢速路径中处理接收数据的核心函数**，负责数据排序、乱序处理和重复检测：
+
+TODO
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L4389
+static void tcp_data_queue(struct sock *sk, struct sk_buff *skb)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	int eaten = -1;
+	bool fragstolen = false;
+
+	// 顺序数据：序列号等于期望的下一个
+	if (TCP_SKB_CB(skb)->seq == tp->rcv_nxt) {
+		if (tcp_receive_window(tp) == 0)
+			goto out_of_window;
+
+		// 尝试快速路径直接拷贝到用户空间
+		if (tp->ucopy.task == current &&
+		    tp->copied_seq == tp->rcv_nxt && tp->ucopy.len &&
+		    sock_owned_by_user(sk) && !tp->urg_data) {
+			// 直接拷贝到用户空间缓冲区（DMA-like优化）
+			......
+		}
+
+		if (eaten <= 0) {
+queue_and_out:
+			// 加入接收队列
+			eaten = tcp_queue_rcv(sk, skb, 0, &fragstolen);
+		}
+		// 更新rcv_nxt
+		tcp_rcv_nxt_update(tp, TCP_SKB_CB(skb)->end_seq);
+
+		// 检查乱序队列：之前乱序到达的包现在可能变为有序
+		if (!skb_queue_empty(&tp->out_of_order_queue)) {
+			tcp_ofo_queue(sk);  // 从乱序队列移入接收队列
+		}
+
+		// 检查FIN
+		if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
+			tcp_fin(sk);
+
+		// 发送ACK检查
+		if (!inet_csk_ack_scheduled(sk))
+			goto no_ack;
+		......
+		return;
+	}
+
+	// 乱序数据处理
+	if (!after(TCP_SKB_CB(skb)->end_seq, tp->rcv_nxt)) {
+		// 数据完全重复，丢弃
+		tcp_drop(sk, skb);
+		tcp_dsack_set(sk, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq);
+		goto out;
+	}
+
+	// 加入乱序队列 out_of_order_queue
+	tcp_data_queue_ofo(sk, skb);
 }
 ```
 
@@ -3704,8 +3789,7 @@ static int tcp_transmit_skb(struct sock *sk, struct sk_buff *skb, int clone_it,
 ```
 
 ##	0x0C	数据传输：接收路径 tcp_recvmsg
-
-用户进程调用`recv()`/`read()`接收数据时，最终进入`tcp_recvmsg`。接收路径的核心调用链：
+前面章节简单介绍了数据在内核层的接收过程，本小节看下应用层是如何接收数据的。用户进程调用`recv()`/`read()`接收数据时，最终进入`tcp_recvmsg`。接收路径的核心调用链：
 
 ```text
 recv()/read()
@@ -3846,67 +3930,10 @@ out:
 }
 ```
 
-####	tcp_data_queue：接收数据排序
+####	理解TCP的全双工本质
 
-[`tcp_data_queue`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L4389) 是**慢速路径中处理接收数据的核心函数**，负责数据排序、乱序处理和重复检测：
+TODO
 
-```cpp
-//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L4389
-static void tcp_data_queue(struct sock *sk, struct sk_buff *skb)
-{
-	struct tcp_sock *tp = tcp_sk(sk);
-	int eaten = -1;
-	bool fragstolen = false;
-
-	// 顺序数据：序列号等于期望的下一个
-	if (TCP_SKB_CB(skb)->seq == tp->rcv_nxt) {
-		if (tcp_receive_window(tp) == 0)
-			goto out_of_window;
-
-		// 尝试快速路径直接拷贝到用户空间
-		if (tp->ucopy.task == current &&
-		    tp->copied_seq == tp->rcv_nxt && tp->ucopy.len &&
-		    sock_owned_by_user(sk) && !tp->urg_data) {
-			// 直接拷贝到用户空间缓冲区（DMA-like优化）
-			......
-		}
-
-		if (eaten <= 0) {
-queue_and_out:
-			// 加入接收队列
-			eaten = tcp_queue_rcv(sk, skb, 0, &fragstolen);
-		}
-		// 更新rcv_nxt
-		tcp_rcv_nxt_update(tp, TCP_SKB_CB(skb)->end_seq);
-
-		// 检查乱序队列：之前乱序到达的包现在可能变为有序
-		if (!skb_queue_empty(&tp->out_of_order_queue)) {
-			tcp_ofo_queue(sk);  // 从乱序队列移入接收队列
-		}
-
-		// 检查FIN
-		if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
-			tcp_fin(sk);
-
-		// 发送ACK检查
-		if (!inet_csk_ack_scheduled(sk))
-			goto no_ack;
-		......
-		return;
-	}
-
-	// 乱序数据处理
-	if (!after(TCP_SKB_CB(skb)->end_seq, tp->rcv_nxt)) {
-		// 数据完全重复，丢弃
-		tcp_drop(sk, skb);
-		tcp_dsack_set(sk, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq);
-		goto out;
-	}
-
-	// 加入乱序队列 out_of_order_queue
-	tcp_data_queue_ofo(sk, skb);
-}
-```
 
 ##	0x0D	TCP 状态图变迁总览
 
@@ -4167,7 +4194,9 @@ static void tcp_fastretrans_alert(struct sock *sk, const int acked,
 
 ####	SACK（选择性确认）
 
-SACK允许接收方告知发送方哪些数据段已经成功接收，使发送方仅重传真正丢失的段。内核在`tcp_sacktag_write_queue`中处理SACK信息：
+SACK允许接收方告知发送方哪些数据段已经成功接收，使发送方仅重传真正丢失的段。内核在`tcp_sacktag_write_queue`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L1643)中处理SACK信息：
+
+TODO
 
 ```c
 // SACK处理的核心逻辑（简化）
@@ -5051,7 +5080,8 @@ TIME_WAIT状态存在的意义是：
 1. 确保最后一个ACK能到达对端（如果丢失，对端会重传FIN）
 2. 等待网络中残留的属于此连接的旧数据包过期，避免干扰相同四元组的新连接
 
-一个有趣的case
+一个有趣的case，在使用ebpf进行端口connect事件捕获时（原始hook点为`tcp_connect`与`inet_unhash`），存在因`tcp_tw_reuse`逃逸的事件：
+当系统开启`/proc/sys/net/ipv4/tcp_tw_reuse`内核特性时，此时允许新连接随机分配端口时复用`TIME_WAIT`状态的socket。该场景下，套接字重新被分配出去，导致释放统计遗漏，会造成统计误差
 
 ##	0x12	总结：完整生命周期内核调用链
 
