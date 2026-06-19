@@ -1491,7 +1491,17 @@ tcp_v4_rcv(struct sk_buff * skb)
 -	激活重传定时器：在把 `request_sock` 存入哈希表的同时，调用 `inet_csk_reqsk_queue_added()`。这会初始化并启动一个重传定时器（通常初次是 `1` 秒）。如果客户端的第三次握手 ACK 迟迟不来，内核就会在这个定时器到期时，自动重传 SYN-ACK
 
 ####    tcp_v4_rcv的核心流程（ALL sk_state）
-本小节，先完整的梳理下TCP报文在内核流转的主要代码以及不同状态的处理，函数调用链为`tcp_v4_rcv->tcp_v4_do_rcv->tcp_rcv_state_process`
+本小节，先完整的梳理下TCP报文在内核流转的主要代码以及不同状态的处理，函数调用链为`tcp_v4_rcv-->tcp_v4_do_rcv-->tcp_rcv_state_process`
+
+当 IP 层将 TCP 数据包递交上来时，第一个接手的就是 `tcp_v4_rcv`。它的主要职责是初步检查、找人（socket 查找）和决定数据包的去向，核心包含如下步骤：
+
+1、基本校验： 检查 Checksum 是否正确，头部长度是否合法等
+
+2、查找 socket（查表）：根据源 IP、目的 IP、源端口、目的端口，在内核的哈希表中找到对应的 sock 结构体（可能是处于 LISTEN 状态的监听 Socket，也可能是已经建立连接的 socket，或者是半连接状态的 `request_sock`）
+
+3、处理特殊状态（如 `TCP_NEW_SYN_RECV`）：正常情况下的三次握手最后一步 ACK，会在这里被直接拦截处理，转化为全新的子 socket
+
+4、查看 socket 是否正忙（backlog 机制）：如果这个 socket 此时没有被用户进程锁住（比如没有在调用 recv 或 accept），直接调用 `tcp_v4_do_rcv`处理剩下的逻辑（负责真正的 TCP 协议状态机推进）；如果 socket 正在被用户进程使用（处于 locked 状态），`tcp_v4_rcv`会把数据包扔进这个 socket 的 backlog 队列，等用户进程忙完了再去处理
 
 ```cpp
 int tcp_v4_rcv(struct sk_buff *skb)
@@ -2212,7 +2222,7 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 
 即第二次握手（服务端收到SYN报文）TCP 状态是 `TCP_NEW_SYN_RECV`，第三次握手后，TCP 状态才是 `TCP_SYN_RECV`
 
-这里还有一个细节是：如果服务端开启了syncookies机制，那么这里的ACK包，有可能来自于两种情况（核心都是`tcp_child_process`）
+这里还有一个细节是：如果服务端开启了syncookies机制，那么这里的ACK包，有可能来自于两种情况（核心都是`tcp_child_process`），简言之，正常情况下的 TCP_NEW_SYN_RECV 处理通常发生在 `tcp_v4_rcv` 中，而基于 SYN Cookie 的 TCP_LISTEN 状态下的子连接创建发生在 `tcp_v4_do_rcv` 中
 
 1、开启了syncookies机制时，syncookies对应的ACK报文处理逻辑，对应下面的代码
 
@@ -2686,6 +2696,22 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb) {
 1.	通知对象是listen socket，即`parent`（状态为`TCP_LISTEN`），其任务是接收新连接，而新创建的子socket（`child`）用于实际数据传输，所以需要唤醒listen socket上的关联的sock等待队列。当子socket状态从`TCP_SYN_RECV`迁移到`TCP_ESTABLISHED`后，需要通知listen socket 有新连接就绪，唤醒阻塞在`accept()`进程关联在listen socket的等待队列（`sk->sk_wq`）
 
 2. 子socket，即`child`关联的sock等待队列，在同步阻塞模式下，可以用于唤醒等待数据传输的进程
+
+对于上面提到的两个不同流程中的`tcp_child_process`，核心作用都是完全一样的：拿着最后一步的 ACK 包，去激活刚刚诞生出来的子 socket，把它推入 TCP_ESTABLISHED 状态，并将其挂载到父 socket 的 accept 队列中，唤醒等待的应用程序。不同之处是**子 Socket 是怎么创建出来的**（即前置条件不同），下面说明一下：
+
+场景 1：在 `tcp_v4_rcv` 中遇到 TCP_NEW_SYN_RECV（常规的三次握手）
+
+-	前置条件：服务器收到第一步 SYN 时，正常分配了一个半连接对象（`request_sock`）
+-	触发机制：客户端发来第三步 ACK，`tcp_v4_rcv` 查表时找到了这个半连接对象（状态表现为 TCP_NEW_SYN_RECV）
+-	创建子 socket： 内核调用 `tcp_check_req()`，验证 ACK 无误后，根据之前保存的半连接信息，正式创建一个全连接的子 socket（`nsk`）
+-	调用 `tcp_child_process`： 把这个 ACK 包喂给刚生出来的 `nsk`，让它完成状态切换（进入 ESTABLISHED）并排队等待 `accept()`
+
+场景 2：在 `tcp_v4_do_rcv` 中遇到 TCP_LISTEN（触发了 SYN Cookie）
+
+-	前置条件： 服务器开启 SYNCookie，收到第一步 SYN 时，没有保存半连接对象，直接回了 SYN+ACK
+-	触发机制： 客户端发来第三步 ACK，因为没有半连接对象，`tcp_v4_rcv` 查表只能找到原来的监听 socket (TCP_LISTEN)，于是把包交给了`tcp_v4_do_rcv`
+-	创建子 socket：`tcp_v4_do_rcv` 调用 `tcp_v4_cookie_check()`，对包里的 cookie 进行解密和校验。如果合法，凭空（根据 cookie 中的信息）直接构造出一个全连接的子 socket （`nsk`）
+-	调用 `tcp_child_process`： 把这个 ACK 包喂给这个凭空造出来的 `nsk`，后续动作与上面一致
 
 ####	重要： __inet_lookup_skb 与 __inet_lookup_listener 的实现逻辑
 
@@ -4014,8 +4040,32 @@ out:
 
 ####	理解TCP的全双工本质
 
-TODO
+从tcp sock的结构，不难理解TCP协议全双工（Full-Duplex）的本质，**正是因为每一个 socket 都拥有一套完全独立的发送和接收队列（以及对应的缓冲区和状态控制变量）**，互不干扰
 
+1、独立的队列结构
+
+在内核的 `struct sock` 和 `struct tcp_sock` 中，发送和接收是由两套完全分离的队列和指针管理的，小结一下：
+
+-	发送流水线（Write / Send Path）：应用层调用 write() 或 send() 写入数据时
+	-	队列：数据会被切分成 `sk_buff`（网络数据包结构体），放进 `sk->sk_write_queue`（发送队列）
+	-	控制：内核的发送引擎（如 `tcp_write_xmit()`）会从这个队列里取出包，经过 IP 层、驱动层扔到网卡上
+	-	状态：拥塞控制和发送窗口由 `tcp_sk(sk)->snd_nxt`（下一个要发送的序号）和 `snd_una`（最早未确认的序号）独立控制
+-	接收流水线（Read / Receive Path）：当网卡收到对端发来的数据包时
+	-	队列：经过 `tcp_v4_rcv` 的层层校验后，有序的数据包会被放入 `sk->sk_receive_queue`（接收队列）
+	-	读取：当应用层调用 `read()/recv()` 时，其实就是从接收队列里把数据拷贝到用户空间，然后释放内存
+	-	状态：接收窗口和滑动窗口由 `tcp_sk(sk)->rcv_nxt`（期望接收的下一个序号）和 `rcv_wnd` 独立控制
+
+2、状态机的独立性：互不影响的序号，即两端（客户端/服务器）的序号（Sequence Number）是完全独立的
+
+-	A 给 B 发数据，使用的是 A 的 ISN（初始序号）自增序列
+-	B 给 A 发数据，使用的是 B 的 ISN 自增序列
+
+因为发送队列和接收队列各自维护着自己的 Sequence Number 和 Acknowledgment Number，所以 A 在拼命给 B 发送大文件的同时，B 也可以随时给 A 发送控制指令。A 内部的发送控制块和接收控制块在逻辑上是并发且互不干扰的
+
+3、**不影响之中的微妙联系**，在实际运行中，存在着非常smart的捎带确认和流量控制算法，如
+
+-	ACK 的捎带回复：当接收队列收到了数据，本该单独回一个 ACK 包。但如果此时发送队列也刚好有数据要发出去，内核就会把这个 ACK 标志位和确认号直接塞进发送队列的那个数据包的报头里。两条流水线在这里产生了一次完美的交集，省去了一个网络包的开销
+-	窗口的相互制约（流量控制）：如果应用程序迟迟不调用 `read()`，导致 `sk_receive_queue`爆满，内核在发送数据或回 ACK 时，就会把报头里的 window（接收窗口size）改成 `0`。对端收到后，它的发送流水线就会被迫挂起
 
 ##	0x0D	TCP 状态图变迁总览
 
@@ -5294,6 +5344,10 @@ flowchart TD
 -	等待队列（`sk_sleep`）会管理因 `recv()` 或 `send()` 阻塞的进程（如缓冲区空/满时）
 
 因此在`accept()`系统调用新建的`struct socket`并关联的`struct sock`结构对应的队列是作为数据传输的载体，这些队列是实际数据收发的核心通道，与监听套接字的预留队列有本质区别
+
+####	内核与应用态的模型（`sk_receive_queue`）
+
+todo
 
 ####	本文涉及到核心内核函数
 
