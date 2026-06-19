@@ -424,6 +424,10 @@ struct tcphdr {
 };
 ```
 
+####	bind hashtable
+
+todo
+
 ##	0x02	server：socket实现
 当调用`socket`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L1258)创建`struct socket`结构时，在用户层视角只看到返回了一个文件描述符 fd，内核做了哪些事情？
 
@@ -1820,7 +1824,7 @@ static int ip_local_deliver_finish(struct net *net, struct sock *sk, struct sk_b
 
 -   [`tcp_conn_request`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L6277)
 
-TODO：tcp_v4_rcv && tcp_v4_do_rcv 详细分析
+TODO： tcp_v4_rcv && tcp_v4_do_rcv 详细分析
 
 ```cpp
 int tcp_v4_rcv(struct sk_buff *skb) {
@@ -2208,12 +2212,90 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 
 即第二次握手（服务端收到SYN报文）TCP 状态是 `TCP_NEW_SYN_RECV`，第三次握手后，TCP 状态才是 `TCP_SYN_RECV`
 
-这里还有一个细节是：如果服务端开启了syncookies机制，那么这里的ACK包，有可能来自于
+这里还有一个细节是：如果服务端开启了syncookies机制，那么这里的ACK包，有可能来自于两种情况（核心都是`tcp_child_process`）
 
-1. 开启了syncookies机制时，syncookies对应的ACK报文
-2. 未开启时，正常的三次握手的ACK报文
+1、开启了syncookies机制时，syncookies对应的ACK报文处理逻辑，对应下面的代码
 
-TODO
+```c
+int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
+{
+	struct sock *rsk;
+
+	if (sk->sk_state == TCP_ESTABLISHED) { /* Fast path */
+		......
+		tcp_rcv_established(sk, skb, tcp_hdr(skb), skb->len);
+		return 0;
+	}
+
+	if (tcp_checksum_complete(skb))
+		goto csum_err;
+
+	if (sk->sk_state == TCP_LISTEN) {
+		//
+		struct sock *nsk = tcp_v4_cookie_check(sk, skb);
+
+		if (!nsk)
+			goto discard;
+		if (nsk != sk) {
+			sock_rps_save_rxhash(nsk, skb);
+			sk_mark_napi_id(nsk, skb);
+			// 通过了syncookies校验
+			if (tcp_child_process(sk, nsk, skb)) {
+				rsk = nsk;
+				goto reset;
+			}
+			return 0;
+		}
+	}
+	......
+}                
+```
+
+2. 未开启时，正常的三次握手的ACK报文处理逻辑，对应于下面的代码：
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_ipv4.c#L1692
+int tcp_v4_rcv(struct sk_buff *skb)
+{
+	......
+	if (sk->sk_state == TCP_NEW_SYN_RECV) {
+		struct request_sock *req = inet_reqsk(sk);
+		struct sock *nsk;
+
+		sk = req->rsk_listener;
+		if (unlikely(tcp_v4_inbound_md5_hash(sk, skb))) {
+			sk_drops_add(sk, skb);
+			reqsk_put(req);
+			goto discard_it;
+		}
+		if (unlikely(sk->sk_state != TCP_LISTEN)) {
+			inet_csk_reqsk_queue_drop_and_put(sk, req);
+			goto lookup;
+		}
+		/* We own a reference on the listener, increase it again
+		 * as we might lose it too soon.
+		 */
+		sock_hold(sk);
+		refcounted = true;
+		nsk = tcp_check_req(sk, skb, req, false);
+		if (!nsk) {
+			reqsk_put(req);
+			goto discard_and_relse;
+		}
+		if (nsk == sk) {
+			reqsk_put(req);
+		} else if (tcp_child_process(sk, nsk, skb)) {
+			tcp_v4_send_reset(nsk, skb);
+			goto discard_and_relse;
+		} else {
+			sock_put(sk);
+			return 0;
+		}
+	}
+	......
+}
+```
+
 
 ####    状态机切换
 
