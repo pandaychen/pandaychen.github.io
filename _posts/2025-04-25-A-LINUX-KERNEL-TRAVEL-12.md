@@ -1575,18 +1575,27 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 
     // TCP_LISTEN
 	if (sk->sk_state == TCP_LISTEN) {
+		/*
+		如果服务器当时开启了 SYN Cookie（比如遭遇了 SYN Flood 攻击，没有保存半连接状态），那么第三步的 ACK 到达时，内核查表只能找到原来的 TCP_LISTEN 监听套接字
+		*/
+
+		//检查 ACK 包里的 Cookie 是否合法
+		//如果合法，它会在这个函数内部直接创建一个新的子套接字（代表已经建立的连接），并返回这个新套接字指针 nsk
 		struct sock *nsk = tcp_v4_cookie_check(sk, skb);
 
 		if (!nsk)
 			goto discard;
 		if (nsk != sk) {
+			//若cookies校验成功，此时 nsk != sk 成立（nsk 是新连接，sk 是监听连接）
 			sock_rps_save_rxhash(nsk, skb);
 			sk_mark_napi_id(nsk, skb);
 			if (tcp_child_process(sk, nsk, skb)) {
+				// 在这里处理新连接的状态推进
 				rsk = nsk;
 				goto reset;
 			}
-			return 0;
+			// 注意：不会进入到tcp_rcv_state_process函数
+			return 0;	// <--- 注意这里！直接返回 0 了
 		}
 	}
 
@@ -3991,6 +4000,7 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int nonblock,
 		}
 
 		// 先清理接收缓冲区，可能发送窗口更新ACK
+		//todo：tcp_cleanup_rbuf的作用
 		tcp_cleanup_rbuf(sk, copied);
 
 		// 等待数据
@@ -5346,8 +5356,15 @@ flowchart TD
 因此在`accept()`系统调用新建的`struct socket`并关联的`struct sock`结构对应的队列是作为数据传输的载体，这些队列是实际数据收发的核心通道，与监听套接字的预留队列有本质区别
 
 ####	内核与应用态的模型（`sk_receive_queue`）
+以sock的接收队列`sk_receive_queue`为例，可以用生产消费模型来理解软中断与用户态的交互，软中断（内核网络栈）作为生产者，源源不断地把网卡收到的报文打包成 `sk_buff` 喂进`sk_receive_queue`，用户态进程（通过 `read/recv` 等系统调用）作为消费者，负责把数据从队列里取走并拷贝到用户空间。但是为了保证高并发下的多核安全和高效通知，内核还额外实现了辅助结构，即`sk_backlog`（后备队列） 和 `sk_wq`（等待队列/通知机制）
 
-todo
+1、`sk_backlog`，定义[在](https://elixir.bootlin.com/linux/v4.11.6/source/include/net/sock.h#L366)，是为了解决并发修改`sk_receive_queue`锁竞争引入
+
+考虑这个场景，若用户态进程正在调用 `recv()` 处理数据，此时它会持有这个 socket 的锁。如果此时软中断强行去修改 `sk_receive_queue`，就会发生严重的锁冲突。因此内核引入了 `sk_backlog`：
+
+-	一般情况：用户态进程没有访问这个 socket（没拿锁）。软中断拿着软中断锁，直接把包塞进`sk_receive_queue`
+-	冲突情况：用户态进程正在持锁读取数据。软中断发现 socket 被锁住了，它绝对不会去碰 `sk_receive_queue`，而是默默地把数据包放入 `sk->sk_backlog` 队列中，然后直接返回
+-	追加读取：当用户态进程读完数据、准备释放 socket 锁的时候，它会顺便检查一下 `sk_backlog`。如果发现里面有软中断漏掉的包，由用户态进程负责把包从 `sk_backlog` 挪到 `sk_receive_queue` 中（详细描述见后文）
 
 ####	本文涉及到核心内核函数
 
