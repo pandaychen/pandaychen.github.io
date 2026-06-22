@@ -52,6 +52,103 @@ int main(){
 
 ##  0x01    基础知识
 
+####	request_sock / sock
+`struct request_sock` 和 `struct sock` 是 TCP 三次握手流程中最核心的两个结构体，`request_sock` 是半连接（SYN_RECV）阶段的**临时轻量套接字**，而 `struct sock` 是连接建立（ESTABLISHED）后的全功能重量级套接字，其初衷是内核为了对抗 SYN Flood 攻击、优化多核并发以及精简内存开销而演进出的极致设计
+
+1、结构体角色与核心作用
+
+`struct request_sock`（轻量级请求控制块）：
+
+-	创建时机：当本端收到客户端的 SYN 包，且决定接受这个连接请求时（`tcp_conn_request` 流程），关联[代码](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L6308)
+-	该结构体的功能如下
+	-	记录握手信息：它只保存构建 SYN+ACK 报文以及校验第三次握手 ACK 所必需的极简元数据（如对端的 mss、rcv_isn 初始序列号、snd_isn 本端初始序列号、四元组信息等）
+	-	挂载重传定时器： 负责维护 SYN+ACK 的指数退避重传，直到收到第三次握手，或者超时被销毁
+	-	存在状态为TCP_NEW_SYN_RECV（4.x内核引入的伪状态）
+
+同样，对于三次握手过程中的`struct sock`（全功能网络套接字）：
+
+-	创建时机：三次握手完成（关联TCP_ESTABLISHED状态），内核收到客户端的第三次 ACK 报文 时（`tcp_check_req` → `tcp_v4_syn_recv_sock` 流程）
+-	该结构体的功能如下
+	-	全协议栈支持：承载了 TCP 协议栈的所有复杂功能，包括拥塞控制状态机（tcp_congestion_ops）、滑动窗口、重传队列、动态缓冲区等
+	-	数据搬运： 拥有真正用于应用层读写的 sk_write_queue（发送队列）和 sk_receive_queue（接收队列）
+	-	被 accept 从全连接队列中移除后会绑定到 fd 和 `struct file`
+
+2、req_to_sk 的伪装术
+
+在早期 Linux 内核（2.6 版本）中，`struct request_sock` 和 `struct sock` 是完全独立的两个结构体，半连接队列也是一个独立的局部哈希表。在 4.11.6 版本，为了实现 Lockless Listener（无锁化监听），内核做了重构，即让 request_sock 伪装成一个特殊的 struct sock
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/net/request_sock.h#L49
+struct request_sock {
+	struct sock_common		__req_common;	// 重点：包含 sock 的核心公用头部
+#define rsk_refcnt			__req_common.skc_refcnt
+#define rsk_hash			__req_common.skc_hash
+#define rsk_listener			__req_common.skc_listener
+#define rsk_window_clamp		__req_common.skc_window_clamp
+#define rsk_rcv_wnd			__req_common.skc_rcv_wnd
+
+	struct request_sock		*dl_next;
+	u16				mss;
+	u8				num_retrans; /* number of retransmits */
+	u8				cookie_ts:1; /* syncookie: encode tcpopts in timestamp */
+	u8				num_timeout:7; /* number of timeouts */
+	u32				ts_recent;
+	struct timer_list		rsk_timer;
+	const struct request_sock_ops	*rsk_ops;
+	struct sock			*sk;
+	u32				*saved_syn;
+	u32				secid;
+	u32				peer_secid;
+};
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/net/sock.h#L311
+struct sock {
+	/*
+	 * Now struct inet_timewait_sock also uses sock_common, so please just
+	 * don't add nothing before this first member (__sk_common) --acme
+	 */
+	struct sock_common	__sk_common;
+#define sk_node			__sk_common.skc_node
+#define sk_nulls_node		__sk_common.skc_nulls_node
+#define sk_refcnt		__sk_common.skc_refcnt
+#define sk_tx_queue_mapping	__sk_common.skc_tx_queue_mapping
+	......
+}
+```
+
+从上面定义看出，request_sock 的第一个成员并不是普通的字段，而是一个 `struct sock_common`，这就产生了一个精妙的宏`req_to_sk(req)`
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/net/request_sock.h#L76
+static inline struct sock *req_to_sk(struct request_sock *req) {
+	return (struct sock *)req;
+}
+```
+
+为什么能够强制类型转换？ 因为 `struct sock` 的第一个成员也是 `struct sock_common`。这就意味着，在内核看来，request_sock 内存块的前半部分，其布局和 `struct sock` 完全一致。注意，**request_sock 和 sock 不是可以任意互转，而是可以在 struct sock_common 这个公共前缀范围内互相解释**
+
+通过`struct sock *sk = req_to_sk(req)`强制转换，`sk`只能安全访问 `sock_common` 里的字段，比如：
+
+```bash
+sk->sk_hash
+sk->sk_state
+sk->sk_prot
+sk->sk_nulls_node
+sk->sk_refcnt
+sk->sk_daddr
+sk->sk_rcv_saddr
+sk->sk_dport
+sk->sk_num
+sk->sk_bound_dev_if
+```
+
+3、内核设计的意义
+
+在后文，有一个知识点需要额外注意，由于在4.11.6 版本中，半连接队列被取消了，内核需要把半连接对象（request_sock）直接塞进全局的 `tcp_hashinfo.ehash`（已建立连接哈希表）中，但是ehash 里的桶节点类型规定必须是 `struct sock *`，如何实现呢？于是内核直接调用`req_to_sk(req)`将 request_sock 强转并包装成一个伪 sock，对于后续动作：
+
+-	无锁查找：当网卡来包时，软中断无锁地去 ehash 里计算四元组查找。查找的结果节点可能是一个真正的 struct sock（状态为 TCP_ESTABLISHED），也可能是一个被伪装的 request_sock（状态为 TCP_NEW_SYN_RECV）
+-	分流处理： 内核只需在无锁查找到节点后，检查下 `sk->sk_state`，如果是 TCP_NEW_SYN_RECV，就代表这实际上是个 request_sock，立刻交由 `tcp_check_req` 去验证第三次握手，否则，就是一个正常状态机下的sock结构
+
 ####	socket/sock/inet_sock/inet_connection_sock
 `struct socket` 是用于负责对（上层）给用户提供接口，并且和文件系统关联。而 `struct sock` 负责向下对接内核网络协议栈
 ![sock-relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/epoll/socket-family.png)
@@ -1930,6 +2027,8 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
              const struct tcp_request_sock_ops *af_ops,
              struct sock *sk, struct sk_buff *skb) {
     ...
+	
+	// 重要：创建轻量级连接请求request_sock
     req = inet_reqsk_alloc(rsk_ops, sk, !want_cookie);
     ...
     if (fastopen_sk) {
@@ -2890,6 +2989,125 @@ out:
 
 这里着重点出`sk_wq`与`sk_data_ready`的意义是，用户态编程时，当某个fd（关联sock数据就绪时）可读可写时，内核会通过这二者配合的机制唤醒上层进程进行数据处理
 
+####	重要：双端 TCP_ESTABLISHED 的设置
+本小节描述下，对于客户端与服务端，三次握手完成之后，对于客户端、服务端的协议栈的ehash，状态设置为TCP_ESTABLISHED的过程，客户端和服务端发生的位置肯定是不一样的，下面分别进行说明
+
+#####	客户端：active open
+当客户端 connect() 时，socket 先进入 ehash，此时其状态机还不是 TCP_ESTABLISHED，而是 TCP_SYN_SENT：
+
+```c
+tcp_v4_connect()
+  -> tcp_set_state(sk, TCP_SYN_SENT)
+  -> inet_hash_connect(tcp_death_row, sk)	//插入ehash 哈希表
+     -> __inet_hash_connect()
+        -> inet_ehash_nolisten(sk, NULL)
+           -> inet_ehash_insert(sk, NULL)
+```
+
+也就是说，客户端 socket 在发送 SYN 包阶段就已经进入 ehash。后续收到服务端 SYN+ACK 时，内核通过 ehash 找回这个 TCP_SYN_SENT socket。
+客户端状态变为 TCP_ESTABLISHED 的位置如下：
+
+```c
+tcp_v4_rcv()
+  -> tcp_v4_do_rcv()
+  -> tcp_rcv_state_process()
+     case TCP_SYN_SENT:
+       -> tcp_rcv_synsent_state_process()
+          -> tcp_finish_connect()	//重要！设置TCP_ESTABLISHED的函数，参考前文
+             -> tcp_set_state(sk, TCP_ESTABLISHED)
+```
+
+#####	服务端：passive open
+服务端收到 SYN 时，先创建的是 request_sock，不是最终 child socket：
+
+```c
+tcp_v4_rcv()
+  -> tcp_rcv_state_process()
+     case TCP_LISTEN:
+       -> tcp_v4_conn_request()
+          -> inet_csk_reqsk_queue_hash_add()
+             -> reqsk_queue_hash_req()
+```
+
+服务端 SYN 阶段的 request socket 会参与 hash 查找，状态表现为 TCP_NEW_SYN_RECV 这类 request socket 状态。当服务端收到第三次握手 ACK 后，路径是：
+
+```c
+tcp_v4_rcv()
+  -> __inet_lookup_skb()
+     -> __inet_lookup_established()
+        //找到 request_sock / TCP_NEW_SYN_RECV
+  -> tcp_check_req(listener, skb, req, false)
+  -> tcp_v4_syn_recv_sock()
+```
+
+child socket 创建时，初始状态是 TCP_SYN_RECV：
+
+```c
+tcp_v4_syn_recv_sock()
+  -> tcp_create_openreq_child()
+     -> inet_csk_clone_lock()
+        -> newsk->sk_state = TCP_SYN_RECV
+```
+
+服务端 child socket 插入 ehash 的位置是：
+
+```c
+tcp_v4_syn_recv_sock()
+  -> inet_ehash_nolisten(newsk, req_to_sk(req_unhash))
+     -> inet_ehash_insert(newsk, old_req_sk)
+```
+
+这里会用真正的 child struct `sock *newsk` 替换 ehash 中原来的 request socket。然后完成 hashdance 和 accept queue 挂载：
+
+```c
+//1、child 创建：
+tcp_check_req()
+  -> inet_csk_complete_hashdance(listener, child, req, own_req) //注意：inet_csk_complete_hashdance() 不是设置 TCP_ESTABLISHED 的位置
+     -> inet_csk_reqsk_queue_add(listener, req, child)
+        -> req->sk = child
+        -> 挂入 listener->icsk_accept_queue
+```
+
+服务端 child socket 状态变为 TCP_ESTABLISHED 的位置是：
+
+```c
+tcp_v4_rcv()
+  -> tcp_check_req()
+     -> 返回 child
+  -> tcp_child_process(listener, child, skb)
+     -> tcp_rcv_state_process(child, skb)	//关键代码在 tcp_rcv_state_process() 的 case TCP_SYN_RECV分支
+        case TCP_SYN_RECV:
+          -> tcp_set_state(child, TCP_ESTABLISHED)
+```
+
+汇总下服务端的调用链如下：
+
+```c
+//1、child 创建：
+tcp_check_req()
+  -> tcp_v4_syn_recv_sock()
+  -> inet_csk_clone_lock()
+     newsk->sk_state = TCP_SYN_RECV
+
+//2、child 插入 ehash：
+tcp_v4_syn_recv_sock()
+  -> inet_ehash_nolisten(newsk, req_to_sk(req))
+
+//3、child 加入 accept queue：
+inet_csk_complete_hashdance()
+  -> inet_csk_reqsk_queue_add()
+
+//4、状态变为 TCP_ESTABLISHED：
+tcp_child_process()
+  -> tcp_rcv_state_process()
+     case TCP_SYN_RECV
+       -> tcp_set_state(sk, TCP_ESTABLISHED)
+```
+
+
+-	客户端：先以 TCP_SYN_SENT 进入 ehash，收到 SYN+ACK 后 `tcp_finish_connect()` 置 ESTABLISHED
+-	服务端：SYN 阶段先 hash request_sock；最终 ACK 到来后 `tcp_v4_syn_recv_sock()` 创建 child 并插入 ehash，随后 `tcp_rcv_state_process()` 的 TCP_SYN_RECV 分支置 ESTABLISHED
+
 ##	0x08	server：accept操作
 服务端`accept`系统调用的功能就是从已经建立好的全连接队列（链表）中取出一个返回给用户进程。当 `accept` 之后，通常服务端进程会创建一个新的 socket 出来，专门用于和对应的客户端通信，然后把它放到当前进程的打开文件列表中，这里内核数据结构关系如下（注意到`file.file_operations`是指向`socket_file_ops`）
 
@@ -2904,6 +3122,22 @@ struct socket {
     struct sock     *sk;
 	//...
 }
+```
+
+accept系统调用的核心调用链如下：
+
+```c
+accept4()
+  -> sock_alloc()
+  -> sock_alloc_file()
+  -> sock->ops->accept()
+       -> inet_accept()
+          -> sk1->sk_prot->accept()
+             -> inet_csk_accept()
+                -> reqsk_queue_remove(&icsk->icsk_accept_queue, sk)
+                -> newsk = req->sk
+          -> sock_graft(newsk, newsock)
+  -> fd_install(newfd, newfile)
 ```
 
 `accept`系统调用核心代码如下，主要分为四步即新建socket并初始化、初始化socket的VFS结构、接收连接（fd），最后添加新fd到当前进程的打开文件列表中
@@ -3204,6 +3438,34 @@ static inline struct request_sock *reqsk_queue_remove(struct request_sock_queue 
 ```
 
 ####	accept内核调用中的一个细节
+当三次握手完成，应用层使用accept获取到这个新的socket，同时accept将此连接（半连接对象`struct request_sock`）从全连接队列（`reqsk_queue_remove()`函数）中拆除，那么此时这个socket存储在内核的那个结构中？
+
+在上面的`inet_csk_accept`函数中，真正的新连接 socket 是`newsk = req->sk`，也就是 child `struct sock`，当`accept()` 完成后，这个 child socket 主要存在于两个地方：`accept()` 后它不再挂在监听 socket 的全连接队列上，而是被新 fd 的 `struct file -> struct socket -> struct sock` 链路持有，并继续保留在 TCP established ehash 中
+
+1、用户态 accepted fd 对应的 file/socket 链路
+
+```c
+current->files
+  -> fdtable[accepted_fd]
+    -> struct file
+      -> file->private_data = struct socket *newsock	//fd的private data指向这个新建连接的socket
+        -> newsock->sk = struct sock *child_sk
+```
+
+同时 child sock 反向指向 socket，这个绑定由 `sock_graft(sk2, newsock)` 实现
+
+```c
+child_sk->sk_socket = newsock
+child_sk->sk_wq     = newsock->wq
+```
+
+2、此外，当内核协议栈接收逻辑走到`tcp_v4_rcv`时，都会通过四元组查找已建立连接，[查表](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_ipv4.c#L1657)，即TCP established ehash
+
+```c
+tcp_hashinfo.ehash
+  -> bucket
+    -> child_sk
+```
 
 ####	`struct sock`创建的区别
 
@@ -5365,6 +5627,11 @@ flowchart TD
 -	一般情况：用户态进程没有访问这个 socket（没拿锁）。软中断拿着软中断锁，直接把包塞进`sk_receive_queue`
 -	冲突情况：用户态进程正在持锁读取数据。软中断发现 socket 被锁住了，它绝对不会去碰 `sk_receive_queue`，而是默默地把数据包放入 `sk->sk_backlog` 队列中，然后直接返回
 -	追加读取：当用户态进程读完数据、准备释放 socket 锁的时候，它会顺便检查一下 `sk_backlog`。如果发现里面有软中断漏掉的包，由用户态进程负责把包从 `sk_backlog` 挪到 `sk_receive_queue` 中（详细描述见后文）
+
+2、跨越内核与用户态的等待唤醒机制：`sk_wq`（等待队列），主要解决如何通知/唤醒队列为空而等待的消费者，主要包含两块内容，一是如果队列空了，消费者该怎么等？二是数据来了，如何唤醒它？因此内核在这里引入了等待队列（Wait Queue）与回调机制
+
+-	进程休眠： 当用户态进程调用 `recv()` 发现 `sk_receive_queue` 是空的时候，如果是非阻塞模式会直接返回，但如果是阻塞模式，进程会把自己挂到 socket 的等待队列 `sk->sk_wq` 上，然后进入睡眠状态
+-	中断唤醒： 软中断把包塞进 `sk_receive_queue` 之后，会顺便调用内核函数 `sk->sk_data_ready()`（默认实现是 `sock_def_readable`），此函数会遍历 `sk->sk_wq`，唤醒进程或者通知 epoll 产生可读事件
 
 ####	本文涉及到核心内核函数
 
