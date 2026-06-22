@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:  Linux 内核之旅（二十五）：TCP 数据包接收全景 && 内核源码追踪
+title:  Linux 内核之旅（二十五）：TCP 数据包接收路径 && 内核源码追踪
 subtitle:   拥塞控制、滑动窗口、快慢路径、ACK 机制与 epoll 交互
 date:       2025-12-25
 author:     pandaychen
@@ -120,7 +120,7 @@ flowchart TD
         │                                  │
         │  sk_receive_queue ──────────────►│──► 按序到达的数据（sk_buff_head链表）
         │  tp->out_of_order_queue ────────►│──► 乱序到达的数据（rb_root红黑树）
-        │  tp->ooo_last_skb ─────────────►│──► rb_tree最右节点缓存（优化尾部追加）
+        │  tp->ooo_last_skb ──────────────►│──► rb_tree最右节点缓存（优化尾部追加）
         │  sk_backlog ────────────────────►│──► socket被锁时暂存的数据
         │  tp->ucopy.prequeue ────────────►│──► prequeue（v4.14后移除）
         │                                  │
@@ -1162,7 +1162,7 @@ discard:
 
 ####    ACK处理：tcp_ack（复杂）
 
-`tcp_ack`是TCP接收路径中最复杂的函数之一，主要负责处理对端返回的ACK信息，驱动发送端的窗口滑动和拥塞控制：
+`tcp_ack`是TCP接收路径中最复杂的函数之一，**主要负责处理对端返回的ACK信息，驱动发送端的窗口滑动和拥塞控制**：
 
 ```cpp
 //file: net/ipv4/tcp_input.c
@@ -3134,6 +3134,8 @@ tr:       定时器类型（0=无, 1=重传, 2=keepalive, 4=TIME_WAIT）
 
 极限情况（Zero Window）：当接收缓冲区完全塞满时，内核会给对端发送一个带有 `Window = 0` 的 ACK。对端收到后就会立刻停止发送新数据，进入零窗口探测（Zero Window Probe）状态
 
+所以，即使接收窗口变成了 `0`，那些已经被塞进队列的数据，依然是**成功接收并被 ACK 确认的状态**
+
 ##  0x0D    参考
 
 -   [Linux 网络栈接收数据（RX）：原理及内核实现（2022）](https://arthurchiao.art/blog/linux-net-stack-implementation-rx-zh/)
@@ -3142,7 +3144,4 @@ tr:       定时器类型（0=无, 1=重传, 2=keepalive, 4=TIME_WAIT）
 -   [Congestion Avoidance and Control - Van Jacobson](https://ee.lbl.gov/papers/congavoid.pdf)
 -   [CUBIC: A New TCP-Friendly High-Speed TCP Variant](https://www.cs.princeton.edu/courses/archive/fall16/cos561/papers/Cubic08.pdf)
 -   [Kernel TCP Stack: CUBIC and BBR](https://www.kernel.org/doc/html/latest/networking/tcp-rst.html)
--   <<TCP/IP详解 卷1：协议>>
--   <<Linux内核源码剖析：TCP/IP实现>>
-
 
