@@ -104,7 +104,7 @@ struct task_struct {
 
 内核为每一个CPU都创建一个队列`struct rq`来保存可以在这个CPU上运行的任务，`task_struct`就是用`sched_entity`这个成员变量将自己挂载到某个CPU的队列上的
 
-```CPP
+```cpp
 struct rq {
     struct rt_rq rt;    //实时进程队列rt_rq
     struct cfs_rq cfs;      //CFS运行队列cfs_rq（实际上，CFS 的队列是一棵红黑树）
@@ -116,7 +116,7 @@ struct rq {
 
 3、 [`sched_entity`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/sched.h#L359)：代表被CFS算法调度的实体
 
-```CPP
+```cpp
 struct sched_entity {
 	/* For load-balancing: */
 	struct load_weight		load;
@@ -185,7 +185,7 @@ root           1  0.0  0.1 214124  8332 ?        Ss    2022 332:52 /usr/lib/syst
 
 假设A进程正在用户态运行，函数的调用过程假设为`A_main->A_Fun->read()`，这个调用过程自然是被保存在用户态的栈里面的，而`read()`是一个系统调用，会进入内核，进入内核的那个时刻，用户态的栈顶指针`SP`和指令指针`IP`都会被保存在`pt_regs`里面，放到A进程对应的`task_struct`的`stack`成员变量指向的内核栈里面。在内核中，假设继续会进行函数调用过程`do_read()->A_Kernel1->A_Kernel2`，这个调用过程自然是被保存在内核栈里面，这个栈也有一个栈顶指针`SP`，这个时候的`IP`指向的是`A_Kernel2`里面的内核代码，在内核函数`A_Kernel2`中，发现要读的东西还没就绪，就需要进行等待，那么`A_Kernel2`的内核代码中应该会包含如下代码片段：
 
-```CPP
+```cpp
 /* Nothing to read, let's sleep */
 schedule(); 
 ```
@@ -200,7 +200,7 @@ schedule();
 ####    进程上下文切换
 本小节切换到CPU视角来介绍下`context_switch`的大致逻辑，有这两行核心代码：
 
-```CPP
+```cpp
   switch_to(prev, next, prev);
   return finish_task_switch(prev);
 ```
@@ -230,7 +230,7 @@ schedule();
 ####    调度类
 在Linux中，将调度器公共的部分抽象，使用`struct sched_class`结构体描述一个具体的调度类。系统核心调度代码会通过`struct sched_class`结构体的成员调用具体调度类的核心算法
 
-```CPP
+```cpp
 struct sched_class {
 	const struct sched_class *next; //next成员指向下一个调度类（比自己低一个优先级）。在Linux中，每一个调度类都是有明确的优先级关系，高优先级调度类管理的进程会优先获得cpu使用权
 
@@ -282,7 +282,7 @@ sched_class_highest----->stop_sched_class
 
 Linux调度核心在选择下一个合适的task运行的时候，会按照上面调度类优先级的顺序遍历各个调度类的`pick_next_task`函数。因此，`SCHED_FIFO`调度策略的实时进程永远比`SCHED_NORMAL`调度策略的普通进程优先运行
 
-```CPP
+```cpp
 //负责选择一个即将运行的进程
 static inline struct task_struct *pick_next_task(struct rq *rq,
                                                  struct task_struct *prev, struct rq_flags *rf)
@@ -307,7 +307,7 @@ static inline struct task_struct *pick_next_task(struct rq *rq,
 -   `struct rt_rq`：实时调度器就绪队列
 -   `struct dl_rq`：Deadline调度器就绪队列
 
-```CPP
+```cpp
 struct rq {
     struct cfs_rq cfs;
 	struct rt_rq rt;
@@ -343,7 +343,7 @@ struct cfs_rq {
 
 1、写入块设备，写入需要一段时间，这段时间用不上CPU
 
-```CPP
+```cpp
 static void btrfs_wait_for_no_snapshoting_writes(struct btrfs_root *root){
     //......
     do {
@@ -359,7 +359,7 @@ static void btrfs_wait_for_no_snapshoting_writes(struct btrfs_root *root){
 
 2、从 Tap 网络设备等待一个读取
 
-```CPP
+```cpp
 static ssize_t tap_do_read(struct tap_queue *q,
             struct iov_iter *to,
             int noblock, struct sk_buff *skb){
@@ -395,7 +395,7 @@ static ssize_t tap_do_read(struct tap_queue *q,
 
 1、周期性调度入口：`scheduler_tick`
 
-```CPP
+```cpp
 void scheduler_tick(void)
 {
         // 取出当前的cpu及其任务队列
@@ -425,7 +425,7 @@ void scheduler_tick(void)
 
 2、`task_tick_fair`的实现
 
-```CPP
+```cpp
 static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 {       
         /*若是进程数据任务组的话，则逐层为每一个父任务组的cfs_rq调用entity_tick*/
@@ -439,7 +439,7 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 
 3、`entity_tick`的实现：只有CFS算法的`task_tick`方法才会调用`entity_tick`函数
 
-```CPP
+```cpp
 static void
 entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 {
@@ -463,7 +463,7 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 
 4、`update_curr`函数（CFS的核心函数）：`task_struct.sched_entity.vruntime`（进程的虚拟运行时间），如果一个进程在运行，随着时间的增长（一个个 tick 的到来）进程的 `vruntime` 将不断增大。没有得到执行的进程 `vruntime` 不变，最后尽量保证所有进程的vruntime相等
 
-```CPP
+```cpp
 /*
  * Update the current task's runtime statistics.
  */
@@ -499,7 +499,7 @@ static inline u64 calc_delta_fair(u64 delta, struct sched_entity *se){
 
 5、`check_preempt_tick`详解（CFS的核心函数）：它的主要工作内容则是检查此时是否应该发生重新调度，然后`resched_curr()`去设置`TIF_NEED_RESCHED`标志位
 
-```CPP
+```cpp
 check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
         unsigned long ideal_runtime, delta_exec;
@@ -544,10 +544,110 @@ Linux内核为观测CPU运行队列运行指标（主要是调度延迟）提供
 
 从上文了解到，调度分为两类 Voluntary Switch和 Involuntary Switch，而且调度时并不是立即切换，所以必然存在一定的调度延迟。所谓调度延迟，是指一个任务具备运行的条件（新创建进入 CPU 的 runqueue OR 抢占调度准备完成），到真正执行（获得 CPU 的执行权）的这段时间。那为什么会有调度延迟呢？因为 CPU 还被其他任务占据，还没有空出来，而且可能还有其他在 runqueue 中排队的任务；排队的任务越多，调度延迟就可能越长，所以这也是间接衡量 CPU 负载的一个指标（CPU 负载通过计算各个时刻 runqueue 上的任务数量获得）
 
-```CPP
+```cpp
 wake_up_process() --> ttwu_do_wakeup() --> trace_sched_wakeup   //抢占式调度
 _do_fork() -->wake_up_new_task() --> trace_sched_wakeup_new   //新进程创建调度
 __schedule() --> trace_sched_switch             // 
+```
+
+####    切换的类型
+在 CFS 调度中，当一个task_struct因访问 I/O 资源暂时不可获得而主动让出 CPU，自然是 Voluntary Switch，而一个task_struct因 vruntime 处于劣势而被抢占，自然是 Involuntary Switch。考虑这种情况：如果是任务主动调用 `cond_resched()`，当 need schedule 标志位满足条件，就实施调度的情况呢？属于哪种？
+
+`/proc/<pid>/sched`统计的`nr_voluntary_switches` 和 `nr_involuntary_switches` ，对应 `task_struct` 结构体：
+
+```c
+struct task_struct {
+    /* Context switch counts: */
+    unsigned long  nvcsw;
+    unsigned long  nivcsw;
+    ......
+}
+```
+
+例如：
+
+```BASH
+[root@VM-X-X-centos ~]# cat /proc/2689622/sched
+scpserver (2689622, #threads: 6)
+-------------------------------------------------------------------
+se.exec_start                                :   68001639204.231892
+se.vruntime                                  :     900444917.762884
+se.sum_exec_runtime                          :             4.215309
+se.nr_migrations                             :                    4
+nr_switches                                  :                    8
+nr_voluntary_switches                        :                    8
+nr_involuntary_switches                      :                    0
+......
+```
+
+从`__schedule`的实现来看，两个因素：
+
+1.  取决于调用 `__schedule()` 的入参`preempt`是 `false/true`
+2.  取决于 switch out 的任务（即 prev）的状态，这里判断 `prev->state` 是否为 `0`，其实是判断状态是否为 `TASK_RUNNING`
+
+```c
+schedule() --> __schedule(false);
+preempt_schedule_common() --> __schedule(true)
+```
+
+因此，如果入参是 `false`且 `prev->state` 非`TASK_RUNNING`，那么就被归为 voluntary switch；否则为involuntary switch
+
+在下面引用的这段代码块中，有几处细节：
+
+1、`!preempt/*preempt为false才有可能进入此块*/ && prev->state`这个条件什么情况下才会触发？即`prev->state`为何不是`TASK_RUNNING`状态？（被切出的任务怎么会不是 TASK_RUNNING 状态呢？）
+在进入 `__schedule` 函数的时候，prev task 肯定是还占据着 CPU 的，但该状态是可以被设置的，比如，调用 `wait_event_xxx` 系列宏的时候，就会设置当前 task 的状态为 `INTERRUPTIBLE/UNINTERRUPTIBLE`
+
+2、从`if (likely(prev != next))`这块代码可知，`likely`为大概率事件，即大概率会发生切换switch（`prev != next`成立），所以在这段代码中才进行计数累加
+
+3、如果上面的`if`判断为false，`prev==next`的情况，即满足如果调用 `pick_next_task()` 经 scheduler 再次选择后，prev 的 vruntime还是最小，还是该它执行，那也是不会切换的
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/core.c#L3363
+static void __sched notrace __schedule(bool preempt){
+    ......
+    switch_count = &prev->nivcsw;   //switch_count为nivcsw
+	if (!preempt/*preempt为false才有可能进入此块*/ && prev->state) {
+		if (unlikely(signal_pending_state(prev->state, prev))) {
+			prev->state = TASK_RUNNING;
+		} else {
+			deactivate_task(rq, prev, DEQUEUE_SLEEP);
+			prev->on_rq = 0;
+
+			if (prev->in_iowait) {
+				atomic_inc(&rq->nr_iowait);
+				delayacct_blkio_start();
+			}
+
+			if (prev->flags & PF_WQ_WORKER) {
+				struct task_struct *to_wakeup;
+
+				to_wakeup = wq_worker_sleeping(prev);
+				if (to_wakeup)
+					try_to_wake_up_local(to_wakeup, &rf);
+			}
+		}
+		switch_count = &prev->nvcsw;    //switch_count为nvcsw
+	}
+    ......
+
+    if (likely(prev != next)) {
+		rq->nr_switches++;
+		rq->curr = next;
+
+        // switch_count累加的代码
+		++*switch_count;
+
+		trace_sched_switch(preempt, prev, next);
+
+		/* Also unlocks the rq: */
+		rq = context_switch(rq, prev, next, &rf);
+	} else {
+		rq->clock_update_flags &= ~(RQCF_ACT_SKIP|RQCF_REQ_SKIP);
+		rq_unpin_lock(rq, &rf);
+		raw_spin_unlock_irq(&rq->lock);
+	}
+    ......
+}
 ```
 
 ####    计算延迟
@@ -555,7 +655,7 @@ __schedule() --> trace_sched_switch             //
 2.  任务因 Involuntary Switch 让出 CPU（任务切换时作为 `prev_pid`），到再次获得 CPU （之后的某次任务切换时作为`next_pid`）所经历的时间。在这期间，任务始终在 runqueue 上，始终是 runnable 的状态，所以有 `prev_state` 是否为 `TASK_RUNNING` 的判断
 
 ####    
-```CPP
+```cpp
 static void __sched notrace __schedule(bool preempt)
 {
 	struct task_struct *prev, *next;
@@ -649,7 +749,7 @@ static void __sched notrace __schedule(bool preempt)
 ####     wake_up_process
 [`wake_up_process`](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/core.c#L1947)
 
-```CPP
+```cpp
 
 ```
 
@@ -665,3 +765,4 @@ static void __sched notrace __schedule(bool preempt)
 -   [Linux进程调度：调度时机](https://zhuanlan.zhihu.com/p/163728119)
 -   [Linux进程调度：周期性调度器](https://zhuanlan.zhihu.com/p/426448579)
 -   [CFS调度器（1）-基本原理](http://www.wowotech.net/process_management/447.html)
+-   [Linux 调度 - 切换类型的划分](https://zhuanlan.zhihu.com/p/402423877)

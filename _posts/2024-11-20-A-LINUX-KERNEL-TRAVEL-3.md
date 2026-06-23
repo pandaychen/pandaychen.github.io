@@ -8,6 +8,7 @@ header-img:
 catalog: true
 tags:
     - Linux
+    - Kernel
 ---
 
 ##  0x00    前言
@@ -1434,7 +1435,7 @@ struct mountpoint *get_mountpoint(struct dentry *dentry)
 ```cpp
 path = {
     .mnt = root_mnt,          // 根挂载
-    .dentry = /mnt/test的dentry  // 在根文件系统中
+    .dentry = /mnt/test  // 在根文件系统中（test的dentry）
 }
 ```
 
