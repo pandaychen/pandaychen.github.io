@@ -2036,7 +2036,7 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
     } else {
         ...
         if (!want_cookie)
-            // 加入半连接队列并启动定时器
+				// 加入半连接队列并启动定时器
 			inet_csk_reqsk_queue_hash_add(sk, req, TCP_TIMEOUT_INIT);
         // 服务端给客户端发送 SYN + ACK 包
         // https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L6414
@@ -2421,6 +2421,7 @@ int tcp_v4_rcv(struct sk_buff *skb)
 
 -	`__inet_lookup_skb`
 -	`tcp_check_req`
+-	`inet_csk_complete_hashdance`：将新连接child加入全连接队列
 
 ```cpp
 int tcp_v4_rcv(struct sk_buff *skb) {
@@ -2823,7 +2824,7 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb) {
 
 ####	重要： __inet_lookup_skb 与 __inet_lookup_listener 的实现逻辑
 
-`__inet_lookup_skb`是`tcp_v4_rcv`中查找目标sock的关键函数，其查找逻辑为先查`ehash`（ESTABLISHED连接），再查`listening_hash`（LISTEN状态）：
+`__inet_lookup_skb`是`tcp_v4_rcv`中查找目标sock的[关键函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_ipv4.c#L1656)，其查找逻辑为先查`ehash`（ESTABLISHED连接），再查`listening_hash`（LISTEN状态）：
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/net/inet_hashtables.h#L350
@@ -2846,6 +2847,27 @@ static inline struct sock *__inet_lookup_skb(struct inet_hashinfo *hashinfo,
 // __inet_lookup 内部调用链：
 // 1. __inet_lookup_established() - 查询ehash表
 // 2. __inet_lookup_listener() - 查询listening_hash表
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/net/inet_hashtables.h#L303
+static inline struct sock *__inet_lookup(struct net *net,
+					 struct inet_hashinfo *hashinfo,
+					 struct sk_buff *skb, int doff,
+					 const __be32 saddr, const __be16 sport,
+					 const __be32 daddr, const __be16 dport,
+					 const int dif,
+					 bool *refcounted)
+{
+	u16 hnum = ntohs(dport);
+	struct sock *sk;
+
+	sk = __inet_lookup_established(net, hashinfo, saddr, sport,
+				       daddr, hnum, dif);
+	*refcounted = true;
+	if (sk)
+		return sk;
+	*refcounted = false;
+	return __inet_lookup_listener(net, hashinfo, skb, doff, saddr,
+				      sport, daddr, hnum, dif);
+}
 ```
 
 ####	__inet_lookup_established 的实现
@@ -3004,8 +3026,7 @@ tcp_v4_connect()
            -> inet_ehash_insert(sk, NULL)
 ```
 
-也就是说，客户端 socket 在发送 SYN 包阶段就已经进入 ehash。后续收到服务端 SYN+ACK 时，内核通过 ehash 找回这个 TCP_SYN_SENT socket。
-客户端状态变为 TCP_ESTABLISHED 的位置如下：
+也就是说，客户端 socket 在发送 SYN 包阶段就已经进入 ehash。后续收到服务端 SYN+ACK 时，内核通过 ehash 找回这个 TCP_SYN_SENT socket。客户端状态变为 TCP_ESTABLISHED 的位置如下：
 
 ```c
 tcp_v4_rcv()
