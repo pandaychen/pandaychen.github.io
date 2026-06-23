@@ -126,7 +126,7 @@ void epoll_server_run(){
 
 ####    struct sock/socket/sock_comm
 
-![sock-relation]()
+![sock-relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/epoll/socket-sock-sock_common-relation.png)
 
 `struct sock`结构关联的等待队列`socket_wq`，包含了内核等待队列的头节点：
 
@@ -137,6 +137,19 @@ struct socket_wq {
 	......
 };
 ```
+
+注意 `struct sock` 与 `struct socket_wq` 通过指针 `sk->sk_wq` 相连，而 `struct socket` 通过 `socket->wq` 也指向同一份 `socket_wq`（见 [`sock_init_data`](https://elixir.bootlin.com/linux/v4.11.6/source/net/core/sock.c#L2460) 中的 `sk->sk_wq = &sock->wq`），故有：
+
+```cpp
+// https://elixir.bootlin.com/linux/v4.11.6/source/include/net/sock.h#L1822
+static inline wait_queue_head_t *sk_sleep(struct sock *sk)
+{
+    BUILD_BUG_ON(offsetof(struct socket_wq, wait) != 0);
+    return &rcu_dereference_raw(sk->sk_wq)->wait;
+}
+```
+
+由于 `BUILD_BUG_ON` 保证 `wait` 是 `socket_wq` 的第一个成员，`&socket_wq` 与 `&socket_wq.wait` 地址相同，所以 `sk_sleep(sk)` 实际就是 `sock->sk_wq->wait` 这个等待队列头。后文 `ep_insert` 经 `tcp_poll → sock_poll_wait(file, sk_sleep(sk), wait)` 把 `eppoll_entry.wait` 挂入的，正是这条链表
 
 ####    epoll的API
 1、`epoll_create`：创建一个 `epoll` 对象，返回fd
@@ -320,7 +333,7 @@ SYSCALL_DEFINE4(accept4, int, fd, struct sockaddr __user *, upeer_sockaddr,
 ```
 
 ####	新建立socket/file结构
-![socket-2-file-relation]()
+![socket-2-file-relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/epoll/fdtable-file-socket-sock-relation.png)
 
 上文说到，在`accept`里创建的新 `struct socket` 成员`file`，即`struct file`的`f_op`成员（类型为`struct file_operations`），被赋值为下面`socket_file_ops`的[方法](https://elixir.bootlin.com/linux/v4.11.6/source/net/socket.c#L140)：
 
@@ -374,12 +387,29 @@ struct sock *inet_csk_accept(struct sock *sk, int flags, int *err, bool kern)
 ```
 
 ```cpp
+// https://elixir.bootlin.com/linux/v4.11.6/source/net/core/sock.c#L2460
 void sock_init_data(struct socket *sock, struct sock *sk)
 {
-    sk->sk_wq   =   NULL;
-    sk->sk_data_ready   =   sock_def_readable;
+    // 关键：把 sock->wq 挂到 sk->sk_wq，从此 sk_sleep(sk) 与 socket 等待队列一一对应
+    sk->sk_wq           =   sock ? &sock->wq : NULL;
+
+    // 注册四类默认回调（v4.11.6 中均为单参签名）
+    sk->sk_state_change =   sock_def_wakeup;        // 状态变化（如 tcp_fin、tcp_done）
+    sk->sk_data_ready   =   sock_def_readable;      // 数据可读（receive_queue 有新数据）
+    sk->sk_write_space  =   sock_def_write_space;   // 发送空间可用
+    sk->sk_error_report =   sock_def_error_report;  // 错误上报（如 tcp_reset）
 }
 ```
+
+这 4 个默认回调函数的作用，将分别承担 `EPOLLIN/EPOLLHUP/EPOLLOUT/EPOLLERR` 通知的入口工作，是后文（`0x07`）理解整套回调链的基础（详见后文）
+
+####    listener fd 与 accept fd 的 sk_data_ready 链路差异
+两种 fd 都会复用 `sk_data_ready = sock_def_readable` 这套机制，但触发点完全不同：
+
+- **acceptfd** 在前文 `tcp_rcv_established`/`tcp_data_queue` 中触发，事件含义是**`sk_receive_queue` 有有序数据可读**
+- **listenerfd** 的 `sk_data_ready` 不在数据收包路径上，而是在三次握手完成时由 `inet_csk_complete_hashdance` → `parent->sk_data_ready(parent)` 显式触发（路径：`tcp_v4_rcv → tcp_v4_do_rcv → tcp_v4_hnd_req → tcp_check_req → inet_csk_complete_hashdance`），事件含义是**`icsk_accept_queue`（全连接队列）多了一个可 `accept` 的子 sock**
+
+但二者从 `sk_data_ready` 之后的链路（`wake_up_interruptible_sync_poll → ep_poll_callback → ...`）是**完全一致**的，这也是 epoll 能用同一套机制统一处理新连接和数据可读事件的根本原因
 
 ##  0x04    epoll_ctl 实现：操作fd
 这一步是`epoll`机制的核心，在上面的示例代码中，通过`epoll_ctl`操作网络连接socket fd的内核大致过程描述如下：
@@ -620,7 +650,7 @@ static inline void init_poll_funcptr(poll_table *pt,
 }
 ```
 
-![ep_pqueue_relation]()
+![ep_pqueue_relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/epoll/ep_pqueue.png)
 
 在`ep_insert`的实现中，`ep_item_poll`函数在`init_poll_funcptr`之后被调用，注意它的参数是`struct ep_pqueue`的两个成员
 
@@ -701,41 +731,52 @@ static inline void poll_wait(struct file * filp, wait_queue_head_t * wait_addres
 继续分析，回调函数`ep_ptable_queue_proc`真正完成了socket等待队列的初始化及添加等工作，注意到参数`whead`是socket等待队列的头结点，等待队列项最终会通过`whead`插入
 
 ```cpp
+// https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L1090
 static void ep_ptable_queue_proc(struct file *file, wait_queue_head_t *whead,
                  poll_table *pt)
 {
-	//新建一个eppoll_entry对象
+    // 从 poll_table 反向拿到 epitem（依赖 ep_pqueue 的内存布局：epi 紧跟 pt）
+    struct epitem *epi = ep_item_from_epqueue(pt);
+    // 新建一个 eppoll_entry 对象（重要！这才是 socket 等待队列的真正驻留项）
     struct eppoll_entry *pwq;
-    f (epi->nwait >= 0 && (pwq = kmem_cache_alloc(pwq_cache, GFP_KERNEL))) {
-		//初始化回调方法
-		init_waitqueue_func_entry(&pwq->wait, ep_poll_callback);
 
-		//将ep_poll_callback放入socket的等待队列whead（注意不是epoll的等待队列）
-		add_wait_queue(whead, &pwq->wait);
+    if (epi->nwait >= 0 && (pwq = kmem_cache_alloc(pwq_cache, GFP_KERNEL))) {
+        // 初始化 pwq->wait（wait_queue_t）：把回调 func 设为 ep_poll_callback，private 留 NULL
+        init_waitqueue_func_entry(&pwq->wait, ep_poll_callback);
+        pwq->whead = whead;     // 记录所属 socket 等待队列头
+        pwq->base  = epi;       // 反向指针：回调时通过 base 拿到 epitem
+        // 关键：根据是否设置 EPOLLEXCLUSIVE，决定挂入方式（决定唤醒时是否被 break）
+        if (epi->event.events & EPOLLEXCLUSIVE)
+            add_wait_queue_exclusive(whead, &pwq->wait); // 设置 WQ_FLAG_EXCLUSIVE
+        else
+            add_wait_queue(whead, &pwq->wait);
+        // 同时把 pwq 挂到 epitem.pwqlist，方便 ep_remove 时反向清理
+        list_add_tail(&pwq->llink, &epi->pwqlist);
+        epi->nwait++;
+    } else {
+        epi->nwait = -1;
     }
-	//....
 }
 ```
 
-`ep_ptable_queue_proc`调用`init_waitqueue_func_entry`初始化一个等待队列项，等待队列项中仅仅只设置了回调函数 `q->func` 为 `ep_poll_callback`，其定义在[`ep_poll_callback`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L1004)
+在上面的`ep_ptable_queue_proc`函数中，一个很重要的细节是`add_wait_queue*`函数，这里是将`ep_poll_callback`放入socket/sock的等待队列`whead`（注意不是epoll的等待队列），这样对于内核而言，底层 sock/socket 完全不需要知道 epoll 的存在，socket 只需要负责在自己状态发生变化时，无脑地唤醒自己等待队列上的所有节点即可
+
+`ep_ptable_queue_proc` 调用 `init_waitqueue_func_entry` 初始化 `eppoll_entry.wait` 这个等待队列项（注意：等待队列项是 `eppoll_entry` 的成员 `wait`，而非 `eppoll_entry` 整体），其中只设置 `func = ep_poll_callback`、`private = NULL`，其定义见 [`ep_poll_callback`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L1004)。注意 `EPOLLEXCLUSIVE` 分支：它是后文 `0x08` 章节解决惊群问题的源头
 
 ![eppoll_entry-relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/epoll/epitem_relation_eppollentry.png)
 
 在内核软中断ksoftirqd将数据收到 socket 的接收队列后，内核会唤醒这个socket等待队列上的所有项，会通过注册的这个 `ep_poll_callback` 函数来回调（依次调用其注册的回调函数），进而通知到 `epoll` 对象
 
-此外，这里思考下为何在epoll机制下的`init_waitqqueue_func_entry`中`q->private`要设置为`NULL`？首先这个`private`的意义是的内核实现等待队列机制中，当等待条件可能就绪时内核要唤醒的进程结构`task_struct`，但是**在epoll机制中，socket是由epoll统一管理的，不需要在一个 socket 就绪的时候就唤醒进程（这样效率也极低），所以这里的 `q->private` 没意义就设置成了 NULL**
+此外，这里思考下为何在 epoll 机制下的 `init_waitqueue_func_entry` 中 `q->private` 要设置为 `NULL`？首先 `private` 字段在内核等待队列机制中，承载的是**当条件就绪时需要唤醒的 `task_struct`**，但是**在 epoll 机制中，socket 是由 epoll 统一管理的，不需要在某一个 socket 就绪的瞬间直接唤醒应用进程（那样效率也极低），所以这里 `q->private` 被显式设置为 `NULL`**，唤醒进程的工作被推迟到后面的 `ep_poll_callback` 内部：先把 `epitem` 加入 `ep->rdllist`，再去唤醒挂在 `ep->wq`（epoll 自己的等待队列）上的进程。这种**两级唤醒**是 epoll 高效的核心
 
 ```cpp
-static inline void init_waitqqueue_func_entry(
+// https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/wait.h#L72
+static inline void init_waitqueue_func_entry(
     wait_queue_t *q, wait_queue_func_t func)
 {
-    q->flags = 0;
-	// 这里为什么是NULL？
-    q->private = NULL;
-
-    //ep_poll_callback 注册到 wait_queue_t对象上
-    //有数据到达的时候调用 q->func
-    q->func = func;   
+    q->flags   = 0;
+    q->private = NULL;  // 不绑定进程：唤醒时不会走 try_to_wake_up（设置为NULL的原因）
+    q->func    = func;  // ep_poll_callback：有数据到达时被调用
 }
 ```
 
@@ -772,7 +813,38 @@ static void ep_rbtree_insert(struct eventpoll *ep, struct epitem *epi)
 2.	为操作参数fd关联的socket的等待队列，注册等待队列项及数据就绪时候的回调函数
 3.	操作eventpoll的红黑树，变更信息
  
-![epoll_ctl_flow]()
+![epoll_ctl_flow](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/epoll/epoll_workflow-optimism.png)
+
+####    ep_poll_callback 是否绑定五元组？
+这是一个常被误解的问题。准确回答：**`ep_poll_callback` 并不是按五元组哈希挂载，而是按 `struct sock` 实例挂载**，具体来说挂在 `sk->sk_wq->wait` 这个等待队列头上。两个推论：
+
+1. **对一个 established TCP sock**：由于内核中 `(saddr, sport, daddr, dport, protocol)` 五元组与 `struct sock` 实例是 1:1 关系（由 `__inet_lookup_established` 通过 `tcp_hashinfo` 哈希定位），所以"每个五元组对应一份 `eppoll_entry`"在事实上成立，但本质是"每个 sock 对应一份"
+2. **对 listener sock**：listener 没有完整五元组（远端二元组未确定），但它同样是一个 `struct sock`，因此 listener 的 `sk_wq->wait` 上也会被挂入一份 `eppoll_entry`
+
+下面这种"一对多"的情况也是合法的，且常见于 prefork/fork 后多进程模型：**同一个 sock 被多个 `eventpoll` 实例（多个 epfd）通过 `epoll_ctl_add` 监听时，该 sock 的 `sk_wq->wait` 上会驻留多份 `eppoll_entry`（每份的 `base` 指向各自的 `epitem`，分别归属不同的 `eventpoll`）**。当数据到达触发 `sk_data_ready` 时，`__wake_up_common` 会沿着链表逐个调用每份 `eppoll_entry.wait.func`（即 `ep_poll_callback`），这正是惊群问题在"多个 epfd 监听同一 listener fd"场景下的物理基础
+
+```mermaid
+graph LR
+  subgraph sockA["struct sock A (5tuple: a)"]
+    wqA["sk_wq->wait (list_head)"]
+  end
+  subgraph sockB["struct sock B (5tuple: b)"]
+    wqB["sk_wq->wait (list_head)"]
+  end
+  subgraph ep1["eventpoll #1"]
+    epi1A["epitem(sockA)"]
+    epi1B["epitem(sockB)"]
+  end
+  subgraph ep2["eventpoll #2 (另一个进程)"]
+    epi2A["epitem(sockA) <br/>同一 fd 被两个 epfd 监听"]
+  end
+  wqA --> ee1A["eppoll_entry<br/>func=ep_poll_callback<br/>base=epi1A"]
+  wqA --> ee2A["eppoll_entry<br/>func=ep_poll_callback<br/>base=epi2A"]
+  wqB --> ee1B["eppoll_entry<br/>func=ep_poll_callback<br/>base=epi1B"]
+  ee1A -.base.-> epi1A
+  ee2A -.base.-> epi2A
+  ee1B -.base.-> epi1B
+```
 
 ##  0x05    epoll_wait实现：等待就绪connection
 [`epoll_wait`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L2005) 系统调用的核心流程如下，核心调用链为`sys_epoll_wait->ep_poll`
@@ -931,7 +1003,7 @@ static inline void __add_wait_queue_exclusive(wait_queue_head_t *q,
 
 4-5、等待-唤醒机制的经典循环以及唤醒时再检测
 
-6、当前进程主动调用`schedule`让出CPU（`schedule_hrtimeout_range`），主动进入睡眠状态，调度流程可以参考前文[]()
+6、当前进程主动调用`schedule`让出CPU（`schedule_hrtimeout_range`），主动进入睡眠状态，调度流程可以参考前文 [Linux 内核之旅：CFS 调度器](https://pandaychen.github.io/2025/02/05/A-LINUX-KERNEL-TRAVEL-CFS-STUDY-6/)
 
 ```cpp
 int __sched schedule_hrtimeout_range(ktime_t *expires, 
@@ -1019,34 +1091,32 @@ int tcp_v4_rcv(struct sk_buff *skb)
 }
 
 //tcp_v4_do_rcv
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_ipv4.c#L1413
 int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 {
     if (sk->sk_state == TCP_ESTABLISHED) {
-        // TCP_ESTABLISHED：执行连接状态下的数据处理
-		// 暂时只关注这个状态下的数据传输
-        if (tcp_rcv_established(sk, skb, tcp_hdr(skb), skb->len)) {
-			......
-        }
+        // TCP_ESTABLISHED：执行连接状态下的数据处理（暂时只关注此状态）
+        // v4.11.6 中 tcp_rcv_established 返回 void，无须 if 包裹
+        tcp_rcv_established(sk, skb, tcp_hdr(skb), skb->len);
         return 0;
     }
-
     //其它非 ESTABLISH 状态的数据包处理
     ......
 }
 
 //tcp_rcv_established：非常复杂，基于TCP FSM处理
-int tcp_rcv_established(struct sock *sk, struct sk_buff *skb,
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L5388
+void tcp_rcv_established(struct sock *sk, struct sk_buff *skb,
             const struct tcphdr *th, unsigned int len)
 {
     ......
 
     // 1、调用 tcp_queue_rcv ，将接收数据放到 sock 的接收队列sk_receive_queue
-    eaten = tcp_queue_rcv(sk, skb, tcp_header_len,
-                                    &fragstolen);
+    eaten = tcp_queue_rcv(sk, skb, tcp_header_len, &fragstolen);
 	......
-    // 2、数据 ready，唤醒 sock 上阻塞掉的进程
-    sk->sk_data_ready(sk, 0);
-	
+    // 2、数据 ready，唤醒 sock 等待队列上的等待者
+    sk->sk_data_ready(sk);
+
 	......
 }
 
@@ -1074,15 +1144,22 @@ static int __must_check tcp_queue_rcv(struct sock *sk, struct sk_buff *skb, int 
 // 在ep_ptable_queue_proc会把新建的eppoll_entry对象挂到上面这个等待队列链表里面
 static void ep_ptable_queue_proc(struct file *file, wait_queue_head_t *whead, poll_table *pt)
 {
-	//新建一个eppoll_entry对象
-    struct eppoll_entry *pwq;
-    f (epi->nwait >= 0 && (pwq = kmem_cache_alloc(pwq_cache, GFP_KERNEL))) {
-		//初始化pwq（eppoll_entry对象）回调方法
-		init_waitqueue_func_entry(&pwq->wait, ep_poll_callback);
-		//将ep_poll_callback放入socket的等待队列whead（注意不是epoll的等待队列）
-		add_wait_queue(whead, &pwq->wait);
+    struct epitem *epi = ep_item_from_epqueue(pt);
+    struct eppoll_entry *pwq;  //新建一个eppoll_entry对象
+    if (epi->nwait >= 0 && (pwq = kmem_cache_alloc(pwq_cache, GFP_KERNEL))) {
+        //初始化pwq->wait（等待队列项）的回调方法
+        init_waitqueue_func_entry(&pwq->wait, ep_poll_callback);
+        pwq->whead = whead;
+        pwq->base  = epi;
+        //将 pwq->wait 放入socket的等待队列whead（注意不是epoll的等待队列）
+        if (epi->event.events & EPOLLEXCLUSIVE)
+            add_wait_queue_exclusive(whead, &pwq->wait);
+        else
+            add_wait_queue(whead, &pwq->wait);
+        list_add_tail(&pwq->llink, &epi->pwqlist);
+        epi->nwait++;
     }
-	//....
+    ...
 }
 
 // 初始化等待队列项wait_queue_t
@@ -1101,10 +1178,11 @@ static inline void __add_wait_queue(wait_queue_head_t *head, wait_queue_t *new)
 }
 ```
 
-当内核调用 `tcp_queue_rcv` 完成数据接收后，接着再调用 `sk->sk_data_ready` 来唤醒在 `sock.sk_wq` 等待队列上等待的用户进程。前面已经介绍过在`sock_init_data`函数中的这段代码`sk->sk_data_ready = sock_def_readable`，先看下`sock_def_readable`的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/net/core/sock.c#L2397)：
+当内核调用 `tcp_queue_rcv` 完成数据接收后，接着再调用 `sk->sk_data_ready(sk)` 来唤醒在 `sock.sk_wq` 等待队列上等待的用户进程。前面已经介绍过在 `sock_init_data` 函数中的这段代码 `sk->sk_data_ready = sock_def_readable`，先看下 `sock_def_readable` 的[实现](https://elixir.bootlin.com/linux/v4.11.6/source/net/core/sock.c#L2397)：
 
 ```cpp
-static void sock_def_readable(struct sock *sk, int len)
+// https://elixir.bootlin.com/linux/v4.11.6/source/net/core/sock.c#L2397
+static void sock_def_readable(struct sock *sk)
 {
     struct socket_wq *wq;
 
@@ -1113,13 +1191,17 @@ static void sock_def_readable(struct sock *sk, int len)
 
     //判断等待队列不为空
     if (skwq_has_sleeper(wq))
-        //执行等待队列项上的回调函数
+        //唤醒等待队列上的所有 EXCLUSIVE 项（受 nr_exclusive 控制）
+        //会逐个调用 wait_queue_t.func，即 ep_poll_callback
         wake_up_interruptible_sync_poll(&wq->wait, POLLIN | POLLPRI |
                         POLLRDNORM | POLLRDBAND);
+    //向通过 fcntl(F_SETOWN) 注册了 SIGIO 的进程发信号（与 epoll 路径无关）
     sk_wake_async(sk, SOCK_WAKE_WAITD, POLL_IN);
     rcu_read_unlock();
 }
 ```
+
+注意末尾的 `sk_wake_async(sk, SOCK_WAKE_WAITD, POLL_IN)`：它是给老式异步 I/O（即 `fcntl(F_SETOWN)+SIGIO`）的进程发信号用的，与 epoll 工作流没有直接关系，可以暂时忽略
 
 `sock_def_readable`函数中，`skwq_has_sleeper`这里会检测`sk->sk_wq`及sock的等待队列上是否为空`!list_empty(&q->task_list)`
 
@@ -1405,7 +1487,430 @@ static int ep_send_events_proc(struct eventpoll *ep, struct list_head *head,
 }
 ```
 
+####	快速路径 vs 慢速路径下 ep_poll_callback 的触发时机
+前文反复出现 `tcp_rcv_established` 与 `tcp_data_queue`函数，二者都是 v4.11.6 协议栈收包路径的核心，但 `sk_data_ready` 的触发时机有微妙差异，下面分两条路径展开说明
+
+**1、快速路径（Fast Path / Header Prediction）**
+
+`tcp_rcv_established` 一进入就做Header预测，如果 TCP 头字段完全符合预期（无紧急、无 SACK、无窗口变化、序列号等于 `rcv_nxt`），就直接走快速路径，跳过完整的 TCP FSM 状态机处理。命中条件见 [`tcp_input.c`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L5400)：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L5388
+void tcp_rcv_established(struct sock *sk, struct sk_buff *skb,
+             const struct tcphdr *th, unsigned int len)
+{
+    ......
+    // 头预测命中三连：
+    // 1) flag 字段与 pred_flags 完全一致
+    // 2) seq == rcv_nxt（顺序段）
+    // 3) ack_seq 未超 snd_nxt
+    if ((tcp_flag_word(th) & TCP_HP_BITS) == tp->pred_flags &&
+        TCP_SKB_CB(skb)->seq == tp->rcv_nxt &&
+        !after(TCP_SKB_CB(skb)->ack_seq, tp->snd_nxt)) {
+        ......
+        // ── Fast Path：直接入 receive_queue ──
+        eaten = tcp_queue_rcv(sk, skb, tcp_header_len, &fragstolen);
+        ......
+        sk->sk_data_ready(sk);   // ★ 触发 sock_def_readable → ep_poll_callback
+        return;
+    }
+slow_path:
+    ......
+    tcp_data_queue(sk, skb);     // 走慢速路径
+    ......
+}
+```
+
+**2、慢速路径（Slow Path）**
+
+任何Header预测失败（如带 SACK、窗口变化、乱序、紧急、PSH+FIN 等）都进 `slow_path`，最终调用 `tcp_data_queue`，在此函数中又分为三个子分支：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L4561
+static void tcp_data_queue(struct sock *sk, struct sk_buff *skb)
+{
+    ......
+    if (TCP_SKB_CB(skb)->seq == tp->rcv_nxt) {
+        //── 分支 A：有序段（in-sequence in-window）──
+queue_and_out:
+        eaten = tcp_queue_rcv(sk, skb, 0, &fragstolen);
+        tcp_rcv_nxt_update(tp, TCP_SKB_CB(skb)->end_seq);
+        ......
+        if (!RB_EMPTY_ROOT(&tp->out_of_order_queue)) {
+            //── 分支 B：本段填补了空洞，把 OFO 队列里能转正的段批量迁出 ──
+            tcp_ofo_queue(sk);    // OFO -> receive_queue
+            ......
+        }
+        if (!sock_flag(sk, SOCK_DEAD))
+            sk->sk_data_ready(sk);     // ★ 此处触发 ep_poll_callback
+        return;
+    }
+    ......
+    //── 分支 C：纯乱序段（seq > rcv_nxt）──
+    tcp_data_queue_ofo(sk, skb);   // 只挂 out_of_order_queue（rbtree）
+    // ★ 注意：这里不调用 sk_data_ready，所以 epoll 不会收到通知！
+}
+```
+
+**3、关键差异**
+
+| 路径 | 是否触发 `sk_data_ready` | 原因 |
+| --- | --- | --- |
+| Fast Path：Header预测命中 | 是 | 数据有序入 `sk_receive_queue`，用户读得到 |
+| Slow Path-有序段 | 是 | 数据有序入 `sk_receive_queue` |
+| Slow Path-填补空洞 | 是（与有序段共用一次） | OFO 队列中能转正的段被 `tcp_ofo_queue` 批量迁入 `sk_receive_queue` |
+| Slow Path-纯乱序段 | **否** | 数据进 `out_of_order_queue`（rbtree），需要等待重组，用户用 `recv()` 读不到，唤醒无意义 |
+
+```mermaid
+flowchart TD
+    A["tcp_v4_rcv（软中断）"] --> B[tcp_v4_do_rcv]
+    B --> C[tcp_rcv_established]
+    C -->|"Header Prediction OK"| D[Fast Path]
+    C -->|"Header Prediction FAIL"| E["slow_path:<br/>tcp_data_queue"]
+    D --> D1[tcp_queue_rcv]
+    D1 --> D2["sk->sk_data_ready(sk)"]
+    E -->|"seq == rcv_nxt"| F1[tcp_queue_rcv]
+    F1 --> F2["tcp_ofo_queue<br/>(若 OFO 队列非空)"]
+    F2 --> F3["sk->sk_data_ready(sk)"]
+    E -->|"seq > rcv_nxt 乱序"| G1[tcp_data_queue_ofo]
+    G1 --> G2["挂 out_of_order_queue<br/>不通知 epoll!"]
+    D2 --> Z["sock_def_readable<br/>→ wake_up_interruptible_sync_poll<br/>→ ep_poll_callback"]
+    F3 --> Z
+    G2 -.->|"等待后续有序段到达<br/>填补空洞，再批量迁出"| F2
+```
+
+**4、对应用层的含义**
+
+- 乱序数据到达时，**应用通过 epoll 是观察不到的**（实际上用户态 `recvfrom` 也读不到，因为协议栈本就不允许越过空洞读）
+- 一旦空洞被填补，所有积累的有序数据会通过**一次** `sk_data_ready` 通知 epoll，这也是 epoll **不会丢事件**的保证
+- **这也解释了 ET 模式必须配合 `while(read)` 直到 `EAGAIN` 的原因，一次唤醒可能对应多个段的合并入队**
+
+####	epitem.rdllink 与 eventpoll.rdllist 的生命周期
+
+```c
+struct eventpoll *ep;
+struct epitem *epi;
+```
+
+在代码中，经常可以看到`epitem.rdllink` 与 `eventpoll.rdllist`关联用法，二者的关系就是经典内核侵入式链表（intrusive list）的 head/node 关系。解释如下：
+
+-  `eventpoll.rdllist` 是**链表头**（`struct list_head`），驻留在 `eventpoll` 对象中，全局唯一
+-  `epitem.rdllink` 是**链表节点**（也是 `struct list_head`），每个 `epitem` 都有一份；它通过 `list_add_tail(&epi->rdllink, &ep->rdllist)` 串联到 `rdllist` 上
+-   并发安全性：所有对 `rdllist`/`rdllink` 的修改都在 `ep->lock`（spinlock，禁中断）保护下进行，因为 `ep_poll_callback` 可能从软中断上下文调用
+
+下表梳理 `rdllink` 的完整生命周期：
+
+| 阶段 | 操作位置 | 动作 | 涉及代码 |
+| :--- | :--- | :--- | :--- |
+| 注册（ADD） | `ep_insert` | 仅 `INIT_LIST_HEAD(&epi->rdllink)`，节点为空，不在任何链表上 | [`fs/eventpoll.c#L1293`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L1293) |
+| 就绪 | `ep_poll_callback` | `list_add_tail(&epi->rdllink, &ep->rdllist)`，节点入链 | [`fs/eventpoll.c#L1058`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L1058) |
+| 上报 | `ep_scan_ready_list` | `list_splice_init(&ep->rdllist, &txlist)`，整链转移到栈上 `txlist` | [`fs/eventpoll.c#L666`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L666) |
+| ET 模式 | `ep_send_events_proc` | `list_del_init(&epi->rdllink)`，永久脱链（除非状态再次变化） | [`fs/eventpoll.c#L1430`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L1430) |
+| LT 模式 | `ep_send_events_proc` | `list_add_tail(&epi->rdllink, &ep->rdllist)`，重新入链供下次检查 | [`fs/eventpoll.c#L1467`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L1467) |
+| 移除（DEL） | `ep_remove` | `list_del_init(&epi->rdllink)`，脱链 + 释放 epitem | [`fs/eventpoll.c#L697`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L697) |
+
+下图状态机展示一个 `epitem` 在 LT/ET 两种模式下的链表状态翻转
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle: ep_insert<br/>INIT_LIST_HEAD
+    Idle --> InList: ep_poll_callback<br/>list_add_tail
+    InList --> InTxlist: ep_scan_ready_list<br/>list_splice_init
+    InTxlist --> Idle: ET 模式<br/>且数据已读完
+    InTxlist --> InList: LT 模式<br/>list_add_tail 重新入链
+    InList --> Removed: ep_remove<br/>list_del_init
+    Idle --> Removed: ep_remove
+    Removed --> [*]
+```
+
+所以，这个说法**epoll 的就绪 fd 都挂在一个链表上**是不准确的，精确版本是，每个 `eventpoll` 结构实例都有自己的 `rdllist`，它串起了**本实例内**所有就绪的 `epitem`；同一个 fd 若同时被多个 epfd 监听，则会被多个 rdllist 各自串住一份对应的 `epitem`
+
 ##  0x07    番外
+
+####    epitem / ep_pqueue / poll_table / eppoll_entry 四结构体全景
+前文 `0x04` 节简要列出了四个epoll核心的数据结构，这里集中梳理它们各自的归属、生命周期与互相关系，这是理解 epoll 内部最重要的全景图
+
+**1、归属与生命周期分类**
+
+| 结构 | 归属（驻留位置） | 生命周期 | 实例数量 | 关键指针 |
+| :--- | :--- | :--- | :--- | :--- |
+| `epitem` | **eventpoll 全局**（挂在 `ep->rbr` rbtree、`ep->rdllist` 链表） | 自 `ep_insert` 起至 `ep_remove` / fd 关闭 | 每个 `(epfd, fd)` 对一个 | `ep`、`ffd`、`pwqlist` |
+| `ep_pqueue` | **栈上临时**（`ep_insert` 局部变量） | 仅 `ep_insert` 内一次 ADD 期间 | 每次 ADD 一个 | 包含 `pt` 与 `epi` |
+| `poll_table` | 栈上临时（即 `ep_pqueue.pt`，二者地址重合） | 同上 | 同上 | `_qproc`、`_key` |
+| `eppoll_entry` | **socket 持久**（挂在 `sk->sk_wq->wait`，同时挂在 `epi->pwqlist`） | 自 `ep_ptable_queue_proc` 起至 `ep_remove` | 每个 `(epitem, sk)` 一份（同一 fd 被多个 epfd 监听时同 sk 上会有多份） | `base`、`wait`、`whead` |
+
+**核心区分**：
+
+- **epitem 与 eppoll_entry 是持久结构**，监听期间一直存在；前者归属于 `eventpoll`，后者归属于 `sock`
+- **ep_pqueue 与 poll_table 是栈上一次性结构**，只在 `epoll_ctl(EPOLL_CTL_ADD)` 调用栈展开期间存在，仅扮演**把回调注册到 sock 等待队列**的临时桥梁角色
+
+**2、五对象引用拓扑（含 `struct sock`）**
+
+```mermaid
+graph LR
+  subgraph EventPoll["struct eventpoll (epfd)"]
+    rbr["rbr (rbtree)"]
+    rdllist["rdllist (list_head)"]
+    epwq["wq (waitqueue<br/>for epoll_wait)"]
+  end
+  subgraph Sock["struct sock (fd)"]
+    skwq["sk_wq->wait (waitqueue)"]
+    rcvq["sk_receive_queue"]
+  end
+  subgraph Epi["struct epitem"]
+    rbn["rbn (rb_node)"]
+    rdllink["rdllink (list_head node)"]
+    ffd["ffd (struct,file,fd)"]
+    pwqlist["pwqlist (list_head)"]
+    epPtr["ep -> eventpoll"]
+  end
+  subgraph Eppoll["struct eppoll_entry"]
+    base["base -> epitem"]
+    wait["wait (wait_queue_t,func=ep_poll_callback)"]
+    whead["whead -> sk_wq->wait"]
+    llink["llink (in epi->pwqlist)"]
+  end
+  rbr -.contains.-> rbn
+  rdllist -.contains.-> rdllink
+  pwqlist -.contains.-> llink
+  skwq -.contains.-> wait
+  base --> Epi
+  epPtr --> EventPoll
+  whead --> skwq
+  ffd -.points to.-> Sock
+```
+
+图中可以直观看出四类对象的两两关联：
+
+- `epitem` 在 `eventpoll` 一侧通过 `rbn` 进 rbtree、通过 `rdllink` 进 rdllist
+- `epitem` 在 `eventpoll` 内部通过 `pwqlist` 串起所有归属于自己的 `eppoll_entry`（同一 fd 通过 epoll set 监听到多个文件时会有多份）
+- `eppoll_entry.wait` 则越界挂到 `sk_wq->wait`，构成 socket 这一侧的接入点
+- 当 sock 上有数据，`sk_wq->wait` 被唤醒 → 调用 `eppoll_entry.wait.func`（`ep_poll_callback`）→ 通过 `base` 反向找到 `epitem` → 通过 `epitem.ep` 找到 `eventpoll` → 把 `rdllink` 加入 `rdllist`，再唤醒 `eventpoll.wq`。**整个sock 侧到epoll 侧的跨越就是靠 `eppoll_entry` 双向枢纽完成的**
+
+更直观的物理对应关系如图：
+
+![epoll_all_relations](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/epoll/epoll_all_relations_without_rbtree.png)
+
+####    epoll 体系的回调函数对比
+本小节梳理下epoll完整路径中，涉及到的回调函数，按照**注册位置 → 挂载点 → 触发时机 → 作用**四个维度对比
+
+| 回调 | 注册位置 / 何时设置 | 挂载到 | 触发场景 | private 字段 | 作用 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `sock_def_readable` | `sock_init_data`（创建 sock 时） | `sk->sk_data_ready` 字段 | 协议栈把有序数据放入 `sk_receive_queue` 后 | — | 入口函数：遍历 `sk_wq->wait` 唤醒等待者 |
+| `ep_ptable_queue_proc` | `init_poll_funcptr`（`ep_insert` 内） | `poll_table._qproc` 字段 | `f_op->poll()`→`tcp_poll()`→`poll_wait()` 时（**仅一次**） | — | **一次性桥梁**：分配 `eppoll_entry`，把 `ep_poll_callback` 挂到 `sk_wq->wait` |
+| `ep_poll_callback` | `init_waitqueue_func_entry`（在 `ep_ptable_queue_proc` 内） | `eppoll_entry.wait.func`（即 `sk_wq->wait` 链表元素的 func） | 每次 `sk_data_ready`、`sk_state_change`、`sk_error_report` 唤醒 sk_wq | **NULL**（不绑进程） | **常驻消费者**：把 `epi` 加入 `ep->rdllist`，再唤醒 `ep->wq` |
+| `default_wake_function` | `init_waitqueue_entry`（`ep_poll` 内） | `ep->wq` 链表元素的 `.func` | `ep_poll_callback` 末尾 `wake_up_locked(&ep->wq)` 时 | **当前进程 `task_struct`** | 通过 `try_to_wake_up(curr->private, ...)` 把阻塞在 `epoll_wait` 的进程拉回 runqueue |
+
+
+**回调函数的链式触发时序**
+
+```mermaid
+sequenceDiagram
+    participant NET as 软中断 ksoftirqd
+    participant SK as sock<br/>(sk_data_ready)
+    participant SKWQ as sk_wq->wait<br/>(挂 eppoll_entry)
+    participant EPC as ep_poll_callback
+    participant EP as eventpoll<br/>(rdllist + wq)
+    participant DWF as default_wake_function
+    participant USR as epoll_wait 进程
+    Note over NET: 收到 TCP 段并入 receive_queue
+    NET->>SK: 调 sk->sk_data_ready(sk)<br/>= sock_def_readable
+    SK->>SKWQ: wake_up_interruptible_sync_poll
+    SKWQ->>EPC: 逐个调 wait.func<br/>= ep_poll_callback
+    EPC->>EP: list_add_tail(&epi->rdllink,<br/>&ep->rdllist)
+    EPC->>EP: wake_up_locked(&ep->wq)
+    EP->>DWF: 调 wq 上每个元素的<br/>.func = default_wake_function
+    DWF->>USR: try_to_wake_up(<br/>task_struct = curr->private)
+    USR-->>USR: 从 schedule() 返回<br/>继续执行 ep_send_events
+```
+
+**关键洞察**：
+
+- `ep_ptable_queue_proc` 是一次性桥梁，它只在 `EPOLL_CTL_ADD` 时被 `poll_wait` 间接调用一次，作用就是把 `ep_poll_callback` 这个常驻钩子对象植入 `sk_wq->wait` 链表。**之后它就再也不会被调用**
+- `ep_poll_callback` 是常驻消费者，每次 sk 上有数据/状态变化都会触发；它特意把 `private` 设为 NULL，**就是为了避免在 sk 唤醒时直接调 `try_to_wake_up` 唤醒应用进程**（那将退化为同步阻塞 IO 的低效模型），而是先把 epi 入 rdllist，再统一通过 `ep->wq` 唤醒进程
+- 这种两级解耦是 epoll 区别于 `select/poll` 的核心优势：内核协议栈 sock 侧的就绪事件被异步缓存到 rdllist，应用进程被唤醒后只需扫一遍 rdllist 即可，**无需重新遍历整个监听集合**
+
+####    fd 关闭时的通知链
+fd 关闭是 epoll 实际工程中最容易踩坑的场景，需要从协议栈与 epoll 双侧同时理解。下面按三种典型情形展开
+
+**1、应用主动关闭 `close(fd)`**
+
+调用链路（v4.11.6）：
+
+```
+close(fd)
+  └─> __close_fd
+       └─> filp_close
+            └─> fput
+                 └─> ____fput
+                      └─> __fput
+                           ├─> file->f_op->release  // socket_file_ops.release = sock_close
+                           │     └─> __sock_release
+                           │          └─> sock->ops->release  // inet_release
+                           │               └─> tcp_close
+                           │                    ├─> tcp_send_fin / tcp_set_state(TCP_CLOSE)
+                           │                    └─> sk_state_change(sk)  // = sock_def_wakeup
+                           │                         └─> wake_up_interruptible_all(&wq->wait)
+                           │                              └─> ep_poll_callback (报 POLLHUP)
+                           └─> eventpoll_release(file)
+                                └─> eventpoll_release_file
+                                     └─> 遍历 file->f_ep_links
+                                          └─> ep_remove(ep, epi)   // 自动从 epoll 卸载
+```
+
+关键代码 [`eventpoll_release_file`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L989)：
+
+```cpp
+// https://elixir.bootlin.com/linux/v4.11.6/source/fs/file_table.c#L187
+static void __fput(struct file *file)
+{
+	struct dentry *dentry = file->f_path.dentry;
+	struct vfsmount *mnt = file->f_path.mnt;
+	struct inode *inode = file->f_inode;
+
+	might_sleep();
+
+	fsnotify_close(file);
+	/*
+	 * The function eventpoll_release() should be the first called
+	 * in the file cleanup chain.
+	 */
+	eventpoll_release(file);
+    ......
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/eventpoll.h#L42
+static inline void eventpoll_release(struct file *file)
+{
+
+	/*
+	 * Fast check to avoid the get/release of the semaphore. Since
+	 * we're doing this outside the semaphore lock, it might return
+	 * false negatives, but we don't care. It'll help in 99.99% of cases
+	 * to avoid the semaphore lock. False positives simply cannot happen
+	 * because the file in on the way to be removed and nobody ( but
+	 * eventpoll ) has still a reference to this file.
+	 */
+	if (likely(list_empty(&file->f_ep_links)))
+		return;
+
+	/*
+	 * The file is being closed while it is still linked to an epoll
+	 * descriptor. We need to handle this by correctly unlinking it
+	 * from its containers.
+	 */
+	eventpoll_release_file(file);
+}
+
+// 当 file 引用计数归零时被 __fput 调用
+void eventpoll_release_file(struct file *file)
+{
+    struct eventpoll *ep;
+    struct epitem *epi, *next;
+
+    mutex_lock(&epmutex);
+    // 一个 file 可能同时被多个 epoll 监听，所以是 list 遍历
+    list_for_each_entry_safe(epi, next, &file->f_ep_links, fllink) {
+        ep = epi->ep;
+        mutex_lock_nested(&ep->mtx, 0);
+        ep_remove(ep, epi);   // 从对应 eventpoll 上彻底卸载
+        mutex_unlock(&ep->mtx);
+    }
+    mutex_unlock(&epmutex);
+}
+```
+
+**一个常见误区**：close fd 后必须先 `EPOLL_CTL_DEL`，否则会内存泄露？
+
+从上面的代码，`__fput` 路径下的 `eventpoll_release` 会**自动**调 `ep_remove`，但需要满足**该 fd 没有其他 dup（如 `fork` 共享 fdtable 后 dup）持有该 file 引用**这个前提；如果有 dup 引用，close 只是引用计数减 1，**eventpoll 仍持有该 file 的间接引用**（实际上 epoll 不持有 file refcnt，只是 epitem 还在 rbtree 里），事件继续上报，直到最后一份 file 被释放才触发清理。所以**正确的工程建议是：close 之前显式调用 `EPOLL_CTL_DEL`**，避免在多线程/dup 场景下出现close 后仍收到该 fd 事件的 bug
+
+**2、对端发 FIN（半关闭）**
+
+软中断收到带 FIN 的数据包后：
+
+```cpp
+// https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L4135
+void tcp_fin(struct sock *sk)
+{
+    inet_csk_schedule_ack(sk);
+    sk->sk_shutdown |= RCV_SHUTDOWN;
+    sock_set_flag(sk, SOCK_DONE);
+    // 状态机切换：ESTABLISHED -> CLOSE_WAIT，FIN_WAIT_2 -> TIME_WAIT 等
+    switch (sk->sk_state) { case TCP_ESTABLISHED: tcp_set_state(sk, TCP_CLOSE_WAIT); break; ... }
+    ......
+    if (!sock_flag(sk, SOCK_DEAD)) {
+        sk->sk_state_change(sk);    // = sock_def_wakeup -> 唤醒 sk_wq，上报 POLLHUP（仅 shutdown==SHUTDOWN_MASK 时）
+        if (sk->sk_shutdown == SHUTDOWN_MASK || sk->sk_state == TCP_CLOSE)
+            sk_wake_async(sk, SOCK_WAKE_WAITD, POLL_HUP);
+        else
+            sk_wake_async(sk, SOCK_WAKE_WAITD, POLL_IN);
+    }
+    ......
+}
+```
+
+注意 `tcp_fin` 是被 `tcp_data_queue` 在[分支 A](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L4609)（in-sequence）末尾[调用](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L4644)的（见前文），所以 **`tcp_data_queue` 末尾的 `sk_data_ready(sk)` 会带着 `EPOLLIN | EPOLLRDHUP` 一起通知 epoll**。`tcp_poll()`（即 `f_op->poll`）会根据当前 sock 状态构造 `revents`：
+
+- `sock_flag(sk, SOCK_DONE) == 1 && sk->sk_shutdown & RCV_SHUTDOWN` → 上报 `EPOLLRDHUP`
+- `sk->sk_state == TCP_CLOSE_WAIT` → 同时上报 `EPOLLIN`（当应用 read 返回 `0`时，发现对端关闭）
+
+**3、对端发 RST（强制关闭）**
+
+当对端（向本端）发送RST，正常情况下，本端的内核调用链为`tcp_v4_rcv → tcp_v4_do_rcv → tcp_rcv_established → tcp_validate_incoming → tcp_reset → sk_error_report`，用户态的 epoll 随后会收到 EPOLLHUP 或 EPOLLERR 信号，再次调用 read() 时，系统调用就会返回 `-1` 并带上内核在 `tcp_reset` 中赋予的 `ECONNRESET` 错误码
+
+```cpp
+// https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L4097
+void tcp_reset(struct sock *sk)
+{
+    switch (sk->sk_state) {
+    case TCP_SYN_SENT:  sk->sk_err = ECONNREFUSED; break;
+    case TCP_CLOSE_WAIT: sk->sk_err = EPIPE;        break;
+    case TCP_CLOSE:     return;
+    default:            sk->sk_err = ECONNRESET;
+    }
+    smp_wmb();
+    if (!sock_flag(sk, SOCK_DEAD))
+        sk->sk_error_report(sk);    // = sock_def_error_report
+    tcp_done(sk);                   // 状态切到 TCP_CLOSE，触发 sk_state_change
+}
+```
+
+`sock_def_error_report` 调用 `wake_up_interruptible_poll(&wq->wait, POLLERR)` ，这同样会触发 `ep_poll_callback`，最终 `tcp_poll` 看到 `sk->sk_err != 0` 上报 `EPOLLERR | EPOLLHUP`
+
+**4、三场景汇总流程图**
+
+```mermaid
+flowchart TD
+    subgraph C1["场景1: 应用主动 close(fd)"]
+        A1["close()"] --> A2["__fput"]
+        A2 --> A3["tcp_close<br/>(sk_state_change<br/>=sock_def_wakeup)"]
+        A2 --> A4["eventpoll_release_file<br/>遍历 f_ep_links 调 ep_remove"]
+        A3 --> Z["ep_poll_callback<br/>(报 POLLHUP)"]
+    end
+    subgraph C2["场景2: 对端 FIN 半关闭"]
+        B1["tcp_v4_rcv (收到 FIN)"] --> B2["tcp_data_queue<br/>(in-sequence分支)"]
+        B2 --> B3["tcp_fin<br/>(sk_state=CLOSE_WAIT<br/>sk_state_change)"]
+        B2 --> B4["sk_data_ready"]
+        B3 --> Z
+        B4 --> Z
+        Z --> B5["tcp_poll 上报<br/>EPOLLIN | EPOLLRDHUP"]
+    end
+    subgraph C3["场景3: 对端 RST 强制关闭"]
+        D1["tcp_v4_rcv (收到 RST)"] --> D2["tcp_reset<br/>(sk_err=ECONNRESET)"]
+        D2 --> D3["sk_error_report<br/>=sock_def_error_report"]
+        D2 --> D4["tcp_done<br/>(状态切 TCP_CLOSE)"]
+        D3 --> Z2["ep_poll_callback<br/>(报 POLLERR)"]
+        D4 --> Z2
+        Z2 --> D5["tcp_poll 上报<br/>EPOLLERR | EPOLLHUP"]
+    end
+```
+
+**5、应用层处理建议**
+
+- 在 `epoll_wait` 返回的 events 上同时检查 `EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR` 等四个标志
+- `EPOLLRDHUP` 表示"对端发 FIN，本端可读端关闭"，可继续 `read` 直到返回 `0`，然后调用 `close`
+- `EPOLLHUP` 与 `EPOLLERR` 是**强制上报的**（即便没在 `epoll_ctl` 时注册），表示连接已不可用，应直接 `close`
+- close 之前显式调用 `EPOLL_CTL_DEL`，避免 dup/fork 场景下的幽灵事件
 
 ####	`EPOLL_CTL_DEL` AND `EPOLL_CTL_MOD`的流程
 `EPOLL_CTL_DEL`关联实现为`ep_remove()`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L697)，主要流程围绕解绑事件关联、清理数据结构、释放资源等
@@ -1555,21 +2060,307 @@ check_events:
 ```
 
 ####	epoll机制下的回调函数
-epoll在内核的运作机制中主要使用到`3`类回调函数：
+epoll 内核运作机制中涉及的 4 类回调函数（详细解读参考`0x07`章节）
 
--	`sock_def_readable`：内核在三次握手创建完整的`struct sock`结构并初始化时，设置成员`sk_data_ready`的默认值
--	`ep_poll_callback`：当调用`epoll_ctl` 时添加到 socket/sock 上，本质是向`struct sock`的`sk_wq`等待队列头添加了一个等待项（`.private`为`NULL`，`.func`为`ep_poll_callback`）
--	`default_wake_function`：当调用`epoll_wait`时，设置到 `epollevent`等待队列上，本质是向`struct eventpoll`的`wq`等待队列头添加了一个等待项（`.private`为当前进程，`.func`为`default_wake_function`）
+-	`sock_def_readable`：在 `sock_init_data` 中赋给 `sk->sk_data_ready`，是协议栈数据可读时的入口
+-	`ep_ptable_queue_proc`：在 `ep_insert` 中通过 `init_poll_funcptr` 注册到 `poll_table._qproc`，**只在 `EPOLL_CTL_ADD` 阶段被 `poll_wait` 调用一次**，作用是创建 `eppoll_entry` 并把 `ep_poll_callback` 挂到 `sk_wq->wait`
+-	`ep_poll_callback`：在 `ep_ptable_queue_proc` 内通过 `init_waitqueue_func_entry` 注册到 `eppoll_entry.wait.func`，是 sock 等待队列上的**常驻消费者**（`.private` 为 `NULL`）
+-	`default_wake_function`：在 `ep_poll` 内通过 `init_waitqueue_entry` 注册到 `ep->wq` 等待项的 `.func`（`.private` 为当前进程），负责把 `epoll_wait` 阻塞的进程拉回 runqueue
 
-##	0x08	惊群问题（`epoll_wait`+IO多路复用机制下）
+##	0x08	惊群问题（`epoll_wait`+IO 多路复用机制下）
+惊群（thundering herd）是高并发服务端开发中最经典的问题之一。本小节从内核源码角度拆解 v4.11.6 上 epoll 惊群的成因，以及 `EPOLLEXCLUSIVE` 与 `SO_REUSEPORT` 两种主流解法
 
 ####	惊群问题的本质
+epoll 场景下的惊群严格来说有**两种不同形态**，本小节分别讨论
 
-####	解决方案一：EPOLLEXCLUSIVE选项
+**形态 A：多进程/多线程共享同一个 epfd**
 
-####	解决方案二：SO_REUSEPORT技术
+典型代码模式：父进程 `epoll_create()` 创建 epfd 并 `epoll_ctl_add(listen_fd)`，然后 `fork()` 出 N 个 worker，所有 worker 都在同一个 epfd 上 `epoll_wait`。此时：
 
-[`reuseport_select_sock`](https://elixir.bootlin.com/linux/v4.11.6/source/net/core/sock_reuseport.c#L196)
+- 同一个 `eventpoll.wq` 上挂了 N 个等待项（每个 worker 一份）
+- 当 listener sock 上有新连接到达，`ep_poll_callback` 调 `wake_up_locked(&ep->wq)`
+- `__wake_up_common` 默认遍历整个 wq 链表，唤醒所有非 EXCLUSIVE 的等待项
+- **N 个 worker 同时被唤醒**，但只有一个能成功 `accept`，其他 N-1 个（进程）白做了一次上下文切换
+
+**形态 B：多进程各自 epoll，但都监听同一个 listener fd**
+
+典型代码模式：先 `socket()+bind()+listen()` 拿到 listen_fd，再 `fork()`，每个 worker 各自 `epoll_create()` 并 `epoll_ctl_add(listen_fd)`。此时：
+
+- listener sock 的 `sk_wq->wait` 上挂了 N 个 `eppoll_entry`（每个 worker 一份，`base` 分别指向各自 epfd 内的 epitem）
+- 当新连接到达，`sock_def_readable → wake_up_interruptible_sync_poll` 遍历整个 `sk_wq->wait`
+- **N 个 `ep_poll_callback` 都被触发**，N 个 epfd 都把 epi 加入各自的 rdllist，并唤醒各自的 `ep->wq`
+- N 个 worker 同时被唤醒，同样只有一个能 `accept` 成功
+
+两种形态的根本原因都是**等待队列被多个等待项注册了"非互斥"的唤醒回调**。下图对比两种形态：
+
+```mermaid
+flowchart LR
+    subgraph A["形态A: 共享epfd"]
+        epA[epfd1]
+        wqA["ep->wq<br/>(挂4个等待项)"]
+        epA --> wqA
+        wqA --> w1[worker1] & w2[worker2] & w3[worker3] & w4[worker4]
+    end
+    subgraph B["形态B: 共享listenfd"]
+        lsk["listen_sock<br/>sk_wq->wait"]
+        lsk --> ee1[eppoll1] --> epfdB1[epfd1] --> wB1[worker1]
+        lsk --> ee2[eppoll2] --> epfdB2[epfd2] --> wB2[worker2]
+        lsk --> ee3[eppoll3] --> epfdB3[epfd3] --> wB3[worker3]
+        lsk --> ee4[eppoll4] --> epfdB4[epfd4] --> wB4[worker4]
+    end
+```
+
+形态 A 中 epoll 默认就用 `__add_wait_queue_exclusive`（见 `ep_poll` 中的 `__add_wait_queue_exclusive(&ep->wq, &wait)`），所以**形态 A 在 v4.11.6 上其实已经基本不惊群**了：`__wake_up_common` 看到 `WQ_FLAG_EXCLUSIVE` 后只唤醒 1 个 worker 就 break。但形态 B 是新增的惊群源，需要 `EPOLLEXCLUSIVE` 来解决
+
+####	解决方案一：EPOLLEXCLUSIVE 选项（针对形态 B）
+`EPOLLEXCLUSIVE` 是 4.5 版本内核引入的 epoll 标志位，专门用来缓解形态 B，其工作原理是把 sock 侧的 `eppoll_entry.wait` 设置为互斥，使得 `wake_up_interruptible_sync_poll` 遍历 `sk_wq->wait` 时**遇到一个被消费的 EXCLUSIVE 项就 break**
+
+**1、注册侧：在 `sk_wq->wait` 上设置 `WQ_FLAG_EXCLUSIVE`**
+
+回看 `ep_ptable_queue_proc`：
+
+```cpp
+// https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L1090
+static void ep_ptable_queue_proc(struct file *file, wait_queue_head_t *whead,
+                 poll_table *pt)
+{
+    struct epitem *epi = ep_item_from_epqueue(pt);
+    struct eppoll_entry *pwq;
+    if (epi->nwait >= 0 && (pwq = kmem_cache_alloc(pwq_cache, GFP_KERNEL))) {
+        init_waitqueue_func_entry(&pwq->wait, ep_poll_callback);
+        pwq->whead = whead;
+        pwq->base  = epi;
+        if (epi->event.events & EPOLLEXCLUSIVE)
+            add_wait_queue_exclusive(whead, &pwq->wait); // ★ 设置 WQ_FLAG_EXCLUSIVE
+        else
+            add_wait_queue(whead, &pwq->wait);
+        ......
+    }
+}
+```
+
+`add_wait_queue_exclusive` 与 `add_wait_queue` 的差别就是前者会置位 `wait->flags |= WQ_FLAG_EXCLUSIVE`，并且追加到队尾（而非头部），这样唤醒遍历时所有非互斥项排在前面，互斥项排在末尾
+
+**2、唤醒侧：`__wake_up_common` 的"消费即停"逻辑**
+
+```cpp
+// https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/wait.c#L74
+static void __wake_up_common(wait_queue_head_t *q, unsigned int mode,
+            int nr_exclusive, int wake_flags, void *key)
+{
+    wait_queue_t *curr, *next;
+    list_for_each_entry_safe(curr, next, &q->task_list, task_list) {
+        unsigned flags = curr->flags;
+        // ★ 关键：func 返回非 0 表示"已消费"
+        //   若该项是 EXCLUSIVE，且 nr_exclusive 减到 0，就 break
+        if (curr->func(curr, mode, wake_flags, key) &&
+                (flags & WQ_FLAG_EXCLUSIVE) && !--nr_exclusive)
+            break;
+    }
+}
+```
+
+`wake_up_interruptible_sync_poll` 调用此函数时 `nr_exclusive = 1`，所以最多只唤醒 1 个 EXCLUSIVE 项
+
+**3、`ep_poll_callback` 的配合：`ewake` 返回值**
+
+光让 `ep_poll_callback` 总是返回 `1` 是不够的，如果 epoll 自己的 `ep->wq` 上没人等（即没有进程在 `epoll_wait`），那这个 epfd **并没有真正消费事件**，应该让下一个 epfd 继续被尝试唤醒。v4.11.6 内核在 `ep_poll_callback` [末尾](https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L1004)做了这件事：
+
+```cpp
+// https://elixir.bootlin.com/linux/v4.11.6/source/fs/eventpoll.c#L1057
+static int ep_poll_callback(wait_queue_t *wait, unsigned mode, int sync, void *key)
+{
+    int pwake = 0;
+    struct epitem *epi = ep_item_from_wait(wait);
+    struct eventpoll *ep = epi->ep;
+    int ewake = 0;
+    ......
+    if (waitqueue_active(&ep->wq)) {
+        // ★ 只有 ep->wq 上确实有进程在等 + 事件类型匹配，才置 ewake=1
+        if ((epi->event.events & EPOLLEXCLUSIVE) &&
+                    !((unsigned long)key & POLLFREE)) {
+            switch ((unsigned long)key & EPOLLINOUT_BITS) {
+            case POLLIN:
+                if (epi->event.events & POLLIN)  ewake = 1; break;
+            case POLLOUT:
+                if (epi->event.events & POLLOUT) ewake = 1; break;
+            case 0:
+                ewake = 1; break;
+            }
+        }
+        wake_up_locked(&ep->wq);
+    }
+    ......
+    // ★ EPOLLEXCLUSIVE 模式下，把"是否真消费"的信号返回给 __wake_up_common
+    if (epi->event.events & EPOLLEXCLUSIVE)
+        return ewake;
+    return 1;
+}
+```
+
+这样 `__wake_up_common` 拿到 `func` 的返回值后：
+
+- 返回 0（`ewake == 0`，说明本 epfd 实际没人等）→ 继续往下遍历下一个 epfd
+- 返回 1（`ewake == 1`，说明本 epfd 已唤醒一个进程）→ `nr_exclusive--`，若归零则 break
+
+**4、效果时序图**
+
+```mermaid
+sequenceDiagram
+    participant NET as 软中断
+    participant LWQ as listen_sock<br/>sk_wq->wait
+    participant E1 as eppoll_entry1<br/>(EXCLUSIVE)
+    participant E2 as eppoll_entry2<br/>(EXCLUSIVE)
+    participant EP1 as epfd1->wq
+    participant EP2 as epfd2->wq
+    Note over NET: 新连接到达 listener
+    NET->>LWQ: wake_up_interruptible_sync_poll<br/>nr_exclusive=1
+    LWQ->>E1: 调 ep_poll_callback
+    E1->>EP1: wake_up_locked(ep1->wq)
+    E1-->>LWQ: 返回 ewake=1
+    Note over LWQ: nr_exclusive 减为 0, break!
+    Note over E2: ep_poll_callback 不被调用<br/>epfd2 worker 不被惊扰
+```
+
+**5、注意事项**
+
+- `EPOLLEXCLUSIVE` 只能用在 `EPOLL_CTL_ADD` 时设置，不能 `MOD`
+- 不能与 `EPOLLONESHOT` 共用
+- 解决的是**多个 epfd 监听同一 fd**的场景；如果是**多 worker 共享同一 epfd**，可以不用，因为 `__add_wait_queue_exclusive(&ep->wq, &wait)` 在 `ep_poll` 中已经默认互斥
+
+####	解决方案二：SO_REUSEPORT 技术（从根本上避免惊群）
+
+`SO_REUSEPORT` 是另外一种解决思路：让**多个 listener sock 各自绑定同一个 `(addr, port)`**，三次握手到达时由内核做负载均衡，**只把请求送到其中一个 sock**。这样从根本上避免了**同一 sock 触发多个监听者**的问题
+
+**1、用户态用法**
+
+```c
+// 每个 worker 独立创建 socket 并设置 SO_REUSEPORT
+int sk = socket(AF_INET, SOCK_STREAM, 0);
+int one = 1;
+setsockopt(sk, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
+bind(sk, ...);   // 多个 worker bind 同一 (addr, port) 不会 EADDRINUSE
+listen(sk, ...);
+// 每个 worker 各自 epoll_create + epoll_ctl_add(sk)
+```
+
+**2、内核侧：reuseport 组与 `reuseport_select_sock`**
+
+内核为同一 `(addr, port)` 的所有 reuseport sock 维护一个 `struct sock_reuseport` 组：
+
+```cpp
+// https://elixir.bootlin.com/linux/v4.11.6/source/include/net/sock_reuseport.h#L13
+struct sock_reuseport {
+    struct rcu_head     rcu;
+    u16                 max_socks;     // socks[] 容量
+    u16                 num_socks;     // 当前数量
+    struct bpf_prog __rcu *prog;       // 可选：用户态 BPF 选择程序
+    struct sock        *socks[0];      // 所有 reuseport 成员 sock
+};
+```
+
+新 sock 加入组通过 `reuseport_add_sock` 完成
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/core/sock_reuseport.c#L90
+int reuseport_add_sock(struct sock *sk, struct sock *sk2)
+{
+	struct sock_reuseport *reuse;
+
+    ......
+	spin_lock_bh(&reuseport_lock);
+	reuse = rcu_dereference_protected(sk2->sk_reuseport_cb,
+					  lockdep_is_held(&reuseport_lock)),
+	WARN_ONCE(rcu_dereference_protected(sk->sk_reuseport_cb,
+					    lockdep_is_held(&reuseport_lock)),
+		  "socket already in reuseport group");
+
+	if (reuse->num_socks == reuse->max_socks) {
+		reuse = reuseport_grow(reuse);
+		if (!reuse) {
+			spin_unlock_bh(&reuseport_lock);
+			return -ENOMEM;
+		}
+	}
+
+    // 重点看这一行
+	reuse->socks[reuse->num_socks] = sk;
+	smp_wmb();
+	reuse->num_socks++;
+	rcu_assign_pointer(sk->sk_reuseport_cb, reuse);
+
+	spin_unlock_bh(&reuseport_lock);
+
+	return 0;
+}
+```
+
+握手到达时，`__inet_lookup_listener` 命中第一个 reuseport 组成员后，调用 `reuseport_select_sock` 做实际选择：
+
+```cpp
+// https://elixir.bootlin.com/linux/v4.11.6/source/net/core/sock_reuseport.c#L196
+struct sock *reuseport_select_sock(struct sock *sk, u32 hash,
+                                   struct sk_buff *skb, int hdr_len)
+{
+    struct sock_reuseport *reuse;
+    struct bpf_prog *prog;
+    struct sock *sk2 = NULL;
+    u16 socks;
+
+    rcu_read_lock();
+    reuse = rcu_dereference(sk->sk_reuseport_cb);
+    if (!reuse) goto out;
+    prog  = rcu_dereference(reuse->prog);
+    socks = READ_ONCE(reuse->num_socks);
+    if (likely(socks)) {
+        smp_rmb();   // 与 reuseport_add_sock 的 smp_wmb 配对
+        if (prog && skb)
+            // 路径1: 有 BPF 程序 → 跑 BPF 拿到 index
+            sk2 = run_bpf(reuse, socks, prog, skb, hdr_len);
+        else
+            // 路径2: 默认按 hash 取模（基于源 IP/port + 目的 IP/port 计算）
+            sk2 = reuse->socks[reciprocal_scale(hash, socks)];
+    }
+out:
+    rcu_read_unlock();
+    return sk2;
+}
+```
+
+注意 `reciprocal_scale(hash, socks)` 是高效的 `32` 位哈希取模实现（无 `%`），`hash` 实际是 `inet_lhash2_for_each_icsk_rcu` 计算的连接哈希，**确保相同五元组连接稳定落到同一 sock**
+
+**3、整体流程图**
+
+```mermaid
+flowchart TD
+    A["SYN 包到达内核"] --> B["ip_rcv -> tcp_v4_rcv"]
+    B --> C["__inet_lookup_listener"]
+    C --> D{"命中 reuseport 组?"}
+    D -->|"否(单 listener)"| E["返回唯一的 sk"]
+    D -->|"是"| F["reuseport_select_sock(sk, hash, skb)"]
+    F --> G{"reuse->prog?"}
+    G -->|"无 BPF"| H["sk2 = socks[<br/>reciprocal_scale(hash, n)]"]
+    G -->|"有 BPF"| I["sk2 = run_bpf(skb)<br/>返回 socks[index]"]
+    H --> J["仅 sk2 进入<br/>icsk_accept_queue"]
+    I --> J
+    J --> K["仅 sk2 的 sk_data_ready 触发<br/>仅对应 worker 被唤醒"]
+    K --> L["从源头规避惊群"]
+```
+
+**4、对比与组合策略**
+
+| 维度 | EPOLLEXCLUSIVE | SO_REUSEPORT |
+| :--- | :--- | :--- |
+| 内核版本 | 4.5+ | 3.9+ |
+| 解决形态 | 形态 B（多 epfd 共享同一 fd） | 多 worker bind 同一 port |
+| 负载均衡 | 轮转（依赖等待队列顺序，可能不均） | hash 散列或 BPF 决定（可自定义） |
+| fd 数 | 1 个共享 listener fd | N 个独立 listener fd |
+| 性能特征 | 唤醒侧短路，但仍有 1 次 `ep_poll_callback` | 内核直接路由到目标 sock，开销最低 |
+| 是否需要 BPF | 不需要 | 可选（默认 hash） |
+| 进程模型 | 兼容 fork/prefork（共享 fd） | 通常配合 prefork（每 worker 独立 sock） |
+| nginx 使用 | `accept_mutex on` 之外的备选 | 1.9.1+ 直接支持 `reuseport` 关键字 |
+
+**最佳实践**：在 v4.11.6 及以上内核，**优先使用 `SO_REUSEPORT`**避免惊群问题
 
 ##  0x09    总结
 
@@ -1592,6 +2383,7 @@ epoll在内核的运作机制中主要使用到`3`类回调函数：
 epoll机制中，红黑树的作用主要是在`epoll_ctl`操作海量fd时能够快速的定位到相关`epitem`节点，此外还兼顾了查找效率、插入效率、内存开销等多方面因素
 
 ####	`ep_pqueue`、`poll_table`与`eppoll_entry`结构的关系
+
 在介绍`ep_insert`的实现中，出现了三个数据结构`ep_pqueue`、`poll_table` 和 `eppoll_entry`（其中`ep_pqueue`包含了`poll_table`与`epitem`指针）这三者共同实现了高效的事件监听与回调机制。其中**ep_pqueue 是临时桥梁，用于向文件注册回调；poll_table 是标准接口，传递回调函数；eppoll_entry 是持久纽带，绑定文件等待队列与 epoll 监听项**
 
 这里再稍微回顾下`epoll_ctl(EPOLL_CTL_ADD)`的流程，当调用 `epoll_ctl(EPOLL_CTL_ADD)` 添加监听fd时
@@ -1645,26 +2437,96 @@ init_waitqueue_func_entry(&pwq->wait, ep_poll_callback); // 注册回调
 | `poll_table` | 作为标准轮询接口，封装回调函数指针（`_qproc`），由sock操作（`tcp_poll()`）调用 | 作为 `ep_pqueue` 的成员被初始化 |仅在 `epoll_ctl(EPOLL_CTL_ADD)` 期间存在，临时结构 | 提供通用接口，兼容不同文件操作（如 socket、pipe等），解耦 epoll 与具体设备|
 |`eppoll_entry`| 作为持久结构体，绑定sock等待队列与 `epitem`结构，事件发生时触发回调通知 epoll | 由 `ep_pqueue` 的回调函数创建 |存在直到该fd监听被从epoll中移除 | 通过 `wait` 成员长期驻留文件等待队列，实现一次注册+永久监听的高效模型，此外，它还双向链接到 `epitem.pwqlist`，便于监听移除时清理资源（调用 `ep_remove()` 时遍历删除）| 
 
-####	listenfd 与 acceptfd 
+####	listenfd 与 acceptfd
 在 Linux 的 epoll 机制中，通过 `epoll_ctl` 注册的监听套接字（listenfd）和通过 accept 获取的客户端套接字（acceptfd）在内核数据结构、队列机制以及唤醒后的处理流程都是有差异的，如下表：
 
-| - | listenfd（监听套接字）  | acceptfd（客户端套接字） |
-| :-----| :---- | :---- |
-| 类型 | 被动套接字（仅监听），for accept	|  主动套接字（数据通信），for read/write|
-| 关联内核队列	| 全连接队列（Accept Queue），包含连接的 struct sock 结构|读/写缓冲区|
-| 等待队列触发条件 |全连接队列非空（有新连接）|读缓冲区有数据/写缓冲区有空闲空间|
-| 注册事件 | EPOLLIN（新连接到达）	| EPOLLIN（可读）、EPOLLOUT（可写）	|
+| 维度 | listenfd（监听套接字） | acceptfd（客户端套接字） |
+| :--- | :--- | :--- |
+| 类型 | 被动套接字（仅监听），for accept | 主动套接字（数据通信），for read/write |
+| TCP 状态 | `TCP_LISTEN` | `TCP_ESTABLISHED` 等 |
+| 关联内核队列 | 半连接队列（`icsk_accept_queue.rskq_accept_head`）+ 全连接队列（`icsk_accept_queue` 主链） | `sk_receive_queue` / `sk_write_queue` |
+| 等待队列触发条件 | 全连接队列非空（新连接到达） | `sk_receive_queue` 有有序数据 / 发送缓冲区可写 |
+| `sk_data_ready` 触发点 | `tcp_check_req` → `inet_csk_complete_hashdance`，握手完成后由内核显式调用 | `tcp_rcv_established`（fast path）或 `tcp_data_queue`（slow path 有序段） |
+| 注册事件 | `EPOLLIN`（新连接到达） | `EPOLLIN` / `EPOLLOUT` / `EPOLLRDHUP` |
+| `EPOLLIN` 的语义 | 全连接队列非空 → 可 `accept` | `sk_receive_queue` 非空 → 可 `read`；或对端 FIN |
+| `sk_receive_queue` 作用 | **无用**（listener 不收用户数据） | 存储 TCP 段供 `read`/`recvmsg` 消费 |
+| 接收队列存储内容 | 全连接队列存的是 `struct request_sock`（已完成握手的连接） | `sk_buff`（数据包） |
 
-对于sock等待队列机制与唤醒，二者些许区别：
-1、对于acceptfd（sock）：某个已经处于`TCP_ESTABLISHED`状态的socket上有数据到达时，经由`tcp_rcv_established->tcp_queue_rcv`数据被挂在sock的接收队列`sk_receive_queue`上，然后内核触发唤醒过程`sk->sk_data_ready(sk, ...)`
-2、对于 listenfd（sock）：新连接到达，内核完成TCP三次握手流程后加入全连接队列，由于全连接队列非空（有新连接就绪），会[触发]()唤醒流程，内核唤醒 listenfd 的等待队列，调用 `ep_poll_callback` ，会把 `epitem` 加入 `eventpoll` 的就绪队列`rdllist`，从而 `epoll_wait` 返回 `EPOLLIN` 事件
+对于 sock 等待队列机制与唤醒，二者些许区别：
 
-但是注册、唤醒之后（到达应用层之前）的流程本质上是一样的，对于listenfd，epoll 将 `ep_poll_callback` 注册到等待队列，触发后会将 listenfd 对应的 `epitem` 加入 `eventpoll` 的就绪队列`rdllist`；而对于 acceptfd，同样注册 `ep_poll_callback`，当数据到达或缓冲区可写时，将 acceptfd 的 epitem 加入 `rdllist`
+1. **acceptfd（sock）**：处于 `TCP_ESTABLISHED` 状态的 socket 上有数据到达时，经由 `tcp_rcv_established → tcp_queue_rcv`（fast path）或 `tcp_data_queue → tcp_queue_rcv`（slow path 有序段）数据被挂到 sock 的接收队列 `sk_receive_queue`，然后内核触发唤醒 `sk->sk_data_ready(sk)`
+2. **listenfd（sock）**：新连接到达并完成三次握手后，内核执行 `tcp_v4_do_rcv → tcp_v4_hnd_req → tcp_check_req`，在 `tcp_check_req` 末尾调用 `inet_csk_complete_hashdance`，把子 sock 挂入父 listener 的全连接队列，然后调用父 listener 的 `sk_data_ready(parent)`，从而唤醒 listenfd 上的等待者，调用 `ep_poll_callback`，把 listener 对应的 `epitem` 加入 `eventpoll.rdllist`，最终 `epoll_wait` 返回 `EPOLLIN` 事件
 
-此外，对 listenfd而言，其本身无数据收发能力，其接收队列实为全连接队列，存储的是 struct sock 结构（代表已建立的连接），而非数据包。换句话说，listenfd 关联的sock结构的`sk_receive_queue`接收队列实际上是没用的
+但是注册、唤醒之后（到达应用层之前）的流程本质上是一样的：对于 listenfd，epoll 将 `ep_poll_callback` 注册到 listener sock 的 `sk_wq->wait`，触发后会将 listenfd 对应的 `epitem` 加入 `eventpoll` 的就绪队列 `rdllist`；而对于 acceptfd，同样注册 `ep_poll_callback`，当数据到达或缓冲区可写时，将 acceptfd 的 epitem 加入 `rdllist`
+
+此外，对 listenfd 而言，其本身无数据收发能力，其全连接队列存储的是 `struct sock`（代表已建立的连接），而非数据包。换句话说，listenfd 关联的 sock 结构的 `sk_receive_queue` 接收队列实际上是空置的
+
+####    端到端全链路总图
+一张图 `epoll_create → epoll_ctl → 协议栈收包 → ep_poll_callback → epoll_wait 返回`完整串连起来
+
+```mermaid
+flowchart TD
+    subgraph Phase1["阶段1: epoll_create"]
+        P1A["进程调用 epoll_create"] --> P1B["ep_alloc 分配 eventpoll<br/>初始化 wq, rdllist, rbr"]
+        P1B --> P1C["anon_inode_getfile<br/>建立 epfd↔file↔eventpoll<br/>三方关联"]
+    end
+    subgraph Phase2["阶段2: epoll_ctl(ADD)"]
+        P2A["进程调用 epoll_ctl_add"] --> P2B["ep_insert 分配 epitem<br/>设置 epi->ffd=(file,fd)<br/>epi->ep=eventpoll"]
+        P2B --> P2C["init_poll_funcptr(<br/>&epq.pt, ep_ptable_queue_proc)"]
+        P2C --> P2D["ep_item_poll<br/>→ tcp_poll<br/>→ sock_poll_wait<br/>→ poll_wait"]
+        P2D --> P2E["调 ep_ptable_queue_proc<br/>分配 eppoll_entry<br/>挂 ep_poll_callback 到 sk_wq->wait"]
+        P2E --> P2F["ep_rbtree_insert<br/>epi 入 ep->rbr"]
+    end
+    subgraph Phase3["阶段3: epoll_wait 阻塞"]
+        P3A["进程调用 epoll_wait"] --> P3B{"rdllist 非空?"}
+        P3B -->|"是"| P3F
+        P3B -->|"否"| P3C["init_waitqueue_entry(wait, current)<br/>wait.func=default_wake_function"]
+        P3C --> P3D["__add_wait_queue_exclusive(<br/>&ep->wq, &wait)"]
+        P3D --> P3E["schedule_hrtimeout_range<br/>进程睡眠"]
+    end
+    subgraph Phase4["阶段4: 协议栈收包"]
+        P4A["NIC 中断<br/>软中断 ksoftirqd"] --> P4B["tcp_v4_rcv"]
+        P4B --> P4C{"sock 状态?"}
+        P4C -->|"TCP_ESTABLISHED"| P4D["tcp_rcv_established<br/>fast/slow path<br/>入 sk_receive_queue"]
+        P4C -->|"TCP_LISTEN<br/>(收 SYN/ACK)"| P4E["tcp_check_req<br/>完成3次握手<br/>挂全连接队列"]
+        P4D --> P4F["sk->sk_data_ready(sk)<br/>= sock_def_readable"]
+        P4E --> P4F2["父 listener sk_data_ready"]
+        P4F --> P4G["wake_up_interruptible_sync_poll<br/>遍历 sk_wq->wait"]
+        P4F2 --> P4G
+        P4G --> P4H["调 ep_poll_callback"]
+    end
+    subgraph Phase5["阶段5: ep_poll_callback"]
+        P5A["ep_item_from_wait<br/>反向找到 epitem"] --> P5B["list_add_tail<br/>(&epi->rdllink, &ep->rdllist)"]
+        P5B --> P5C{"ep->wq 非空?"}
+        P5C -->|"是"| P5D["wake_up_locked(&ep->wq)<br/>逐个调 default_wake_function"]
+        P5D --> P5E["try_to_wake_up(<br/>task_struct = 等待中的进程)"]
+    end
+    subgraph Phase6["阶段6: 唤醒后 epoll_wait 返回"]
+        P3F["ep_send_events"] --> P6B["ep_scan_ready_list<br/>list_splice_init(rdllist→txlist)"]
+        P6B --> P6C["ep_send_events_proc<br/>__put_user copy 到用户态"]
+        P6C --> P6D{"ET or LT?"}
+        P6D -->|"ET"| P6E["不重新入 rdllist"]
+        P6D -->|"LT"| P6F["list_add_tail<br/>重新入 rdllist"]
+        P6E --> P6G["返回 nfds 给用户"]
+        P6F --> P6G
+    end
+    P1C -.->|"准备好 epfd"| P2A
+    P2F -.->|"注册完成"| P3A
+    P3E -.->|"挂起等待"| P4A
+    P4H --> P5A
+    P5E --> P3F
+```
+
+**全文导读总结**：
+
+1. `epoll_create` 准备 `eventpoll` 数据结构（rbtree + rdllist + wq）
+2. `epoll_ctl_add` 通过 `ep_ptable_queue_proc` 把 `ep_poll_callback` 这个常驻钩子植入 sock 的 `sk_wq->wait`，自此协议栈 → epoll 的通知路径已建立
+3. `epoll_wait` 把当前进程挂到 `ep->wq` 上睡眠，等待"事件就绪"信号
+4. 协议栈收包后逐级回调（`sk_data_ready` → `ep_poll_callback` → `default_wake_function`），把进程拉回 runqueue
+5. 进程醒来后扫描 `rdllist`，将就绪 fd 复制回用户态
 
 ##  0x0A 参考
--	[linux源码解读（十七）：红黑树在内核的应用——epoll](https://www.cnblogs.com/theseventhson/p/15829130.html)
+-	[linux源码解读（十七）：红黑树在内核的应用 epoll](https://www.cnblogs.com/theseventhson/p/15829130.html)
 -   [深入揭秘 epoll 是如何实现 IO 多路复用的](https://mp.weixin.qq.com/s/OmRdUgO1guMX76EdZn11UQ)
 -	[epoll和惊群](https://plantegg.github.io/2019/10/31/epoll和惊群/)
 -	[从内核看SO_REUSEPORT的实现（基于5.9.9）](https://cloud.tencent.com/developer/article/1844163)
