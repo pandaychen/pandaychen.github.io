@@ -17,7 +17,7 @@ tags:
 本文学习下 Linux 内核 TCP 数据包**接收路径**中 TCP 协议层特有的核心机制，基于内核 [v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source)版本，已有相关文章：
 
 -   **通用收包路径**（关联路径为 NIC → NAPI → netif_receive_skb → ip_rcv → ip_rcv_finish → ip_local_deliver）：TCP 与 UDP 共享，详见 [Linux内核之旅（八）：内核数据包接收](https://pandaychen.github.io/2025/03/02/A-LINUX-KERNEL-TRAVEL-8/)
--   **TCP 完整通信过程**（三次握手 / 四次挥手 / 状态机）：详见 [Linux内核之旅（十二）](https://pandaychen.github.io/2025/04/25/A-LINUX-KERNEL-TRAVEL-12/)
+-   **TCP 完整通信过程**（三次握手 / 四次挥手 / 状态机）：详见 [Linux 内核之旅（十二）：内核视角下的 TCP 完整通信过程](https://pandaychen.github.io/2025/04/25/A-LINUX-KERNEL-TRAVEL-12/)
 -   **TCP 发送路径的协议栈视角**（关联路径为 tcp_sendmsg → 拥塞窗口 → IP 层 → 驱动）：详见 [TCP 发送路径内核源码深度分析](https://pandaychen.github.io/2026/05/11/A-TCP-SENDING-PATH-DEEP-DIVE/)
 
 本文主要分析如下知识点：
@@ -26,19 +26,16 @@ tags:
 2.  快速路径（Fast Path）与慢速路径（Slow Path）的 header prediction 机制
 3.  序号校验与 ACK 处理（含 Delayed ACK、Duplicate ACK）
 4.  接收端滑动窗口与流量控制
-5.  拥塞控制（双端视角下的CUBIC/Reno 算法源码、拥塞状态机）
+5.  拥塞控制（双端视角下的 CUBIC/Reno 算法源码、拥塞状态机）
 6.  数据入队、乱序处理、Prequeue/Backlog 队列
 7.  URG 紧急数据机制
 8.  应用层 `recv`/`tcp_recvmsg` 读取路径
-9.  **TCP 层与 epoll 的交互机制**（正常可读通知 + 连接断开/错误通知的完整内核调用链）
-10. 接收链路上可观测相关知识
-
+9.  TCP 层与 epoll 的交互机制（正常可读通知 + 连接断开/错误通知的完整内核调用链）
+10. 内核协议栈数据包接收链路上可观测相关知识
 
 ####    基础函数（补充）
 
-1、`__skb_queue_tail` 
-
-`__skb_queue_tail`是 Linux 内核链表操作的底层原语，关联数据结构为Socket 的 `sk_receive_queue`，`sk_receive_queue`是一个通过 `struct sk_buff_head` 组织的双向循环链表，抽象如下：
+1、`__skb_queue_tail`：`__skb_queue_tail`是 Linux 内核链表操作的底层原语，关联数据结构为socket 的 `sk_receive_queue`，`sk_receive_queue`是一个通过 `struct sk_buff_head` 组织的双向循环链表
 
 ```c
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/skbuff.h#L1748
@@ -54,7 +51,7 @@ void __skb_queue_tail(struct sk_buff_head *list, struct sk_buff *newsk)
 }
 ```
 
-在 Linux 内核约定中，带有 `__` 前缀的队列操作函数通常表示调用者必须自己保证锁安全。这里是无锁设计（极其重要），因为当报文走到 `tcp_queue_rcv` 时，内核必定已经持有该 Socket 的自旋锁（通常是底半部 SoftIRQ 上下文中的 `bh_lock_sock`）。既然外层已经加了锁，这里直接修改链表指针效率最高，避免了二次加锁的开销
+在 Linux 内核约定中，**带有 `__` 前缀的队列操作函数通常表示调用者必须自己保证锁安全**。这里是无锁设计（极其重要），因为当报文走到 `tcp_queue_rcv` 时，内核必定已经持有该 socket 的自旋锁（通常是底半部 SoftIRQ 上下文中的 `bh_lock_sock`）。既然外层已经加了锁，这里直接修改链表指针效率最高，避免了二次加锁的开销
 
 ##  0x01    TCP接收路径全景概览
 
@@ -480,15 +477,15 @@ flowchart TD
 
 ####    tcp_rcv_state_process：完整的状态机逻辑（核心）
 
-`tcp_rcv_state_process` 主要完成对TCP状态机处理函数，是处理慢接收路径（Slow Path）和状态流转的核心引擎。当 Socket 处于建立连接阶段（如三次握手）、断开连接阶段（如四次挥手），或者虽然处于 ESTABLISHED 状态但收到带有特殊标志位的报文时，都会进入此函数
+`tcp_rcv_state_process` 主要完成对TCP状态机处理函数，是处理慢接收路径（Slow Path）和状态流转的核心引擎。当 socket 处于建立连接阶段（如三次握手）、断开连接阶段（如四次挥手），或者虽然处于 ESTABLISHED 状态但收到带有特殊标志位的报文时，都会进入此函数
 
 1、第一阶段：特殊前置状态处理 (Pre-ACK 状态)，函数入口，首先处理不需要或者还没到校验 ACK 阶段的三个初始状态：
 
 -   TCP_CLOSE：最简单，连接已关闭，直接 `goto discard` 丢弃报文
--   TCP_LISTEN：服务端监听状态下，如果收到带 ACK 或 RST 标志的包，直接拒绝/丢弃。如果收到 SYN 包（建连请求），且不带 FIN，则关闭下半部中断（`local_bh_disable`），调用 `icsk->icsk_af_ops->conn_request`（通常是 `tcp_v4_conn_request`）来分配 Request Socket 并回复 SYN+ACK。这是**三次握手的第一步**
+-   TCP_LISTEN：服务端监听状态下，如果收到带 ACK 或 RST 标志的包，直接拒绝/丢弃。如果收到 SYN 包（建连请求），且不带 FIN，则关闭下半部中断（`local_bh_disable`），调用 `icsk->icsk_af_ops->conn_request`（通常是 `tcp_v4_conn_request`）来分配 Request socket 并回复 SYN+ACK。这是**三次握手的第一步**
 -   TCP_SYN_SENT：客户端发起连接后的状态。调用 `tcp_rcv_synsent_state_process` 专门处理服务端的 SYN+ACK 回复。如果处理成功（即三次握手第二步完成），直接返回或继续发送数据
 
-2、第二阶段：基础校验与 Fast Open 处理。如果 Socket 不是上述三种状态，说明连接至少处于握手中期或已建立：
+2、第二阶段：基础校验与 Fast Open 处理。如果 socket 不是上述三种状态，说明连接至少处于握手中期或已建立：
 
 -   TCP Fast Open (TFO)：检查 `tp->fastopen_rsk`，处理 TFO 机制下的特定校验
 -   非法标志拦截：如果包里既没有 ACK，也没有 RST 和 SYN（非法包），直接丢弃
@@ -511,7 +508,7 @@ switch (sk->sk_state) {
 -   如果 ACK 不合法，直接退出
 -   释放掉暂存的 request_sock（要变成真正的 socket）
 -   初始化拥塞控制、MTU、缓冲区等
--   核心代码是`tcp_set_state(sk, TCP_ESTABLISHED);`，即将 Socket 状态正式切换为已连接
+-   核心代码是`tcp_set_state(sk, TCP_ESTABLISHED);`，即将 socket 状态正式切换为已连接
 -   唤醒可能阻塞在 `accept()` 上的应用层进程（`sk_wake_async`）
 
 3.2、TCP_FIN_WAIT1 （主动关闭方收到 ACK）：主动调用 `close()` 后，发送了 FIN，处于此状态等待对方的 ACK
@@ -533,7 +530,7 @@ switch (sk->sk_state) {
 -   无URG仅普通Payload的场景，根据当前状态决定如何处理数据：
     -   如果处于 CLOSE_WAIT / CLOSING / LAST_ACK（对方已发送 FIN），忽略正常数据，除非是收到由于重传导致的乱序旧数据
     -   如果处于 FIN_WAIT1 / FIN_WAIT2（本端已停止发送但可接收，但对方仍可发送），或者 Fall through 到了 TCP_ESTABLISHED：
-        -   安全检查：如果本地 Socket 已经关闭了接收端（RCV_SHUTDOWN），但对方还发来新数据，根据 RFC 1122 规范，会增加统计计数，并发送 RST 强行重置连接
+        -   安全检查：如果本地 socket 已经关闭了接收端（RCV_SHUTDOWN），但对方还发来新数据，根据 RFC 1122 规范，会增加统计计数，并发送 RST 强行重置连接
         -  数据入队：调用 `tcp_data_queue(sk, skb)`，按序放入接收队列，或者乱序放入 OFO (Out Of Order) 红黑树
 
 5、第五阶段：扫尾工作（收包响应反馈）
@@ -975,7 +972,7 @@ static inline void __tcp_fast_path_on(struct tcp_sock *tp, u32 snd_wnd)
 ```
 
 ####    快速路径的（最终）处理函数：tcp_queue_rcv
-ps：这里其实不仅仅是快速路径的场景，`tcp_queue_rcv` 扮演着**按序数据入队最终执行者**的角色。无论是经过怎样的前置条件检查，只要内核确认一段数据是合法、按序（In-Sequence）且需要暂存到 Socket 接收队列中等待用户态读取的，最终都会调用`tcp_queue_rcv`函数。在本内核版本中，`tcp_queue_rcv` 只有两个核心调用场景（快+慢），先分别说明：
+ps：这里其实不仅仅是快速路径的场景，`tcp_queue_rcv` 扮演着**按序数据入队最终执行者**的角色。无论是经过怎样的前置条件检查，只要内核确认一段数据是合法、按序（In-Sequence）且需要暂存到 socket 接收队列中等待用户态读取的，最终都会调用`tcp_queue_rcv`函数。在本内核版本中，`tcp_queue_rcv` 只有两个核心调用场景（快+慢），先分别说明：
 
 1、场景一：命中快速路径（Fast Path）
 
@@ -990,7 +987,7 @@ ps：这里其实不仅仅是快速路径的场景，`tcp_queue_rcv` 扮演着**
 
 在慢速路径的触发条件（数据包是按序的，但伴随了其他复杂状况）如下：
 
--   状态不完美：Socket 可能处于 FIN_WAIT_1、FIN_WAIT_2 等半关闭状态，非 ESTABLISHED
+-   状态不完美：socket 可能处于 FIN_WAIT_1、FIN_WAIT_2 等半关闭状态，非 ESTABLISHED
 -   携带特殊标志：报文带了 PSH（推送）、URG（紧急指针），内核需要特殊处理
 -   经历了异常恢复：例如刚刚填补了乱序队列（OFO）的空洞，或者发生过窗口缩小、内存紧张等问题
 -   有趣的场景：**部分重叠（Partial overlap）**，即内核收到一个重传包，其中有一部分是旧数据，一部分是新数据。内核在 `tcp_data_queue` 中通过 `__skb_pull` 裁掉旧数据后，剩下的新数据依然符合按序条件，对应这部分[代码](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L4609)
@@ -1041,17 +1038,17 @@ static void tcp_rcv_nxt_update(struct tcp_sock *tp, u32 seq)
 	sock_owned_by_me((struct sock *)tp);
 	tp->bytes_received += delta;
 
-    //将 Socket 控制块（tcp_sock）中记录的"期望接收的下一个序列号"更新为当前报文的结束序列号
+    //将 socket 控制块（tcp_sock）中记录的"期望接收的下一个序列号"更新为当前报文的结束序列号
 	tp->rcv_nxt = seq;
 }
 ```
 
-`tcp_queue_rcv` 是 Linux 内核 TCP 快速路径接收流程的最后一步，将已经确认合法、按序到达的纯 payload 数据，正式放入 Socket 的接收队列 (`sk_receive_queue`)，以供用户态进程读取，上述代码有几个要点：
+`tcp_queue_rcv` 是 Linux 内核 TCP 快速路径接收流程的最后一步，将已经确认合法、按序到达的纯 payload 数据，正式放入 socket 的接收队列 (`sk_receive_queue`)，以供用户态进程读取，上述代码有几个要点：
 
 -   `skb_peek_tail`：内核试图找到当前队列尾部的 skb。这是为了接下来的合并（Coalesce）操作做准备
 -   `__skb_pull`：将 `skb->data` 指针向前推 `hdrlen`（通常是 MAC头 + IP头 + TCP头 的长度）。执行完这一句后，这个 skb 就只剩下纯粹的 TCP 数据载荷了
 
-注意，如果 `tcp_try_coalesce` 失败（比如队尾报文的分片数组满了，或者内存不连续等原因），则走传统的慢速路径，即将这个完整的 skb 挂到队列尾部，并通过 `skb_set_owner_r` 将这个报文占用的内存计入当前 Socket 的接收缓冲区内存配额（`sk_rmem_alloc`）中
+注意，如果 `tcp_try_coalesce` 失败（比如队尾报文的分片数组满了，或者内存不连续等原因），则走传统的慢速路径，即将这个完整的 skb 挂到队列尾部，并通过 `skb_set_owner_r` 将这个报文占用的内存计入当前 socket 的接收缓冲区内存配额（`sk_rmem_alloc`）中
 
 当`tcp_queue_rcv`成功执行后，对调用方（前文）而言，会触发如下可能的后续动作：
 
@@ -1890,21 +1887,21 @@ static void tcp_fastretrans_alert(struct sock *sk, ...)
 1.  路径1：`tcp_rcv_state_proces`，包括`tcp_v4_rcv --> tcp_v4_do_rcv --> tcp_rcv_state_proces`、`tcp_child_process -->  tcp_rcv_state_process`两种场景
 2.  路径2：`tcp_rcv_established`，`tcp_v4_rcv --> tcp_v4_do_rcv --> tcp_rcv_established`
 
-在 Linux 内核 TCP 协议栈的架构设计中，接收处理逻辑被分为了数据传输阶段和状态转换阶段。`tcp_data_queue` 作为专门负责处理 TCP 数据载荷（Payload）入队（包括正常接收队列和乱序 OFO 队列）的设计，在上述两个阶段都有体现。核心区别是**当前 Socket （状态机）所处的生命周期状态以及报文是否命中了性能优化的快速路径**
+在 Linux 内核 TCP 协议栈的架构设计中，接收处理逻辑被分为了数据传输阶段和状态转换阶段。`tcp_data_queue` 作为专门负责处理 TCP 数据载荷（Payload）入队（包括正常接收队列和乱序 OFO 队列）的设计，在上述两个阶段都有体现。核心区别是**当前 socket （状态机）所处的生命周期状态以及报文是否命中了性能优化的快速路径**
 
 1、路径1：`tcp_rcv_established` 中的调用
 
-背景：此时 Socket 处于 `TCP_ESTABLISHED`（已连接）状态，处于 TCP 生命周期的主要数据交换阶段。如前文所描述，报文处理分为快速路径（Fast Path）和慢速路径（Slow Path）
+背景：此时 socket 处于 `TCP_ESTABLISHED`（已连接）状态，处于 TCP 生命周期的主要数据交换阶段。如前文所描述，报文处理分为快速路径（Fast Path）和慢速路径（Slow Path）
 
 -   快速路径（首选）：如果收到的报文非常完美（完全按序、没有任何特殊 Flag 如 URG/FIN/SYN、仅仅是纯数据或纯 ACK、接收窗口充足），内核会直接绕过 `tcp_data_queue`，在 `tcp_rcv_established` 内部直接调用更底层的函数（如 `tcp_queue_rcv`）将数据放入队列或直接拷贝给用户态程序
 -   慢速路径（Fallback）：一旦报文不够完美，内核会剥夺它的 Fast Path 待遇，将其打入 Slow Path。在 Slow Path 的最后一步，内核就会调用 `tcp_data_queue`（兜底处理不规矩的报文）
 
 2、路径2：`tcp_rcv_state_process` 中的调用
 
-背景：此时 Socket 不处于稳定的 `TCP_ESTABLISHED` 状态（或者处于建连/断连的边缘状态），在这个函数中调用 `tcp_data_queue`的场景，通常是为了处理在连接建立末期或连接断开期间到达的数据，主要包含如下case：
+背景：此时 socket 不处于稳定的 `TCP_ESTABLISHED` 状态（或者处于建连/断连的边缘状态），在这个函数中调用 `tcp_data_queue`的场景，通常是为了处理在连接建立末期或连接断开期间到达的数据，主要包含如下case：
 
--   TCP Fast Open (TFO) 或建连最后的捎带数据：当处于 `TCP_SYN_RECV` 状态的服务端收到客户端三次握手的最后一个 ACK 时，如果这个 ACK 报文中捎带了应用层数据，Socket 状态会刚刚在这个函数内被切换为 `TCP_ESTABLISHED`（即`tcp_set_state(sk, TCP_ESTABLISHED);`）。状态切换完成后，调用 `tcp_data_queue` 来处理这批随握手包一起到达的第一波数据
--   半关闭状态下的数据接收（FIN_WAIT1 / FIN_WAIT2）：当本地应用层调用 `close()` 主动关闭连接，发出 FIN 后，Socket 进入 FIN_WAIT1 或 FIN_WAIT2 状态。由于TCP 是全双工的。此时虽然本地不再发送数据，但依然可以接收对端发送的数据。如果在这两个状态下收到了对方发来的数据包，`tcp_rcv_state_process` 会走入相应的 case，最后向下 fall through 到调用 `tcp_data_queue`，将这些对端在关闭前抢发的最后数据放入接收队列供应用层读取
+-   TCP Fast Open (TFO) 或建连最后的捎带数据：当处于 `TCP_SYN_RECV` 状态的服务端收到客户端三次握手的最后一个 ACK 时，如果这个 ACK 报文中捎带了应用层数据，socket 状态会刚刚在这个函数内被切换为 `TCP_ESTABLISHED`（即`tcp_set_state(sk, TCP_ESTABLISHED);`）。状态切换完成后，调用 `tcp_data_queue` 来处理这批随握手包一起到达的第一波数据
+-   半关闭状态下的数据接收（FIN_WAIT1 / FIN_WAIT2）：当本地应用层调用 `close()` 主动关闭连接，发出 FIN 后，socket 进入 FIN_WAIT1 或 FIN_WAIT2 状态。由于TCP 是全双工的。此时虽然本地不再发送数据，但依然可以接收对端发送的数据。如果在这两个状态下收到了对方发来的数据包，`tcp_rcv_state_process` 会走入相应的 case，最后向下 fall through 到调用 `tcp_data_queue`，将这些对端在关闭前抢发的最后数据放入接收队列供应用层读取
 -   等待关闭的僵死期数据排错（CLOSE_WAIT / CLOSING / LAST_ACK）：理论上，在对方发送 FIN 之后（本地处于 CLOSE_WAIT 及后续状态），不应该再收到具有新序列号的正常数据包。如果由于网络延迟，在这些状态下收到了一些旧的重传乱序包（其序列号在 `rcv_nxt` 之前），内核代码也会放行这些包，让 `tcp_data_queue` 去做最终的清理（例如触发 RST 或是默默丢弃并回复 ACK）
 
 ####    tcp_data_queue：数据分发总控
@@ -1993,7 +1990,7 @@ static void tcp_data_queue(struct sock *sk, struct sk_buff *skb)
 
 2.1 内存额度检查（Memory Scheduling）
 
-内核首先会调用 `tcp_try_rmem_schedule()` 检查当前 Socket 的接收缓冲区（`sk_rcvbuf`）是否还有足够的内存。如果内存不足，内核会尝试清理（prune）乱序队列。如果清理后依然无法分配空间，该乱序报文就会被直接丢弃，并增加全局统计计数 `LINUX_MIB_TCPOFODROP`
+内核首先会调用 `tcp_try_rmem_schedule()` 检查当前 socket 的接收缓冲区（`sk_rcvbuf`）是否还有足够的内存。如果内存不足，内核会尝试清理（prune）乱序队列。如果清理后依然无法分配空间，该乱序报文就会被直接丢弃，并增加全局统计计数 `LINUX_MIB_TCPOFODROP`
 
 2.2 红黑树检索与插入逻辑，针对乱序队列 `out_of_order_queue` 红黑树结构，会遍历这棵红黑树，根据 skb 的序列号（`seq`）寻找它在这棵树中的正确位置
 
@@ -2007,7 +2004,7 @@ static void tcp_data_queue(struct sock *sk, struct sk_buff *skb)
 
 2.4 更新 SACK（选择性确认）
 
-为了让发送方知道接收方已经收到了这部分乱序数据，函数会触发 SACK 逻辑（`tcp_dsack_set` 或 `tcp_dsack_extend`），同时会更新 Socket 的 SACK 块信息，并通过后续回复的 ACK 报文通知发送方，避免发送方盲目重传这部分已经送达的数据，从而节省带宽
+为了让发送方知道接收方已经收到了这部分乱序数据，函数会触发 SACK 逻辑（`tcp_dsack_set` 或 `tcp_dsack_extend`），同时会更新 socket 的 SACK 块信息，并通过后续回复的 ACK 报文通知发送方，避免发送方盲目重传这部分已经送达的数据，从而节省带宽
 
 2.5 统计数据更新，成功将报文放入红黑树后，更新相应的 SNMP 统计计数（如`LINUX_MIB_TCPOFOQUEUE`）
 
@@ -2965,7 +2962,7 @@ unsigned int tcp_poll(struct file *file, struct socket *sock,
     // === 连接已关闭 / 出错 ===
     if (sk->sk_err)
         mask |= EPOLLERR;
-    if (state == TCP_CLOSE)
+    if (state == TCP_CLOSE) 
         mask |= EPOLLHUP;              // 完全关闭
     if (sk->sk_shutdown == SHUTDOWN_MASK)
         mask |= EPOLLHUP;
@@ -3130,7 +3127,7 @@ tr:       定时器类型（0=无, 1=重传, 2=keepalive, 4=TIME_WAIT）
 
 2、第二个问题：如果应用层一直不读取怎么办？（流量控制）
 
-这里就引出了 TCP 滑动窗口（Flow Control）的核心机制，当 `tcp_queue_rcv` 不断把数据塞进队列，而应用层一直不调用 `recv()`时，`sk_receive_queue` 会越来越长。如此这样，每一次packet入队，内核都会对 Socket 消耗的内存（`sk_rmem_alloc`）进行记账，随着可用缓存空间的减少，内核在回复给对端的 ACK 报文中，包含的接收窗口大小（Receive Window）会越来越小。
+这里就引出了 TCP 滑动窗口（Flow Control）的核心机制，当 `tcp_queue_rcv` 不断把数据塞进队列，而应用层一直不调用 `recv()`时，`sk_receive_queue` 会越来越长。如此这样，每一次packet入队，内核都会对 socket 消耗的内存（`sk_rmem_alloc`）进行记账，随着可用缓存空间的减少，内核在回复给对端的 ACK 报文中，包含的接收窗口大小（Receive Window）会越来越小。
 
 极限情况（Zero Window）：当接收缓冲区完全塞满时，内核会给对端发送一个带有 `Window = 0` 的 ACK。对端收到后就会立刻停止发送新数据，进入零窗口探测（Zero Window Probe）状态
 
