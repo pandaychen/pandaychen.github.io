@@ -1627,6 +1627,10 @@ stateDiagram-v2
 
 ##  0x07    番外
 
+####    内核通知机制与优化
+
+todo
+
 ####    epitem / ep_pqueue / poll_table / eppoll_entry 四结构体全景
 前文 `0x04` 节简要列出了四个epoll核心的数据结构，这里集中梳理它们各自的归属、生命周期与互相关系，这是理解 epoll 内部最重要的全景图
 
