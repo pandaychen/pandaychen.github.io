@@ -34,7 +34,23 @@ tags:
 10. 内核协议栈数据包接收链路上可观测相关知识
 11. tcp内核协议栈接收路径上的若干细节补充
 
-####    基础函数（补充）
+
+**由于TCP是全双工协议，本文的场景就假设客户端是发送端（对端），服务端是接收端（本端），这样理解起来直观一些**
+
+####    基础知识1
+1、用双端的视角理解seq（序列号）和ack（确认号）
+
+以本端（接收端）收到一个来自对端的 TCP 报文这一确切的视角，来描述
+
+-   接收到（报文中）的 seq，表示对方的发送进度。即这个 seq 表示对端当前正在发送给（本端）这批数据，其第一个字节的编号是 seq。也就是说，对端已经发送过了 seq-1 及之前的数据。内核的映射过程是，当本端收到这个 seq 后，会去和本端的 `tp->rcv_nxt`（期望接收的下一个序号）做比较，如果 `seq == tp->rcv_nxt`，说明包是按序到达的。关联本端作为接收端的场景
+-   接收到的 ack，表示对方对（本端）的期盼，此 ack 表示对端已经成功收到了（本端）发送的编号为 `ack-1` 及之前的所有数据，现在正式通知本端，希望（本端）下次从编号 ack 开始发送数据。内核映射过程，当本端收到这个 ack 后，会将本端发送滑动窗口的左边缘推移，也就是将 `tp->snd_una`（最早未确认的序号）更新为这个 ack 的值，并把发送队列里 ack 之前的数据包全释放掉（因为对方已经确认收到了），关联本端作为发送端的场景
+
+| 字段 | 视角：收到对端的报文时 | 视角：收到对端的报文时 | 补充 |
+| :-----| :---- | :---- |:---- |
+| SEQ | 对端发来的数据包起始编号 | 用来校验本端的 `rcv_nxt` | 永远是在说自己：我正在发的数据是从哪开始的 |
+| ACK | 对端对本端数据的确认进度 | 用来推进本端的 `snd_una` | 永远是在说别人：我已经收到了你多少东西，你接下来该给我发啥了 |
+
+####    基础知识2
 
 1、`__skb_queue_tail`：`__skb_queue_tail`是 Linux 内核链表操作的底层原语，关联数据结构为socket 的 `sk_receive_queue`，`sk_receive_queue`是一个通过 `struct sk_buff_head` 组织的双向循环链表
 
@@ -1187,7 +1203,7 @@ static inline bool before(__u32 seq1, __u32 seq2)
 #define after(seq2, seq1) before(seq1, seq2)
 ```
 
-`tcp_validate_incoming`是慢速路径中的完整校验：
+`tcp_validate_incoming`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L5229)是慢速路径中的完整校验：
 
 ```cpp
 //file: net/ipv4/tcp_input.c
@@ -1195,7 +1211,8 @@ static bool tcp_validate_incoming(struct sock *sk, struct sk_buff *skb,
                                   const struct tcphdr *th, int syn_inerr)
 {
     struct tcp_sock *tp = tcp_sk(sk);
-
+    ......
+    /* Step 1: check sequence number */
     // 1. 序号校验：段必须在接收窗口内
     if (!tcp_sequence(tp, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq)) {
         // 序号不在窗口内
@@ -1207,6 +1224,7 @@ static bool tcp_validate_incoming(struct sock *sk, struct sk_buff *skb,
         goto discard;
     }
 
+    /* Step 2: check RST bit */
     // 2. RST标志检查
     if (th->rst) {
         if (TCP_SKB_CB(skb)->seq == tp->rcv_nxt)
@@ -1216,8 +1234,12 @@ static bool tcp_validate_incoming(struct sock *sk, struct sk_buff *skb,
             tcp_send_challenge_ack(sk, skb);
         goto discard;
     }
+    /* step 3: check security and precedence [ignored] */
 
-    // 3. SYN标志检查（ESTABLISHED状态不应收到SYN）
+    /* step 4: Check for a SYN
+	 * RFC 5961 4.2 : Send a challenge ack
+	 */
+    // 4. SYN标志检查（ESTABLISHED状态不应收到SYN）
     if (th->syn) {
         tcp_send_challenge_ack(sk, skb);
         goto discard;
@@ -1229,6 +1251,47 @@ discard:
     return false;
 }
 ```
+
+这里有个细节，为何`tcp_validate_incoming`为何不校验tcp报文中的ack号？只校验seq号呢？从上面的英文注释，不难发现，这里严格遵循了 RFC 793 中关于报文段处理流程（Segment Processing）的标准（5步剥洋葱）模型。`tcp_validate_incoming`函数不校验 ACK 号，是因为内核设计中，SEQ 校验是状态无关（State-Independent）的全局前置拦截，而 ACK 校验是状态强相关（State-Dependent）的，会后置触发
+
+在 RFC 793 的 Section 3.9 中，规定了任何一个到达的 TCP 报文，必须按照严格的先后顺序进行这5步基础校验
+
+-   Step 1: Check Sequence Number (校验 SEQ 号是否在接收窗口内)
+-   Step 2: Check RST bit (校验是否带有 RST 标志)
+-   Step 3: Check Security and Precedence (Linux 基本跳过此步)
+-   Step 4: Check SYN bit (校验 SYN 标志的合法性)
+-   Step 5: Check ACK field (校验 ACK 字段)
+
+`tcp_validate_incoming` 完成 Step 1-Step 4，只要报文通过了前四步，说明这个包在物理空间（Sequence 序号）上是合法的，且没有恶意的 RST 或非法 SYN 攻击
+
+再思考第二个问题：为什么 SEQ 先验，而这里不校验ACK？从安全视角来看
+
+1、SEQ 校验的目的（防丢包、防伪造）：无论当前 TCP 处于 SYN_RECV、FIN_WAIT_1 还是 TIME_WAIT 状态，只要对方发来的 SEQ 号落在了本端 `rcv_wnd` 之外（且不是合法的窗口探测包），这个包大概率是非法报文，可以丢弃
+
+2、与 SEQ 不同，ACK 驱动本端发送状态机向前走。在TCP的不同状态下，对合法/非法ACK的定义存在较大差异：
+
+-   在 SYN_RECV 状态：收到合法的 ACK，意味着三次握手成功，需要创建一个完整的 child socket 并进入 ESTABLISHED
+-   在 FIN_WAIT_1 状态：收到合法的 ACK，意味着对方确认了本端的 FIN，状态机需要翻转到 FIN_WAIT_2
+-   在 LAST_ACK 状态：收到合法的 ACK，意味着连接彻底终结，需要销毁 socket 释放内存
+
+那么，RFC协议的Step 5在哪里呢？[参考](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L5941)
+
+```c
+int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
+{
+    ......
+    /* step 5: check the ACK field */
+	acceptable = tcp_ack(sk, skb, FLAG_SLOWPATH |
+				      FLAG_UPDATE_TS_RECENT) > 0;
+
+    //根据具体的 socket 状态，结合 acceptable（ACK是否合法）做不同反应
+	switch (sk->sk_state) {  
+        ......
+    }
+}
+```
+
+下面重点分析一下`tcp_ack`的实现
 
 ####    ACK处理：tcp_ack（复杂）
 
@@ -3291,6 +3354,11 @@ tr:       定时器类型（0=无, 1=重传, 2=keepalive, 4=TIME_WAIT）
 5.  **拥塞窗口过小**：`ss -tnpi`查看cwnd，如持续很小可能是丢包严重或算法不适配
 
 ##  0x0C    总结
+
+####    TCP报文对接收端的影响
+总结下，一个到达的 TCP 报文（及其携带的 Options 和 Payload），对本端`tcp_sock`以及滑动窗口核心字段的影响
+
+todo
 
 ####    sk_receive_queue与ACK回复的时机
 在内核设计中，数据成功接收的边界就停留在OS的内核缓冲区（即 `sk_receive_queue`）。一旦 `tcp_queue_rcv` 成功将报文挂入队列，并且更新了 `tp->rcv_nxt`（期望的下一个序列号），此时内核已经可以向对端发送 ACK 确认了。这与应用层是否调用了 `read()/recv()` 毫无关系，即协议栈与应用层的解耦：内核只会通过 epoll/select 或阻塞唤醒机制发出可读事件（Data Ready）通知，绝不会等待应用层读完才发 ACK
