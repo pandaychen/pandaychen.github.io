@@ -1674,6 +1674,7 @@ flowchart TD
 
 ```cpp
 //file: include/linux/tcp.h - struct tcp_sock
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/tcp.h#L144
 struct tcp_sock {
     // 接收窗口相关
     u32 rcv_wnd;        // 当前接收窗口大小（字节）
@@ -1687,8 +1688,13 @@ struct tcp_sock {
     // 自动调优
     u32 rcvq_space;     // 估算的接收速率（用于自动调优）
     u32 space;          // 最近一段时间内的数据到达量
+    .......
 };
 ```
+
+####    滑动窗口的变化机制（重要）
+
+todo
 
 ####    窗口通告：tcp_select_window
 
