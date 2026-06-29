@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      Linux 内核内存管理：/proc/meminfo 深度解析与内核源码追踪
+title:      Linux 内核内存管理：/proc/meminfo 深度解析
 subtitle:   从 free 命令到内核源码分析
 date:       2026-06-17
 author:     pandaychen
