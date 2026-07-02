@@ -333,7 +333,8 @@ Timeout 的设置对于重传非常重要。设长了重发就慢，设短了可
 **3）Jacobson/Karels 算法（1988，当前 Linux 使用）**
 
 > 前面两种算法用的都是加权移动平均，最大的问题就是如果 RTT 有一个大的波动，很难被发现，因为被平滑掉了。Jacobson/Karels 算法引入了最新的 RTT 采样和平滑过的 SRTT 的差距做因子来计算：
->
+
+```text
 > **SRTT = SRTT + α(RTT – SRTT)** ： 计算平滑 RTT
 >
 > **DevRTT = (1-β) \* DevRTT + β \* (|RTT-SRTT|)** ： 计算平滑 RTT 和真实值的差距（加权移动平均）
@@ -341,6 +342,8 @@ Timeout 的设置对于重传非常重要。设长了重发就慢，设短了可
 > **RTO = μ \* SRTT + ∂ \* DevRTT** 
 >
 > 在 Linux 下，`α = 0.125,β = 0.25,μ = 1,∂ = 4`
+```
+
 
 **补充**：Linux 4.11.6 中该算法实现在 [`tcp_rtt_estimator()`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L710)，内核中 RTO 的最小值默认为 `200ms`（`TCP_RTO_MIN`），最大值为 `120s`（`TCP_RTO_MAX`）
 
