@@ -37,6 +37,8 @@ hook涉及：
 
 ####	dns数据发送流向
 
+![msghdr2ioviter](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/msghdr2ioviter.png)
+
 ---
 
 ## 0x02 基础概念：三层 I/O 数据描述体系
