@@ -14,7 +14,7 @@ tags:
 ##  0x00    前言
 笔者最近在研究基于ebpf的网络协议栈可观测及tracing，本文对协议栈的数据处理基础做了若干总结
 
-本文代码基于 [v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include) 版本，网卡类型选择 Intel 的 igb（千兆网卡）驱动
+本文代码基于 [v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include) 版本，[网卡类型](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb)选择 Intel 的 igb（千兆网卡）驱动实现
 
 推荐阅读：
 -	[Linux 网络栈接收数据（RX）：原理及内核实现（2022）](https://arthurchiao.art/blog/linux-net-stack-implementation-rx-zh/)
@@ -78,7 +78,7 @@ stateDiagram-v2
 ####	网卡收包：一个例子
 本小节使用以太网的物理网卡结合一个UDP packet的接收过程为例子描述下内核收包过程，如下：
 
-一、阶段1：数据包从网卡到内存
+**一、阶段1：数据包从网卡到内存**
 
 下图展示了数据包（packet）如何进入内存，并被内核的网络模块开始处理
 
@@ -123,7 +123,7 @@ stateDiagram-v2
 
 （软中断函数开始从RingBuffer中进行循环取包，并且封装为`sk_buff`，然后投递给网络协议栈进行处理；协议栈处理完成后数据就进入用户态的对应进程，进程就可以操作数据了）
 
-二、阶段2：内核的网络模块
+**二、阶段2：内核的网络模块**
 
 软中断会触发内核网络模块中的软中断处理函数，继续上面的流程
 
@@ -186,7 +186,7 @@ stateDiagram-v2
 17、待内存中的所有数据包被处理完成后（即`poll`函数执行完成），**会再次启用网卡的硬中断，这样下次网卡再收到数据的时候就会通知CPU**
 
 
-三、阶段3：协议栈网络层（IP）
+**三、阶段3：协议栈网络层（IP）**
 
 接着看下数据包来到协议栈的处理过程，重要的内核函数如下：
 
@@ -238,7 +238,7 @@ stateDiagram-v2
 -   `dst_output_sk`： 该函数会调用IP层的相应函数将该数据包发送出去（参考协议栈数据包发送流程的后半部分）
 -   `ip_local_deliver`：如果上面`routing`的时候发现目的IP是本地IP，那么将会调用该函数。该函数会先调用`NF_INET_LOCAL_IN`相关的钩子程序，如果通过，数据包将会向下发送到UDP层
 
-四、阶段4：协议栈传输层（UDP）
+**四、阶段4：协议栈传输层（UDP）**
 
 ```TEXT
           |
@@ -273,7 +273,7 @@ stateDiagram-v2
 -   `__skb_queue_tail`： 将数据包放入socket接收队列的末尾
 -   `sk_data_ready`： 通知socket数据包已经准备好；调用完`sk_data_ready`之后，一个数据包处理完成，等待应用层程序来读取，上面所有函数的执行过程都在软中断的上下文中
 
-五、阶段5：socket应用程序
+**五、阶段5：socket应用程序**
 
 应用层一般有两种方式接收数据：
 -   `recvfrom`函数阻塞等待数据到来，这种情况下当socket收到通知后，`recvfrom`就会被唤醒，然后读取接收队列的数据
@@ -1107,7 +1107,28 @@ flowchart LR
 
 ##	0x03	可观测：内核收包的主要过程
 
-####	准备工作
+本章节从以下步骤详细说明下网卡启动（初始化）、内核收包交互的全过程，回到开篇的图
+
+![rx](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/rx-overview.png)
+
+1.  内核：初始化网卡驱动；其中包括了注册 `poll()` 方法
+2.  网卡：收到包
+3.  网卡：通过 DMA 将包复制到内核内存中的 ring buffer
+4.  网卡：如果此时 NAPI 没有在执行，就产生硬件中断（IRQ），通知系统收到了一个包（否则不用额外 IRQ 就会把包收走）；触发软中断
+5.  内核：调度到软中断处理线程 ksoftirqd
+6.  内核：软中断处理，调用 NAPI 的 `poll()` 从 ringbuffer 收包，并以 skb 的形式送至更上层处理
+7.  协议栈：L2 处理
+8.  协议栈：L3 处理
+9.  协议栈：L4 处理
+
+几个有意思的问题：
+
+-   中断（Interrupt）的上半部（Top Half，即硬件中断/Hard IRQ）和下半部（Bottom Half，其中软中断Softirq是实现下半部的一种主要机制），内核为什么要如此设计及其的主要功能
+-   ringbuffer的并发机制实现
+-   收包&&处理包的线程到底是谁？
+-   上下文借用（线程劫持）的意义
+
+####	一：准备工作（Linux启动）
 
 Linux驱动，内核协议栈等等模块在具备接收网卡数据包之前，需要完整如下的初始化工作，这部分内容可以参考[图解Linux网络包接收过程](https://mp.weixin.qq.com/s/GoYDsfy9m0wRoXi_NCfCmg)：
 
@@ -1248,7 +1269,9 @@ static inline struct list_head *ptype_head(const struct packet_type *pt){
 
 小结下，上述逻辑中`inet_protos`记录了udp，tcp处理函数的地址，`ptype_base`存储了`ip_rcv()`函数的处理地址，软中断中会通过`ptype_base`找到`ip_rcv`函数地址，进而将ip包正确地送到`ip_rcv()`函数中执行，进而在`ip_rcv`中将会通过`inet_protos`结构定位到tcp或者udp的处理函数，再而把包转发给`udp_rcv()`或`tcp_v4_rcv()`函数。另外，在`ip_rcv`、`tcp_v4_rcv`、`udp_rcv`等函数中可以了解更详细的处理细节，比如`ip_rcv`中会处理netfilter和iptables过滤规则， netfilter 或 iptables 规则，这些规则都是在软中断的上下文中执行的，会加大网络延迟（规则复杂且数目较多）
 
-####	接收数据的主要流程（核心）
+##  0x04    接收数据的主要流程（迎接数据的到来）
+
+####	二：接收数据的主要流程（迎接数据的到来）
 
 下面给出内核收包从网卡到应用层的完整调用链总览：
 
@@ -1305,6 +1328,8 @@ flowchart TD
     AA --> BB
 ```
 
+####   一：硬中断处理
+
 **1、硬中断处理**
 
 首先数据帧从网线到达网卡的接收队列上，网卡在分配给自己的RingBuffer中寻找可用的内存位置，找到后DMA引擎会把数据DMA到这块Ringbuffer中（该过程对CPU无感）。当DMA操作完成以后，网卡会向CPU发起一个硬中断，通知CPU有数据帧到达。igb网卡的硬中断注册的处理函数是[`igb_msix_ring`](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L5782)，这里硬中断里只完成简单必要的工作，剩下的大部分逻辑都是转交给软中断处理。`igb_msix_ring`的逻辑仅仅记录了一个寄存器，修改了一下CPU的`poll_list`，然后发出软中断即完成
@@ -1358,6 +1383,8 @@ void __raise_softirq_irqoff(unsigned int nr)
 ```
 
 注意是先注册 NAPI poll，再打开硬件中断；硬中断先执行到网卡注册的 IRQ handler，在 handler 里面再触发 `NET_RX_SOFTIRQ` 的软中断softirq。在网卡驱动的硬中断处理函数做的事情很少，但软中断将会在和硬中断相同的 CPU 上执行。这就是给每个 CPU 一个特定的硬中断的意义：此 CPU 不仅处理这个硬中断，而且通过 NAPI 处理接下来的软中断来收包
+
+####    二：ksoftirqd内核线程处理软中断
 
 **2、 `ksoftirqd`内核线程处理软中断**
 
@@ -1891,6 +1918,8 @@ static gro_result_t napi_skb_finish(gro_result_t ret, struct sk_buff *skb)
 }
 ```
 
+####    三：网络协议栈的实现
+
 **3、网络协议栈处理**
 
 ![netif_receive_skb_list_internal.png]()
@@ -1952,6 +1981,8 @@ static inline int deliver_skb(struct sk_buff *skb,
 	return pt_prev->func(skb, skb->dev, pt_prev, orig_dev);
 }
 ```
+
+####    四：IP层的实现
 
 **4、IP协议层处理流程**
 
@@ -2185,6 +2216,8 @@ static int ip_local_deliver_finish(struct sk_buff *skb)
 }
 ```
 
+####    五：传输层的实现
+
 **5、UDP协议层处理过程**
 
 UDP协议的处理[函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/udp.c#L1873)是`udp_rcv->__udp4_lib_rcv`，关键流程如下：
@@ -2408,6 +2441,166 @@ flowchart TD
 ```
 
 至此，软中断的一轮接收报文及处理过程结束，`run_ksoftirqd`逻辑中`__do_softirq`处理完成，继续下面的流程
+
+
+####    小结
+
+1、回到上面网卡-->协议栈完整的收包（**CPU在软中断里收包的同时，网卡硬件依然在并行地通过 DMA 把新包写入 Ring Buffer**）过程，总结为一句话
+
+> 1. 网卡收到包，DMA 写入 Ring Buffer
+> 2. （如果开启了硬件中断合并，网卡会稍微等一会儿积累报文）网卡发起物理硬中断
+> 3. CPU 执行硬中断函数，立刻关闭该网卡的硬中断，将 NAPI 挂入软中断队列，硬中断退出
+> 4. 退出瞬间，CPU 就地直接执行软中断（不唤醒 ksoftirqd）
+> 5. 软中断执行 NAPI poll() 狂收包，并进行 L2-L4 协议栈解析
+> 6. 如果包实在太多达到了 Budget 配额，软中断被迫中止，唤醒 ksoftirqd 接力执行
+> 7. 当队列里的包被彻底收空，NAPI 结束工作，重新开启网卡硬中断，回到步骤 1 等待下一个包的闹钟
+
+
+这里面有几个容易理解偏差的细节：
+
+1. （时机问题）谁负责关闭硬中断？并不是软中断开始处理时（由软中断）关闭硬中断，实际上**硬中断是在上半部（硬中断处理函数）中被立刻关闭的**。网卡产生电信号触发 CPU 硬中断后，CPU 跳入网卡驱动注册的硬中断函数（如 `igb_msix_ring`），在这个函数里做的第一件事就是写网卡寄存器，把该队列的硬中断屏蔽掉；若等到软中断调度起来再去关，由于中间存在时间差，在万兆网络下，这几十微秒的延迟足以让网卡再发出成百上千个新的硬中断，把 CPU 打成筛子
+
+2. （执行主体问题）软中断是否就是 ksoftirqd？并不是内核调度到软中断处理线程 ksoftirqd 进行收包。绝大多数情况下，收包软中断是在硬中断退出的那一瞬间，直接借用当前被中断的（随便哪个）进程的内核栈就地执行的（见后文）。 那么什么时候才会用到 ksoftirqd？可以将 ksoftirqd 看作内核的一道防线，当网络流量极大，软中断在当前进程的上下文里执行了太久（比如超过了 `2m`），或者连续处理了太多包，为了防止那个被无辜打断的进程被饿死，内核会强制终止当前的软中断，并唤醒后台的 ksoftirqd/X 内核线程，让它在后台慢慢去把剩下的包收完
+
+3. （中断合并）网卡通过DMA机制将数据包存入ringbuffer，何时发出中断？错误理解是收到一定程度，才通过硬中断通知内核。实际上，在纯粹的 NAPI 逻辑下，只要 NAPI 处于空闲状态，只要来第 `1` 个包，网卡就会立刻发硬中断。现代网卡硬件（如 Intel 网卡）为了进一步减少硬中断，在物理层面上加入**中断合并（Interrupt Moderation / Coalescing）** 的功能，即可以通过寄存器告诉网卡，当收到第 `1` 个包时，先憋着不发中断，启动一个 `50` 微秒的硬件定时器；或者等累积够 `10` 个包了，再一起向 CPU 发一个硬中断。这里**积累一波再发中断是物理网卡硬件提供的功能，而非内核 NAPI 软件协议栈的机制**
+
+4. 防霸权机制（NAPI Budget / 预算配额）：软中断何时处理完成并退出，继续回到硬中断的部分。从前面描述来看，内核设计了 Budget（预算） 机制来解决，小结如下：
+
+-   每次调用 NAPI 的 `poll()` 方法时，内核会给它发配额（比如单次最多收 `64` 个包，整个软中断阶段最多收 `300` 个`netdev_budget`）
+-   如果收满了 `64` 个包，不管 RingBuffer 里还有没有剩下的，`poll()` 必须立刻返回
+-   如果总处理包数达到了 `300` 个，NAPI 必须被迫退出，并且此时依然保持硬中断关闭，把后续收包工作交给刚才提到的 ksoftirqd 线程
+-   只有当 poll() 发现 RingBuffer 真的彻底空了，它才会调用 `napi_complete` 退出，并重新开启硬中断
+
+这里对上面的软中断核心处理逻辑`__do_softirq--->net_rx_action`做一下补充：
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/softirq.c#L241
+asmlinkage __visible void __softirq_entry __do_softirq(void)
+{
+	unsigned long end = jiffies + MAX_SOFTIRQ_TIME;
+	unsigned long old_flags = current->flags;
+	int max_restart = MAX_SOFTIRQ_RESTART;
+	struct softirq_action *h;
+	bool in_hardirq;
+	__u32 pending;
+	int softirq_bit;
+
+    .......
+
+	pending = local_softirq_pending();
+	account_irq_enter_time(current);
+
+	__local_bh_disable_ip(_RET_IP_, SOFTIRQ_OFFSET);
+	in_hardirq = lockdep_softirq_start();
+
+restart:
+	/* Reset the pending bitmask before enabling irqs */
+	set_softirq_pending(0);
+
+	local_irq_enable();
+
+	h = softirq_vec;
+
+	while ((softirq_bit = ffs(pending))) {
+		unsigned int vec_nr;
+		int prev_count;
+
+		h += softirq_bit - 1;
+
+		vec_nr = h - softirq_vec;
+		prev_count = preempt_count();
+
+		kstat_incr_softirqs_this_cpu(vec_nr);
+
+        //for ebpf start
+		trace_softirq_entry(vec_nr);
+
+        //即net_rx_action
+		h->action(h);
+
+        // ebpf end
+		trace_softirq_exit(vec_nr);
+		if (unlikely(prev_count != preempt_count())) {
+			pr_err("huh, entered softirq %u %s %p with preempt_count %08x, exited with %08x?\n",
+			       vec_nr, softirq_to_name[vec_nr], h->action,
+			       prev_count, preempt_count());
+			preempt_count_set(prev_count);
+		}
+		h++;
+		pending >>= softirq_bit;
+	}
+
+	rcu_bh_qs();
+	local_irq_disable();
+
+	pending = local_softirq_pending();
+	if (pending) {
+		if (time_before(jiffies, end) && !need_resched() &&
+		    --max_restart)
+			goto restart;
+
+		wakeup_softirqd();
+	}
+
+	lockdep_softirq_end(in_hardirq);
+	account_irq_exit_time(current);
+	__local_bh_enable(SOFTIRQ_OFFSET);
+	WARN_ON_ONCE(in_interrupt());
+	tsk_restore_flags(current, old_flags, PF_MEMALLOC);
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/core/dev.c#L5313
+static __latent_entropy void net_rx_action(struct softirq_action *h)
+{
+	struct softnet_data *sd = this_cpu_ptr(&softnet_data);
+	unsigned long time_limit = jiffies + 2;
+	int budget = netdev_budget;
+	LIST_HEAD(list);
+	LIST_HEAD(repoll);
+
+	local_irq_disable();
+	list_splice_init(&sd->poll_list, &list);
+	local_irq_enable();
+
+	for (;;) {
+		struct napi_struct *n;
+
+		if (list_empty(&list)) {
+			if (!sd_has_rps_ipi_waiting(sd) && list_empty(&repoll))
+				goto out;
+			break;
+		}
+
+		n = list_first_entry(&list, struct napi_struct, poll_list);
+		budget -= napi_poll(n, &repoll);
+
+		if (unlikely(budget <= 0 ||
+			     time_after_eq(jiffies, time_limit))) {
+			sd->time_squeeze++;
+			break;
+		}
+	}
+
+	local_irq_disable();
+
+	list_splice_tail_init(&sd->poll_list, &list);
+	list_splice_tail(&repoll, &list);
+	list_splice(&list, &sd->poll_list);
+	if (!list_empty(&sd->poll_list))
+		__raise_softirq_irqoff(NET_RX_SOFTIRQ);
+
+	net_rps_action_and_irq_enable(sd);
+out:
+	__kfree_skb_flush();
+}
+
+```
+
+todo
+
+2、举一个例子详细的描述下上下文借用在硬中断/收包过程的意义
+
+todo
 
 ##	0x04	应用层处理
 上一章节描述了整个Linux内核对数据包的接收和处理过程，最后把数据包放到socket的接收队列中，那么应用层如何接受数据呢？以UDP应用常用的`recvfrom`函数（glibc库函数）为例进行分析

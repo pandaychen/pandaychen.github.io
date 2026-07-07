@@ -600,7 +600,7 @@ tcp        0      0 ::ffff:2.2.2.2:443  ::ffff:192.168.0.200:56418 ESTABLISHED 2
 ```
 
 ####  透明代理：socket替换的原理是什么？
-可以参考此文[一文吃透 Linux TProxy 透明代理](https://asphaltt.github.io/post/linux-how-tproxy-works/)\
+可以参考此文[一文吃透 Linux TProxy 透明代理](https://asphaltt.github.io/post/linux-how-tproxy-works/)
 
 ####  `-m socket`的作用
 回看tproxy透明代理第一步操作：
