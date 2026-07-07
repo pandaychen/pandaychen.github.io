@@ -347,7 +347,18 @@ void si_meminfo(struct sysinfo *val)
 
 两者均通过 per-CPU 的 `vm_zone_stat[]` 和 `vm_node_stat[]` 数组进行无锁快速读取
 
-todo
+#####	核心概念对比：Node vs Zone
+
+Linux 为了应对多处理器（SMP）和非统一内存访问（NUMA）架构，采用了分层结构来管理物理内存。层级关系是，一个系统包含多个 Node，每个 Node 包含多个 Zone
+
+| 概念 | 含义 | 描述 |
+| :-----| ----: | :----: |
+| Node （NUMA Node） | 内存节点 | 在 NUMA 系统中，CPU 和物理内存被划分为多个节点（Node）。每个 Node 拥有自己的本地内存和 CPU。访问本地 Node 内存的速度远快于跨 Node 访问 |
+| Zone （内存区域） | 内存分区 | 每个 Node 内部进一步被划分为若干个 Zone（如 `ZONE_DMA`，`ZONE_NORMAL`，`ZONE_MOVABLE` 等）。这是因为不同硬件限制（如 `32` 位寻址限制）决定了某些页框只能用于特定用途 |
+
+对于本文提到的`global_node_page_state(item)`与`global_zone_page_state(item)`函数，前者的含义是统计的是全系统范围内某个特定指标的总和，它会遍历所有 NUMA Node，累加每个 Node 上该指标的数值，通常当用户关心全局统计数据（如系统总的 NR_ACTIVE_ANON 即活跃匿名页）时使用；而后者的含义是统计的是全系统范围内某个特定 Zone 类型指标的总和，会遍历所有 Node，并累加所有 Node 中属于该 item 对应的 Zone 的数值。注意：`global_zone_page_state` 的参数通常是 `enum zone_stat_item`，它针对的是内存分布特性（如 DMA, Normal）
+
+更通俗点说，在内核代码 `fs/proc/meminfo.c` 实现中，如果统计指标是按区域划分的（比如内存分配器分区），内核倾向于使用 `global_zone_page_state`；如果统计指标是按进程或系统行为划分的（比如匿名页、文件缓存页），内核倾向于使用 `global_node_page_state`
 
 ##  0x03    MemTotal的疑惑：为什么 16G 机器只显示 15G？
 
