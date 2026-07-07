@@ -14,7 +14,7 @@ tags:
 ##  0x00    前言
 笔者最近在研究基于ebpf的网络协议栈可观测及tracing，本文对协议栈的数据处理基础做了若干总结
 
-本文代码基于 [v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include) 版本
+本文代码基于 [v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include) 版本，网卡类型选择 Intel 的 igb（千兆网卡）驱动
 
 推荐阅读：
 -	[Linux 网络栈接收数据（RX）：原理及内核实现（2022）](https://arthurchiao.art/blog/linux-net-stack-implementation-rx-zh/)
@@ -47,8 +47,8 @@ tags:
 
 ![irq-and-napi-poll](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/net-stack-implementation/irq-and-napi-poll.png)
 
--	每次执行到 NAPI 的 `poll()` 方法时，也就是会执行到网卡注册的 poll() 方法时，会批量从 RingBuffer 收包；在此 poll 工作时，会尽量把所有待收的包都收完（通过内核 budget 配置和调优）；在此期间内新到达网卡的包，也不会再触发硬件中断 IRQ
--	当 NAPI poll() 未正在运行或不在这个调度周期内，收到的包会触发 IRQ，然后内核来启动 poll() 再收包（下面要讨论的`igb_msix_ring`硬件中断处理函数的流程）
+-	每次执行到 NAPI 的 `poll()` 方法时，也就是会执行到网卡注册的 `poll()` 方法时，会批量从 RingBuffer 收包；在此 poll 工作时，会尽量把所有待收的包都收完（通过内核 budget 配置和调优）；在此期间内新到达网卡的包，也不会再触发硬件中断 IRQ
+-	当 NAPI `poll()` 未正在运行或不在这个调度周期内，收到的包会触发 IRQ，然后内核来启动 `poll()` 再收包（下面要讨论的`igb_msix_ring`硬件中断处理函数的流程）
 -	**NAPI 存在的意义是无需硬件中断通知就可以接收网络数据**。NAPI 的轮询循环（poll loop）是受硬件中断（IRQ）触发而运行起来的。NAPI 功能启用，但默认是没有工作的，直到第一个包到达的时候，网卡触发的一个硬件将它唤醒。当然内核也有其他的情况导致NAPI 功能也会被关闭，直到下一个硬中断再次将它唤起
 
 NAPI 在中断模式和轮询模式之间的状态切换：
@@ -1305,7 +1305,7 @@ flowchart TD
     AA --> BB
 ```
 
-1、硬中断处理
+**1、硬中断处理**
 
 首先数据帧从网线到达网卡的接收队列上，网卡在分配给自己的RingBuffer中寻找可用的内存位置，找到后DMA引擎会把数据DMA到这块Ringbuffer中（该过程对CPU无感）。当DMA操作完成以后，网卡会向CPU发起一个硬中断，通知CPU有数据帧到达。igb网卡的硬中断注册的处理函数是[`igb_msix_ring`](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L5782)，这里硬中断里只完成简单必要的工作，剩下的大部分逻辑都是转交给软中断处理。`igb_msix_ring`的逻辑仅仅记录了一个寄存器，修改了一下CPU的`poll_list`，然后发出软中断即完成
 
@@ -1359,7 +1359,7 @@ void __raise_softirq_irqoff(unsigned int nr)
 
 注意是先注册 NAPI poll，再打开硬件中断；硬中断先执行到网卡注册的 IRQ handler，在 handler 里面再触发 `NET_RX_SOFTIRQ` 的软中断softirq。在网卡驱动的硬中断处理函数做的事情很少，但软中断将会在和硬中断相同的 CPU 上执行。这就是给每个 CPU 一个特定的硬中断的意义：此 CPU 不仅处理这个硬中断，而且通过 NAPI 处理接下来的软中断来收包
 
-2、 `ksoftirqd`内核线程处理软中断
+**2、 `ksoftirqd`内核线程处理软中断**
 
 先介绍下内核调度器与调用栈，调度执行到某个特定线程的调用栈如下表所示，如果此时调度到的是 `ksoftirqd` 线程，那 `thread_fn()` 执行的就是 `run_ksoftirqd()`函数。并且从下面的流程还可以看出，在NAPI工作模式下，`__do_softirq()`即软中断核心逻辑会不停地收包直至返回，然后再次打开硬中断
 
@@ -1891,7 +1891,9 @@ static gro_result_t napi_skb_finish(gro_result_t ret, struct sk_buff *skb)
 }
 ```
 
-3、网络协议栈处理
+**3、网络协议栈处理**
+
+![netif_receive_skb_list_internal.png]()
 
 `netif_receive_skb->__netif_receive_skb_core`函数会根据packet的协议调用注册的协议处理函数处理，在`__netif_receive_skb_core`函数，`__netif_receive_skb_core`取出protocol，它会从数据包中取出协议信息，然后遍历注册在这个协议上的回调函数列表
 
@@ -1935,20 +1937,23 @@ static int __netif_receive_skb_core(struct sk_buff *skb, bool pfmemalloc)
 }
 
 //file: net/core/dev.c
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/core/dev.c#L1828
 static inline int deliver_skb(struct sk_buff *skb,
-                  struct packet_type *pt_prev,
-                  struct net_device *orig_dev)
+			      struct packet_type *pt_prev,
+			      struct net_device *orig_dev)
 {
-    //......
+	if (unlikely(skb_orphan_frags(skb, GFP_ATOMIC)))
+		return -ENOMEM;
+	atomic_inc(&skb->users);
 
-	//这里调用到了协议层注册的处理函数
+    //这里调用到了协议层注册的处理函数
 	//对于ip包，就会进入到ip_rcv
 	//对于arp包，会进入到arp_rcv
-    return pt_prev->func(skb, skb->dev, pt_prev, orig_dev);
+	return pt_prev->func(skb, skb->dev, pt_prev, orig_dev);
 }
 ```
 
-4、IP协议层处理流程
+**4、IP协议层处理流程**
 
 网络包接收在 IP 层的入口函数是 `ip_rcv`，在此即可看到netfilter的核心逻辑了。packet在这里会遇到netfilter第一个 HOOK `PREROUTING`。当该钩子上的规则都处理完后，会进行路由选择。如果发现是本设备的网络包，进入`ip_local_deliver` 函数之后又会遇到 `INPUT` HOOK，如下图逻辑
 
@@ -1965,6 +1970,7 @@ static inline int deliver_skb(struct sk_buff *skb,
 
 ```cpp
 //file: net/ipv4/ip_input.c
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/ip_input.c#L406
 int ip_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt, struct net_device *orig_dev)
 {
     //......
@@ -2179,12 +2185,14 @@ static int ip_local_deliver_finish(struct sk_buff *skb)
 }
 ```
 
-5、UDP协议层处理过程
+**5、UDP协议层处理过程**
 
 UDP协议的处理[函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/udp.c#L1873)是`udp_rcv->__udp4_lib_rcv`，关键流程如下：
 
 -	`__udp4_lib_lookup_skb`：根据`skb`来寻找对应的socket结构，即`struct sock *sk`
 -	`udp_queue_rcv_skb`：将`skb`成功挂到`sk`对应的接收队列`sk_receive_queue`的尾部，等待上层接收
+
+![__udp4_lib_rcv]()
 
 ```cpp
 //file: net/ipv4/udp.c
