@@ -888,3 +888,4 @@ todo
 -   [4.2 TCP 重传、滑动窗口、流量控制、拥塞控制](https://xiaolincoding.com/network/3_tcp/tcp_feature.html#%E6%8B%A5%E5%A1%9E%E6%8E%A7%E5%88%B6)
 -   [Selective Repeat / Go Back N](https://www.tkn.tu-berlin.de/teaching/rn/animations/gbn_sr/)
 -   [DMA介绍](https://www.xiaolincoding.com/os/8_network_system/zero_copy.html#%E4%B8%BA%E4%BB%80%E4%B9%88%E8%A6%81%E6%9C%89-dma-%E6%8A%80%E6%9C%AF)
+-   [Congestion Avoidance and Control](https://ee.lbl.gov/papers/congavoid.pdf)

@@ -20,6 +20,7 @@ tags:
 -	[Linux 网络栈接收数据（RX）：原理及内核实现（2022）](https://arthurchiao.art/blog/linux-net-stack-implementation-rx-zh/)
 -	[图解Linux网络包接收过程](https://zhuanlan.zhihu.com/p/256428917)
 
+
 ##  0x01   网卡的报文接收过程
 一些背景知识：
 
@@ -27,6 +28,142 @@ tags:
 -   常见的intel网卡：igb（网卡，其中的 i 是 intel，gb 表示每秒 1Gb）、ixgbe（xgb 表示 10Gb，e 表示以太网）、i40e（intel 40Gbps 以太网）
 
 ![recv-arch](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/kernel_packet.jpg)
+
+####    hardirqs 和 softirqs ？
+-   hardirqs 是硬件中断处理程序。当硬件设备产生一个中断请求时，内核会将该请求映射到一个特定的中断向量，然后执行与之关联的硬件中断处理程序。硬件中断处理程序通常用于处理设备驱动程序中的事件，例如设备数据传输完成或设备错误
+-   softirqs 是软件中断处理程序。它们是内核中的一种底层异步事件处理机制，用于处理内核中的高优先级任务。softirqs 通常用于处理网络协议栈、磁盘子系统和其他内核组件中的事件。与硬件中断处理程序相比，软件中断处理程序具有更高的灵活性和可配置性
+
+在ebpf中，可以通过如下hook来捕获 hardirqs 和 softirqs（挂载特定的 kprobe 或者 tracepoint），[参考](https://eunomia.dev/zh/tutorials/10-hardirqs/)，内核态代码如下（hardirqs 程序的主要目的是获取中断处理程序的名称、执行次数和执行时间，并以直方图的形式展示执行时间的分布）
+
+在`handle_entry` 和 `handle_exit` 两个函数中。在中断入口处，如果启用了计数模式，程序会直接增加中断计数；否则记录当前时间戳。在中断出口处，程序计算执行时间（当前时间减去开始时间），然后根据配置决定是累加总时间还是更新直方图槽位
+
+todo：`struct irqaction`结构体
+
+在下文中，可以看到网卡在收包-->CPU处理报文这一过程（切换到软中断下），内核预埋的tracepoint追踪点
+
+```c
+//对于 hardirqs：irq_handler_entry 和 irq_handler_exit
+//对于 softirqs：softirq_entry 和 softirq_exit
+
+struct irq_key {
+	char name[32];
+};
+
+struct {
+ __uint(type, BPF_MAP_TYPE_CGROUP_ARRAY);
+ __type(key, u32);
+ __type(value, u32);
+ __uint(max_entries, 1);
+} cgroup_map SEC(".maps");
+ 
+struct {
+ __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+ __uint(max_entries, 1);
+ __type(key, u32);
+ __type(value, u64);
+} start SEC(".maps");
+ 
+struct {
+ __uint(type, BPF_MAP_TYPE_HASH);
+ __uint(max_entries, MAX_ENTRIES);
+ __type(key, struct irq_key);
+ __type(value, struct info);
+} infos SEC(".maps");
+ 
+static struct info zero;
+ 
+static int handle_entry(int irq, struct irqaction *action)
+{
+ if (filter_cg && !bpf_current_task_under_cgroup(&cgroup_map, 0))
+  return 0;
+ 
+ if (do_count) {
+  struct irq_key key = {};
+  struct info *info;
+ 
+  bpf_probe_read_kernel_str(&key.name, sizeof(key.name), BPF_CORE_READ(action, name));
+  info = bpf_map_lookup_or_try_init(&infos, &key, &zero);
+  if (!info)
+   return 0;
+  info->count += 1;
+  return 0;
+ } else {
+  u64 ts = bpf_ktime_get_ns();
+  u32 key = 0;
+ 
+  if (filter_cg && !bpf_current_task_under_cgroup(&cgroup_map, 0))
+   return 0;
+ 
+  bpf_map_update_elem(&start, &key, &ts, BPF_ANY);
+  return 0;
+ }
+}
+ 
+static int handle_exit(int irq, struct irqaction *action)
+{
+ struct irq_key ikey = {};
+ struct info *info;
+ u32 key = 0;
+ u64 delta;
+ u64 *tsp;
+ 
+ if (filter_cg && !bpf_current_task_under_cgroup(&cgroup_map, 0))
+  return 0;
+ 
+ tsp = bpf_map_lookup_elem(&start, &key);
+ if (!tsp)
+  return 0;
+ 
+ delta = bpf_ktime_get_ns() - *tsp;
+ if (!targ_ns)
+  delta /= 1000U;
+ 
+ bpf_probe_read_kernel_str(&ikey.name, sizeof(ikey.name), BPF_CORE_READ(action, name));
+ info = bpf_map_lookup_or_try_init(&infos, &ikey, &zero);
+ if (!info)
+  return 0;
+ 
+ if (!targ_dist) {
+  info->count += delta;
+ } else {
+  u64 slot;
+ 
+  slot = log2(delta);
+  if (slot >= MAX_SLOTS)
+   slot = MAX_SLOTS - 1;
+  info->slots[slot]++;
+ }
+ 
+ return 0;
+}
+ 
+SEC("tp_btf/irq_handler_entry")
+int BPF_PROG(irq_handler_entry_btf, int irq, struct irqaction *action)
+{
+ return handle_entry(irq, action);
+}
+ 
+SEC("tp_btf/irq_handler_exit")
+int BPF_PROG(irq_handler_exit_btf, int irq, struct irqaction *action)
+{
+ return handle_exit(irq, action);
+}
+ 
+SEC("raw_tp/irq_handler_entry")
+int BPF_PROG(irq_handler_entry, int irq, struct irqaction *action)
+{
+ return handle_entry(irq, action);
+}
+ 
+SEC("raw_tp/irq_handler_exit")
+int BPF_PROG(irq_handler_exit, int irq, struct irqaction *action)
+{
+ return handle_exit(irq, action);
+}
+```
+
+####    中断的上半部 && 下半部的解释
+
 
 ####	NAPI技术
 
@@ -2443,7 +2580,7 @@ flowchart TD
 至此，软中断的一轮接收报文及处理过程结束，`run_ksoftirqd`逻辑中`__do_softirq`处理完成，继续下面的流程
 
 
-####    小结
+####    小结（重要）
 
 1、回到上面网卡-->协议栈完整的收包（**CPU在软中断里收包的同时，网卡硬件依然在并行地通过 DMA 把新包写入 Ring Buffer**）过程，总结为一句话
 
@@ -2601,6 +2738,8 @@ todo
 2、举一个例子详细的描述下上下文借用在硬中断/收包过程的意义
 
 todo
+
+3、
 
 ##	0x04	应用层处理
 上一章节描述了整个Linux内核对数据包的接收和处理过程，最后把数据包放到socket的接收队列中，那么应用层如何接受数据呢？以UDP应用常用的`recvfrom`函数（glibc库函数）为例进行分析
