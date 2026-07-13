@@ -1322,7 +1322,7 @@ Linux驱动，内核协议栈等等模块在具备接收网卡数据包之前，
 
 系统初始化时会调用`smpboot_register_percpu_thread`，该[函数](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/smpboot.h#L51)进一步会执行到`spawn_ksoftirqd`来创建出softirqd 线程
 
-![spawn_ksoftirqd]()
+![spawn_ksoftirqd](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/8/spawn_ksoftirqd.png)
 
 创建ksoftirqd内核线程关联结构[`softirq_threads`](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/softirq.c#L748)，当ksoftirqd被创建出来以后，它就会进入自己的线程循环函数`ksoftirqd_should_run`和`run_ksoftirqd`，不停地判断有没有软中断需要被处理
 
@@ -1349,15 +1349,260 @@ early_initcall(spawn_ksoftirqd);
 
 2、网络子系统初始化
 
-![subsys_initcall]()
+![subsys_initcall](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/8/subsys_initcall.png)
+
+`subsys_initcall--->net_dev_init`，`subsys_initcall`主要初始化各个子系统，`net_dev_init`主要用于网络子系统的初始化
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/core/dev.c#L8356
+static int __init net_dev_init(void)
+{
+    ......
+
+    for_each_possible_cpu(i) {
+        //为每个CPU都申请一个softnet_data数据结构
+        struct softnet_data *sd = &per_cpu(softnet_data, i);
+
+        memset(sd, 0, sizeof(*sd));
+        skb_queue_head_init(&sd->input_pkt_queue);
+        skb_queue_head_init(&sd->process_queue);
+        sd->completion_queue = NULL;
+        //poll_list：等待驱动程序将其poll函数注册进来
+        INIT_LIST_HEAD(&sd->poll_list);
+
+        ......
+    }
+
+    ......
+
+    open_softirq(NET_TX_SOFTIRQ, net_tx_action);
+    open_softirq(NET_RX_SOFTIRQ, net_rx_action);
+}
+subsys_initcall(net_dev_init);
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/softirq.c#L447
+void open_softirq(int nr, void (*action)(struct softirq_action *))
+{
+	softirq_vec[nr].action = action;
+}
+
+//全局数组
+static struct softirq_action softirq_vec[NR_SOFTIRQS] __cacheline_aligned_in_smp;
+```
+
+`open_softirq`的作用是为每一种软中断都注册一个处理函数。`NET_TX_SOFTIRQ`类型软中断的处理函数为`net_tx_action`，`NET_RX_SOFTIRQ`的为`net_rx_action`。继续跟踪`open_softirq`后发现这个注册的方式是记录在`softirq_vec`[变量](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/softirq.c#L56)里的。后面`ksoftirqd`线程收到软中断的时候，也会使用这个变量来找到每一种软中断对应的处理函数
 
 -	SoftIRQ handler 初始化：`net_dev_init` 分别为接收和发送数据注册了一个软中断处理函数（后文会描述网卡驱动的中断处理函数是如何触发 `net_rx_action()` 执行的）；这里内核的软中断系统是一种在硬中断处理上下文（驱动中）之外执行代码的机制，可以把软中断系统想象成一系列内核线程（每个 CPU 一个）， 这些线程执行针对不同事件注册的处理函数（SoftIRQ handler）
 
+
 3、协议栈注册，针对协议栈支持的各类协议如arp/icmp/ip/udp/tcp等，每一个协议都会将自己的处理函数注册
+
+内核是通过注册的方式来实现的协议栈各个协议的处理钩子函数，如`ip_rcv()/tcp_v4_rcv()/udp_rcv()`等。内核中的`fs_initcall`和`subsys_initcall`类似，也是初始化模块的入口。`fs_initcall`调用`inet_init`后开始网络协议栈注册，即将上述函数注册到了`inet_protos`和`ptype_base`数据结构中
+
+![inet_init](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/8/inet_init.jpg)
+
+```c
+static struct packet_type ip_packet_type __read_mostly = {
+    .type = cpu_to_be16(ETH_P_IP),
+    .func = ip_rcv,
+};
+
+static const struct net_protocol udp_protocol = {
+    .handler =  udp_rcv,
+    .err_handler =  udp_err,
+    .no_policy =    1,
+    .netns_ok = 1,
+};
+
+static const struct net_protocol tcp_protocol = {
+    .early_demux    =   tcp_v4_early_demux,
+    .handler    =   tcp_v4_rcv,
+    .err_handler    =   tcp_v4_err,
+    .no_policy  =   1,
+    .netns_ok   =   1,
+};
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/af_inet.c#L1792
+static int __init inet_init(void)
+{
+    ......
+
+    rc = proto_register(&tcp_prot, 1);
+	if (rc)
+		goto out;
+
+	rc = proto_register(&udp_prot, 1);
+	if (rc)
+		goto out_unregister_tcp_proto;
+
+	rc = proto_register(&raw_prot, 1);
+	if (rc)
+		goto out_unregister_udp_proto;
+
+	rc = proto_register(&ping_prot, 1);
+	if (rc)
+		goto out_unregister_raw_proto;
+
+    ......
+
+    if (inet_add_protocol(&icmp_protocol, IPPROTO_ICMP) < 0)
+        pr_crit("%s: Cannot add ICMP protocol\n", __func__);
+    if (inet_add_protocol(&udp_protocol, IPPROTO_UDP) < 0)
+        pr_crit("%s: Cannot add UDP protocol\n", __func__);
+    if (inet_add_protocol(&tcp_protocol, IPPROTO_TCP) < 0)
+        pr_crit("%s: Cannot add TCP protocol\n", __func__);
+
+    ......
+
+    arp_init();
+
+	/*
+	 *	Set the IP module up
+	 */
+
+	ip_init();
+
+	/* Setup TCP slab cache for open requests. */
+	tcp_init();
+
+	/* Setup UDP memory threshold */
+	udp_init();
+
+	/* Add UDP-Lite (RFC 3828) */
+	udplite4_register();
+
+	ping_init();
+
+    ......
+
+    //dev_add_pack：
+    //ip_packet_type结构体中的type是协议名，func是ip_rcv函数
+    //在dev_add_pack中会被注册到ptype_base哈希表中
+    dev_add_pack(&ip_packet_type);
+}
+
+//inet_add_protocol函数将tcp和udp对应的处理函数都注册到了inet_protos数组
+int inet_add_protocol(const struct net_protocol *prot, unsigned char protocol)
+{
+	if (!prot->netns_ok) {
+		pr_err("Protocol %u is not namespace aware, cannot register.\n",
+			protocol);
+		return -EINVAL;
+	}
+
+	return !cmpxchg((const struct net_protocol **)&inet_protos[protocol],
+			NULL, prot) ? 0 : -1;
+}
+EXPORT_SYMBOL(inet_add_protocol);
+```
+
+`udp_protocol`结构体中的`handler`是`udp_rcv`，`tcp_protocol`结构体中的`handler`是`tcp_v4_rcv`，通过`inet_add_protocol`完成了初始化工作
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/core/dev.c#L387
+void dev_add_pack(struct packet_type *pt)
+{
+	struct list_head *head = ptype_head(pt);
+
+	spin_lock(&ptype_lock);
+	list_add_rcu(&pt->list, head);
+	spin_unlock(&ptype_lock);
+}
+EXPORT_SYMBOL(dev_add_pack);
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/core/dev.c#L378
+static inline struct list_head *ptype_head(const struct packet_type *pt)
+{
+	if (pt->type == htons(ETH_P_ALL))
+		return pt->dev ? &pt->dev->ptype_all : &ptype_all;
+	else
+		return pt->dev ? &pt->dev->ptype_specific :
+				 &ptype_base[ntohs(pt->type) & PTYPE_HASH_MASK];
+}
+```
+
+这里需要记住`inet_protos`记录着udp/tcp等协议的处理函数地址（入口），`ptype_base`存储着`ip_rcv()`函数的处理地址。后文对软中断机制分析中会通过`ptype_base`找到`ip_rcv`函数地址，进而将ip包正确地送到`ip_rcv()`中执行。在`ip_rcv`中将会通过`inet_protos`找到tcp/udp的处理函数，再而把包转发给`udp_rcv()/tcp_v4_rcv()`函数。这几类函数中包含了大量的协议栈细节，典型的如下：
+
+-   `ip_rcv`中会处理netfilter/iptable过滤
+-   `udp_rcv`中会判断socket接收队列是否满了（内核参数`net.core.rmem_max/net.core.rmem_default`）
 
 4、网卡驱动初始化，初始化DMA以及向内核注册收包函数地址（NAPI的`poll`函数）
 
+每一个驱动程序（不仅仅只是网卡驱动）会使用 `module_init` 向内核注册一个初始化函数，当驱动被加载时，内核会调用这个初始化函数，以igb网卡为例：
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L674
+static struct pci_driver igb_driver = {
+    .name     = igb_driver_name,
+    .id_table = igb_pci_tbl,
+    .probe    = igb_probe,
+    .remove   = igb_remove,
+    ......
+};
+
+static int __init igb_init_module(void)
+{
+	int ret;
+
+	pr_info("%s - version %s\n",
+	       igb_driver_string, igb_driver_version);
+	pr_info("%s\n", igb_copyright);
+
+    ......
+	ret = pci_register_driver(&igb_driver);
+	return ret;
+}
+
+module_init(igb_init_module);
+```
+
+当驱动的`pci_register_driver`调用完成后，内核就知道了该驱动的相关信息，比如igb网卡驱动的`igb_driver_name`和`igb_probe`函数地址等。当网卡设备被识别以后，内核会调用其驱动的`probe`方法（`igb_driver`的`probe`方法是`igb_probe`）。驱动`probe`方法执行的目的就是让设备ready。主要执行的操作如下：
+
+![pci_register_driver](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/8/pci_register_driver.jpg)
+
+插个题外话，如何理解`ethtool`的工作原理？
+
+上图第5步，网卡驱动实现了`ethtool`所需要的接口（完成函数地址的注册）。当 `ethtool` 发起一个系统调用之后，内核会找到对应操作的[回调函数](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_ethtool.c)
+
+`ethtool`命令之所以能查看网卡收发包统计、能修改网卡自适应模式、能调整RX 队列的数量和大小，是因为该命令最终调用到了网卡驱动的相应方法
+
+第6步注册的`igb_netdev_ops`中包含的是`igb_open`等函数，该函数在网卡被启动的时候会被调用
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L2143
+static const struct net_device_ops igb_netdev_ops = {
+  .ndo_open               = igb_open,
+  .ndo_stop               = igb_close,
+  .ndo_start_xmit         = igb_xmit_frame,
+  .ndo_get_stats64        = igb_get_stats64,
+  .ndo_set_rx_mode        = igb_set_rx_mode,
+  .ndo_set_mac_address    = igb_set_mac,
+  .ndo_change_mtu         = igb_change_mtu,
+  .ndo_do_ioctl           = igb_ioctl,
+    ......
+}
+```
+
+第7步在`igb_probe`初始化过程中，还调用到了`igb_alloc_q_vector`，其注册了一个NAPI机制所必须的poll函数（对于igb网卡驱动来说，这个函数就是`igb_poll`）
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L1193
+static int igb_alloc_q_vector(struct igb_adapter *adapter,
+                  int v_count, int v_idx,
+                  int txr_count, int txr_idx,
+                  int rxr_count, int rxr_idx)
+{
+
+    ......
+    /* initialize NAPI */
+    netif_napi_add(adapter->netdev, &q_vector->napi,
+               igb_poll/*NAPI的核心poll函数*/, 64);
+    ......
+}
+```
+
 5、启动网卡，分配RX/TX队列，注册中断对应的处理函数
+
 
 ```cpp
 //file: drivers/net/ethernet/intel/igb/igb_main.c
@@ -1378,7 +1623,84 @@ static int __igb_open(struct net_device *netdev, bool resuming)
     for (i = 0; i < adapter->num_q_vectors; i++)
         napi_enable(&(adapter->q_vector[i]->napi));
 
-    //......
+    ......
+}
+```
+
+当上面的初始化都完成以后，就可以启动网卡了。前文网卡驱动初始化时，驱动向内核注册了 `structure net_device_ops` 变量，它包含着网卡启用、发包、设置mac 地址等回调函数（函数指针）。当启用一个网卡时（如`ifconfig eth0 up`），`net_device_ops` 中的 `igb_open`方法会被调用
+
+![igb_open](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/8/igb_open.jpg)
+
+在上面`__igb_open`函数调用了`igb_setup_all_tx_resources`和`igb_setup_all_rx_resources`
+
+-   [`igb_setup_all_rx_resources`](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L3328)：分配了RingBuffer，并建立内存和Rx队列的映射关系
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L3471
+static int igb_setup_all_rx_resources(struct igb_adapter *adapter)
+{
+	struct pci_dev *pdev = adapter->pdev;
+	int i, err = 0;
+
+	for (i = 0; i < adapter->num_rx_queues; i++) {
+		err = igb_setup_rx_resources(adapter->rx_ring[i]);
+		if (err) {
+			dev_err(&pdev->dev,
+				"Allocation for Rx Queue %u failed\n", i);
+			for (i--; i >= 0; i--)
+				igb_free_rx_resources(adapter->rx_ring[i]);
+			break;
+		}
+	}
+
+	return err;
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L3328
+static int igb_setup_all_tx_resources(struct igb_adapter *adapter)
+{
+	struct pci_dev *pdev = adapter->pdev;
+	int i, err = 0;
+
+	for (i = 0; i < adapter->num_tx_queues; i++) {
+		err = igb_setup_tx_resources(adapter->tx_ring[i]);
+		if (err) {
+			dev_err(&pdev->dev,
+				"Allocation for Tx Queue %u failed\n", i);
+			for (i--; i >= 0; i--)
+				igb_free_tx_resources(adapter->tx_ring[i]);
+			break;
+		}
+	}
+
+	return err;
+}
+```
+
+继续，对中断函数注册`igb_request_irq`可以发现， `__igb_open ---> igb_request_irq ---> igb_request_msix`，对于多队列的网卡，为每一个队列都注册了中断，其对应的中断处理函数是`igb_msix_ring`。此外，msix方式下，每个 RX 队列有独立的MSI-X 中断，从网卡硬件中断的层面就可以设置让收到的包被不同的 CPU处理（可以通过 `/proc/irq/IRQ_NUMBER/smp_affinity`能够修改和CPU的绑定行为）
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L1411
+static int igb_request_irq(struct igb_adapter *adapter)
+{   
+    .......
+    if (adapter->msix_entries) {
+        err = igb_request_msix(adapter);
+        if (!err)
+            goto request_done;
+        ......
+    }
+}
+
+static int igb_request_msix(struct igb_adapter *adapter)
+{
+    ......
+    for (i = 0; i < adapter->num_q_vectors; i++) {
+        ......
+        err = request_irq(adapter->msix_entries[vector].vector,
+                  igb_msix_ring, 0, q_vector->name,
+    }
+    ......
 }
 ```
 
