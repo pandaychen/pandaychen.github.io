@@ -4452,3 +4452,4 @@ conntrack -S
 -   [Kubernetes Service 实现原理](https://kubernetes.io/docs/concepts/services-networking/service/)
 -   [IPVS-Based In-Cluster Load Balancing Deep Dive](https://kubernetes.io/blog/2018/07/09/ipvs-based-in-cluster-load-balancing-deep-dive/)
 -   [Cilium: BPF and XDP for containers](https://cilium.io/)
+-   [Dynamic DMA mapping Guide](https://www.kernel.org/doc/Documentation/DMA-API-HOWTO.txt)
