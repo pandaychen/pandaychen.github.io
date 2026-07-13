@@ -164,6 +164,13 @@ int BPF_PROG(irq_handler_exit, int irq, struct irqaction *action)
 
 ####    中断的上半部 && 下半部的解释
 
+内核和网络设备驱动是通过中断的方式来处理的。那么为何需要分为上下半部呢？
+
+当设备上有数据到达的时候，会给CPU的相关引脚上触发一个电压变化，以通知CPU来处理数据。对于网络模块来说，由于处理过程比较复杂和耗时，如果在中断函数中完成所有的处理，将会导致中断处理函数（优先级过高）将过度占据CPU，将导致CPU无法响应其它设备（如鼠标和键盘的消息）。因此Linux中断处理函数被分上半部和下半部
+
+上半部是只进行最简单的工作，快速处理然后释放CPU，接着CPU就可以允许其它中断进来。剩下将绝大部分的工作都放到下半部中，可以慢慢从容处理。和硬中断不同的是，硬中断是通过给CPU物理引脚施加电压变化，而软中断是通过给内存中的一个变量的二进制值以通知软中断处理程序
+
+todo
 
 ####	NAPI技术
 
@@ -441,6 +448,7 @@ stateDiagram-v2
 
 
 ```C
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/skbuff.h#L566
 struct sk_buff {
 	union {
 		struct {
@@ -736,10 +744,32 @@ static inline struct sk_buff *alloc_skb(unsigned int size, gfp_t priority){
 
 ![sk_buff_oper](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/sk_buff/sk_buff_oper_function.png)
 
--   `skb_put`
--   `skb_push`
--   `skb_pull`：常用于协议栈接收报文时，从外到内剥离协议头（以太网头-IP 头-TCP 头）的操作
--   `skb_reserve`
+需要了解内核的设计哲学：零拷贝指针操作，即通过移动四个核心指针来实现所有的添加和剥离操作，通过`alloc_skb()` 分配的 Socket Buffer ，是一大块连续的内存。由四个指针来界定：
+
+1.  `head`：指向这块内存空间的绝对起点（固定不变）
+2.  `data`：指向当前有效协议数据的起始位置（动态滑动）
+3.  `tail`：指向当前有效协议数据的结束位置（动态滑动）
+4.  `end`：指向这块内存空间的绝对终点（固定不变）
+
+在这四个指针之间，形成了三个重要的区域：
+
+1.  Headroom（头部预留空间）：`head` 到 `data` 之间。用于在发送时往前面插入协议头
+2.  Payload（有效载荷）：`data` 到 `tail` 之间。这才是当前协议层真正关心的数据
+3.  Tailroom（尾部预留空间）：`tail` 到 `end` 之间。用于在尾部追加数据
+
+所以，下面这四个函数本质上就是在修改 `data` 和 `tail` 这两个指针的值（对应上图）
+
+-   `skb_put`：在尾部追加数据，将 `tail` 指针向后（朝着 `end` 方向）移动 `len` 字节，同时增加 skb 的 `len`（有效数据长度），扩大当前的 Payload 区域，把空间腾出来，以便向数据的末尾写入内容
+-   `skb_push`：用于在头部添加协议头（封装），即将 `data` 指针向前（朝着 `head` 方向）移动 `len` 字节，同时增加 skb 的 `len`。本质是侵占 Headroom 空间，在当前有效数据的最前方暴露出一块空间，用来写入新的协议头
+-   `skb_pull`：常用于协议栈接收报文时，从外到内剥离协议头（以太网头-IP 头-TCP 头）的操作，即在头部剥离协议头（解封装）。将 `data` 指针向后（朝着 `tail` 方向）移动 `len` 字节，同时减少 skb 的 `len`。隐藏最前方的 `len` 字节数据，使其退化为 Headroom 的一部分（剥洋葱）
+-   `skb_reserve`：预留头部空间（发送数据包的第一步），将 `data` 和 `tail` 指针同时向后（朝着 end 的方向）移动 `len` 字节。通常在 `alloc_skb` 刚刚分配完空内存、还没填入任何数据时调用。它的目的是在内存的最前面空出一段 Headroom，以便后续协议栈往里面塞 MAC 头、IP 头、TCP 头
+
+上面四个函数对应的使用场景如下：
+
+-   `skb_put`：对于接收端场景（网卡驱动）：当网卡通过 DMA 把数据填入内存后，驱动会调用 `skb_put`，把 `tail` 指针往后拉，将 DMA 填入的数据正式纳入 skb 的有效载荷中。而对于发送端场景（应用层），本函数常用于将用户态的真实业务数据（如 HTTP 响应体）放入 skb 
+-   `skb_push`：典型的发送方向（TX）操作，即当TCP 层收到数据，调用 `skb_push` 腾出 `20` 字节，填入 TCP 头；继续往下传给 IP 层，调用 `skb_push` 腾出 `20` 字节，填入 IP 头；最后往下传给以太网层，调用 `skb_push` 腾出 `14` 字节，填入 MAC 头
+-   `skb_pull`：典型的接收方向（RX）操作。当以太网层处理完 MAC 头，调用 `skb_pull(14)`，把 MAC 头扔掉（其实数据还在内存里，只是指针越过了它）；IP 层处理完，调用 `skb_pull(20)`，把 IP 头剥离；TCP 层处理完，调用 `skb_pull(20)`，最后只剩下纯应用层数据交给用户态
+-   `skb_reserve`：发送数据包的第一步
 
 5.3、接收数据包的处理过程，伪代码描述如下：
 
@@ -1265,16 +1295,40 @@ flowchart LR
 -   收包&&处理包的线程到底是谁？
 -   上下文借用（线程劫持）的意义
 
+####    软中断及其类型
+todo
+
+```c
+//file: include/linux/interrupt.h
+enum{
+    HI_SOFTIRQ=0,
+    TIMER_SOFTIRQ,
+    NET_TX_SOFTIRQ,
+    NET_RX_SOFTIRQ,
+    BLOCK_SOFTIRQ,
+    BLOCK_IOPOLL_SOFTIRQ,
+    TASKLET_SOFTIRQ,
+    SCHED_SOFTIRQ,
+    HRTIMER_SOFTIRQ,
+    RCU_SOFTIRQ,  
+};
+```
+
 ####	一：准备工作（Linux启动）
 
 Linux驱动，内核协议栈等等模块在具备接收网卡数据包之前，需要完整如下的初始化工作，这部分内容可以参考[图解Linux网络包接收过程](https://mp.weixin.qq.com/s/GoYDsfy9m0wRoXi_NCfCmg)：
 
 1、Linux系统启动，创建ksoftirqd内核线程，用来处理软中断
 
+系统初始化时会调用`smpboot_register_percpu_thread`，该[函数](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/smpboot.h#L51)进一步会执行到`spawn_ksoftirqd`来创建出softirqd 线程
+
+![spawn_ksoftirqd]()
+
 创建ksoftirqd内核线程关联结构[`softirq_threads`](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/softirq.c#L748)，当ksoftirqd被创建出来以后，它就会进入自己的线程循环函数`ksoftirqd_should_run`和`run_ksoftirqd`，不停地判断有没有软中断需要被处理
 
 ```cpp
 //file: kernel/softirq.c
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/softirq.c#L753
 static struct smp_hotplug_thread softirq_threads = {
     .store          = &ksoftirqd,
     .thread_should_run  = ksoftirqd_should_run,
@@ -1294,6 +1348,8 @@ early_initcall(spawn_ksoftirqd);
 ```
 
 2、网络子系统初始化
+
+![subsys_initcall]()
 
 -	SoftIRQ handler 初始化：`net_dev_init` 分别为接收和发送数据注册了一个软中断处理函数（后文会描述网卡驱动的中断处理函数是如何触发 `net_rx_action()` 执行的）；这里内核的软中断系统是一种在硬中断处理上下文（驱动中）之外执行代码的机制，可以把软中断系统想象成一系列内核线程（每个 CPU 一个）， 这些线程执行针对不同事件注册的处理函数（SoftIRQ handler）
 
