@@ -1603,7 +1603,6 @@ static int igb_alloc_q_vector(struct igb_adapter *adapter,
 
 5、启动网卡，分配RX/TX队列，注册中断对应的处理函数
 
-
 ```cpp
 //file: drivers/net/ethernet/intel/igb/igb_main.c
 static int __igb_open(struct net_device *netdev, bool resuming)
@@ -1677,7 +1676,7 @@ static int igb_setup_all_tx_resources(struct igb_adapter *adapter)
 }
 ```
 
-继续，对中断函数注册`igb_request_irq`可以发现， `__igb_open ---> igb_request_irq ---> igb_request_msix`，对于多队列的网卡，为每一个队列都注册了中断，其对应的中断处理函数是`igb_msix_ring`。此外，msix方式下，每个 RX 队列有独立的MSI-X 中断，从网卡硬件中断的层面就可以设置让收到的包被不同的 CPU处理（可以通过 `/proc/irq/IRQ_NUMBER/smp_affinity`能够修改和CPU的绑定行为）
+继续，对中断函数注册`igb_request_irq`可以发现， `__igb_open ---> igb_request_irq ---> igb_request_msix`，**对于多队列的网卡，为每一个队列都注册了中断，其对应的中断处理函数是`igb_msix_ring`**。此外，msix方式下，每个 RX 队列有独立的MSI-X 中断，从网卡硬件中断的层面就可以设置让收到的包被不同的 CPU处理（可以通过 `/proc/irq/IRQ_NUMBER/smp_affinity`能够修改和CPU的绑定行为）
 
 ```c
 //https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L1411
@@ -1847,7 +1846,7 @@ flowchart TD
 
 **1、硬中断处理**
 
-首先数据帧从网线到达网卡的接收队列上，网卡在分配给自己的RingBuffer中寻找可用的内存位置，找到后DMA引擎会把数据DMA到这块Ringbuffer中（该过程对CPU无感）。当DMA操作完成以后，网卡会向CPU发起一个硬中断，通知CPU有数据帧到达。igb网卡的硬中断注册的处理函数是[`igb_msix_ring`](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L5782)，这里硬中断里只完成简单必要的工作，剩下的大部分逻辑都是转交给软中断处理。`igb_msix_ring`的逻辑仅仅记录了一个寄存器，修改了一下CPU的`poll_list`，然后发出软中断即完成
+首先数据帧从网线到达网卡的接收队列上，网卡在分配给自己的RingBuffer中寻找可用的内存位置，找到后DMA引擎会把数据DMA到这块Ringbuffer中（该过程对CPU无感知）。当DMA操作完成以后，网卡会向CPU发起一个硬中断，通知CPU有数据帧到达。igb网卡的硬中断注册的处理函数是[`igb_msix_ring`](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L5782)，这里硬中断里只完成简单必要的工作，剩下的大部分逻辑都是转交给软中断处理。`igb_msix_ring`的逻辑仅仅记录了一个寄存器，修改了一下CPU的`poll_list`，然后发出软中断即完成
 
 硬中断期间是不能再进行另外的硬中断的，不能嵌套。所以硬中断处理函数（handler）执行时，会屏蔽部分或全部（新的）硬中断。这就要求硬中断要尽快处理，然后关闭这次硬中断，这样下次硬中断才能再进来；另一方面，中断被屏蔽的时间越长，丢失事件的可能性也就越大；如果一次硬中断时间过长，RingBuffer 会被塞满导致丢包。因此所有耗时的操作都应该从硬中断处理逻辑中剥离出来，硬中断因此能尽可能快地执行，然后再重新打开。所以软中断就是针对这一目的设计的
 
@@ -1858,21 +1857,31 @@ flowchart TD
 -   `igb_write_itr`：记录一下硬件中断频率
 -   硬中断触发，调用`napi_schedule->__napi_schedule->____napi_schedule->__raise_softirq_irqoff`：触发软中断
 
-```cpp
+在上文启动网卡的过程中，可了解到**网卡的硬中断注册的处理函数是`igb_msix_ring`**
+
+```c
 // igb网卡的硬中断处理函数
 //file: drivers/net/ethernet/intel/igb/igb_main.c
+//https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L5782
 static irqreturn_t igb_msix_ring(int irq, void *data)
 {
     struct igb_q_vector *q_vector = data;
 
     /* Write the ITR value calculated from the previous interrupt. */
+
+    //igb_write_itr只是记录一下硬件中断频率
     igb_write_itr(q_vector);
 
+    // 这个是重点
     napi_schedule(&q_vector->napi);
 
     return IRQ_HANDLED;
 }
+```
 
+继续，顺着`napi_schedule`调用一路跟踪，在`____napi_schedule`函数中，`list_add_tail`修改了CPU变量`softnet_data`里的`poll_list`，将驱动`napi_struct`传过来的`poll_list`添加了进来。其中`softnet_data`中的`poll_list`是一个双向列表，其中的设备都带有输入帧等着被处理。紧接着`__raise_softirq_irqoff`触发了一个软中断`NET_RX_SOFTIRQ`（类型），从`__raise_softirq_irqoff`实现来看，触发过程只是对一个变量进行了一次或运算而已，非常轻量
+
+```c
 /* Called with irq disabled */
 static inline void ____napi_schedule(struct softnet_data *sd,
                      struct napi_struct *napi)
@@ -1898,6 +1907,10 @@ void __raise_softirq_irqoff(unsigned int nr)
 ```
 
 注意是先注册 NAPI poll，再打开硬件中断；硬中断先执行到网卡注册的 IRQ handler，在 handler 里面再触发 `NET_RX_SOFTIRQ` 的软中断softirq。在网卡驱动的硬中断处理函数做的事情很少，但软中断将会在和硬中断相同的 CPU 上执行。这就是给每个 CPU 一个特定的硬中断的意义：此 CPU 不仅处理这个硬中断，而且通过 NAPI 处理接下来的软中断来收包
+
+再次强调一下，Linux在硬中断里只完成简单必要的工作，剩下的大部分的处理（收包入协议栈等）都是转交给软中断的。硬中断处理过程只是记录了一个寄存器，修改了一下下CPU的`poll_list`，然后发出个软中断
+
+todo
 
 ####    二：ksoftirqd内核线程处理软中断
 
@@ -1932,17 +1945,19 @@ smpboot_thread_fn
     }
 ```
 
-ksoftirqd中两个线程函数`ksoftirqd_should_run`和`run_ksoftirqd`的主要逻辑如下：
+内核线程初始化时，ksoftirqd中两个线程函数`ksoftirqd_should_run`和`run_ksoftirqd`的主要逻辑如下：
 
-![kfngxl]()
+![ksoftirqd]()
 <!--ksoftirqd线程函数主要逻辑图-->
 
 -   `ksoftirqd_should_run`：读取`local_softirq_pending`函数的结果（硬中断也调用此函数，硬中断位置会修改写入标记），如果硬中断中设置了`NET_RX_SOFTIRQ`，接下来会真正进入线程函数中`run_ksoftirqd`处理
 -   `run_ksoftirqd`函数：在软中断线程初始化时，就会注册`run_ksoftirqd()`函数。首先调用`local_irq_disable()`，`local_irq_disable()`是个宏，会展开成处理器架构相关的函数，**功能是关闭所在 CPU 的所有硬中断**，接下来，判断如果有 pending softirq，则执行`__do_softirq()` 处理软中断，软中断流程完成后，然后重新打开所在 CPU 的硬中断，然后返回；否则直接打开所在 CPU 的硬中断，然后返回
+-   可以看到软中断和硬中断中调用了同一个函数`local_softirq_pending`，使用方式不同的是硬中断位置是为了写入标记，这里仅仅只是读取。如果硬中断中设置了`NET_RX_SOFTIRQ`，这里自然能读取的到。接下来会真正进入线程函数中`run_ksoftirqd`处理
 
 ![run_ksoftirqd](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/net-stack-implementation/run_ksoftirqd.png)
 
 ```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/softirq.c#L663
 static int ksoftirqd_should_run(unsigned int cpu)
 {
     return local_softirq_pending();
@@ -1950,7 +1965,12 @@ static int ksoftirqd_should_run(unsigned int cpu)
 
 #define local_softirq_pending() \
     __IRQ_STAT(smp_processor_id(), __softirq_pending)
+```
 
+继续，进入软中断的核心线程函数`run_ksoftirqd`：
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/softirq.c#L668
 static void run_ksoftirqd(unsigned int cpu)
 {
     // 屏蔽当前CPU上的所有中断
@@ -1976,8 +1996,11 @@ static void run_ksoftirqd(unsigned int cpu)
 
 这里对`run_ksoftirqd`的逻辑进行下说明：
 
--   [`__do_softirq`](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/softirq.c#L241)：判断根据当前CPU的软中断类型，调用其注册的`action`方法（前文描述过为`NET_RX_SOFTIRQ`注册的处理函数[`net_rx_action`](https://elixir.bootlin.com/linux/v4.11.6/source/net/core/dev.c#L5313)）
+-   [`__do_softirq`](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/softirq.c#L241)：在`__do_softirq`中，**判断根据当前CPU的软中断类型，调用其注册的`action`方法**（前文描述过为`NET_RX_SOFTIRQ`注册的处理函数[`net_rx_action`](https://elixir.bootlin.com/linux/v4.11.6/source/net/core/dev.c#L5313)）
 -   网络软中断下半部处理由 `net_rx_action` 函数完成，其主要功能就是从待处理队列中获取一个数据包，然后根据数据包的网络层协议类型来找到相应的处理接口来处理
+
+还需要注意一个细节，**硬中断中设置软中断标记和ksoftirq的判断是否有软中断到达，都是基于`smp_processor_id()`的，这意味着只要硬中断在哪个CPU上被响应，那么软中断也是在这个CPU上处理的。所以说，如果在调优时发现软中断CPU消耗都集中在一个核上的话，做法是要把调整硬中断的CPU亲和性，来将硬中断打散到不同的CPU核上去**
+
 
 这里总结下`__do_softirq() -> net_rx_action()`的流程：
 
@@ -1991,14 +2014,14 @@ asmlinkage void __do_softirq(void)
             unsigned int vec_nr = h - softirq_vec;
             int prev_count = preempt_count();
 
-            //...
+            ......
             trace_softirq_entry(vec_nr);
             //CALL net_rx_action
 			// 指向 net_rx_action()
 			//一旦软中断代码判断出有 softirq 处于 pending 状态，就会开始处理， 执行 net_rx_action，从 RingBuffer 收包
             h->action(h);
             trace_softirq_exit(vec_nr);
-            //...
+            ......
         }
         h++;
         pending >>= 1;
@@ -2009,7 +2032,7 @@ asmlinkage void __do_softirq(void)
 `h->action(h)`即调用`net_rx_action`函数，它的工作过程如下：
 
 1.  函数开头的`time_limit`和`budget`是用来控制`net_rx_action`函数主动退出的，目的是保证网络包的接收不霸占CPU不放，等下次网卡再有硬中断过来的时候再处理剩下的接收数据包
-2.  `net_rx_action`最核心逻辑是获取到当前CPU变量`softnet_data`，对其`poll_list`进行遍历, 然后执行到网卡驱动注册到的`poll`函数（对于igb网卡来说即igb驱动的`igb_poll`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L6600)）
+2.  `net_rx_action`最核心逻辑是**获取到当前CPU变量`softnet_data`，对其`poll_list`进行遍历, 然后执行到网卡驱动注册到的`poll`函数**（对于igb网卡来说即igb驱动的`igb_poll`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L6600)）
 3.	`igb_poll`的初始化流程在[`igb_alloc_q_vector`](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L1225)函数中：`netif_napi_add(adapter->netdev, &q_vector->napi,igb_poll, 64)`
 4.	`napi_poll`函数的核心`h->action` 调用的实际是`net_rx_action`，该函数的功能是检查当前CPU的`softnet_data`的`poll_list`，取出第一个设备的napi列表，调用`napi_poll`获取对应网卡上的数据包，每个设备执行poll会受到两个参数的约束（确保不会占用过多的CPU资源），一旦超过给定的时间限制或者处理的包达到配额上限, 则直接返回
 
@@ -2032,6 +2055,11 @@ static __latent_entropy void net_rx_action(struct softirq_action *h)
 	unsigned long time_limit = jiffies + 2;
 	// 该 CPU 的所有 NAPI 变量的总预算
 	int budget = netdev_budget;
+    /*重要：
+    time_limit和budget是用来控制net_rx_action函数主动退出的
+    目的是保证网络包的接收不霸占CPU不放，
+    等下次网卡再有硬中断过来的时候再处理剩下的接收数据包
+    */
 	LIST_HEAD(list);
 	LIST_HEAD(repoll);
 
@@ -2251,6 +2279,8 @@ flowchart TD
 
 最后，阅读代码有一个疑问，在[`likely(work < weight)`]()这里为`true`之后没有直接调用`napi_complete`关闭NAPI，原因为何？这里结合上面提到的网卡驱动poll函数与NAPI之间的契约就容易理解了 
 
+前面提到，软中断的核心逻辑是获取到当前CPU变量`softnet_data`，对其`poll_list`进行遍历, 然后执行到网卡驱动注册到的poll函数。对于igb网卡就是`igb_poll`函数。而在读取操作中，igb_poll的重点工作是对`igb_clean_rx_irq`的调用
+
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L6600
 
@@ -2265,6 +2295,7 @@ static int igb_poll(struct napi_struct *napi, int budget)
 	if (q_vector->tx.ring)
 		clean_complete = igb_clean_tx_irq(q_vector, budget);
 
+    // 收包过程
 	if (q_vector->rx.ring) {
 		int cleaned = igb_clean_rx_irq(q_vector, budget);
 
@@ -2317,10 +2348,16 @@ static int igb_poll(struct napi_struct *napi, int budget)
     //...
 }
 
+//https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L7157
 static bool igb_clean_rx_irq(struct igb_q_vector *q_vector, const int budget)
 {
-    //...
-    do {
+    ......
+    struct igb_ring *rx_ring = q_vector->rx.ring;
+	struct sk_buff *skb = rx_ring->skb;
+	unsigned int total_bytes = 0, total_packets = 0;
+	u16 cleaned_count = igb_desc_unused(rx_ring);
+
+	while (likely(total_packets < budget)) {
         /* retrieve a buffer from the ring */
         skb = igb_fetch_rx_buffer(rx_ring, rx_desc, skb);
 
@@ -2338,7 +2375,17 @@ static bool igb_clean_rx_irq(struct igb_q_vector *q_vector, const int budget)
         /* populate checksum, timestamp, VLAN, and protocol */
         igb_process_skb_fields(rx_ring, rx_desc, skb);
 
+        // igb_clean_rx_irq中最核心的函数：收包
         napi_gro_receive(&q_vector->napi, skb);
+
+        /* reset skb pointer */
+		skb = NULL;
+
+		/* update budget accounting */
+		total_packets++;
+	}
+
+    ......
 }
 
 static struct sk_buff *igb_fetch_rx_buffer(struct igb_ring *rx_ring,
@@ -2368,9 +2415,29 @@ static struct sk_buff *igb_fetch_rx_buffer(struct igb_ring *rx_ring,
 	}
 	//...
 }
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L7064
+static bool igb_is_non_eop(struct igb_ring *rx_ring,
+			   union e1000_adv_rx_desc *rx_desc)
+{
+	u32 ntc = rx_ring->next_to_clean + 1;
+
+	/* fetch, update, and store next to clean */
+	ntc = (ntc < rx_ring->count) ? ntc : 0;
+	rx_ring->next_to_clean = ntc;
+
+	prefetch(IGB_RX_DESC(rx_ring, ntc));
+
+	if (likely(igb_test_staterr(rx_desc, E1000_RXD_STAT_EOP)))
+		return false;
+
+	return true;
+}
 ```
 
-这里额外贴下`mlx5`驱动的`skb_from_cqe`[实现](https://elixir.bootlin.com/linux/v4.11.8/source/drivers/net/ethernet/mellanox/mlx5/core/en_rx.c#L762)，可以看到XDP在内核的实现位置：
+上面给出了`igb_clean_rx_irq`函数及其调用函数`igb_fetch_rx_buffer`、`igb_is_non_eop`的代码。`igb_fetch_rx_buffer`和`igb_is_non_eop`的主要作用就是把数据帧从RingBuffer上摘取下来，**获取下来的一个数据帧即是一个`sk_buff`**。收取完数据以后，对其进行一些校验，然后开始设置`sbk`变量的timestamp，VLAN id, protocol等字段
+
+接下来进入到`napi_gro_receive`中，在此之前，先补充下xdp的一些知识。额外贴下`mlx5`驱动的`skb_from_cqe`[实现](https://elixir.bootlin.com/linux/v4.11.8/source/drivers/net/ethernet/mellanox/mlx5/core/en_rx.c#L762)，可以看到XDP在内核的实现位置：
 
 ```cpp
 static inline
@@ -2410,6 +2477,7 @@ struct sk_buff *skb_from_cqe(struct mlx5e_rq *rq, struct mlx5_cqe64 *cqe,
 
 ```cpp
 //file: net/core/dev.c
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/core/dev.c#L4660
 gro_result_t napi_gro_receive(struct napi_struct *napi, struct sk_buff *skb)
 {
     skb_gro_reset_offset(skb);
@@ -2429,9 +2497,11 @@ static gro_result_t napi_skb_finish(gro_result_t ret, struct sk_buff *skb)
         if (netif_receive_skb(skb))
             ret = GRO_DROP;
         break;
-    //......
+    ......
 }
 ```
+
+`napi_skb_finish`函数主要就是调用了`netif_receive_skb`，在`netif_receive_skb`中，数据包将被送到协议栈中，特别注意`3、网络协议栈处理`、`4、IP协议层处理流程`、`5、UDP协议层处理过程`也属于软中断的处理过程
 
 ####    三：网络协议栈的实现
 
@@ -2439,7 +2509,7 @@ static gro_result_t napi_skb_finish(gro_result_t ret, struct sk_buff *skb)
 
 ![netif_receive_skb_list_internal.png]()
 
-`netif_receive_skb->__netif_receive_skb_core`函数会根据packet的协议调用注册的协议处理函数处理，在`__netif_receive_skb_core`函数，`__netif_receive_skb_core`取出protocol，它会从数据包中取出协议信息，然后遍历注册在这个协议上的回调函数列表
+`netif_receive_skb->__netif_receive_skb_core`函数会根据packet的协议调用注册的协议处理函数处理（如udp包，会将包依次送到`ip_rcv() --> udp_rcv()`），在`__netif_receive_skb_core`函数，`__netif_receive_skb_core`取出protocol，它会从数据包中取出协议信息，然后遍历注册在这个协议上的回调函数列表
 
 -	tcpdump的抓包点逻辑
 -	`list_for_each_entry_rcu`用于遍历由RCU保护的链表，目的是将网络数据包（sk_buff）分发给注册的协议处理程序（如抓包工具tcpdump或协议栈）,在`__netif_receive_skb_core`中，`list_for_each_entry_rcu`被用于两个场景（代码片段如下）
@@ -2448,12 +2518,67 @@ static gro_result_t napi_skb_finish(gro_result_t ret, struct sk_buff *skb)
 
 <!--__netif_receive_skb_core协议分发逻辑图-->
 
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/core/dev.c#L4296
+int netif_receive_skb(struct sk_buff *skb)
+{   
+    //对应tracepoint hook点
+	trace_netif_receive_skb_entry(skb);
+
+	return netif_receive_skb_internal(skb);
+}
+EXPORT_SYMBOL(netif_receive_skb);
+
+static int netif_receive_skb_internal(struct sk_buff *skb)
+{
+	int ret;
+
+	net_timestamp_check(netdev_tstamp_prequeue, skb);
+
+	if (skb_defer_rx_timestamp(skb))
+		return NET_RX_SUCCESS;
+
+	rcu_read_lock();
+
+    ......
+	ret = __netif_receive_skb(skb);
+	rcu_read_unlock();
+	return ret;
+}
+
+
+static int __netif_receive_skb(struct sk_buff *skb)
+{
+	int ret;
+
+	if (sk_memalloc_socks() && skb_pfmemalloc(skb)) {
+		unsigned long pflags = current->flags;
+
+		/*
+		 * PFMEMALLOC skbs are special, they should
+		 * - be delivered to SOCK_MEMALLOC sockets only
+		 * - stay away from userspace
+		 * - have bounded memory usage
+		 *
+		 * Use PF_MEMALLOC as this saves us from propagating the allocation
+		 * context down to all allocation sites.
+		 */
+		current->flags |= PF_MEMALLOC;
+		ret = __netif_receive_skb_core(skb, true);
+		tsk_restore_flags(current, pflags, PF_MEMALLOC);
+	} else
+		ret = __netif_receive_skb_core(skb, false);
+
+	return ret;
+}
+```
+
 ```cpp
 static int __netif_receive_skb_core(struct sk_buff *skb, bool pfmemalloc)
 {
-    //......
+    ......
 
-    //pcap逻辑，这里会将数据送入抓包点。tcpdump就是从这个入口获取包的
+    //对应pcap逻辑，这里会将数据送入抓包点。tcpdump就是从这个入口获取包的
     list_for_each_entry_rcu(ptype, &ptype_all, list) {
         if (!ptype->dev || ptype->dev == skb->dev) {
 			 // 数据包传递给匹配的协议处理程序
@@ -2497,7 +2622,11 @@ static inline int deliver_skb(struct sk_buff *skb,
 }
 ```
 
+注意到，`__netif_receive_skb_core`函数中，最后根据数据包中的protocol，然后遍历注册在这个协议上的回调函数列表。在前文协议注册时，提到`ip_rcv` 函数地址就是存储在`ptype_base`这个 hashtable中。最后调用`pt_prev->func`调用到了协议层注册的处理函数了
+
 ####    四：IP层的实现
+
+todo
 
 **4、IP协议层处理流程**
 
@@ -2697,6 +2826,8 @@ static inline int dst_input(struct sk_buff *skb)
 }
 ```
 
+在本机处理场景下，`dst_input`函数最后`skb_dst(skb)->input`调用的`input`方法就是路由子系统赋的`ip_local_deliver`
+
 在`ip_local_deliver`函数最后的逻辑`ip_local_deliver_finish`中，会看到根据协议`ip_hdr(skb)->protocol`类型来选择对应的handler进行调用`ipprot->handler(skb)`，skb buffer将会进一步被派送到更上层的协议中，比如udp/tcp
 
 ```cpp
@@ -2723,10 +2854,10 @@ static int ip_local_deliver_finish(struct sk_buff *skb)
     int protocol = ip_hdr(skb)->protocol;
     const struct net_protocol *ipprot;
 
-	//inet_protos中保存着tcp_rcv()和udp_rcv()的函数地址
+	//重要：inet_protos中保存着tcp_rcv()和udp_rcv()的函数地址
     ipprot = rcu_dereference(inet_protos[protocol]);
     if (ipprot != NULL) {
-        ret = ipprot->handler(skb);
+        ret = ipprot->handler(skb); //调用上层协议处理函数继续
     }
 }
 ```
@@ -2737,13 +2868,14 @@ static int ip_local_deliver_finish(struct sk_buff *skb)
 
 UDP协议的处理[函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/udp.c#L1873)是`udp_rcv->__udp4_lib_rcv`，关键流程如下：
 
--	`__udp4_lib_lookup_skb`：根据`skb`来寻找对应的socket结构，即`struct sock *sk`
--	`udp_queue_rcv_skb`：将`skb`成功挂到`sk`对应的接收队列`sk_receive_queue`的尾部，等待上层接收
+-	[`__udp4_lib_lookup_skb`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/udp.c#L549)：根据`skb`来寻找对应的socket结构，即`struct sock *sk`
+-	[`udp_queue_rcv_skb`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/udp.c#L1660)：将`skb`成功挂到`sk`对应的接收队列`sk_receive_queue`的尾部，等待上层接收
 
 ![__udp4_lib_rcv]()
 
 ```cpp
 //file: net/ipv4/udp.c
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/udp.c#L2105
 int udp_rcv(struct sk_buff *skb)
 {
     return __udp4_lib_rcv(skb, &udp_table, IPPROTO_UDP);
@@ -2752,6 +2884,7 @@ int udp_rcv(struct sk_buff *skb)
 /*
  *	All we need to do is get the socket, and then do a checksum.
  */
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/udp.c#L1873
 int __udp4_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,
            int proto)
 {
@@ -2769,7 +2902,9 @@ int __udp4_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,
 }
 ```
 
-`udp_queue_rcv_skb`函数的主要功能是
+`udp_queue_rcv_skb`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/udp.c#L1660)的主要功能是：
+
+todo
 
 ```cpp
 //file: net/ipv4/udp.c
@@ -2914,7 +3049,7 @@ int __udp_enqueue_schedule_skb(struct sock *sk, struct sk_buff *skb)
 	int rmem, delta, amt, err = -ENOMEM;
 	spinlock_t *busy = NULL;
 	int size;
-	//......
+	......
 
 	//把skb挂到list的尾部
 	// 将这个 skb 插入 socket 的接收队列 sk->sk_receive_queue
@@ -2924,7 +3059,7 @@ int __udp_enqueue_schedule_skb(struct sock *sk, struct sk_buff *skb)
         sk->sk_data_ready(sk);
 
 	
-	//......	
+	......	
 }
 EXPORT_SYMBOL_GPL(__udp_enqueue_schedule_skb);
 ```
