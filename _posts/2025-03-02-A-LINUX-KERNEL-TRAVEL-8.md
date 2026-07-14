@@ -1970,6 +1970,15 @@ static int ksoftirqd_should_run(unsigned int cpu)
 继续，进入软中断的核心线程函数`run_ksoftirqd`：
 
 ```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/softirq.c#L749
+//定义在此
+static struct smp_hotplug_thread softirq_threads = {
+	.store			= &ksoftirqd,
+	.thread_should_run	= ksoftirqd_should_run,
+	.thread_fn		= run_ksoftirqd,
+	.thread_comm		= "ksoftirqd/%u",
+};
+
 //https://elixir.bootlin.com/linux/v4.11.6/source/kernel/softirq.c#L668
 static void run_ksoftirqd(unsigned int cpu)
 {
@@ -4884,7 +4893,14 @@ conntrack -S
     -   可以在更早的位置（如XDP）处理包，减少协议栈开销
     -   支持socket级别的负载均衡（`connect()`时直接选择后端，避免DNAT）
 
-##  0x09  参考
+##  0x09  总结
+
+####    收包全景链路总结
+本文讨论了硬件（网卡）、中断子系统、调度器以及网络协议栈在报文接收中的全链路，这里总结下，从网卡收到光电信号，直到数据包落入用户态进程的全链路的过程总结
+
+
+
+##  0x0A  参考
 -   [Monitoring and Tuning the Linux Networking Stack: Sending Data](https://blog.packagecloud.io/monitoring-tuning-linux-networking-stack-sending-data/)
 -   [Monitoring and Tuning the Linux Networking Stack: Receiving Data](https://blog.packagecloud.io/monitoring-tuning-linux-networking-stack-receiving-data/)
 -   [Linux网络 - 数据包的发送过程](https://segmentfault.com/a/1190000008926093)
