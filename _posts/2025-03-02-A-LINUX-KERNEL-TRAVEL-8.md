@@ -14,11 +14,11 @@ tags:
 ##  0x00    前言
 笔者最近在研究基于ebpf的网络协议栈可观测及tracing，本文对协议栈的数据处理基础做了若干总结
 
-本文代码基于 [v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include) 版本，[网卡类型](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb)选择 Intel 的 igb（千兆网卡）驱动实现
+本文代码主要基于 [v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include) 版本，[网卡类型](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb)选择 Intel 的 igb（千兆网卡）驱动实现
 
 推荐阅读：
 -	[Linux 网络栈接收数据（RX）：原理及内核实现（2022）](https://arthurchiao.art/blog/linux-net-stack-implementation-rx-zh/)
--	[图解Linux网络包接收过程](https://zhuanlan.zhihu.com/p/256428917)
+-	[图解Linux网络包接收过程](https://zhuanlan.zhihu.com/p/256428917)，基于2.6内核
 
 
 ##  0x01   网卡的报文接收过程
@@ -4900,10 +4900,39 @@ conntrack -S
 
 1、第一阶段：硬件入场与内核检查（DMA 与 `irq_enter`）
 
--   DMA 零拷贝写入：网卡（NIC）收到网络帧，通过 DMA 引擎直接将 Payload 写入主存的 Ring Buffer，此过程 CPU 完全不参与
--   触发硬件中断：写入完成后，网卡向 CPU 发送 MSI-X 中断信号
--   架构层接管&&检查：CPU 暂停当前正在执行的业务线程，跳入架构相关的通用中断处理函数（如 x86 的 do_IRQ）
--   布置环境（`irq_enter`）：在调用网卡驱动前，内核先执行 `irq_enter()`。如果 CPU 刚才在休眠（`NO_HZ_IDLE`），这里会恢复系统时钟（Tick）；同时增加抢占计数器（`preempt_count`），给当前 CPU 盖上正在处理硬中断的钢印，并通知 RCU 子系统进入中断上下文
+1.  DMA 零拷贝写入：网卡（NIC）收到网络帧，通过 DMA 引擎直接将 Payload 写入主存的 Ring Buffer，此过程 CPU 完全不参与
+2.  触发硬件中断：写入完成后，网卡向 CPU 发送 MSI-X 中断信号
+3.  架构层接管&&检查：CPU 暂停当前正在执行的业务线程，跳入架构相关的通用中断处理函数（如 x86 的 do_IRQ）
+4.  布置环境（`irq_enter`）：在调用网卡驱动前，内核先执行 `irq_enter()`。如果 CPU 刚才在休眠（`NO_HZ_IDLE`），这里会恢复系统时钟（Tick）；同时增加抢占计数器（`preempt_count`），给当前 CPU 打上正在处理硬中断的标记，并通知 RCU 子系统进入中断上下文
+
+2、第二阶段：驱动发令与退场（NAPI 调度）
+
+1.  执行驱动回调：`do_IRQ` 通过中断向量表找到具体的网卡驱动函数（如 igb 驱动的 `igb_msix_ring`）
+2.  屏蔽硬件中断：**驱动做的第一件事是关闭该网卡的当前硬件中断**，防止后续大量数据包引发中断风暴
+3.  调度 NAPI：驱动调用 `napi_schedule()`，将网卡的 NAPI 结构体挂载到当前 CPU 的 `softnet_data->poll_list` 链表上（这里的细节参考前文）
+4.  激活软中断标志：通过 `__raise_softirq_irqoff(NET_RX_SOFTIRQ)` 挂起网络收包软中断，随后驱动函数干净利落地返回
+
+3、第三阶段：软中断上下文的线程劫持（`irq_exit`）
+
+1.  拦截返回：架构层函数准备退出硬中断，调用 `irq_exit()`，内核发现 `NET_RX_SOFTIRQ` 被置位
+2.  执行前校验（`invoke_softirq`）的核心过程：
+    -   检查 ksoftirqd 是否已经在运行？如果是，直接退出，绝不抢活
+    -   检查是否配置了中断线程化（`PREEMPT_RT`）？若配置了该选项，推迟给线程处理
+3.  防栈溢出与劫持：确认安全后，内核放弃将 CPU 交还给刚才被中断的业务线程。如果架构支持（如 x86_64），它会切换到专用的 softirq stack；否则**它直接在被劫持业务线程的内核栈上**，开始执行 `__do_softirq()`，[即](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/softirq.c#L405)`irq_exit-->invoke_softirq-->__do_softirq`
+4.  重新打开中断：调用 `local_irq_enable()`，允许 CPU 响应时钟或磁盘中断（不响应网卡中断），但网卡中断在第二阶段已被屏蔽，所以不会嵌套
+5.  轮询收包：执行 `net_rx_action()`，调用网卡驱动的 `poll()` 从 Ring Buffer 中将数据打包成 `sk_buff`，送往上层
+
+4、第四阶段：配额耗尽与调度器（算法）抉择（ksoftirqd 与 CFS）
+
+在网卡高吞吐的场景下，软中断不可能无限期霸占 CPU，内核设计了一系列的退出机制
+
+1.  逃生舱触发：当 `poll()` 连续处理满 `64` 个包（或软中断霸占 CPU 超 `2ms/10`次循环），内核强制退出收包循环
+2.  唤醒兜底线程：调用 `wakeup_softirqd()`，将当前 CPU 绑定的 ksoftirqd 线程塞入 CFS（完全公平调度器）就绪队列
+3.  标记抢占：若 CFS 算法发现 ksoftirqd 的 vruntime 很小，会给当前被劫持的业务线程打上 `TIF_NEED_RESCHED` 标志
+4.  此时内核的选择如下（中断返回指令如 IRET）：
+    -   场景 A（业务线程在用户态被中断）：强制拦截，调度器瞬间剥夺业务线程的 CPU，ksoftirqd 上位接管
+    -   场景 B（业务线程在内核态且 `CONFIG_PREEMPT_NONE`）：无视抢占标志，CPU 交还给业务线程继续跑，ksoftirqd 在队列里排队等待
+5.  专业收尾（ksoftirqd 运行）：一旦 ksoftirqd 拿到 CPU，它会在进程上下文中继续收包，并在每次循环后调用 `cond_resched_rcu_qs()`，报告 RCU 静息状态，并根据 CFS 负载有条件地将 CPU 重新让给业务线程
 
 
 
