@@ -4934,7 +4934,50 @@ conntrack -S
     -   场景 B（业务线程在内核态且 `CONFIG_PREEMPT_NONE`）：无视抢占标志，CPU 交还给业务线程继续跑，ksoftirqd 在队列里排队等待
 5.  专业收尾（ksoftirqd 运行）：一旦 ksoftirqd 拿到 CPU，它会在进程上下文中继续收包，并在每次循环后调用 `cond_resched_rcu_qs()`，报告 RCU 静息状态，并根据 CFS 负载有条件地将 CPU 重新让给业务线程
 
+5、第五阶段：协议栈极速通道
 
+从 ringbuffer 复制出的 `sk_buff` 在进入 TCP/UDP 前，会经过内核网络层的加速机制：
+
+1.  GRO（Generic Receive Offload）：将多个属于同一数据流的小包（如 `1500` 字节 MTU），在底层直接拼装成一个 `64KB` 的超级大包，极大降低协议栈遍历开销
+2.  Early Demux（早期多路复用）：在 IP 层直接查找 Socket 缓存，若命中且有效，直接绕过复杂的路由子系统，空降传输层
+
+6、第六阶段：协议栈分流与 TCP 大锁（sk_backlog）
+
+数据包抵达传输层时，UDP 直接利用微观自旋锁放入 `sk_receive_queue`。而 TCP 报文需要走连接状态机：
+
+1.  获取自旋锁：查找 socket 后，尝试获取 `sk->sk_lock.slock`
+2.  分支 A（socket 空闲）：
+    -   当前没有业务线程在读写，软中断直接接管协议栈处理
+    -   Fast Path：包序完美，直接剥离 TCP 头放入 `sk_receive_queue`
+    -   Slow Path：发生乱序，放入红黑树（Out-of-Order Queue）等待重组，回复 SACK等、
+3.  分支 B（用户态正在霸占 socket）：
+    -   业务线程正在执行 `recvmsg`，软中断绝对不能阻塞在自旋锁上
+    -   软中断调用 `sk_add_backlog()`，将数据包追加到 `sk->sk_backlog` 链表，然后立刻释放自旋锁离开
+
+7、第七阶段：用户态处理（`release_sock`）及收尾，这里有一个细节：
+
+1.  业务线程（可能在另一个 CPU 核心上）完成了本次 `recvmsg` 的数据拷贝，准备退出内核态
+2.  它调用 `release_sock(sk)` 释放 socket 锁
+3.  在释放socket锁前，它发现 `sk_backlog` 里有软中断刚才塞进来的包
+4.  用户态线程亲自下场：业务线程在自己的时间片内，逐个取出 `sk_backlog` 里的 `sk_buff`，推入 TCP 状态机执行 Fast/Slow Path 解析。**这使得繁重的 TCP 重组与 ACK 计算开销，被巧妙地转移到了业务进程的 sys CPU 消耗中，保住了软中断的响应延迟**
+5.  最后，数据包安稳落入 `sk_receive_queue`，业务线程顺手将其拷贝到用户空间
+
+####    硬中断打开的时机
+硬中断的打开，精准地发生于软中断执行 `net_rx_action()` 时，调用网卡驱动绑定的 `poll()` 函数（如 `ixgbe_poll`）的退出时刻。通俗点说：硬中断的打开时机是网卡的物理环形缓冲区（Ring Buffer）是不是被软中断掏空了？
+
+当处于软中断上下文中，`ixgbe_poll(napi, budget)` 开始从 ringbuffer 里往取数据包（默认 `budget=64`）。循环结束后，驱动会进行如下判断：
+
+1、caseA：ringbuffer 被取空了（常态流量），驱动消费了 `20` 个包后，发现 ringbuffer 空了（`work_done < budget`），驱动认为当前没有积压的包了，需要结束轮询
+
+-   调用内核网络核心层的接口：`napi_complete_done(napi, work_done)`，此函数会将当前的 NAPI 结构体从 CPU 的 `softnet_data->poll_list` 链表中摘除，同时清除 `NAPI_STATE_SCHED` 标志位
+-   紧接着，驱动会调用底层的硬件寄存器写入函数（如 `ixgbe_irq_enable(adapter)`），作用是会向网卡芯片的 IMS（Interrupt Mask Set/Read）寄存器写入特定的位
+-   **网卡硬件中断在这一刻被正式重新打开，即网卡再次具备了敲击 CPU 发送硬中断的能力**
+
+2、caseB：配额耗尽，但是ring buffer 里还有包（洪峰流量）：驱动消费了 `64` 个包，发现 ring buffer 里还有一堆包没处理完（`work_done == budget`）。此时驱动认为自己已经占用了太久的 CPU，必须让出控制权
+
+-   不会调用 `napi_complete_done()`，会直接 `return budget` 返回给软中断层
+-   由于此时没有调用硬件开启函数，网卡的硬件中断依然处于被屏蔽（Masked）的状态
+-   内核的 `net_rx_action()` 看到 `poll()` 返回了满额的 `64`，就会把这个 NAPI 结构体重新挂回 `poll_list` 的尾部，并再次触发软中断，等待下一轮继续消费数据包，直到走入caseA
 
 ##  0x0A  参考
 -   [Monitoring and Tuning the Linux Networking Stack: Sending Data](https://blog.packagecloud.io/monitoring-tuning-linux-networking-stack-sending-data/)
