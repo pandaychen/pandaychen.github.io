@@ -14,7 +14,7 @@ tags:
 ##  0x00    前言
 笔者最近在研究基于ebpf的网络协议栈可观测及tracing，本文对协议栈的数据处理基础做了若干总结
 
-本文代码主要基于 [v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include) 版本，[网卡类型](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb)选择 Intel 的 igb（千兆网卡）驱动实现
+本文代码主要基于 [v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include) 版本，[网卡类型](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb)选择 Intel 的 igb（千兆网卡）驱动实现（万兆网卡为ixgb）
 
 推荐阅读：
 -	[Linux 网络栈接收数据（RX）：原理及内核实现（2022）](https://arthurchiao.art/blog/linux-net-stack-implementation-rx-zh/)
@@ -1676,7 +1676,7 @@ static int igb_setup_all_tx_resources(struct igb_adapter *adapter)
 }
 ```
 
-继续，对中断函数注册`igb_request_irq`可以发现， `__igb_open ---> igb_request_irq ---> igb_request_msix`，**对于多队列的网卡，为每一个队列都注册了中断，其对应的中断处理函数是`igb_msix_ring`**。此外，msix方式下，每个 RX 队列有独立的MSI-X 中断，从网卡硬件中断的层面就可以设置让收到的包被不同的 CPU处理（可以通过 `/proc/irq/IRQ_NUMBER/smp_affinity`能够修改和CPU的绑定行为）
+继续，对**中断函数注册`igb_request_irq`**可以发现， `__igb_open ---> igb_request_irq ---> igb_request_msix`，**对于多队列的网卡，为每一个队列都注册了中断，其对应的中断处理函数是`igb_msix_ring`**。此外，msix方式下，每个 RX 队列有独立的MSI-X 中断，从网卡硬件中断的层面就可以设置让收到的包被不同的 CPU处理（可以通过 `/proc/irq/IRQ_NUMBER/smp_affinity`能够修改和CPU的绑定行为）
 
 ```c
 //https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L1411
@@ -1696,6 +1696,8 @@ static int igb_request_msix(struct igb_adapter *adapter)
     ......
     for (i = 0; i < adapter->num_q_vectors; i++) {
         ......
+
+        //重要！igb网卡的硬中断注册的处理函数是igb_msix_ring
         err = request_irq(adapter->msix_entries[vector].vector,
                   igb_msix_ring, 0, q_vector->name,
     }
@@ -1849,6 +1851,221 @@ flowchart TD
 首先数据帧从网线到达网卡的接收队列上，网卡在分配给自己的RingBuffer中寻找可用的内存位置，找到后DMA引擎会把数据DMA到这块Ringbuffer中（该过程对CPU无感知）。当DMA操作完成以后，网卡会向CPU发起一个硬中断，通知CPU有数据帧到达。igb网卡的硬中断注册的处理函数是[`igb_msix_ring`](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L5782)，这里硬中断里只完成简单必要的工作，剩下的大部分逻辑都是转交给软中断处理。`igb_msix_ring`的逻辑仅仅记录了一个寄存器，修改了一下CPU的`poll_list`，然后发出软中断即完成
 
 硬中断期间是不能再进行另外的硬中断的，不能嵌套。所以硬中断处理函数（handler）执行时，会屏蔽部分或全部（新的）硬中断。这就要求硬中断要尽快处理，然后关闭这次硬中断，这样下次硬中断才能再进来；另一方面，中断被屏蔽的时间越长，丢失事件的可能性也就越大；如果一次硬中断时间过长，RingBuffer 会被塞满导致丢包。因此所有耗时的操作都应该从硬中断处理逻辑中剥离出来，硬中断因此能尽可能快地执行，然后再重新打开。所以软中断就是针对这一目的设计的
+
+这里详细描述一下**硬中断发送到处理，关闭的详细过程**，对于的核心函数是`do_IRQ`
+
+网卡（NIC）收到网络帧，通过 DMA 引擎直接将数据包写入主存的 RingBuffer（此过程 CPU 完全不参与），写入完成后，此时触发硬件中断。网卡向 CPU 发送 MSI-X 中断信号，CPU 暂停当前正在执行的业务线程，跳入架构相关的通用中断处理函数（如 x86 的 `do_IRQ`）
+
+由于这是一个底层架构逻辑，位于 x86 架构的中断进入/退出汇编和通用代码中，见[汇编代码](https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/entry/entry_64.S#L518)，如下代码中`desc = __this_cpu_read(vector_irq[vector])`就是查找中断向量表，其中`vector_irq`，这是一个 Per-CPU（每个 CPU 核心专属）的数组，可以把它理解为内核在内存中维护的**软件中断路由表**
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/kernel/irq.c#L212
+__visible unsigned int __irq_entry do_IRQ(struct pt_regs *regs)
+{
+	struct pt_regs *old_regs = set_irq_regs(regs);
+	struct irq_desc * desc;
+	/* high bit used in ret_from_ code  */
+
+    //vector：CPU 刚刚从硬件寄存器里读出来的中断向量号（比如 0x32）
+	unsigned vector = ~regs->orig_ax;
+
+    // 1. 保存现场
+    // 告诉内核：现在正式进入硬中断上下文了
+
+    //entering_irq-->irq_enter
+	entering_irq();
+
+	/* entering_irq() tells RCU that we're not quiescent.  Check it. */
+	RCU_LOCKDEP_WARN(!rcu_is_watching(), "IRQ failed to wake up RCU");
+
+    // 2. 调用具体的处理函数（比如 igb_msix_ring）
+
+    //vector_irq：向量表，硬件到软件的桥梁
+    //desc：查表得到的结果是一个指向 struct irq_desc（中断描述符）的指针。这个描述符像是一个档案袋，里面装满了关于这个特定中断的所有信息（包括是谁注册的、怎么处理等）
+	desc = __this_cpu_read(vector_irq[vector]);
+
+    // 【3. 驱动干活】
+    // 顺藤摸瓜调用到 -> action->handler -> igb_msix_ring()
+    // igb_msix_ring 内部清网卡寄存器，然后调用 napi_schedule()
+    // napi_schedule() 把 NET_RX_SOFTIRQ 挂起，驱动功成身退
+	if (!handle_irq(desc, regs)) {
+		ack_APIC_irq();
+
+		if (desc != VECTOR_RETRIGGERED) {
+			pr_emerg_ratelimited("%s: %d.%d No irq handler for vector\n",
+					     __func__, smp_processor_id(),
+					     vector);
+		} else {
+			__this_cpu_write(vector_irq[vector], VECTOR_UNUSED);
+		}
+	}
+
+    // 4. 硬中断处理完毕，退出前调用这个关键函数
+    // 【软中断劫持的爆发点】
+    // 驱动干完活了，准备退出硬中断
+    // exiting_irq() 内部会调用 irq_exit()
+    // irq_exit() 发现刚刚 igb_msix_ring 挂起了 NET_RX_SOFTIRQ
+    // 于是，在此处原地展开执行 invoke_softirq() -> net_rx_action()
+	exiting_irq();
+
+    //恢复被劫持线程的现场并返回
+	set_irq_regs(old_regs);
+	return 1;
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/include/asm/apic.h#L638
+static inline void entering_irq(void)
+{
+	irq_enter();
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/softirq.c#L336
+// irq_enter完成了内核硬中断处理之前的准备工作
+void irq_enter(void)
+{
+    // rcu_irq_enter：通知 RCU（Read-Copy-Update）子系统，当前 CPU 正在进入硬件中断上下文
+    // 其意义是
+    // 告诉内核，接下来在硬中断里如果涉及读取被 RCU 保护的路由表或网络状态，系统需要保证这些数据结构的安全性
+	rcu_irq_enter();
+
+    //最核心的逻辑：处理 Idle 状态下的网络包唤醒
+	if (is_idle_task(current) && !in_interrupt()) {
+		/*
+		 * Prevent raise_softirq from needlessly waking up ksoftirqd
+		 * here, as softirq will be serviced on return from interrupt.
+		 */
+		local_bh_disable();
+		tick_irq_enter();
+		_local_bh_enable();
+	}
+
+	__irq_enter();
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/hardirq.h#L35
+#define __irq_enter()					\
+	do {						\
+		account_irq_enter_time(current);	\
+		preempt_count_add(HARDIRQ_OFFSET);	\
+		trace_hardirq_enter();			\
+	} while (0)
+
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/include/asm/apic.h#L655
+static inline void exiting_irq(void)
+{
+	irq_exit();
+}
+```
+
+上面代码中，`entering_irq--->irq_enter()`的细节如下。假设服务器正在运行，不管它此时是在跑业务代码、还是在Idle 状态，只要网卡DMA 写完了数据，给 CPU 发了一个硬中断信号，CPU 会立刻进入**do_IRQ() -> irq_enter() -> 网卡驱动的中断处理函数 -> irq_exit() -> 软中断收包**流程（以 x86 架构为例），重点看`irq_enter`的后面部分：
+
+```c
+void irq_enter(void)
+{
+    ......
+    //最核心的逻辑：处理 Idle 状态下的网络包唤醒
+	if (is_idle_task(current) && !in_interrupt()) {
+		local_bh_disable();
+		tick_irq_enter();
+		_local_bh_enable();
+	}
+
+	__irq_enter();
+}
+```
+
+中间的实现部分，是内核为了解决在Tickless（`NO_HZ_IDLE`）深度睡眠状态下的系统时钟更新问题，即**网卡中断把 CPU 叫醒，必须立刻调用 tick_irq_enter() 来更新系统时间，并恢复时钟子系统**，前后使用`local_bh_disable/_local_bh_enable`的目的是，使用`local_bh_disable()`临时禁用软中断，人为把 softirq 的计数器加 `1`，这样当`tick_irq_enter`里面触发定时器软中断时，发现软中断被禁用了，就不会去唤醒 ksoftirqd，只是默默打上一个 pending 标记，出来后再调用 `_local_bh_enable()` 恢复现场
+
+最后，`__irq_enter`（宏）的作用是**更新当前 CPU 的 preempt_count（抢占计数器）**，该操作在计数器里加上了 `HARDIRQ_OFFSET`标志，从这一行代码执行完开始，整个内核（包括后续网卡驱动的所有代码）调用 `in_interrupt()` 时都会返回 `true`，该操作保证了在接下来的网卡驱动收包逻辑中，如果驱动去申请内存、锁操作，内核机制会立刻确认**当前CPU在硬中断的运行逻辑，不能睡眠或者阻塞**
+
+
+继续，`do_IRQ--->handle_irq`的细节如下，这个函数可以看作是触发并执行网卡驱动代码，最终会调用先前注册的网卡驱动函数`igb_msix_ring`。对于现代的高速网卡（如 igb），通常使用的是 MSI-X（消息信号中断），边沿触发（Edge-triggered）
+
+1.  `handle_irq(desc, regs)`：进入通用中断处理子系统
+2.  `desc->handle_irq()`：调用这个档案袋里配置的底层流控函数。对于 MSI-X，它通常指向 `handle_edge_irq()`
+3.  `handle_irq_event(desc)`：流控函数确认硬件状态无误后，准备执行软件注册的动作
+4.  `handle_irq_event_percpu(desc, ...)`：遍历`desc`的 `action` 链表（`struct irqaction`）
+5.  `action->handler(irq, action->dev_id)`：当系统启动时，igb 驱动调用了 `request_irq()` 或 `request_msi()`，把 `igb_msix_ring` 这个函数的内存地址，存进了这里的 `action->handler` 中，即调用`igb_msix_ring`函数
+
+`igb_msix_ring`的函数实现见下文，非常轻量
+
+继续，`exiting_irq--->irq_exit()`的实现：
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/softirq.c#L394
+void irq_exit(void)
+{
+#ifndef __ARCH_IRQ_EXIT_IRQS_DISABLED
+	local_irq_disable();
+#else
+	WARN_ON_ONCE(!irqs_disabled());
+#endif
+
+	account_irq_exit_time(current);
+
+    // 【核心工作 1：清理硬中断上下文】
+    // 减去硬中断计数，标志着物理中断彻底结束
+	preempt_count_sub(HARDIRQ_OFFSET);
+
+    // 【核心工作 2：执行软中断】
+    // 条件：目前没有其他中断嵌套 (!in_interrupt) 且 确实有软中断任务在排队 (local_softirq_pending)
+	if (!in_interrupt() && local_softirq_pending()){
+        // 进去之后就是执行 net_rx_action，要么干完退出，要么超时被踢出
+		invoke_softirq();
+    }
+
+
+    // ... 恢复抢占，彻底回到原线程 ...
+	tick_irq_exit();
+	rcu_irq_exit();
+
+    //ebpf hardirq 退出
+	trace_hardirq_exit(); /* must be last! */
+}
+```
+
+`irq_exit`函数的核心作用包含了两点内容：
+
+1、清理硬中断的上下文（退出硬中断状态），在调用真正执行软中断的代码之前，`irq_exit` 必须先执行类似 `preempt_count_sub(HARDIRQ_OFFSET)` 的操作，目的是通过修改 CPU 的抢占计数器，向内核宣告（当前 CPU）现在已经正式退出了硬中断状态。为什么必须先做这一步？因为内核的铁律是**软中断绝对不能在硬中断上下文中执行**，只有先退出硬中断状态，`in_interrupt()` 这个宏才会返回 `false`，接下来的 `invoke_softirq()` 才有合法身份去启动网络收包流程
+
+2、执行软中断的核心逻辑，直到退出。一旦进入`invoke_softirq()`的流程，并不是让软中断无休止地干活，这里又包含了两种情况：
+
+-   case1（完美退出）：系统流量不大，软中断处理完所有的（比如 `net_rx_action` 里的网卡包）数据，完美退出
+-   case2（ksoftirqd接管）：后文会详细讨论。先简单介绍下，即网络洪峰的场景下，软中断企图霸占 CPU 超过上限（比如循环了 `10` 次或者执行时间超过 `2ms`），内核的防饿死机制就会强行切断它的执行。此时的退出，其实是把没干完的活（收包）甩给了 ksoftirqd 进程，然后退出（还是得走内核CFS调度等）
+
+####    invoke_softirq：软中断的核心处理过程
+
+自`irq_exit`硬中断关闭，就进入了软中断的核心处理函数`invoke_softirq`
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/softirq.c#L352
+static inline void invoke_softirq(void)
+{   
+    //如果当前 CPU 的 ksoftirqd 内核线程已经在运行（或者已经被唤醒准备运行），那么这里直接返回，什么都不做
+	if (ksoftirqd_running())
+		return;
+    ......
+	if (!force_irqthreads) {
+		__do_softirq();
+	} else {
+		wakeup_softirqd();
+	}
+}
+```
+
+`invoke_softirq`的核心逻辑如下：
+
+1、`if (ksoftirqd_running())`的逻辑：如果当前 CPU 的 ksoftirqd 内核线程已经在运行（或者已经被唤醒准备运行），那么这里直接返回，什么都不做。这里是防饿死兜底机制的体现。软中断唤醒了 ksoftirqd 线程已经在接管了，此时如果又来了一个零星的硬中断并走到这里，内核就会选择直接让步，把新触发的软中断也留给 ksoftirqd 去批量处理。这避免了上下文的疯狂抢占和混乱
+
+2、核心逻辑！检查`force_irqthreads`，如果是 `true`，直接唤醒 ksoftirqd 去执行，当前路径不干活（收包）。在rt内核或者配置`threadirqs`的系统中，绝不允许软中断在硬中断退出的上下文中霸占 CPU（会产生不可预期的延迟，导致高优先级的实时进程无法被调度）。因此，内核通过这个开关，强行把所有软中断都剥离到 ksoftirqd 线程中，让 CFS 调度器或者 RT 调度策略来统一管理它们的优先级
+
+3、防御逻辑，内核决定原地、立刻执行软中断（`__do_softirq()`），不过可能存在内核栈溢出的安全问题：Linux 进程的内核栈非常小（通常只有 `8KB` 或 `16KB`）。软中断处理调用层积极深，非常消耗栈空间。为了防止在当前线程上强行运行导致栈溢出引发内核崩溃问题，内核给出了两种方案：
+
+-   方案A：架构支持独立的 IRQ 栈（如现代 x86_64），对应代码`#ifdef CONFIG_HAVE_IRQ_EXIT_ON_IRQ_STACK ....`，直接调用`__do_softirq()`
+-   方案B：架构不支持，仍在进程堆栈上，对应代码`do_softirq_own_stack()`，即切换到一个专属的软中断栈，然后再执行
+
+下文再汇总介绍`__do_softirq`的两个不同入口：线程劫持与`run_ksoftirqd`。先回到硬中段处理的过程：
 
 ![hardirq]()
 
@@ -2011,7 +2228,7 @@ static void run_ksoftirqd(unsigned int cpu)
 还需要注意一个细节，**硬中断中设置软中断标记和ksoftirq的判断是否有软中断到达，都是基于`smp_processor_id()`的，这意味着只要硬中断在哪个CPU上被响应，那么软中断也是在这个CPU上处理的。所以说，如果在调优时发现软中断CPU消耗都集中在一个核上的话，做法是要把调整硬中断的CPU亲和性，来将硬中断打散到不同的CPU核上去**
 
 
-这里总结下`__do_softirq() -> net_rx_action()`的流程：
+这里总结下`__do_softirq() ---> net_rx_action()`的流程：
 
 ![do_softirq_net_rx_action](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/net-stack-implementation/uu_do_softirq.png)
 
@@ -2038,7 +2255,7 @@ asmlinkage void __do_softirq(void)
 }
 ```
 
-`h->action(h)`即调用`net_rx_action`函数，它的工作过程如下：
+`h->action(h)`即调用`net_rx_action`函数，该函数的核心作用是**它试图通过时间+配额的双重约束，在中断上下文里尽可能多地收包**，它的工作过程如下：
 
 1.  函数开头的`time_limit`和`budget`是用来控制`net_rx_action`函数主动退出的，目的是保证网络包的接收不霸占CPU不放，等下次网卡再有硬中断过来的时候再处理剩下的接收数据包
 2.  `net_rx_action`最核心逻辑是**获取到当前CPU变量`softnet_data`，对其`poll_list`进行遍历, 然后执行到网卡驱动注册到的`poll`函数**（对于igb网卡来说即igb驱动的`igb_poll`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L6600)）
@@ -2048,7 +2265,7 @@ asmlinkage void __do_softirq(void)
 -	`netdev_budget_usecs`：每个设备能够处理的最大时间长度（最长可以占用的 CPU 时间）
 -	`netdev_budget`：单个设备一次能处理的最大包的配额
 
-配额的意义是在NAPI模式下，系统会为软中断线程及NAPI各分配一个额度值（软中断的额度为`netdev_budget`，默认值是`300`，所有NAPI共用；每个NAPI的额度是`weight_p`，默认值是`64`），在一次poll流程里，`ixgbe_poll`每接收一个报文就消耗一个额度，**如果`ixgbe_poll`消耗的额度为NAPI的额度，说明此时网卡收到的报文比较多，因此需要继续下一次poll，每次`napi_poll`消耗的额度会累加，当超过软中断线程的额度时，退出本次软中断处理流程；当`ixgbe_poll`消耗的额度没有达到NAPI的额度时，说明网卡报文不多，因此重新开启队列中断，进入中断模式**
+配额的意义是在NAPI模式下，系统会为软中断线程及NAPI各分配一个额度值（软中断的额度为`netdev_budget`，默认值是`300`，所有NAPI共用；每个NAPI的额度是`weight_p`，默认值是`64`），在一次poll流程里，`igb_poll/ixgbe_poll`每接收一个报文就消耗一个额度，**如果`igb_poll/ixgbe_poll`消耗的额度为NAPI的额度，说明此时网卡收到的报文比较多，因此需要继续下一次poll，每次`napi_poll`消耗的额度会累加，当超过软中断线程的额度时，退出本次软中断处理流程；当`igb_poll/ixgbe_poll`消耗的额度没有达到NAPI的额度时，说明网卡报文不多，因此重新开启队列中断，进入中断模式**
 
 5、NAPI 子系统和设备驱动之间的就是否关闭 NAPI 有一份契约（可以参考igb驱动的实现`igb_poll`）
 
@@ -2073,9 +2290,12 @@ static __latent_entropy void net_rx_action(struct softirq_action *h)
 	LIST_HEAD(repoll);
 
 	local_irq_disable();
+    //重要：原子性地把当前 CPU 待处理的所有 NAPI 任务移到局部变量 list 中
+    //这样在后续遍历时，就不需要给全局链表加锁，避免了性能瓶颈
 	list_splice_init(&sd->poll_list, &list);
 	local_irq_enable();
 
+    //核心循环
 	//特别注意，在napi_poll有三种情况会退出循环
 	for (;;) {
 		struct napi_struct *n;
@@ -2087,10 +2307,10 @@ static __latent_entropy void net_rx_action(struct softirq_action *h)
 		}
 
 		n = list_first_entry(&list, struct napi_struct, poll_list);
-		// napi的poll收包
+		// napi的poll收包的核心逻辑，真正调用网卡驱动（如 igb_poll）的地方
 		// 注意：执行网卡驱动注册的 poll() 方法，返回的是处理的数据帧数量，
     	// 函数返回时，那些数据帧都已经发送到上层栈进行处理了
-		// 每次napi_poll之后，额度会减掉已经处理的包的数量n
+		// 每次napi_poll之后，额度会减掉已经处理的包的数量n（扣除配额）
 		budget -= napi_poll(n, &repoll);
 
 		/* If softirq window is exhausted then punt.
@@ -2098,9 +2318,14 @@ static __latent_entropy void net_rx_action(struct softirq_action *h)
 		 * an average latency of 1.5/HZ.
 		 */
 		// budget 或 time limit 用完了
+
+        //budget <= 0：收够了预定数量（通常是 300 个，netdev_budget）
+        //time_after_eq(jiffies, time_limit)：超过了 2 个 jiffies（约 2ms）
 		if (unlikely(budget <= 0 ||
 			     time_after_eq(jiffies, time_limit))) {
 			// 更新 softnet_data.time_squeeze 计数
+            // 如果触发： sd->time_squeeze++
+            // 若cat /proc/net/softnet_stat 这一列数值飙升，说明 CPU 根本没法在规定时间内处理完所有包，发生了严重的收包过载）
 			sd->time_squeeze++;
 			break;
 		}
@@ -2148,11 +2373,11 @@ static int napi_poll(struct napi_struct *n, struct list_head *repoll)
 	work = 0;
 	//状态检查：若 NAPI 实例未处于 NAPI_STATE_SCHED 状态（即未被调度），则跳过处理
 	if (test_bit(NAPI_STATE_SCHED, &n->state)) {
-		// igb_poll for igb driver
+		// 重要！·igb_poll for igb driver
 		// mlx5 for mlx5 driver
 		work = n->poll(n, weight);	// 调用设备驱动的 poll 函数，注意参数中的weight（配额）
 		/*
-		设备驱动的 poll 函数（如 ixgbe_poll/igb_poll/e1000_clean等）负责从 DMA 环形缓冲区（Rx Ring）提取数据包：
+		设备驱动的 poll 函数（如 igb_poll/ixgbe_poll/igb_poll/e1000_clean等）负责从 DMA 环形缓冲区（Rx Ring）提取数据包：
 		1. 数据包提取：遍历 Rx Ring 的 Descriptor，将数据从 DMA 区域拷贝到 sk_buff 结构体
 		2. 协议栈提交：通过 napi_gro_receive 或 netif_receive_skb 将数据包提交至网络协议栈
 		3. 额度消耗：每处理一个数据包，消耗 1 点额度（work 计数递增）
@@ -2211,6 +2436,17 @@ out_unlock:
 	return work;
 }
 ```
+
+在`net_rx_action`的收尾阶段，如果循环结束时 `list` 还有没处理完的任务，或者 `repoll` 列表里有需要继续轮询的 NAPI 任务，内核会将它们重新拼回到 `sd->poll_list`，并调用 `__raise_softirq_irqoff(NET_RX_SOFTIRQ)`，这里有一个非常细节的场景：
+
+如果这里的场景是劫持了CPU线程在运行内核收包逻辑，为了防止用户态线程饿死，内核需要有一个平衡（兜底）机制。这个兜底机制就是唤醒 ksoftirqd 线程来收包，对应的函数入口是`run_ksoftirqd`。ksoftirqd 线程也要遵循CFS 调度机制，那么如何调度呢？这里由于`net_rx_action` 运行在中断上下文（Interrupt Context），具备中断上下文的特权，即在 `net_rx_action` 执行期间，CPU 是不响应进程调度器的。因此CFS 无法在这个函数内部强行把当前 CPU 的控制权抢走。注意到`net_rx_action`的收尾[逻辑](https://elixir.bootlin.com/linux/v4.11.6/source/net/core/dev.c#L5354)中，如果`poll_list`不为空（收包工作未完成）时，会调用`__raise_softirq_irqoff`，它主要[工作](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/softirq.c#L441)是标记软中断（触发信号），即将当前 CPU 的软中断挂起标志（`__softirq_pending`）置位
+
+与 ksoftirqd 的关系是什么呢？如果当前内核正在处理中断上下文，执行完 `net_rx_action` 后，返回到`irq_exit()` 逻辑会检查这个标志位，如果发现被置位，内核会尝试在当前上下文原地执行剩余的软中断。如果原地执行完又被置位（说明流量太大），或者因为配置了 `PREEMPT_RT` 等特殊原因，内核才会去唤醒 ksoftirqd 线程
+
+所以，当 `net_rx_action` 执行完毕，退出到 `irq_exit()` 时，内核会检查 `TIF_NEED_RESCHED` 标志：
+
+-   如果需要调度：它会触发一次 `preempt_schedule_irq()`，这时候才会把控制权交回给 CFS，从而执行进程切换
+-   如果 ksoftirqd 被唤醒，它是一个内核线程，当 CPU 处理完中断并退出中断上下文后，CFS 会看到 ksoftirqd 处于 `TASK_RUNNING` 状态，于是根据 vruntime 决定是继续跑原来（被劫持）的业务进程，还是切换去跑 ksoftirqd
 
 通过上面的代码，总结下`net_rx_action`、`napi_poll`的主要工作过程：
 
@@ -2281,7 +2517,7 @@ flowchart TD
 -	`napi_struct`，包含`poll_list`（链入 CPU 的轮询队列）、`poll`（指向设备驱动的轮询函数）、`weight`（单次轮询最大包数）
 -	`softnet_data`（PerCPU 结构），包含`poll_list`（当前 CPU 待轮询的 NAPI 实例链表）、`time_squeeze`（统计因超时退出的次数），其中`time_squeeze`可以作为性能调优的依据，直观上理解这个变量表示**rx ringbuffer 还有包等待接收，但 softirq 预算用完了**，当`time_squeeze` 升高并不一定表示系统有丢包，只是表示 softirq 的收包预算用完时，RX queue 中仍然有包等待处理。只要 RX queue 在下次 softirq 处理之前没有溢出，那就不会因为 `time_squeeze` 而导致丢包；但如果有持续且大量的 `time_squeeze`，那确实有 RX queue 溢出导致丢包的可能。在这种情况下，调大 `budget` 参数是更合理的选择，与其让网卡频繁触发 IRQ->SoftIRQ 来收包，不如让 SoftIRQ 每次多执行一会，处理掉 RX queue 中尽量多的包再返回，因为中断和线程切换开销也是很大的
 
-`net_rx_action() -> napi_poll()`的整体流程如下图：
+`net_rx_action() ---> napi_poll()`的整体流程如下图：
 
 ![net_rx_action](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/stack/kfngxl/recv/net_rx_action.png)
 
@@ -2290,7 +2526,73 @@ flowchart TD
 
 前面提到，软中断的核心逻辑是获取到当前CPU变量`softnet_data`，对其`poll_list`进行遍历, 然后执行到网卡驱动注册到的poll函数。对于igb网卡就是`igb_poll`函数。而在读取操作中，igb_poll的重点工作是对`igb_clean_rx_irq`的调用
 
+先回顾下`igb_poll`的调用场景，对应于`net_rx_action--->napi_poll`函数调用链的部分
+
 ```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/core/dev.c#L5251
+static int napi_poll(struct napi_struct *n, struct list_head *repoll)
+{
+	void *have;
+	int work, weight;
+
+	list_del_init(&n->poll_list);
+
+	have = netpoll_poll_lock(n);
+
+	weight = n->weight;
+
+	/* This NAPI_STATE_SCHED test is for avoiding a race
+	 * with netpoll's poll_napi().  Only the entity which
+	 * obtains the lock and sees NAPI_STATE_SCHED set will
+	 * actually make the ->poll() call.  Therefore we avoid
+	 * accidentally calling ->poll() when NAPI is not scheduled.
+	 */
+	work = 0;
+	if (test_bit(NAPI_STATE_SCHED, &n->state)) {
+        //for igb : igb_poll
+		work = n->poll(n, weight);
+		trace_napi_poll(n, work, weight);
+	}
+
+	WARN_ON_ONCE(work > weight);
+
+	if (likely(work < weight))
+		goto out_unlock;
+
+	/* Drivers must not modify the NAPI state if they
+	 * consume the entire weight.  In such cases this code
+	 * still "owns" the NAPI instance and therefore can
+	 * move the instance around on the list at-will.
+	 */
+	if (unlikely(napi_disable_pending(n))) {
+		napi_complete(n);
+		goto out_unlock;
+	}
+
+	if (n->gro_list) {
+		/* flush too old packets
+		 * If HZ < 1000, flush all packets.
+		 */
+		napi_gro_flush(n, HZ >= 1000);
+	}
+
+	/* Some drivers may have called napi_schedule
+	 * prior to exhausting their budget.
+	 */
+	if (unlikely(!list_empty(&n->poll_list))) {
+		pr_warn_once("%s: Budget exhausted after napi rescheduled\n",
+			     n->dev ? n->dev->name : "backlog");
+		goto out_unlock;
+	}
+
+	list_add_tail(&n->poll_list, repoll);
+
+out_unlock:
+	netpoll_poll_unlock(have);
+
+	return work;
+}
+
 //https://elixir.bootlin.com/linux/v4.11.6/source/drivers/net/ethernet/intel/igb/igb_main.c#L6600
 
 static int igb_poll(struct napi_struct *napi, int budget)
@@ -2511,6 +2813,44 @@ static gro_result_t napi_skb_finish(gro_result_t ret, struct sk_buff *skb)
 ```
 
 `napi_skb_finish`函数主要就是调用了`netif_receive_skb`，在`netif_receive_skb`中，数据包将被送到协议栈中，特别注意`3、网络协议栈处理`、`4、IP协议层处理流程`、`5、UDP协议层处理过程`也属于软中断的处理过程
+
+最后，回答下上文的问题，线程劫持的调用入口（被动劫持）和ksoftirqd（主动接管）的调用入口的区别，虽然它们最终都会调用 `net_rx_action`
+
+1、线程劫持场景（被动劫持）：`irq_exit()` 触发在硬中断处理函数调用 `napi_schedule()` 之后，CPU 并没有立刻去收包，而是必须等硬中断处理逻辑执行完毕，准备退回到原线程前的那一刻。该场景本质上是硬中断处理程序的延续，入口点为`irq_exit() -> invoke_softirq()`
+
+在执行身份上，CPU 依然处于 `in_interrupt()` 硬中断的收尾阶段，它顺手执行了软中断，而原线程（业务线程）根本不知道自己被劫持了，它以为自己只是在执行 `do_IRQ`，等 `irq_exit` 执行完，`do_IRQ` 返回，它（可能）就继续执行它的下一行代码。在该场景使用的是被中断线程的内核栈（如果开了中断栈机制，会切换到专门的 irq stack）。内核设计目标是极速收包，尽可能减少延迟
+
+在可调度性上，本case是无法被抢占，强行占用 CPU
+
+```c
+void irq_exit(void)
+{
+    // 1. 硬中断处理完了，看看软中断队列有没有活
+    if (!in_interrupt() && local_softirq_pending())
+        invoke_softirq(); // 核心：这里是劫持的起点
+}
+```
+
+2、ksoftirqd 场景（主动接管）：线程上下文启动当流量大到超过 `2ms` 配额，或者软中断被标记为过载时，内核放弃在硬中断上下文继续收包，转而唤醒 ksoftirqd 内核线程，对应入口 `run_ksoftirqd`，本质上这是一个独立的内核线程被调度器（CFS）选中后执行的普通函数，入口点为`run_ksoftirqd() -> __do_softirq()`
+
+在执行身份上，这是进程上下文（Process Context），和业务线程（如 Nginx等）地位平等。该场景使用的是 ksoftirqd 自己独立的进程内核栈。内核设计目标是在高负载下保公平，防止 CPU 饿死
+
+在可调度性上，本case是可以被 CFS 抢占（公平竞争）
+
+```c
+static int run_ksoftirqd(void *__p)
+{
+    local_irq_disable();
+    if (local_softirq_pending()) {
+        __do_softirq(); // 核心：这里是主动接管的起点
+        rcu_note_context_switch();
+        local_irq_enable();
+        cond_resched(); // 关键点：这里会触发 CFS 调度
+        return 0;
+    }
+    local_irq_enable();
+}
+```
 
 ####    三：网络协议栈的实现
 
@@ -4963,9 +5303,9 @@ conntrack -S
 5.  最后，数据包安稳落入 `sk_receive_queue`，业务线程顺手将其拷贝到用户空间
 
 ####    硬中断打开的时机
-硬中断的打开，精准地发生于软中断执行 `net_rx_action()` 时，调用网卡驱动绑定的 `poll()` 函数（如 `ixgbe_poll`）的退出时刻。通俗点说：硬中断的打开时机是网卡的物理环形缓冲区（Ring Buffer）是不是被软中断掏空了？
+硬中断的打开，精准地发生于软中断执行 `net_rx_action()` 时，调用网卡驱动绑定的 `poll()` 函数（如 `igb_poll/ixgbe_poll`）的退出时刻。通俗点说：硬中断的打开时机是网卡的物理环形缓冲区（Ring Buffer）是不是被软中断掏空了？
 
-当处于软中断上下文中，`ixgbe_poll(napi, budget)` 开始从 ringbuffer 里往取数据包（默认 `budget=64`）。循环结束后，驱动会进行如下判断：
+当处于软中断上下文中，`igb_poll/ixgbe_poll(napi, budget)` 开始从 ringbuffer 里往取数据包（默认 `budget=64`）。循环结束后，驱动会进行如下判断：
 
 1、caseA：ringbuffer 被取空了（常态流量），驱动消费了 `20` 个包后，发现 ringbuffer 空了（`work_done < budget`），驱动认为当前没有积压的包了，需要结束轮询
 
@@ -4978,6 +5318,10 @@ conntrack -S
 -   不会调用 `napi_complete_done()`，会直接 `return budget` 返回给软中断层
 -   由于此时没有调用硬件开启函数，网卡的硬件中断依然处于被屏蔽（Masked）的状态
 -   内核的 `net_rx_action()` 看到 `poll()` 返回了满额的 `64`，就会把这个 NAPI 结构体重新挂回 `poll_list` 的尾部，并再次触发软中断，等待下一轮继续消费数据包，直到走入caseA
+
+####    关闭硬中断 VS 退出硬中断状态
+
+todo
 
 ##  0x0A  参考
 -   [Monitoring and Tuning the Linux Networking Stack: Sending Data](https://blog.packagecloud.io/monitoring-tuning-linux-networking-stack-sending-data/)
