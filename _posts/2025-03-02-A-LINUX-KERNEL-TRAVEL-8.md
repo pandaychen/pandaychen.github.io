@@ -1985,7 +1985,7 @@ void irq_enter(void)
 1.  `handle_irq(desc, regs)`：进入通用中断处理子系统
 2.  `desc->handle_irq()`：调用这个档案袋里配置的底层流控函数。对于 MSI-X，它通常指向 `handle_edge_irq()`
 3.  `handle_irq_event(desc)`：流控函数确认硬件状态无误后，准备执行软件注册的动作
-4.  `handle_irq_event_percpu(desc, ...)`：遍历`desc`的 `action` 链表（`struct irqaction`）
+4.  `handle_irq_event_percpu(desc, ...)`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/irq/handle.c#L185)：遍历`desc`的 `action` 链表（`struct irqaction`）
 5.  `action->handler(irq, action->dev_id)`：当系统启动时，igb 驱动调用了 `request_irq()` 或 `request_msi()`，把 `igb_msix_ring` 这个函数的内存地址，存进了这里的 `action->handler` 中，即调用`igb_msix_ring`函数
 
 `igb_msix_ring`的函数实现见下文，非常轻量
@@ -5321,7 +5321,37 @@ conntrack -S
 
 ####    关闭硬中断 VS 退出硬中断状态
 
-todo
+二者容易混淆，主要对比如下：
+
+| 对比维度 | 关闭硬中断 （Disable IRQ） | 退出硬中断状态 （irq_exit） |
+| :-----| :---- | :---- |
+| 操作对象 | 硬件寄存器 (CPU IF位 / 网卡掩码) | 退出硬中断状态 `irq_exit` |
+| 控制域 | 硬件逻辑：决定 CPU 会不会被打断 | 软件逻辑：决定能不能跑软中断、能不能调度 |
+| 执行者 | 汇编指令 (cli/sti) 或 设备驱动代码 | Linux 内核通用代码 |
+
+一、关闭硬中断（Disabling Hard IRQ），硬件层面的物理断电，这是硬件电路（CPU 针脚或外设寄存器）真实的物理动作，主要影响是它决定了硬件能不能打断 CPU 当前的指令执行流。它分为两种级别：
+
+-   全局级别（CPU 屏蔽）：执行汇编指令 cli（Clear Interrupt Flag），把 CPU 寄存器里的中断标志位置为 `0`。此时任何硬件（网卡、键盘、磁盘等）发出的电平信号，CPU 物理上直接无视
+-   局部级别（设备屏蔽）：如网卡驱动操作过程，通过写入网卡芯片的寄存器，关闭特定网卡的中断。网卡被剥夺了发信号的资格，但 CPU 还能听到其他设备（如时钟）的中断
+
+二、退出硬中断状态（Exiting Hard IRQ State），是软件层面的身份切换，这是操作系统内核（软件）自己维护的一个状态标记。它决定了内核此刻允许做什么代码。**只要退出了硬中断状态（`in_interrupt()` 返回 `false`），内核就允许发生调度**，允许执行软中断逻辑。这完全是 Linux 软件给自己定的规矩。
+
+该操作的本质是 CPU 内存里的一个计数器（即 `preempt_count` 中的硬中断位），当代码执行 `preempt_count_sub(HARDIRQ_OFFSET)` 时，内核就是在宣告退出了硬中断状态
+
+三、在本文的NAPI场景中，回顾一下网卡收包 NAPI 状态机的过程，二者的配合过程
+
+1.  网卡发来硬中断，CPU 陷入 `do_IRQ`：
+    -   硬件层面：CPU 自动关闭了同级别的硬中断（防止重入）
+    -   软件层面：内核通过 `entering_irq()` 宣告自己进入了硬中断状态
+2.  网卡驱动执行 `igb_msix_ring`
+    -   驱动程序通过写网卡寄存器，关闭了网卡的硬中断（拔掉网卡专属报警器）
+    -   驱动挂起软中断（`napi_schedule`），驱动函数返回
+3.  退出的关键时刻 `irq_exit()`：
+    -   软件层面：内核通过 preempt_count_sub 退出了硬中断状态（脱下特权外套）
+    -   硬件层面：CPU 随后会重新打开全局硬中断（插上总警报器电源，允许时钟、键盘等其他中断进来）
+4.  软中断 `net_rx_action` 疯狂收包中（当前状态最微妙）：
+    -   软件层面： 此时早就退出了硬中断状态（否则软中断跑不起来）
+    -   硬件层面： CPU 的全局硬中断是开着的（时钟滴答作响）。但是网卡自己的硬中断依然是关闭的
 
 ##  0x0A  参考
 -   [Monitoring and Tuning the Linux Networking Stack: Sending Data](https://blog.packagecloud.io/monitoring-tuning-linux-networking-stack-sending-data/)
