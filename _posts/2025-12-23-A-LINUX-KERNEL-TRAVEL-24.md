@@ -53,7 +53,110 @@ flowchart LR
 ##  0x01    相关背景知识
 
 ####    应用层：一个write的例子
-TODO
+
+在理解内核路径之前，先从应用层视角看下 `write` 的语义，`write` 的原型为：
+
+```c
+#include <unistd.h>
+ssize_t write(int fd, const void *buf, size_t count);
+```
+
+**1）短写（short write）是常态，不是错误**
+
+`write` 成功时返回**实际写入的字节数** `n`，它满足 `0 <= n <= count`，但**并不保证** `n == count`。当 `n < count` 时称为**短写**，属于合法返回而非错误。触发短写的常见原因：
+
+-   被信号打断（已写入部分后返回）
+-   管道/套接字缓冲区写满
+-   磁盘空间容量在写入途中耗尽
+-   `count` 超过内核单次上限被截断等
+
+因此**正确的写法一定是循环写**，直到把 `count` 字节全部写完，示例代码如下：
+
+```c
+// 健壮的全量写：处理 short write 与可重试错误，适用于大文件写入
+ssize_t write_all(int fd, const void *buf, size_t count)
+{
+    const char *p = buf;
+    size_t left = count;
+
+    while (left > 0) {
+        ssize_t n = write(fd, p, left);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;            // 被信号打断，尚未写入任何字节，直接重试
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // 仅非阻塞 fd（O_NONBLOCK）才会出现：此刻不可写
+                // 阻塞式写普通文件不会走到这里；此处可 poll/epoll 等待可写后重试
+                continue;
+            }
+            return -1;               // EFAULT/ENOSPC/EDQUOT/EFBIG/EPIPE 等：不可屏蔽，上抛
+        }
+        left -= n;                   // n 可能 < left（short write），继续写剩余部分
+        p    += n;
+    }
+    return count;
+}
+```
+
+**2）阻塞 vs 非阻塞的返回值差异**
+
+-   **阻塞模式（默认）**：对**普通文件**（ext4 等）而言，`write` 会一直阻塞到内核把数据拷进 Page Cache（Buffered I/O）或落盘（Direct/O_SYNC），几乎不会返回 `EAGAIN`；对**管道/套接字/字符设备**等，缓冲区满时会阻塞等待对端消费
+-   **非阻塞模式（`O_NONBLOCK`）**：当无法立即写入时立刻返回 `-1` 且 `errno == EAGAIN`（等价 `EWOULDBLOCK`），一个字节都不写。注意 `O_NONBLOCK` 对**普通磁盘文件基本无效**（内核对常规文件的 buffered write 不视为**会阻塞**），主要作用于管道/FIFO/套接字/tty 等
+
+**3）错误分类：可屏蔽（重试）vs 不可屏蔽（上抛）**
+
+| errno | 含义 | 处理方式 | 说明 |
+|-------|------|---------|------|
+| `EINTR` | 写入前被信号打断，未写入任何字节 | 可屏蔽，直接重试 | 若已写入部分则返回已写字节数而非 `EINTR` |
+| `EAGAIN`/`EWOULDBLOCK` | 非阻塞 fd 当前不可写 | 可屏蔽，等可写后重试 | 仅 `O_NONBLOCK` 出现 |
+| `EFAULT` | `buf` 指向非法用户地址 | 不可屏蔽 | 对应内核 `access_ok`/`copy_from_user` 失败 |
+| `ENOSPC` | 文件系统空间不足 | 不可屏蔽 | 延迟分配下也可能在 `write` 阶段预留失败即报出 |
+| `EDQUOT` | 超出磁盘配额 | 不可屏蔽 | 对应 `dquot_reserve_block` 失败 |
+| `EFBIG` | 超过 `RLIMIT_FSIZE` 或文件系统单文件上限 | 不可屏蔽 | 对应 `generic_write_checks` 检查 |
+| `EPIPE` | 写入已关闭读端的管道/套接字 | 不可屏蔽 | 同时递送 `SIGPIPE`，需注意信号处理 |
+| `EBADF` | fd 非法或未以写方式打开 | 不可屏蔽 | 对应 `vfs_write` 的 `FMODE_WRITE` 检查 |
+| `EINVAL` | fd 不支持写、或参数非法 | 不可屏蔽 | 对应 `FMODE_CAN_WRITE` 检查 |
+
+在实践中，`EINTR` 与 `EAGAIN` 通常是可屏蔽的，表示**暂时没写成，稍后再试**；其余错误都**表示这次写彻底失败，必须向上层报告**。特别注意 `EPIPE` 会伴随 `SIGPIPE`，服务端程序通常要 `signal(SIGPIPE, SIG_IGN)` 忽略它，改用 `write` 返回值判断对端断开
+
+**4）返回值与 `count` 的关系，以及单次写入上限**
+
+内核对单次 `write` 的字节数设了上限 `MAX_RW_COUNT`：
+
+```c
+// https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/fs.h#L2411
+#define MAX_RW_COUNT (INT_MAX & PAGE_MASK)   // = 0x7ffff000，约 2GB - 4KB
+```
+
+因此即使传入 `count` 大于 `MAX_RW_COUNT`，`vfs_write` 也会**先把 `count` 截断**到 `MAX_RW_COUNT` 再写（见下文介绍 `vfs_write` 中 `if (count > MAX_RW_COUNT) count = MAX_RW_COUNT;`）。这意味着**单次 `write` 的返回值上限就是 `0x7ffff000`**，想写更大size的数据必须循环调用。返回值 `n` 与 `count` 的关系可归纳为：
+
+-   `n == count`：全部写入（常规情况）
+-   `0 <= n < count`：短写情况，需继续写剩余 `count - n` 字节
+-   `n == -1`：出错，`errno` 指示原因，本次一个字节都没写入（`EINTR` 语义即写入前被打断）
+
+**5）与内核 `vfs_write` 返回值的对应关系**
+
+用户态 `write()` 的返回值/`errno` 正是内核 `SYSCALL_DEFINE3(write)` → `vfs_write` 返回值的映射：
+
+```c
+// 用户态看到的 errno = -(内核返回的负错误码)
+SYSCALL_DEFINE3(write, ...) {
+    ret = vfs_write(f.file, buf, count, &pos);   // ret < 0 → errno = -ret
+    if (ret >= 0)
+        file_pos_write(f.file, pos);             // 成功才推进 f_pos
+    return ret;                                  // ret 即 write() 返回值
+}
+```
+
+| `vfs_write` 内部返回 | 用户态 `write()` 表现 |
+|---------------------|----------------------|
+| `-EBADF`（无 `FMODE_WRITE`） | 返回 `-1`，`errno = EBADF` |
+| `-EINVAL`（无 `FMODE_CAN_WRITE`） | 返回 `-1`，`errno = EINVAL` |
+| `-EFAULT`（`access_ok` 失败） | 返回 `-1`，`errno = EFAULT` |
+| `count` 被截断为 `MAX_RW_COUNT` | 返回值 `<= 0x7ffff000`，表现为短写 |
+| `ret > 0` | 返回实际写入字节数，并 `file_pos_write` 推进偏移 |
+
+最后补充一个细节，**只有当 `ret >= 0` 时内核才调用 `file_pos_write` 更新 `f_pos`。所以写出错时文件偏移不会前进，这为上层的重试逻辑提供了正确的基础**
 
 ####    ext4 文件系统的三种日志模式
 
@@ -61,7 +164,7 @@ ext4 的可靠性依赖 JBD2（Journaling Block Device 2）日志子系统。根
 
 | 模式 | 数据写日志 | 元数据写日志 | 安全性 | 性能 | 说明 |
 |------|-----------|-------------|--------|------|------|
-| `data=journal` | 是 | 是 | 最高 | 最低 | 数据和元V数据都先写日志再写磁盘，崩溃后可完整恢复 |
+| `data=journal` | 是 | 是 | 最高 | 最低 | 数据和元数据都先写日志再写磁盘，崩溃后可完整恢复 |
 | `data=ordered`（默认） | 否 | 是 | 中等 | 中等 | 先将数据刷到磁盘，再提交元数据日志。保证元数据指向的数据块已写入 |
 | `data=writeback` | 否 | 是 | 最低 | 最高 | 仅保证元数据一致性，数据写入顺序不做保证。崩溃后可能出现旧数据 |
 
@@ -327,7 +430,50 @@ static ssize_t new_sync_write(struct file *filp, const char __user *buf,
 2.  **`struct iov_iter`**：将用户空间的缓冲区地址和长度封装为迭代器。后续内核中所有的数据拷贝都通过这个迭代器进行
 3.  **`call_write_iter`**：通过 `file->f_op->write_iter(kiocb, iter)` 将控制权交给具体文件系统
 
-TODO
+####    `buf -> iovec -> iov_iter -> kiocb` 逐层封装的意义
+
+如上面`new_sync_write` 函数的参数中，相关的原始输入：
+
+-   `struct file *filp`
+-   用户缓冲区指针 `const char __user *buf`
+-   长度 `len`
+
+但是，它没有直接把这三个参数直接传给文件系统，而是逐层包装成 `iovec`、`iov_iter`、`kiocb` 三个抽象。这层封装的目的是**用一套统一的接口覆盖所有读写变体**（`read/write`、`readv/writev`、`pread/pwrite`、`preadv/pwritev`、AIO、Direct I/O、splice），让下层文件系统只需实现 `read_iter/write_iter` 两个方法：
+
+```mermaid
+flowchart TD
+    subgraph raw [原始输入]
+        Buf["buf: const char __user *"]
+        Len["len: size_t"]
+        Filp["filp: struct file *"]
+    end
+    subgraph iovecLayer [iovec: 描述一段缓冲区]
+        IOV["iovec{ iov_base=buf, iov_len=len }"]
+    end
+    subgraph iterLayer [iov_iter: 缓冲区迭代器]
+        ITER["iov_iter{ type=WRITE|ITER_IOVEC, iov, nr_segs=1, count=len, iov_offset }"]
+    end
+    subgraph kiocbLayer [kiocb: IO 上下文/状态]
+        KIOCB["kiocb{ ki_filp=filp, ki_pos, ki_flags=IOCB_SYNC/DSYNC/DIRECT, ki_complete }"]
+    end
+    Buf --> IOV
+    Len --> IOV
+    IOV --> ITER
+    Filp --> KIOCB
+    ITER --> Call["call_write_iter(filp, kiocb, iter)"]
+    KIOCB --> Call
+    Call --> FS["ext4_file_write_iter"]
+```
+
+这里详细逐层拆解每一层解决了什么问题：
+
+1.  **`iovec`：把 一段缓冲区 抽象为 `{起始地址, 长度}`**。单缓冲区 `write` 只有一个 `iovec`；而 `writev` 天然就是 `iovec` 数组。用 `iovec` 统一后，单缓冲和多缓冲（scatter-gather）走同一条路径
+
+2.  **`iov_iter`：把 缓冲区来源 抽象化 + 携带迭代状态**。这是最关键的一层，它用 `type` 字段区分缓冲区**来源类型**，分为`ITER_IOVEC`（用户态）、`ITER_KVEC`（内核态，如 NFSD）、`ITER_BVEC`（页数组，如 `splice`/回环设备）、`ITER_PIPE`（管道）。如此下层代码通过 `iov_iter_copy_from_user_atomic`、`iov_iter_advance`、`iov_iter_count` 等通用 API 操作数据，**完全不用关心数据到底来自用户态还是内核态**。同时 `iov_offset` + `count` 记录了**已消费到哪、还剩多少**，使得 `generic_perform_write` 的按页循环可以反复推进同一个迭代器
+
+3.  **`kiocb`：把 本次 I/O 的上下文与状态 与 数据源 解耦**。`iov_iter` 只描述**数据在哪**，而 `kiocb` 描述**这次 I/O 怎么做**：`ki_pos`（写到文件哪个偏移）、`ki_flags`（`IOCB_SYNC`/`IOCB_DSYNC`/`IOCB_DIRECT`，由 `O_SYNC`/`O_DIRECT` 等打开标志推导）、`ki_complete`（异步 I/O 完成回调）。同步 `write` 用栈上的 `kiocb`；AIO 则用长期存活的 `kiocb` 并设置 `ki_complete`，两者共用同一个 `write_iter` 入口
+
+因此，这三层封装带来的直接收益就是**`ext4_file_write_iter(struct kiocb *iocb, struct iov_iter *from)` 一个函数就同时处理了** buffered/direct、同步/异步、单缓冲/多缓冲、用户态/内核态数据源——所有差异都被编码进 `kiocb->ki_flags` 和 `iov_iter->type`，而不需要为每种组合各写一个入口
 
 ##  0x03    阶段二：ext4 层的接入
 
@@ -429,7 +575,7 @@ ext4_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
     inode_unlock(inode);
 
     if (ret > 0)
-        ret = generic_write_sync(iocb, ret);    // 仅在 O_SYNC/O_DSYNC 模式下触发同步刷盘（仅在SYNC模式下有效）--- 见后文补充
+        ret = generic_write_sync(iocb, ret);    // 仅在 O_SYNC/O_DSYNC 模式下触发同步刷盘（详见 0x09 节）
 
     return ret;
 
@@ -483,6 +629,8 @@ ssize_t __generic_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
             IS_DAX(inode))
             goto out;
 
+        // 内联赋值 pos = iocb->ki_pos：DIO 已推进 ki_pos，从当前偏移开始 buffered 补写
+        // 同时把该起点记入 pos，供下方计算 endbyte 及失效 page cache 范围使用
         status = generic_perform_write(file, from, pos = iocb->ki_pos);
         if (unlikely(status < 0)) {
             err = status;
@@ -681,7 +829,7 @@ retry_journal:
 
     lock_page(page);
     if (page->mapping != mapping) {
-        /* 页面在我们重新获取锁之前被截断了，重试 */
+        /* 页面在重新获取锁之前被截断了，重试 */
         unlock_page(page);
         put_page(page);
         ext4_journal_stop(handle);
@@ -717,8 +865,6 @@ retry_journal:
     -   对于需要部分写入的页面（不是整页覆盖），如果页面不是 uptodate 的，需要先从磁盘读入已有数据
 
 补充一下`grab_cache_page_write_begin--->pagecache_get_page`的实现：
-
-todo
 
 ```c
 //https://elixir.bootlin.com/linux/v4.11.6/source/mm/filemap.c#L2766
@@ -773,7 +919,7 @@ repeat:
 	}
 
 	if (page && (fgp_flags & FGP_ACCESSED))
-		mark_page_accessed(page);
+		mark_page_accessed(page);   //这里又看到了mark_page_accessed的实现
 
 no_page:
 	if (!page && (fgp_flags & FGP_CREAT)) {
@@ -809,11 +955,144 @@ no_page:
 EXPORT_SYMBOL(pagecache_get_page);
 ```
 
+这两个函数的分工：`grab_cache_page_write_begin` 是 `write` 路径专用的封装，`pagecache_get_page` 是 Page Cache 查找或创建页的通用核心（`find_or_create_page`、`grab_cache_page` 等均基于它）
+
+**`grab_cache_page_write_begin` 的关键点**：
+
+1.  **`fgp_flags = FGP_LOCK | FGP_WRITE | FGP_CREAT`**：三个标志决定了后续行为，`FGP_LOCK` 表示返回时页面已上锁（`PG_locked`）、`FGP_CREAT` 表示未命中就分配新页并插入 Page Cache、`FGP_WRITE` 表示这是写访问（影响脏页记账，见下）。注意这里**没有** `FGP_ACCESSED`，这一点在下一节分析 `mark_page_accessed` 时很重要（**关系到是否标记页page活跃的逻辑**）
+2.  **`wait_for_stable_page(page)`**：如果底层设备要求稳定页（stable page writeback，如需要计算校验和的设备、部分 RAID/DIF 场景，由 `bdi_cap_stable_pages_required` 决定），且该页正处于回写中（`PG_writeback`），则阻塞等待回写完成后再返回。这样能保证用户新数据不会在 DMA 到磁盘的过程中被同时修改，避免校验和错乱
+
+**`pagecache_get_page` 的执行流程**：
+
+1.  **`find_get_entry`（查找）**：在 `mapping->page_tree`（radix tree）中按 `offset` 查找页面。若命中会递增引用计数（get）。若返回的是 exceptional entry（如 shadow/DAX 项）则视为未命中（`page = NULL`）
+2.  **命中且 `FGP_LOCK`（上锁 + 校验）**：`lock_page(page)` 上锁后，**必须重新校验 `page->mapping == mapping`**，因为在 find_get拿到引用 到 lock成功 之间存在窗口，页面可能已被 truncate 从 Page Cache 摘除。若校验失败（`page->mapping != mapping`），解锁、释放引用并 `goto repeat` 重新查找。这是 Page Cache 里典型的 **truncate 竞态处理**范式
+3.  **未命中且 `FGP_CREAT`（分配 + 插入）**：
+    -   `FGP_WRITE + mapping_cap_account_dirty`：给 `gfp_mask` 加上 `__GFP_WRITE`，提示内存分配器该页即将变脏，便于均衡各 NUMA 节点/zone 的脏页分布
+    -   `__page_cache_alloc(gfp_mask)`：分配物理页
+    -   `add_to_page_cache_lru(page, mapping, offset, ...)`：把新页插入 radix tree **并**挂到 inactive LRU 链表。若插入时返回 `-EEXIST`（并发者抢先插入了同一个 offset），则 `goto repeat` 改为走命中路径
+
+回到 `write` 路径：`ext4_da_write_begin` 调用 `grab_cache_page_write_begin` 后立即 `unlock_page(page)`，随后开启 JBD2 事务、再 `lock_page` 并二次校验 `page->mapping`（同样是防 truncate 竞态），这与 `pagecache_get_page` 内部的竞态处理逻辑类似
+
+####    mark_page_accessed 在 write 路径中的意义
+前文分析过内核观测工具[readahead](https://github.com/iovisor/bcc/blob/master/libbpf-tools/readahead.bpf.c)的实现，使用了hook `fentry/mark_page_accessed`。在前文`grab_cache_page_write_begin-->pagecache_get_page`的路径中也看到了此函数。不过，先澄清一个容易误解的点，在**write 路径本身并不会直接调用 `mark_page_accessed`**。前面分析 `pagecache_get_page` 时提到，write 用的 `fgp_flags` 只有 `FGP_LOCK|FGP_WRITE|FGP_CREAT`，**不含 `FGP_ACCESSED`**，所以 `pagecache_get_page` 里那条 `if (fgp_flags & FGP_ACCESSED) mark_page_accessed(page)` 分支不会走入。相比之下，read 路径（`do_generic_file_read` → `find_get_page` 系列）会显式给页面标记一次访问，见前文分析
+
+那为什么 write 路径要关注它？因为 `mark_page_accessed` 是内核 **LRU 活跃度判定（active/inactive 二次机会算法）** 的核心逻辑，它决定了一个页是留在 inactive 链表（易被回收）还是晋升到 active 链表（受保护）。理解它有两层价值：
+
+1.  **write 产生的脏页最终也要参与 LRU 老化**：新写入的页由 `add_to_page_cache_lru` 挂到 **inactive** 链。若这些页随后被读取/再次访问触发 `mark_page_accessed`，才会晋升 active。因此**只写一次就再不碰的页**（如日志、临时大文件）会长期停留在 inactive，优先被回写和回收，这也正是 Buffered 写不会长期霸占内存的原因
+2.  **是可观测性的关键锚点**：`mark_page_accessed` / `folio_mark_accessed`（高版本） 是**内核追踪页何时被真正访问的天然 hook 点**，下面介绍的 **bcc `readahead` 工具正是利用它来量化预读了但从未被访问的浪费页**
+
+`mark_page_accessed` 的实现如下：
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/swap.c#L366
+void mark_page_accessed(struct page *page)
+{
+	page = compound_head(page);
+	if (!PageActive(page) && !PageUnevictable(page) &&
+			PageReferenced(page)) {
+
+		/*
+		 * If the page is on the LRU, queue it for activation via
+		 * activate_page_pvecs. Otherwise, assume the page is on a
+		 * pagevec, mark it active and it'll be moved to the active
+		 * LRU on the next drain.
+		 */
+		if (PageLRU(page))
+			activate_page(page);
+		else
+			__lru_cache_activate_page(page);
+		ClearPageReferenced(page);
+		if (page_is_file_cache(page))
+			workingset_activation(page);
+	} else if (!PageReferenced(page)) {
+		SetPageReferenced(page);
+	}
+	if (page_is_idle(page))
+		clear_page_idle(page);
+}
+EXPORT_SYMBOL(mark_page_accessed);
+```
+
+它实现的是一个二次机会（second-chance）晋升逻辑：
+
+-   **首次访问**（页面 `!PageReferenced`）：进入 `else if (!PageReferenced(page))` 分支，只 `SetPageReferenced` 打上**被引用过**标记，**不晋升**，页面仍留在 inactive 链
+-   **再次访问**（已 `PageReferenced` 且 `!PageActive`）：进入第一个分支，调用 `activate_page`（若已在 LRU 上）或 `__lru_cache_activate_page`（若还在 per-CPU pagevec 暂存区），把页面**晋升到 active 链**；随后 `ClearPageReferenced` 清标记，并对文件页调用 `workingset_activation` 更新工作集统计
+-   `page_is_idle`/`clear_page_idle`：配合 idle page tracking（`/sys/kernel/mm/page_idle`），清除空闲标记
+
+从`mark_page_accessed`的实现来看，即Referenced → Active需要**两次访问**：第一次点亮 `PG_referenced`，第二次才真正晋升。**这种设计避免了一次偶发访问就把页面提升为热页，是内核冷热页分离的基础**
+
+####    基于 mark_page_accessed 量化：预读但未访问
+
+`mark_page_accessed` 记录了页何时被真正访问，而`__page_cache_alloc` 记录了页何时被分配，如此把这两个时刻关联起来，就能回答一个关键的性能问题**内核预读（readahead）进来的页，到底有多少最终被用到？多久之后被用到？**
+
+bcc 项目的 [readahead](https://github.com/iovisor/bcc/blob/master/libbpf-tools/readahead.bpf.c) 工具正是这么做的（`readahead.bpf.c` 关键片段如下）：
+
+```c
+// 进入预读窗口：标记当前进程正在做 readahead
+SEC("fentry/do_page_cache_ra")
+int BPF_PROG(do_page_cache_ra) {
+    u32 pid = bpf_get_current_pid_tgid();
+    u64 one = 1;
+    bpf_map_update_elem(&in_readahead, &pid, &one, 0);
+    return 0;
+}
+
+// 页面分配完成：若处于预读窗口内，记录该 page 的“出生时间戳”
+static __always_inline int alloc_done(struct page *page) {
+    u32 pid = bpf_get_current_pid_tgid();
+    if (!bpf_map_lookup_elem(&in_readahead, &pid))   // 非预读路径的分配不计入
+        return 0;
+    u64 ts = bpf_ktime_get_ns();
+    bpf_map_update_elem(&birth, &page, &ts, 0);       // birth: page* -> 分配时刻
+    __sync_fetch_and_add(&hist.unused, 1);            // 预读但尚未使用 +1
+    __sync_fetch_and_add(&hist.total, 1);
+    return 0;
+}
+SEC("fexit/__page_cache_alloc")                       // 老内核：__page_cache_alloc
+int BPF_PROG(page_cache_alloc_ret, gfp_t gfp, struct page *ret) { return alloc_done(ret); }
+// 新内核 folio 化后的等价 hook：filemap_alloc_folio(_noprof)
+
+// 页面首次被访问：计算 alloc→access 延迟并落入直方图，unused--
+static __always_inline int mark_accessed(struct page *page) {
+    u64 *tsp = bpf_map_lookup_elem(&birth, &page);
+    if (!tsp) return 0;                               // 不是预读进来的页，忽略
+    s64 delta = (s64)(bpf_ktime_get_ns() - *tsp);
+    u64 slot = log2l(delta / 1000000U);               // 毫秒级 log2 直方图
+    if (slot >= MAX_SLOTS) slot = MAX_SLOTS - 1;
+    __sync_fetch_and_add(&hist.slots[slot], 1);
+    __sync_fetch_and_add(&hist.unused, -1);           // 被访问了，从“未使用”里扣掉
+    bpf_map_delete_elem(&birth, &page);
+    return 0;
+}
+SEC("fentry/mark_page_accessed")                      // 老内核：mark_page_accessed
+int BPF_PROG(mark_page_accessed, struct page *page) { return mark_accessed(page); }
+// 新内核 folio 化后的等价 hook：folio_mark_accessed
+```
+
+其观测原理可归纳为一条「分配—访问」配对流水线：
+
+```mermaid
+flowchart TD
+    A["fentry/do_page_cache_ra: pid 进入预读窗口 in_readahead[pid]=1"] --> B["预读逻辑分配页"]
+    B --> C["fexit/__page_cache_alloc: 记录 birth[page]=now; unused++; total++"]
+    C --> D["fexit/do_page_cache_ra: in_readahead 删除 pid，退出窗口"]
+    D --> E{"该页后续是否被访问?"}
+    E -->|"被访问 (mark_page_accessed)"| F["fentry/mark_page_accessed: delta=now-birth; 直方图[log2(delta)]++; unused--; 删除 birth[page]"]
+    E -->|"始终未访问"| G["birth 保留，unused 计数不减"]
+    F --> H["输出: alloc→access 延迟分布"]
+    G --> I["输出: unused = 预读进来但从未被访问的页数"]
+```
+
+对应到本文的 write 主线，可以得到如下要点：
+
+1.  **hook 点选择的依据**：工具选 `mark_page_accessed` 作为页被真正使用的信号，正是因为它是内核 LRU 活跃度判定的统一入口。无论 read 命中缓存、还是 mmap 访问被 `filemap_map_pages`/缺页路径标记，最终都汇聚到这里。而 **write 路径不触发它**（如上一节所述缺 `FGP_ACCESSED`选项），所以该工具天然只统计读侧的预读收益，不会被写入噪声干扰
+2.  **`unused` 的物理意义**：`unused = total - 已被访问` 就是预读进来却从未被 `mark_page_accessed` 的页。这个值偏高说明预读窗口开得过大（顺序性误判），白白占用 Page Cache 并可能挤占本可用于脏页/写缓存的内存。这正是写密集场景下也需要关注预读浪费的原因
+
+> 版本提示：新内核（folio 化之后）符号有所变化，`__page_cache_alloc → filemap_alloc_folio`、`mark_page_accessed → folio_mark_accessed`。本文v4.11.6 对应的是 `__page_cache_alloc` 与 `mark_page_accessed`
+
 ####    数据拷贝：iov_iter_copy_from_user_atomic
 
 `write_begin` 完成后，页面已准备就绪，接下来将用户数据拷贝到内核页：
-
-TODO
 
 ```cpp
 // https://elixir.bootlin.com/linux/v4.11.6/source/lib/iov_iter.c#L763
@@ -837,6 +1116,18 @@ size_t iov_iter_copy_from_user_atomic(struct page *page,
 -   **`kmap_atomic`**：对高端内存（HIGHMEM）页面建立临时的内核虚拟地址映射。这个映射是 per-CPU 的、不可抢占的，所以称为"原子"。在 64 位系统上这通常是空操作（直接线性映射）
 -   **`copyin`**（即 `__copy_from_user_inatomic`）：从用户空间拷贝数据。与普通的 `copy_from_user` 不同，原子版本在缺页时不会睡眠，而是返回未拷贝的字节数。这就是为什么前面要先调用 `iov_iter_fault_in_readable` 预热页面
 -   **`kunmap_atomic`**：解除临时映射
+
+这里再深入讨论一个问题，**这个函数中是否涉及到页表转换与缺页中断？** 答案是：**用户侧地址的翻译一定发生，缺页则被刻意规避到原子段之外**。这段拷贝的本质是**内核态从 `v.iov_base`（用户虚拟地址）读、写到 `p`（内核对该 page 的映射地址），涉及两侧地址的 MMU 翻译**，但两者的处理策略完全不同：
+
+1.  **内核侧目标地址 `p`（几乎不缺页）**：`p = kmap_atomic(page) + offset`。`page` 已经由 `write_begin` 分配并锁定（`grab_cache_page_write_begin`），其物理页真实存在。64 位os下 `kmap_atomic` 直接返回线性映射地址（`page_address`），无需改页表；32 位 HIGHMEM 下才通过 `kmap_atomic` 在**当前 CPU** 的固定映射窗口（`KM_TYPE`/`kmap_atomic` fixmap）临时建立一条 PTE 并刷新对应 TLB 项。因为这条映射是 per-CPU、且在 `kmap_atomic`/`kunmap_atomic` 之间禁抢占，所以访问它不会缺页
+
+2.  **用户侧源地址 `v.iov_base`（可能缺页，但被提前规避处理）**：读取用户缓冲区要走**用户页表**做虚拟地址到物理地址的翻译。如果对应页当前不在内存（未分配、被换出、或写时复制未触发），正常路径会触发**缺页异常 → `handle_mm_fault`**，而这需要**睡眠**（可能要读磁盘/换入）。但此刻内核**持有 page lock、且处于 `kmap_atomic` 的禁抢占原子上下文**，绝不能睡眠。为此内核用两道防线来阻止该情况发生：
+    -   **提前预热**：进入原子段之前，`generic_perform_write` 先调用 `iov_iter_fault_in_readable(i, bytes)`（见本文 0x04 节 `again:` 标签处），主动对用户页做一次可睡眠的**预触发缺页**，把页读进来。这样后续原子拷贝时用户页大概率已 present
+    -   **原子拷贝不进缺页处理器**：`copyin` 实际是 `__copy_from_user_inatomic`，它在 `pagefault_disable()` 保护下执行。若翻译时**仍然**缺页，CPU 的缺页处理入口会检查 `pagefault_disabled()`，**不进入** `handle_mm_fault` 的睡眠路径，而是走异常修复表（exception fixup）直接返回**未拷贝的字节数**
+
+3.  **缺页真的发生时的慢路径重试**：一旦 `__copy_from_user_inatomic` 返回**未全部拷贝**，`iov_iter_copy_from_user_atomic` 会得到 `copied < bytes` 甚至 `copied == 0`。回到 `generic_perform_write`：若 `copied == 0`，会 `goto again` 缩小 `bytes` 为单段长度、**在原子段之外重新 `fault_in_readable` 预热后重试**，从而避免活锁。这套**先预热 → 原子拷贝 → 失败则退出原子段慢速重试**的结构，正是内核为了在**持锁不可睡眠**与**用户页可能缺页**这对矛盾之间取得平衡
+
+小结下，**页表转换在两侧都发生**（内核侧多为线性映射零成本，用户侧走用户页表）；**缺页中断在原子拷贝段内被禁止**（`pagefault_disable` + 提前 `fault_in_readable`），一旦触及则转为返回未拷贝字节、退出原子段后重试，而不是在原子上下文里睡眠
 
 ####    write_end 钩子：ext4_da_write_end（循环内第二个钩子）
 
