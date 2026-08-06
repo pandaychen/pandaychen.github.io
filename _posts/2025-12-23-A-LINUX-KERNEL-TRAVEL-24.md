@@ -974,7 +974,24 @@ EXPORT_SYMBOL(pagecache_get_page);
 回到 `write` 路径：`ext4_da_write_begin` 调用 `grab_cache_page_write_begin` 后立即 `unlock_page(page)`，随后开启 JBD2 事务、再 `lock_page` 并二次校验 `page->mapping`（同样是防 truncate 竞态），这与 `pagecache_get_page` 内部的竞态处理逻辑类似
 
 ####    mark_page_accessed 在 write 路径中的意义
-前文分析过内核观测工具[readahead](https://github.com/iovisor/bcc/blob/master/libbpf-tools/readahead.bpf.c)的实现，使用了hook `fentry/mark_page_accessed`。在前文`grab_cache_page_write_begin-->pagecache_get_page`的路径中也看到了此函数。不过，先澄清一个容易误解的点，在**write 路径本身并不会直接调用 `mark_page_accessed`**。前面分析 `pagecache_get_page` 时提到，write 用的 `fgp_flags` 只有 `FGP_LOCK|FGP_WRITE|FGP_CREAT`，**不含 `FGP_ACCESSED`**，所以 `pagecache_get_page` 里那条 `if (fgp_flags & FGP_ACCESSED) mark_page_accessed(page)` 分支不会走入。相比之下，read 路径（`do_generic_file_read` → `find_get_page` 系列）会显式给页面标记一次访问，见前文分析
+前文分析过内核观测工具[readahead](https://github.com/iovisor/bcc/blob/master/libbpf-tools/readahead.bpf.c)的实现，该工具使用了hook `fentry/mark_page_accessed`。在上文章节中`grab_cache_page_write_begin-->pagecache_get_page`的路径中也看到了此函数
+
+这里需要厘清一个极易被误解的点：**buffered read/write 主线都不通过 `FGP_ACCESSED` 来「记访问」**。很多人会以为 `pagecache_get_page` 里那条 `if (fgp_flags & FGP_ACCESSED) mark_page_accessed(page)` 并不是 read/write 标记访问的入口
+
+这里基于 v4.11.6 版本源码逐一核对如下：
+
+-   **`FGP_ACCESSED` 由谁设置**：它并不在 read/write 主线里被赋值，唯一的内建赋值点是 `include/linux/pagemap.h` 中的 `find_or_create_page()` 包装器（`FGP_LOCK|FGP_ACCESSED|FGP_CREAT`），以及转调它的 `grab_cache_page()`；此外调用方可用 `find_get_page_flags(mapping, offset, FGP_ACCESSED)` 显式传入。服务对象是查找即算一次访问的调用者（部分文件系统元数据 / buffer cache 路径）
+-   **read 路径**：`generic_file_buffered_read`（`do_generic_file_read` 的实体）用的是 `find_get_page(mapping, index)` 即 `pagecache_get_page(mapping, offset, 0, 0)`，这里参数 **`fgp_flags = 0`，不含 `FGP_ACCESSED`**；随后在拷贝点**直接调用** `mark_page_accessed(page)`，且用 `if (prev_index != index || offset != prev_offset)` 保证**同一页在一次顺序读里被多段拷贝只算一次访问**。这个首次访问才算的语义是 `FGP_ACCESSED`（每次 get 都算）给不了的，所以 read 选择在拷贝点自行精确控制。另一处直接调用点是 `do_read_cache_page`（服务 `read_cache_page`/`read_mapping_page` 读元数据页）
+-   **write 路径**：`ext4_da_write_begin → grab_cache_page_write_begin → pagecache_get_page(FGP_LOCK|FGP_WRITE|FGP_CREAT)`，**既不带 `FGP_ACCESSED`，write_begin/write_end 里也不会直接调用 `mark_page_accessed`**。因此**一个只被写、从不被读的页在写入时不会被标记 accessed**，它由 `add_to_page_cache_lru` 落到 inactive 链，只有后续真被访问才可能晋升 active
+
+| 路径 | 查找接口 | 带 `FGP_ACCESSED`? | 如何 mark accessed |
+|------|---------|------------------|-------------------|
+| buffered read（`generic_file_buffered_read`） | `find_get_page`（flags=0） | 否 | 拷贝点**直接调用**，首次访问才算 |
+| fs 元数据读（`do_read_cache_page`） | `find_get_page` | 否 | `out:` 处**直接调用** |
+| buffered write（`ext4_da_write_begin`） | `grab_cache_page_write_begin`（`FGP_LOCK\|FGP_WRITE\|FGP_CREAT`） | 否 | **完全不 mark** |
+| `find_or_create_page`/`grab_cache_page` 调用方 | 同名包装器 | **是**（唯一内建点） | 由 `pagecache_get_page` 的 `FGP_ACCESSED` 分支处理 |
+
+> 顺带说明 `pagecache_get_page` 对 `FGP_ACCESSED` 的两种处理方式：命中已有页时走 `mark_page_accessed(page)`（可能晋升 active）；新建页时只 `__SetPageReferenced(page)`（注释 `Init accessed so avoid atomic mark_page_accessed later`，省一次原子操作）
 
 那为什么 write 路径要关注它？因为 `mark_page_accessed` 是内核 **LRU 活跃度判定（active/inactive 二次机会算法）** 的核心逻辑，它决定了一个页是留在 inactive 链表（易被回收）还是晋升到 active 链表（受保护）。理解它有两层价值：
 
