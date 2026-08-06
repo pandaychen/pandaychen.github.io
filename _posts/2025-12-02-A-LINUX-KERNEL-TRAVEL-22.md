@@ -3234,17 +3234,246 @@ flowchart LR
 
 因此：**预读/读盘阶段不涉及用户页表**；**只有交付给用户缓冲区时才触发 MMU 页表查询和可能的缺页中断**
 
-####	mark_page_accessed 与 LRU 回收
+####	page cache 的热/冷双链（active/inactive LRU）实现机制
+这里补充下在`do_generic_file_read`函数实现中的一处细节，`mark_page_accessed`的调用（仅一处）
 
-`mark_page_accessed` 在 `page_ok` 标签处被调用，用于更新页面在 LRU 链表中的活跃等级。内核使用**二次机会法**（Two-Chance）进行页面回收：
+`mark_page_accessed` 在 `page_ok` 标签处被调用，用于更新页面在 LRU 链表中的活跃等级。需要先理解内核 page cache 回收所依赖的**双链（two-list）LRU** 结构，即冷链+热链
 
-```text
-inactive,unreferenced  →  inactive,referenced   （第一次访问：设置 PG_referenced）
-inactive,referenced    →  active,unreferenced    （第二次访问：提升到 active 链表）
-active,unreferenced    →  active,referenced      （继续访问：保持活跃）
+Page Cache 的冷链和热链在内核源码中分别对应着 Inactive LRU List（非活跃链表） 和 Active LRU List（活跃链表），通过与`mark_page_accessed` 等函数联动，共同构成了 Linux 缓存淘汰的核心状态机
+
+一、冷链（Inactive List）的作用是用作新数据的考察期与淘汰池，即冷链充当了磁盘数据进入内存的缓冲区。它给新进入的数据提供了一个短暂的窗口期，如果没有表现出被持续访问的价值，就会被迅速淘汰。分两种情况讨论
+
+-	缓存的入口场景（Entry Point）：当用户进程第一次从磁盘读取文件时，内核会将分配的 Page 优先放入冷链的头部（并打上 `PG_referenced` 标记，表示刚被访问过）
+-	淘汰场景（Victim Pool）：当系统内存不足，后台回收线程（kswapd）或直接内存回收（Direct Reclaim）被触发时，它们只会从冷链的尾部开始进行回收以释放内存，位于冷链尾部的 Page 会被毫不留情地释放（干净页）或刷盘后释放（脏页）
+
+二、 热链（Active List）的作用是高频数据的保护区，只有那些在冷链考察期内，再次被真实访问的数据（触发 Two-Touch），才会被晋升（Promoted）到热链中。同样也分两种场景讨论：
+
+-	免受直接淘汰的保护：kswapd 在急需内存时，绝对不会直接回收热链中的页，如此确保业务核心的热点数据（如高频查询的数据库索引、热点日志、频繁加载的动态库）安全驻留在内存中
+-	老化的通道（Demotion）：极限场景下，当系统内存极度紧张，且冷链快被回收完时，内核会强制扫描热链。如果发现热链尾部的一些页已经很久没被碰过了，内核会将它们降级（Demote）回冷链的头部，重新接受考察
+
+三、 二者配合实现了什么功能呢？传统的 LRU 算法而言，新来的放在链表头部，最老的从链表尾部踢掉。内核设计冷热双链表（Two-Touch 算法），解决了单一 LRU 在生产环境中的一个致命缺陷，即缓存污染（Cache Pollution / Scan Resistance）问题，如经典的大文件顺序扫描问题，这些仅被读取过一次的page大概率都仅链接在冷链中，无法触发 `mark_page_accessed` 的第二次调用，永远无法晋升到热链，这也保证了热链中的数据不会受到顺序读取的影响
+
+**1）LRU 链表的组织：`lruvec` 与 `enum lru_list`**
+
+内核并不是维护单个全局 LRU对象，而是在每个 NUMA node（4.11.6 内核中为 `pglist_data`，并按 memcg 细分）上维护一组 LRU 链表，封装在 `struct lruvec` 中：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/mmzone.h#L227
+struct lruvec {
+	struct list_head		lists[NR_LRU_LISTS];	// 5 条链表数组
+	struct zone_reclaim_stat	reclaim_stat;
+	atomic_long_t			inactive_age;		// inactive_file 的驱逐/激活计数（workingset 用）
+	unsigned long			refaults;		// 上轮回收时的 refault 数
+#ifdef CONFIG_MEMCG
+	struct pglist_data *pgdat;
+#endif
+};
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/mmzone.h#L188
+enum lru_list {
+	LRU_INACTIVE_ANON = LRU_BASE,				// 匿名页-冷
+	LRU_ACTIVE_ANON   = LRU_BASE + LRU_ACTIVE,		// 匿名页-热
+	LRU_INACTIVE_FILE = LRU_BASE + LRU_FILE,		// 文件页-冷 ← read 进来的页落这里
+	LRU_ACTIVE_FILE   = LRU_BASE + LRU_FILE + LRU_ACTIVE,	// 文件页-热
+	LRU_UNEVICTABLE,					// 不可回收（mlock 等）
+	NR_LRU_LISTS
+};
 ```
 
-页面回收器 `kswapd` 扫描时，优先回收 inactive 链表末尾的页面。只有被多次访问的页面才能晋升到 active 链表，避免一次性大量读取（如 `cp` 命令）污染 active 链表
+可见文件页（file）与匿名页（anon）各有一对**active（热）/ inactive（冷）**链，本文讨论的基于file的`page cache` 的读缓存页属于 **file** 类，落在 `LRU_INACTIVE_FILE` / `LRU_ACTIVE_FILE` 这对双链上
+
+**2）一个新读入的文件页如何进入 inactive_file 冷链**
+
+前文 `read_pages`/`pagecache_get_page` 都通过 `add_to_page_cache_lru` 把新页加入 page cache，它内部把页挂到 LRU：`add_to_page_cache_lru → lru_cache_add → __lru_cache_add`，并**不直接**上链，而是先塞进 per-CPU 暂存向量 `lru_add_pvec`，等 pvec 满或被 drain 时由 `__pagevec_lru_add_fn` 批量上链：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/swap.c#L393
+static void __lru_cache_add(struct page *page)
+{
+	struct pagevec *pvec = &get_cpu_var(lru_add_pvec);
+
+	get_page(page);
+	if (!pagevec_add(pvec, page) || PageCompound(page))
+		__pagevec_lru_add(pvec);	// pvec 满则批量上链
+	put_cpu_var(lru_add_pvec);
+}
+```
+
+批量上链时，页落 active 链还是 inactive 链**取决于 `PageActive(page)` 标志**：新读入的页未置 `PG_active`，因此一律进入 **inactive_file（冷链）尾部**。这个先入冷链的设计正是如 `lru_cache_add` 描述，把落 active 还是 inactive 的决策推迟到 drain，从而给 `mark_page_accessed()` 一个在 drain 之前把页page提升为 active 的机会（见下文 `__lru_cache_activate_page`）
+
+**3）二次机会法（Two-Chance）：`PG_referenced` + `PG_active` 的四态迁移**
+
+如前描述，内核用 `PG_referenced` 与 `PG_active` 两个标志位组合，实现**被访问两次才算热页的二次机会算法**，避免一次性顺序扫描污染热链：
+
+```text
+inactive,unreferenced   --访问-->  inactive,referenced    （第一次访问：仅置 PG_referenced，仍在冷链）
+inactive,referenced     --访问-->  active,unreferenced     （第二次访问：晋升 active 热链，清 PG_referenced）
+active,unreferenced      --访问-->  active,referenced       （热链内再访问：置 PG_referenced 保活）
+```
+
+```mermaid
+flowchart LR
+    subgraph inactiveList ["inactive_file 冷链"]
+        I0["page: !Active,!Ref"]
+        I1["page: !Active,Ref"]
+    end
+    subgraph activeList ["active_file 热链"]
+        A0["page: Active,!Ref"]
+        A1["page: Active,Ref"]
+    end
+    NEW["新读入页 add_to_page_cache_lru"] -->|"落冷链尾"| I0
+    I0 -->|"mark_page_accessed 首次: SetPageReferenced"| I1
+    I1 -->|"mark_page_accessed 再次: activate_page 晋升"| A0
+    A0 -->|"mark_page_accessed: SetPageReferenced"| A1
+    A1 -.->|"回收扫描降级 shrink_active_list"| I0
+    I1 -.->|"长期不访问, 扫描清 Ref 后回收"| RECLAIM["驱逐/换出"]
+```
+
+**4）为什么要拆成两条链？**
+
+回收器（`kswapd` / 直接回收）**只从 inactive 链尾扫描并驱逐**，active 链不直接回收，只在 inactive 偏小时通过 `shrink_active_list` 把 active 尾部降级回 inactive。这样设计的目的是：
+
+-	**抗顺序扫描污染**：`cp`、`grep`等操作一次性顺序读取大文件等场景，产生的页只被访问一次，永远停在 inactive 冷链，很快被回收，不会挤占真正的热数据（如频繁访问的库文件、索引页）在 active 热链的位置
+-	**工作集识别**：只有真正被重复访问（`>=2` 次）的页才晋升 active，`inactive_age` / `workingset_activation` 进一步支持 refault 检测（页被误驱逐后很快又被访问时，帮助内核判断 inactive 链是否过小）
+
+####	mark_page_accessed 在 vfs_read 中的细节说明
+
+在 `do_generic_file_read` 的 `page_ok` 标签处（本文前面的源码），`mark_page_accessed` 的调用**带一个前置守卫**：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/filemap.c#L1886
+		/*
+		 * When a sequential read accesses a page several times,
+		 * only mark it as accessed the first time.
+		 */
+		if (prev_index != index || offset != prev_offset)
+			mark_page_accessed(page);
+		prev_index = index;
+```
+
+**触发场景与目的**：
+
+1.	**顺序读中「同一页只标记一次」**：一次 `read` 可能拷贝不满整页，或 `readv` 用多段 `iovec` 反复落在同一页。守卫 `prev_index != index || offset != prev_offset` 保证同一页在连续多段拷贝里**只调用一次** `mark_page_accessed`。若不加此判定，顺序读一个大页会被反复标记访问，虚假地把它抬进 active 热链，破坏二次机会法的语义。这正是 read 路径**不复用** `pagecache_get_page` 的 `FGP_ACCESSED`、而选择在拷贝点自行调用的根本原因（`FGP_ACCESSED` 选项的语义是每次 get 都记一次，粒度不匹配，详见后文说明）
+2.	**目的是驱动冷热分级**：首次读某页 → 页在 inactive 冷链 → `mark_page_accessed` 打标记设置 `PG_referenced`；**后续再次读到同一页（如循环重读、mmap 前的预热、热点文件等）→ 第二次 `mark_page_accessed` 触发 `activate_page` 晋升 active 热链，避免被回收**
+3.	**元数据读路径同样直接调用**：`read_cache_page`/`read_mapping_page`（读取 inode、目录块、符号链接等）最终走 [`do_read_cache_page`](https://elixir.bootlin.com/linux/v4.11.6/source/mm/filemap.c#L2483)，在其 `out:` 处也**直接** `mark_page_accessed(page)`（[关联代码](https://elixir.bootlin.com/linux/v4.11.6/source/mm/filemap.c#L2574)），语义与数据读一致
+
+需要强调的是，**buffered write 路径（`ext4_da_write_begin → grab_cache_page_write_begin`）既不带 `FGP_ACCESSED`、也不直呼 `mark_page_accessed`**，因此**只写不读的页在写时不会被标记访问，只落 inactive 冷链，这与本文分析的 read 路径形成对照**
+
+####	mark_page_accessed 代码详细分析
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/swap.c#L356
+/*
+ * inactive,unreferenced	->	inactive,referenced
+ * inactive,referenced		->	active,unreferenced
+ * active,unreferenced		->	active,referenced
+ */
+void mark_page_accessed(struct page *page)
+{
+	page = compound_head(page);		// 复合页取首页（透明大页等）
+	if (!PageActive(page) && !PageUnevictable(page) &&
+			PageReferenced(page)) {
+		// 分支1：非active + 非unevictable + 已referenced ⇒ 第二次访问，执行晋升
+		/*
+		 * If the page is on the LRU, queue it for activation via
+		 * activate_page_pvecs. Otherwise, assume the page is on a
+		 * pagevec, mark it active and it'll be moved to the active
+		 * LRU on the next drain.
+		 */
+		if (PageLRU(page))
+			activate_page(page);		// 已在 LRU 链上：走 pvec 异步晋升
+		else
+			__lru_cache_activate_page(page);// 还在 lru_add_pvec 暂存里：直接置 Active
+		ClearPageReferenced(page);		// 晋升后清 referenced（进入 active,unreferenced）
+		if (page_is_file_cache(page))
+			workingset_activation(page);	// 文件页：更新 inactive_age，供 refault 检测
+	} else if (!PageReferenced(page)) {
+		// 分支2：从未 referenced ⇒ 第一次访问，仅点亮 referenced，页仍留冷链
+		SetPageReferenced(page);
+	}
+	// 分支3（隐含）：已 Active（热页再访问）走到这里，前两个 if 都不进，
+	//   仅由上面的 else-if 逻辑保证——实际上 active,unreferenced 再访问会命中分支②置 Ref
+	if (page_is_idle(page))
+		clear_page_idle(page);			// idle page tracking：清空闲标记
+}
+EXPORT_SYMBOL(mark_page_accessed);
+```
+
+关键子函数 `activate_page`（页已在 LRU 上，通过 per-CPU `activate_page_pvecs` 批量晋升）：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/swap.c#L295
+void activate_page(struct page *page)
+{
+	page = compound_head(page);
+	if (PageLRU(page) && !PageActive(page) && !PageUnevictable(page)) {
+		struct pagevec *pvec = &get_cpu_var(activate_page_pvecs);
+		get_page(page);
+		if (!pagevec_add(pvec, page) || PageCompound(page))
+			pagevec_lru_move_fn(pvec, __activate_page, NULL);	// 批量执行 __activate_page
+		put_cpu_var(activate_page_pvecs);
+	}
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/swap.c#L263
+static void __activate_page(struct page *page, struct lruvec *lruvec, void *arg)
+{
+	if (PageLRU(page) && !PageActive(page) && !PageUnevictable(page)) {
+		int file = page_is_file_cache(page);
+		int lru  = page_lru_base_type(page);		// 得到 inactive 基础 lru 号
+
+		del_page_from_lru_list(page, lruvec, lru);	// 从 inactive_file 摘除
+		SetPageActive(page);				// 置 PG_active
+		lru += LRU_ACTIVE;				// 切到 active_file
+		add_page_to_lru_list(page, lruvec, lru);	// 挂入 active_file 头部
+		__count_vm_event(PGACTIVATE);
+		update_page_reclaim_stat(lruvec, file, 1);
+	}
+}
+```
+
+`__lru_cache_activate_page`（页尚未真正上链、仍在 per-CPU `lru_add_pvec` 暂存里，此时只需置 `PG_active`，等 drain 时自然落 active 链）：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/swap.c#L329
+static void __lru_cache_activate_page(struct page *page)
+{
+	struct pagevec *pvec = &get_cpu_var(lru_add_pvec);
+	int i;
+	// 倒序在本 CPU 的暂存 pvec 中找这个 page（乐观假设它刚被加入）
+	for (i = pagevec_count(pvec) - 1; i >= 0; i--) {
+		struct page *pagevec_page = pvec->pages[i];
+		if (pagevec_page == page) {
+			SetPageActive(page);	// 仅置标志；drain 时 __pagevec_lru_add_fn 会据此落 active
+			break;
+		}
+	}
+	put_cpu_var(lru_add_pvec);
+}
+```
+
+由此可以完整串联起状态机的实现过程，**第一次** `mark_page_accessed` 命中分支2，只置 `PG_referenced`（页留 inactive 冷链）；**第二次** 命中分支1，若页已上 LRU 则 `activate_page → __activate_page` 把它从 inactive_file 摘下、`SetPageActive` 后挂 active_file，若页还在暂存 pvec 里则 `__lru_cache_activate_page` 直接置 `PG_active` 待 drain 落热链；晋升后清 `PG_referenced`，进入 `active,unreferenced`
+
+####	问题：read 读场景是否与 FGP_ACCESSED 有关系？
+
+**结论是 buffered read 主线与 `FGP_ACCESSED` 无关**。在阅读代码时，笔者误以为前文 `pagecache_get_page` 函数中的 `if (page && (fgp_flags & FGP_ACCESSED)) mark_page_accessed(page)` 就是 read 标记访问的入口。其实不是，核对 v4.11.6 源码：
+
+1.	**read 用的是 `find_get_page`，`fgp_flags = 0`**：前文已见 `find_get_page(mapping, index)` 实为 `pagecache_get_page(mapping, offset, 0, 0)`，`fgp_flags` 为 `0`，**不含 `FGP_ACCESSED`**，所以 `pagecache_get_page` 内那条 `FGP_ACCESSED` 分支在 read 路径**根本不会走**。read 的标记访问的action完全由 `page_ok` 处那次**直接调用** `mark_page_accessed` 承担（且带 `prev_index/prev_offset` 前置检查）
+
+2.	**`FGP_ACCESSED` 到底谁在用**：它并不在 read/write 主线里被赋值，唯一的内建赋值点是 `include/linux/pagemap.h` 的 `find_or_create_page()`（`FGP_LOCK|FGP_ACCESSED|FGP_CREAT`）及转调它的 `grab_cache_page()`；此外调用方可用 `find_get_page_flags(mapping, offset, FGP_ACCESSED)` 显式传入。服务对象是查找即算一次访问的调用者（部分文件系统元数据 / buffer cache 路径），这算是内核提供的强制/便捷设置路径
+
+3.	**为什么 read 不复用它？**：`FGP_ACCESSED` 语义是每次 `get` 都 `mark` 一次，而 read 需要同一页在一次顺序读的多段拷贝里只 `mark` 一次（靠 `prev_index/prev_offset` 判定）。粒度不匹配，故 read 选择在拷贝点自行精确控制
+
+此外，`pagecache_get_page` 函数中对 `FGP_ACCESSED` 的两种处理也值得一提：命中已有页时走 `mark_page_accessed(page)`（可能晋升 active）；**新建页**时只 `__SetPageReferenced(page)`（注释 `Init accessed so avoid atomic mark_page_accessed later`，用非原子的 `__SetPageReferenced` 省一次原子操作，等价点亮 referenced 的过程）
+
+各路径与 `FGP_ACCESSED` 的关系汇总：
+
+| 路径 | 查找接口 | 带 `FGP_ACCESSED`? | 如何 mark accessed |
+| --- | --- | --- | --- |
+| buffered read（`do_generic_file_read`） | `find_get_page`（flags=0） | 否 | `page_ok` 处**直接调用**，[首次访问](https://elixir.bootlin.com/linux/v4.11.6/source/mm/filemap.c#L1891)才算） |
+| fs 元数据读（`do_read_cache_page`） | `find_get_page` | 否 | `out:` 处[**直接调用**](https://elixir.bootlin.com/linux/v4.11.6/source/mm/filemap.c#L2574) |
+| buffered write（`ext4_da_write_begin`） | `grab_cache_page_write_begin`（`FGP_LOCK\|FGP_WRITE\|FGP_CREAT`） | 否 | **完全不 mark** |
+| `find_or_create_page`/`grab_cache_page` 调用方 | 同名包装器 | **是**（唯一内建点） | 由 `pagecache_get_page` 的 `FGP_ACCESSED` 分支处理 |
 
 ####	file_accessed 的 atime 策略
 
