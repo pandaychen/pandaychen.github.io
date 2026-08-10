@@ -122,9 +122,9 @@ flowchart TD
 
 在 VFS 层拿到的是 `dentry`/`path`，eBPF 中常用三种方式还原路径：
 
--	`bpf_d_path(&file->f_path, buf, sz)`：最方便，但**仅允许在内核 allowlist 内的 hook 使用**（如 `security_*`、部分 `vfs_*`），且需 5.10+。
--	**手写 dentry 回溯**：沿 `dentry->d_name` 与 `dentry->d_parent` 向上循环拼接，配合 `bpf_probe_read_kernel_str` 读取 `d_name.name`，适用范围最广。
--	`bpf_probe_read_user_str`：在 syscall 层直接读用户态路径字符串（注意 TOCTOU）。
+-	`bpf_d_path(&file->f_path, buf, sz)`：最方便，但**仅允许在内核 allowlist 内的 hook 使用**（如 `security_*`、部分 `vfs_*`），且需 5.10+
+-	**手写 dentry 回溯**：沿 `dentry->d_name` 与 `dentry->d_parent` 向上循环拼接，配合 `bpf_probe_read_kernel_str` 读取 `d_name.name`，适用范围最广
+-	`bpf_probe_read_user_str`：在 syscall 层直接读用户态路径字符串（注意 TOCTOU）
 
 ```c
 // 手写回溯（示意）：从 dentry 逐级向上取 d_name，拼出路径
@@ -138,6 +138,72 @@ for (int i = 0; i < MAX_DEPTH; i++) {
     dentry = parent;
 }
 ```
+
+###	核心 hook 参数约定：如何区分父目录与子节点？
+
+大量命名空间类 VFS 函数（`vfs_create`/`vfs_unlink`/`vfs_mkdir`/`vfs_rmdir`/`vfs_rename`/`vfs_mknod` 等）都采用固定搭配 `(struct inode *dir, struct dentry *dentry)`。一个较常见的困惑就是：**哪个参数是「父目录」，哪个是「被操作的子节点」**。而判据其实很简单，**类型即角色**：
+
+-	`struct inode *dir`：**父目录的 inode**，表示操作发生在哪个目录下。它是 inode 类型，本身**不携带名字**信息（inode 结构没有名字，名字在 dentry 结构中定义）
+-	`struct dentry *dentry`：**被操作的子节点（目标）的目录项**。它携带叶子名 `d_name`，并通过 `d_parent` 指回父目录 dentry
+
+也就是说：参数里凡是 `struct inode *`（通常命名 `dir`/`old_dir`/`new_dir`）一律是**父目录**；凡是 `struct dentry *`（`dentry`/`old_dentry`/`new_dentry`）一律是**要创建/删除/改名的子项**
+
+它们之间存在可用于 eBPF 中**交叉校验**的固定关系：
+
+```c
+dentry->d_parent            // 父目录的 dentry
+dentry->d_parent->d_inode   // 恒等于入参 dir（同一个父目录 inode）
+dentry->d_name              // 子节点名（叶子组件）
+dentry->d_inode             // 子节点自身 inode：
+                            //   创建前为 NULL（负 dentry, negative dentry）
+                            //   unlink/rmdir/rename 等目标已存在时非 NULL
+```
+
+关于**负目录项（negative dentry）**：`create`/`mkdir`/`mknod`/`symlink` 场景下传入的 `dentry` 是**负 dentry（`d_inode == NULL`）**，因为此时对象尚未创建。此时子节点只有名字（`d_name`）可用，**inode 号需要等创建完成后**（用 `kretprobe`/`fexit`，或改挂 `security_inode_*` 之后再在返回点补齐）才能拿到；而 `unlink`/`rmdir`/`rename` 的目标已存在，`dentry->d_inode` 直接有效
+
+这里以 `vfs_unlink` 为例（6.x 带 idmap，`dir`=arg1、`dentry`=arg2）提取并交叉校验：
+
+```c
+SEC("kprobe/vfs_unlink")                    // 6.x：(idmap, dir, dentry, ...)
+int BPF_KPROBE(kp_vfs_unlink, struct mnt_idmap *idmap,
+               struct inode *dir, struct dentry *dentry)
+{
+    u64 parent_ino = BPF_CORE_READ(dir, i_ino);            // 父目录 inode 号
+    struct qstr dn = BPF_CORE_READ(dentry, d_name);        // 子节点叶子名
+    char name[64];
+    bpf_probe_read_kernel_str(name, sizeof(name), dn.name);
+    u64 child_ino = BPF_CORE_READ(dentry, d_inode, i_ino); // 子节点 inode（unlink 时有效）
+
+    // 交叉校验：dentry 的父目录 inode 应等于入参 dir
+    struct inode *pino = BPF_CORE_READ(dentry, d_parent, d_inode);
+    if (pino != dir) { /* 极少见：并发 rename 导致关系已变，谨慎采信 */ }
+    return 0;
+}
+```
+
+**两个易错点**（务必注意）：
+
+1.	`vfs_link(old_dentry, [idmap,] dir, new_dentry, ...)` 里三个路径类参数含义各不相同：
+	-	`old_dentry`：**已存在的源文件**目录项，它的父目录**不是** `dir`
+	-	`dir`：**新硬链接所在的父目录 inode**
+	-	`new_dentry`：新硬链接的子节点（是 `dir` 的孩子，创建前为负 dentry）
+	即`=dir` 的孩子是 `new_dentry` 而非 `old_dentry`，不能想当然地用 `d_parent == dir` 去套 `old_dentry`
+2.	`vfs_rename` 有**两组** `(dir, dentry)`：`(old_dir, old_dentry)` 为源，`(new_dir, new_dentry)` 为目的；跨目录移动时 `old_dir != new_dir`
+
+各核心函数中父目录 / 子节点对应关系汇总：
+
+| 函数 | 父目录（`struct inode *`） | 子节点/目标（`struct dentry *`） | 备注 |
+| --- | --- | --- | --- |
+| `vfs_create` | `dir` | `dentry`（负 dentry） | `want_excl` 对应 `O_EXCL` |
+| `vfs_mkdir` | `dir` | `dentry`（负 dentry） | 目录 |
+| `vfs_mknod` | `dir` | `dentry`（负 dentry） | `dev` 为设备号 |
+| `vfs_symlink` | `dir` | `dentry`（负 dentry） | `oldname` 是链接目标串 |
+| `vfs_unlink` | `dir` | `dentry`（`d_inode` 有效） | 目标已存在 |
+| `vfs_rmdir` | `dir` | `dentry`（`d_inode` 有效） | 目标已存在 |
+| `vfs_link` | `dir`（新链接父目录） | `new_dentry`（负 dentry） | `old_dentry` 是已存在源，父目录非 `dir` |
+| `vfs_rename` | `old_dir` / `new_dir` | `old_dentry` / `new_dentry` | 两组，跨目录时两者不同 |
+
+> 小结：**`inode *dir` = 父目录、`dentry` = 子节点/目标**；需要父目录 inode 号读 `dir->i_ino`，需要子节点名读 `dentry->d_name`，需要子节点 inode 读 `dentry->d_inode`（负 dentry 场景要放到返回点取）。下文各节的参数说明表在此基础上逐个标注
 
 ##	0x02	文件打开 `open`
 
@@ -181,6 +247,18 @@ static int do_dentry_open(struct file *f, struct inode *inode,
 }
 ```
 
+###	核心 hook 参数说明
+
+open 路径的目标文件在进入 hook 时**已解析完成**，因此没有独立的 `dir` 参数，父目录需要从目标 dentry 的 `d_parent` 得到：
+
+| hook 函数 | 参数 | 类型 | 含义 / 父目录 vs 子节点 |
+| --- | --- | --- | --- |
+| `security_file_open` | `f` | `struct file *` | 被打开的**目标文件**对象；子节点 dentry = `f->f_path.dentry`，父目录 = `f->f_path.dentry->d_parent`，目标 inode = `f->f_inode` |
+| `do_filp_open`（返回值） | `ret` | `struct file *` | 返回已打开的 `file`（`kretprobe`/`fexit` 取），失败为 `ERR_PTR` |
+| `do_dentry_open` | `f` / `inode` | `struct file *` / `struct inode *` | `f` 目标文件；`inode` 即**目标文件 inode**（非父目录）；`open` 为具体文件系统 `.open` 回调 |
+
+可提取字段为`f->f_flags`（`O_*` 打开标志）、`f->f_path`（`bpf_d_path` 取完整路径）、`f->f_inode->i_ino`、`BPF_CORE_READ(f, f_path.dentry, d_parent, d_inode, i_ino)`（父目录 inode 号）
+
 ###	版本差异（v5.4 vs v6.6）
 
 -	v5.4：`do_sys_open()` 直接构造 `open_flags` 后调 `do_filp_open()`（无 `openat2`）。
@@ -195,7 +273,11 @@ static int do_dentry_open(struct file *f, struct inode *inode,
 
 ##	0x03	文件创建 `create`/`mknod`
 
-todo
+PS：现在Linux系统编程中，`creat` 在功能上已经被 `open` 完全替代。在底层，`creat` 实际上只是 `open` 的一个语法糖。调用 `creat(pathname, mode)` 完全等价于：
+
+```c
+open(pathname, O_CREAT | O_WRONLY | O_TRUNC, mode);
+```
 
 ###	对应系统调用及参数
 
@@ -234,6 +316,18 @@ int vfs_create(struct mnt_idmap *idmap, struct inode *dir,
 	...
 }
 ```
+
+###	核心 hook 参数说明
+
+| 参数 | 类型 | 含义 / 父目录 vs 子节点 |
+| --- | --- | --- |
+| `idmap`（仅 6.x） | `struct mnt_idmap *` | 挂载点 idmapping，用于 uid/gid 映射；kprobe 中占 arg0 |
+| `dir` | `struct inode *` | **父目录 inode**（在哪个目录下创建）；父目录 inode 号 = `dir->i_ino` |
+| `dentry` | `struct dentry *` | **待创建的子节点**（负 dentry，`d_inode == NULL`）；子节点名 = `dentry->d_name`，inode 号需在返回点（`kretprobe`/`fexit`）读 `dentry->d_inode->i_ino` |
+| `mode` | `umode_t` | 文件类型与权限位（`S_IFREG` 等 + rwx） |
+| `want_excl` | `bool` | 是否 `O_EXCL`（已存在则失败） |
+
+`security_inode_create(dir, dentry, mode)` 两版参数一致（无 `idmap`），`dir`/`dentry` 含义同上。`vfs_mknod` 多一个 `dev_t dev`（设备号）
 
 ###	版本差异
 
@@ -281,6 +375,17 @@ int vfs_unlink(struct mnt_idmap *idmap, struct inode *dir,
 	       struct dentry *dentry, struct inode **delegated_inode)
 { ... error = security_inode_unlink(dir, dentry); ... }
 ```
+
+###	核心 hook 参数说明
+
+| 参数 | 类型 | 含义 / 父目录 vs 子节点 |
+| --- | --- | --- |
+| `idmap`（仅 6.x） | `struct mnt_idmap *` | idmapping；6.x 中占 arg0，导致 `dir`/`dentry` 从 arg0/arg1 后移到 arg1/arg2 |
+| `dir` | `struct inode *` | **父目录 inode**（从哪个目录删）；`dir->i_ino` |
+| `dentry` | `struct dentry *` | **被删的子节点**（目标已存在，`d_inode` 有效）；名 = `dentry->d_name`，目标 inode = `dentry->d_inode`，删除前链接数 = `dentry->d_inode->i_nlink` |
+| `delegated_inode` | `struct inode **` | NFS 委托回收用，审计一般忽略 |
+
+`security_inode_unlink(dir, dentry)` 两版一致；判定“真正删除文件”可看 `i_nlink == 1`（删除后归零）
 
 ###	版本差异
 
@@ -339,6 +444,21 @@ int vfs_rename(struct renamedata *rd)
 }
 ```
 
+###	核心 hook 参数说明
+
+rename 有**两组** `(dir, dentry)`，分别描述源与目的；跨目录移动时 `old_dir != new_dir`：
+
+| 参数 | 类型 | 含义 / 父目录 vs 子节点 |
+| --- | --- | --- |
+| `old_dir` | `struct inode *` | **源父目录 inode** |
+| `old_dentry` | `struct dentry *` | **源子节点**（已存在，`d_inode` 有效）；原名 = `old_dentry->d_name` |
+| `new_dir` | `struct inode *` | **目的父目录 inode** |
+| `new_dentry` | `struct dentry *` | **目的子节点**（若 `RENAME_NOREPLACE` 则为负 dentry；否则 `d_inode` 为被覆盖目标）；新名 = `new_dentry->d_name` |
+| `flags` | `unsigned int` | `RENAME_NOREPLACE` / `RENAME_EXCHANGE` / `RENAME_WHITEOUT` |
+
+- 5.4 上述为 6 个独立参数；6.6 收敛进 `struct renamedata *rd`，需 `BPF_CORE_READ(rd, old_dir)` / `rd->old_dentry` 等按结构体成员取
+- `security_inode_rename(old_dir, old_dentry, new_dir, new_dentry, flags)` 两版一致，**建议直接挂它**避免 `renamedata` 差异
+
 ###	版本差异
 
 -	**这是跨版本差异最大的函数**：5.4 是 6 个独立参数；5.12+/6.6 收敛为单个 `struct renamedata *`。eBPF 中 6.x 需先读 `renamedata` 指针，再按结构体偏移取 `old_dentry`/`new_dentry`。
@@ -377,6 +497,17 @@ int vfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 int vfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 	      struct dentry *dentry, umode_t mode) { ... }
 ```
+
+###	核心 hook 参数说明
+
+| 参数 | 类型 | 含义 / 父目录 vs 子节点 |
+| --- | --- | --- |
+| `idmap`（仅 6.x） | `struct mnt_idmap *` | idmapping，占 arg0 |
+| `dir` | `struct inode *` | **父目录 inode**（在哪个目录下建/删子目录）；`dir->i_ino` |
+| `dentry` | `struct dentry *` | **子目录节点**：`vfs_mkdir` 时为负 dentry；`vfs_rmdir` 时目标已存在（`d_inode` 有效）；名 = `dentry->d_name` |
+| `mode`（仅 mkdir） | `umode_t` | 目录权限位（受 umask 影响） |
+
+`security_inode_mkdir(dir, dentry, mode)` / `security_inode_rmdir(dir, dentry)` 两版一致
 
 ###	版本差异
 
@@ -426,6 +557,29 @@ int vfs_symlink(struct inode *dir, struct dentry *dentry, const char *oldname)
 int vfs_symlink(struct mnt_idmap *idmap, struct inode *dir,
 		struct dentry *dentry, const char *oldname) { ... }
 ```
+
+###	核心 hook 参数说明
+
+`vfs_link`（硬链接）——**注意 `old_dentry` 不是 `dir` 的孩子**：
+
+| 参数 | 类型 | 含义 / 父目录 vs 子节点 |
+| --- | --- | --- |
+| `old_dentry` | `struct dentry *` | **已存在的源文件**目录项（被指向的原文件），其父目录**不是** `dir`；源 inode = `old_dentry->d_inode` |
+| `idmap`（仅 6.x） | `struct mnt_idmap *` | idmapping；**插在 `old_dentry` 之后**（非首参） |
+| `dir` | `struct inode *` | **新硬链接所在的父目录 inode** |
+| `new_dentry` | `struct dentry *` | **新硬链接子节点**（`dir` 的孩子，负 dentry）；链接名 = `new_dentry->d_name` |
+| `delegated_inode` | `struct inode **` | NFS 委托，审计可忽略 |
+
+`vfs_symlink`（软链接）：
+
+| 参数 | 类型 | 含义 / 父目录 vs 子节点 |
+| --- | --- | --- |
+| `idmap`（仅 6.x） | `struct mnt_idmap *` | idmapping，占 arg0 |
+| `dir` | `struct inode *` | **父目录 inode**（软链接建在哪个目录下） |
+| `dentry` | `struct dentry *` | **软链接子节点**（负 dentry）；链接名 = `dentry->d_name` |
+| `oldname` | `const char *` | 链接指向的目标**字符串**（可指向不存在的路径，用 `bpf_probe_read_kernel_str` 读） |
+
+`security_inode_link(old_dentry, dir, new_dentry)` / `security_inode_symlink(dir, dentry, oldname)` 两版一致
 
 ###	版本差异
 
@@ -514,6 +668,19 @@ int notify_change(struct mnt_idmap *idmap, struct dentry *dentry,
 		  struct iattr *attr, struct inode **delegated_inode) { ... }
 ```
 
+###	核心 hook 参数说明
+
+属性变更类 hook **只作用在目标本身，没有 `dir` 父目录参数**（目标由 `dentry`/`path` 直接给出，父目录如需可从 `dentry->d_parent` 得到）：
+
+| 参数 | 类型 | 含义 / 父目录 vs 子节点 |
+| --- | --- | --- |
+| `idmap`（仅 6.x） | `struct mnt_idmap *` | idmapping，占 arg0 |
+| `dentry` | `struct dentry *` | **被修改属性的目标节点**（子节点本身）；目标 inode = `dentry->d_inode`，父目录 = `dentry->d_parent->d_inode` |
+| `attr` | `struct iattr *` | **变更集**：`attr->ia_valid` 位掩码指明改了哪些字段，再取对应值 |
+| `delegated_inode` | `struct inode **` | NFS 委托，可忽略 |
+
+`struct iattr` 关键字段（据 `ia_valid` 判断）：`ATTR_MODE`→`ia_mode`（chmod）、`ATTR_UID`→`ia_uid`、`ATTR_GID`→`ia_gid`（chown）、`ATTR_SIZE`→`ia_size`（truncate）、`ATTR_MTIME`/`ATTR_ATIME`（utimes）。`security_inode_setattr` 6.x 也带 `idmap`，其后 `(dentry, attr)` 同上
+
 ###	版本差异
 
 -	`notify_change` 及 `i_op->setattr` 回调在 6.x 首参新增 `mnt_idmap`。
@@ -559,6 +726,20 @@ int vfs_setxattr(struct mnt_idmap *idmap, struct dentry *dentry,
 	...
 }
 ```
+
+###	核心 hook 参数说明
+
+同属性类，**目标由 `dentry` 直接给出，无 `dir` 父目录参数**：
+
+| 参数 | 类型 | 含义 / 父目录 vs 子节点 |
+| --- | --- | --- |
+| `idmap`（仅 6.x） | `struct mnt_idmap *` | idmapping，占 arg0 |
+| `dentry` | `struct dentry *` | **被设置扩展属性的目标节点**；目标 inode = `dentry->d_inode` |
+| `name` | `const char *` | 属性名（`user.*`/`security.*`/`trusted.*`/`system.*`，用 `bpf_probe_read_kernel_str` 读） |
+| `value` / `size` | `const void *` / `size_t` | 属性值缓冲与长度 |
+| `flags` | `int` | `XATTR_CREATE`（不存在才建）/ `XATTR_REPLACE`（存在才改） |
+
+`vfs_removexattr(idmap, dentry, name)` 少了 `value/size/flags`；审计重点关注 `security.capability`、`security.selinux` 等敏感属性名
 
 ###	版本差异
 
