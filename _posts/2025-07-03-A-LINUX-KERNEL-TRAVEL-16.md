@@ -929,9 +929,9 @@ size_t copy_from_iter(void *addr, size_t bytes, struct iov_iter *i)
 ```mermaid
 flowchart TB
     START["iterate_and_advance(i, n, v, I, B, K)"] --> CAP["n = min(n, i->count)"]
-    CAP --> CHECK{{"i->count > 0 ?"}}
+    CAP --> CHECK{"i.count 大于 0?"}
     CHECK -->|No| DONE["结束"]
-    CHECK -->|Yes| TYPE{{"检查 i->type"}}
+    CHECK -->|Yes| TYPE{"检查 i.type"}
     TYPE -->|ITER_BVEC| BVEC["iterate_bvec(B回调)<br/>遍历bio_vec数组"]
     TYPE -->|ITER_KVEC| KVEC["iterate_kvec(K回调)<br/>遍历kvec数组"]
     TYPE -->|default/IOVEC| IOVEC["iterate_iovec(I回调)<br/>遍历iovec数组"]
@@ -1207,11 +1207,11 @@ flowchart TB
     RECVMSG --> PROTO["sock->ops->recvmsg()<br/>= inet_recvmsg()"]
     PROTO --> TCP["tcp_recvmsg(sk, msg, len, flags)"]
 
-    TCP --> CHECK{{"sk_receive_queue<br/>有数据?"}}
+    TCP --> CHECK{"sk_receive_queue<br/>有数据?"}
     CHECK -->|Yes| COPYOUT["skb_copy_datagram_msg<br/>将sk_buff数据拷贝到msg->msg_iter"]
     CHECK -->|No| WAIT["sk_wait_data(sk, &timeo)<br/>将当前进程加入sk->sk_wq等待队列<br/>调用schedule_timeout让出CPU"]
 
-    WAIT --> WAKEUP["数据到达：<br/>软中断→协议栈→tcp_v4_rcv<br/>→tcp_data_ready<br/>→sk->sk_data_ready(sk)<br/>→sock_def_readable<br/>→wake_up_interruptible(sk->sk_wq)"]
+    WAIT --> WAKEUP["数据到达：<br/>软中断 → 协议栈 → tcp_v4_rcv<br/>→ tcp_data_ready<br/>→ sk->sk_data_ready(sk)<br/>→ sock_def_readable<br/>→ wake_up_interruptible(sk->sk_wq)"]
     WAKEUP --> CHECK
 
     COPYOUT --> RETURN["返回已拷贝字节数"]
