@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:  Linux 内核之旅（二十六）：TCP 发送路径 && 内核源码分析
+title:  Linux 内核之旅（二十六）：TCP 发送路径上的内核实现
 subtitle:   拥塞控制、滑动窗口、ACK 处理与 skb 生命周期
 date:       2026-04-11
 author:     pandaychen
@@ -20,8 +20,10 @@ tags:
 2.  `tcp_sendmsg` → `tcp_write_xmit` → `tcp_transmit_skb` 发送链路的字段级分析
 3.  拥塞控制在发送时的门控作用（哪些字段影响发送决策）
 4.  `tcp_ack` 收到 ACK 时的完整处理：窗口更新、skb 释放、拥塞窗口调整
-5.  滑动窗口在发送侧和接收侧的判断逻辑与更新机制（`tcp_ack`与滑动窗口的应用的双端视角）
-6.  TCP 内存管理与背压（TSQ）机制
+5.  滑动窗口在发送侧和接收侧的判断逻辑与更新机制
+6.  ACK 与滑动窗口的综合分析：`tcp_ack` 的双端调用视角、ACK 驱动 `tcp_write_xmit` 的完整链路、纯 ACK 与带数据 ACK 的场景对比、Delayed ACK 完整机制
+7.  滑动窗口变量的主动 / 被动修改分类总结
+8.  Nagle 算法与发送时机、TCP 内存管理与背压（TSQ）机制
 
 ##  0x01    TCP 发送路径全景图
 
@@ -1537,11 +1539,601 @@ new_measure:
 }
 ```
 
-##  0x0 ack包与滑动窗口的总结
+##  0x0A    ACK 与滑动窗口综合分析
 
-TODO
+前面章节分别从 `tcp_ack` 内部处理逻辑和滑动窗口字段两个角度进行了分析。本节从更高的维度，综合梳理 ACK 在 TCP 发送/接收双端的角色、ACK 如何驱动发送行为、以及 Delayed ACK 的完整机制
 
-##  0x0A    Nagle 算法与发送时机
+####    tcp_ack 的调用本质：发送方还是接收方？
+
+`tcp_ack` 函数[定义](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L3538)在 `net/ipv4/tcp_input.c`，从代码位置就能看出，它是**接收路径**的一部分。但理解 `tcp_ack` 的关键在于TCP 是全双工协议，**每一端同时扮演发送方和接收方两个角色**
+
+当主机 A 向主机 B 发送数据时：
+- A 是数据**发送方**，调用 `tcp_sendmsg` → `tcp_write_xmit` → `tcp_transmit_skb` 发出数据
+- B 收到数据后回复 ACK（可能是纯 ACK包，也可能捎带在数据包中）
+- A 收到这个 ACK 包，进入**接收路径** `tcp_v4_rcv` → `tcp_v4_do_rcv` → `tcp_rcv_established`
+- 在 `tcp_rcv_established` 中调用 `tcp_ack` 处理 ACK 字段
+
+所以，**"发送方调用 tcp_ack"这句话的准确含义是：数据发送方在自己的接收路径中，处理对端返回的 ACK 确认**。`tcp_ack` 始终在接收路径中被调用，但它服务于发送方的窗口推进和拥塞控制
+
+```
+主机A（数据发送方）                     主机B（数据接收方）
+┌─────────────────┐                   ┌─────────────────┐
+│  tcp_sendmsg    │ ──── DATA ────→   │                 │
+│  tcp_write_xmit │                   │  tcp_rcv_established
+│  tcp_transmit_skb                   │  tcp_data_queue  │
+│                 │                   │  tcp_ack_snd_check
+│                 │ ←──── ACK ─────   │  (决定发ACK)     │
+│  tcp_rcv_established                │                 │
+│  tcp_ack ←─┐    │                   │                 │
+│  (处理ACK) │    │                   │                 │
+│  发送窗口推进│    │                   │                 │
+│  释放skb    │   │                   │                 │
+│  更新cwnd   │   │                   │                 │
+│  tcp_data_snd_check                │                 │
+│  → 可能触发更多发送                   │                 │
+└─────────────────┘                   └─────────────────┘
+```
+
+####    发送端涉及 tcp_ack 的场景与后续动作
+
+以数据发送方为视角，收到对端 ACK 后进入 [`tcp_rcv_established`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L5351)，`tcp_ack` 在三条路径上被调用：
+
+**场景一：快速路径 - 纯 ACK（对端只回复确认，不携带数据）**
+
+这是单向传输（如文件下载）中最常见的场景。对端收到数据后回复纯 ACK：
+
+```cpp
+// net/ipv4/tcp_input.c - tcp_rcv_established 快速路径
+// 条件：tcp_header_len == len（包长等于TCP头长，即无数据负载）
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L5413
+......
+if (tcp_header_len == len) {
+    // 纯ACK，无数据
+    tcp_ack(sk, skb, 0);           // 处理ACK
+    __kfree_skb(skb);              // 释放收到的skb
+    tcp_data_snd_check(sk);        // 检查是否有数据可以发送
+    return;
+}
+......
+```
+
+后续动作链如下，`tcp_ack` 内部推进 `snd_una`、释放已确认 skb、更新拥塞窗口。返回后 `tcp_data_snd_check` 检查发送队列是否有待发数据，若有则触发 `tcp_write_xmit`
+
+**场景二：快速路径 - 数据 + ACK（对端回复数据的同时捎带确认）**
+
+全双工通信（如 SSH 交互）中常见，对端的数据包中 ACK 字段确认了己方之前发送的数据，通常是PSH+ACK报文
+
+```cpp
+// net/ipv4/tcp_input.c - tcp_rcv_established 快速路径（有数据）
+tcp_event_data_recv(sk, skb);      // 标记ACK调度，调整ATO
+
+if (TCP_SKB_CB(skb)->ack_seq != tp->snd_una) {
+    // ACK字段确认了新数据
+    tcp_ack(sk, skb, FLAG_DATA);   // FLAG_DATA 表示此包携带数据
+    tcp_data_snd_check(sk);        // 检查是否可以发送更多数据
+    if (!inet_csk_ack_scheduled(sk))
+        goto no_ack;
+}
+
+__tcp_ack_snd_check(sk, 0);       // 决定是否需要回复ACK给对端
+```
+
+后续动作链，与场景一相同的 `tcp_ack` 内部处理 + `tcp_data_snd_check`。额外的 `__tcp_ack_snd_check` 是因为收到了对端数据，需要决定是立即回复 ACK 还是延迟（Delayed ACK）
+
+**场景三：慢速路径（乱序包、SACK、窗口更新等复杂情况）**
+
+```cpp
+// net/ipv4/tcp_input.c - tcp_rcv_established 慢速路径
+slow_path:
+    // ... 校验、validate_incoming ...
+step5:
+    if (tcp_ack(sk, skb, FLAG_SLOWPATH | FLAG_UPDATE_TS_RECENT) < 0)
+        goto discard;
+
+    tcp_urg(sk, skb, th);
+    tcp_data_queue(sk, skb);       // 数据入队（含乱序处理）
+    tcp_data_snd_check(sk);        // 检查是否可以发送更多数据
+    tcp_ack_snd_check(sk);         // 决定是否回复ACK
+    return;
+```
+
+慢速路径传入 `FLAG_SLOWPATH`，`tcp_ack` 内部会执行更完整的处理（SACK 标记、dupACK 检测、`tcp_fastretrans_alert` 等），这也是`tcp_ack`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L3538)看上去实现非常复杂的原因
+
+上述**三个场景的共同点是`tcp_ack` 返回后都会调用 `tcp_data_snd_check`**，这是 ACK 驱动发送（数据）的入口
+
+####    接收端涉及 tcp_ack 的场景
+
+站在数据接收方的视角，收到的数据包中同样携带 ACK 字段（确认己方之前发送的数据，如果有的话）。代码路径与上面完全相同，即`tcp_rcv_established` 并不区分"我是发送方还是接收方"，它只处理收到的 TCP 报文中的各个字段
+
+接收端的核心关注点不同：
+- **`tcp_ack` 部分**：如果接收端之前也发送过数据（全双工），则 `tcp_ack` 推进其发送窗口。如果接收端是纯接收方（如下载场景的客户端），`tcp_ack` 不会有实质操作（因为 `snd_una` 没有需要推进的数据）
+- **`tcp_data_queue` 部分**：这是接收端的核心逻辑，将数据放入接收队列，更新 `rcv_nxt`
+- **`tcp_ack_snd_check` 部分**：决定是否需要回复 ACK（立即发送还是 Delayed ACK），这是接收端最重要的反馈行为
+
+####    tcp_ack 如何影响下一次发送行为
+
+对于发送方而言，收到对端 ACK 后 `tcp_ack` 的处理直接影响后续发送能力。以下流程图展示 ACK 到达后的完整影响链：
+
+```mermaid
+flowchart TD
+    ACK["对端ACK到达<br/>tcp_rcv_established"] --> TA["tcp_ack(sk, skb, flag)"]
+
+    TA --> MW["tcp_may_update_window<br/>snd_wnd = nwin（对端通告窗口）"]
+    TA --> SU["snd_una = ack<br/>发送窗口左边界推进"]
+    TA --> CL["tcp_clean_rtx_queue<br/>释放已确认skb<br/>packets_out减少"]
+    TA --> CA["tcp_cong_avoid<br/>snd_cwnd增大（慢启动/拥塞避免）"]
+    TA --> CS["tcp_check_space<br/>sk_wmem_queued减少可能唤醒阻塞进程"]
+
+    SU --> EW["有效发送窗口增大<br/>min(cwnd*mss, snd_wnd) - (snd_nxt-snd_una)"]
+    MW --> EW
+    CA --> EW
+    CL --> EW
+
+    TA -.->|"返回"| DSC["tcp_data_snd_check(sk)"]
+    DSC --> PPF["tcp_push_pending_frames(sk)"]
+    PPF --> SH{"tcp_send_head(sk)<br/>发送队列有待发数据?"}
+    SH -->|"有"| TWX["__tcp_push_pending_frames<br/>→ tcp_write_xmit"]
+    SH -->|"无"| DONE["无需发送"]
+    TWX --> GATE["tcp_write_xmit 三重门控"]
+    GATE --> CWT["tcp_cwnd_test: snd_cwnd够?"]
+    GATE --> SWT["tcp_snd_wnd_test: snd_wnd够?"]
+    GATE --> NT["tcp_nagle_test: Nagle允许?"]
+    CWT --> SEND["tcp_transmit_skb 发送"]
+    SWT --> SEND
+    NT --> SEND
+```
+
+具体的字段级影响：
+
+**1. 左边界推进（`snd_una`）**
+
+`tcp_ack` 收到有效 ACK 后，将 `snd_una` 推进到 ACK 确认号。这直接减少了"已发送未确认"的数据量（`snd_nxt - snd_una`），等价于释放了发送窗口空间：
+
+```text
+发送前:  snd_una=1000  snd_nxt=5000  已发送未确认=4000字节
+收到ACK=3000后: snd_una=3000  snd_nxt=5000  已发送未确认=2000字节
+→ 释放了2000字节的发送窗口空间
+```
+
+**2. 右边界可能扩展（`snd_wnd` + `snd_cwnd`）**
+
+有效发送窗口的计算：`effective_window = min(snd_cwnd * mss, snd_wnd) - (snd_nxt - snd_una)`
+
+ACK 可能同时带来窗口通告值的更新（`tcp_may_update_window` → `snd_wnd`），以及拥塞窗口的增大（`tcp_cong_avoid` → `snd_cwnd`）。这两者共同决定了右边界
+
+**3. 发送缓冲区释放**
+
+`tcp_clean_rtx_queue` 释放已确认 skb → `sk_wmem_queued` 减少 → 如果之前 `tcp_sendmsg` 因缓冲区满而阻塞（在 `sk_stream_wait_memory` 中睡眠），此时可以被唤醒继续写入新数据
+
+####    tcp_ack 与滑动窗口的关系
+
+**`tcp_ack` 是否是控制滑动窗口移动的最根本因素？**
+
+答案是 **`tcp_ack` 是驱动发送窗口左边界移动的唯一因素，同时也是右边界两个输入来源（`snd_wnd` 和 `snd_cwnd`）的更新触发点**
+
+发送窗口的三个边界由以下因素控制：
+
+| 边界 | 对应字段 | 更新方式 | 是否由 tcp_ack 触发 |
+|------|----------|----------|---------------------|
+| 左边界 | `snd_una` | ACK 确认号推进 | 是，`tcp_ack` 是唯一触发点 |
+| 右边界（流控） | `snd_wnd` | 对端通告窗口 | 是，`tcp_may_update_window` 在 `tcp_ack` 中调用 |
+| 右边界（拥塞） | `snd_cwnd` | 本端拥塞算法计算 | 是，`tcp_cong_avoid` 在 `tcp_ack` 处理有效新 ACK 后调用 |
+| 可发送位置 | `snd_nxt` | 本端发送新数据 | 否，由 `tcp_event_new_data_sent` 在发送时推进 |
+
+```text
+    左边界                可发送位置              右边界
+     │                      │                      │
+     ▼                      ▼                      ▼
+─────┃━━━━━━━━━━━━━━━━━━━━━━┃──────────────────────┃──────────→
+   snd_una              snd_nxt     snd_una + min(cwnd*mss, snd_wnd)
+     │                                             │
+     │←── tcp_ack 驱动推进                          │
+                                  tcp_ack 驱动更新 ──→│
+                                  (snd_wnd + snd_cwnd)
+```
+
+除 `tcp_ack` 外，还有少数场景也会影响窗口：
+- **丢包检测**：`tcp_enter_loss` / `tcp_enter_recovery` 会大幅减小 `snd_cwnd`（但这些函数也是在 `tcp_ack` → `tcp_fastretrans_alert` 的调用链中触发的）
+- **RTO 超时**：`tcp_retransmit_timer` 会将 `snd_cwnd` 重置为 `1`，但这不在 `tcp_ack` 路径中
+- **零窗口探测**：`tcp_probe_timer` 发送探测包，但窗口本身仍然由 `tcp_ack` 收到回复后更新
+
+因此，**在正常数据传输过程中，`tcp_ack` 确实是控制滑动窗口移动的最根本因素**
+
+####    tcp_ack 如何驱动 tcp_write_xmit
+
+`tcp_ack` 本身并不直接调用 `tcp_write_xmit`。驱动发送的完整链路是 `tcp_ack` 返回后由 `tcp_rcv_established` 调用 `tcp_data_snd_check`：
+
+```cpp
+// net/ipv4/tcp_input.c
+static inline void tcp_data_snd_check(struct sock *sk)
+{
+    tcp_push_pending_frames(sk);
+    tcp_check_space(sk);
+}
+```
+
+`tcp_push_pending_frames` [定义](https://elixir.bootlin.com/linux/v4.11.6/source/include/net/tcp.h#L1652)：
+
+```cpp
+// include/net/tcp.h
+static inline void tcp_push_pending_frames(struct sock *sk)
+{
+    if (tcp_send_head(sk)) {
+        struct tcp_sock *tp = tcp_sk(sk);
+        __tcp_push_pending_frames(sk, tcp_current_mss(sk), tp->nonagle);
+    }
+}
+```
+
+只要 `tcp_send_head(sk)` 不为 NULL（即 `sk_write_queue` 中有尚未发送的 skb），就调用 `__tcp_push_pending_frames`：
+
+```cpp
+// net/ipv4/tcp_output.c
+void __tcp_push_pending_frames(struct sock *sk, unsigned int cur_mss,
+                   int nonagle)
+{
+    if (unlikely(sk->sk_state == TCP_CLOSE))
+        return;
+
+    if (tcp_write_xmit(sk, cur_mss, nonagle, 0,
+               sk_gfp_mask(sk, GFP_ATOMIC)))
+        tcp_check_probe_timer(sk);
+}
+```
+
+最终调用 `tcp_write_xmit` 进入发送决策核心（三重门控：拥塞窗口、发送窗口、Nagle 算法）
+
+完整的 ACK 驱动发送调用链：
+
+```
+tcp_rcv_established 收到ACK
+  │
+  ├─→ tcp_ack(sk, skb, flag)
+  │     ├─→ snd_una 推进
+  │     ├─→ tcp_clean_rtx_queue → 释放skb, packets_out减少
+  │     ├─→ tcp_cong_avoid → snd_cwnd增大
+  │     ├─→ tcp_may_update_window → snd_wnd更新
+  │     └─→ tcp_check_space → 可能唤醒阻塞进程
+  │
+  └─→ tcp_data_snd_check(sk)                      ← tcp_ack返回后
+        ├─→ tcp_push_pending_frames(sk)
+        │     └─→ if (tcp_send_head(sk))           ← 队列中有待发数据?
+        │           └─→ __tcp_push_pending_frames
+        │                 └─→ tcp_write_xmit       ← 进入发送决策
+        │                       ├─→ tcp_cwnd_test   (snd_cwnd够?)
+        │                       ├─→ tcp_snd_wnd_test (snd_wnd够?)
+        │                       ├─→ tcp_nagle_test   (Nagle允许?)
+        │                       └─→ tcp_transmit_skb (构造并发送)
+        └─→ tcp_check_space(sk)
+```
+
+`tcp_ack` 内部放宽了三重门控的约束（`snd_cwnd` 增大、`snd_wnd` 更新、`packets_out` 减少），然后 `tcp_data_snd_check` 触发 `tcp_write_xmit` 重新评估门控条件，将之前因窗口/拥塞限制而未发送的数据发出去
+
+####    纯 ACK 与带数据 ACK 的对比
+
+**纯 ACK（只有 ACK 标志，不携带数据负载）并不少见**，在很多场景中甚至是主要的 ACK 形式
+
+| 场景 | 纯 ACK | 带数据 ACK | 说明 |
+|------|--------|-----------|------|
+| 单向下载（HTTP GET 响应） | 非常常见 | 极少 | 客户端只接收数据，回复纯 ACK |
+| 单向上传（HTTP POST 请求体） | 极少 | 极少 | 服务端纯 ACK 确认客户端数据 |
+| 全双工交互（SSH 终端） | 较少 | 常见 | 数据包自然捎带 ACK（piggybacking） |
+| TCP 三次握手第三步 | 是（纯 ACK） | 可能（TFO） | 客户端发送最后的 ACK |
+| Delayed ACK 超时触发 | 是 | 否 | 延迟定时器到期，发送纯 ACK |
+| keepalive 响应 | 是 | 否 | 探活回复 |
+| 窗口更新通知 | 是 | 否 | 接收方缓冲区释放后主动通告 |
+
+内核中的区分逻辑在 `tcp_rcv_established` 快速路径中：
+
+```cpp
+// net/ipv4/tcp_input.c - tcp_rcv_established
+int tcp_header_len = th->doff * 4;
+
+if (tcp_header_len == len) {
+    // 纯ACK：TCP头长度等于包总长度，无数据负载
+    // → tcp_ack → tcp_data_snd_check
+} else {
+    // 有数据：len > tcp_header_len
+    // → tcp_event_data_recv → tcp_ack → tcp_data_snd_check → __tcp_ack_snd_check
+}
+```
+
+对发送方而言，纯 ACK 和带数据 ACK 在 `tcp_ack` 内部的处理逻辑基本一致，都是推进 `snd_una`、释放 skb、更新窗口。差异在于快速路径的 flag 参数（纯 ACK 传 `0`，带数据传 `FLAG_DATA`），以及带数据 ACK 会额外触发 `__tcp_ack_snd_check` 决定是否需要回复 ACK
+
+####    Delayed ACK（延迟ACK） 完整机制
+
+Delayed ACK 是 TCP 接收方的优化策略：不对每个收到的数据段立即回复 ACK，而是延迟一小段时间，期望能将 ACK 捎带在即将发送的数据包中（piggybacking），从而减少网络上的纯 ACK 小包数量
+
+**1. ACK 调度：`tcp_event_data_recv`**
+
+收到数据后，[`tcp_event_data_recv`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L657) 标记需要发送 ACK 并调整 ATO（ACK Timeout）：
+
+```cpp
+// net/ipv4/tcp_input.c
+static void tcp_event_data_recv(struct sock *sk, struct sk_buff *skb)
+{
+    struct inet_connection_sock *icsk = inet_csk(sk);
+
+    // 标记ACK调度（但不立即发送）
+    inet_csk_schedule_ack(sk);
+
+    // 自适应调整ATO
+    if (!icsk->icsk_ack.ato) {
+        tcp_incr_quickack(sk);              // 首包进入QuickACK模式
+        icsk->icsk_ack.ato = TCP_ATO_MIN;   // 初始 40ms
+    } else {
+        int m = now - icsk->icsk_ack.lrcvtime;
+        if (m <= TCP_ATO_MIN / 2) {
+            // 包到达很快：缩小ATO
+            icsk->icsk_ack.ato = (icsk->icsk_ack.ato >> 1) + TCP_ATO_MIN / 2;
+        } else if (m < icsk->icsk_ack.ato) {
+            // 正常间隔：平滑调整
+            icsk->icsk_ack.ato = (icsk->icsk_ack.ato >> 1) + m;
+        } else if (m > icsk->icsk_rto) {
+            // 间隔太长：进入QuickACK模式
+            tcp_incr_quickack(sk);
+        }
+    }
+    icsk->icsk_ack.lrcvtime = now;
+}
+```
+
+**2. ACK 发送决策：`__tcp_ack_snd_check`**
+
+[`__tcp_ack_snd_check`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_input.c#L5197) 决定立即发送 ACK 还是延迟：
+
+todo
+
+```cpp
+// net/ipv4/tcp_input.c
+static void __tcp_ack_snd_check(struct sock *sk, int ofo_possible)
+{
+    struct tcp_sock *tp = tcp_sk(sk);
+
+    if (((tp->rcv_nxt - tp->rcv_wup) > inet_csk(sk)->icsk_ack.rcv_mss &&
+         __tcp_select_window(sk) >= tp->rcv_wnd) ||
+        tcp_in_quickack_mode(sk) ||
+        (ofo_possible && !RB_EMPTY_ROOT(&tp->out_of_order_queue))) {
+        // 立即发送ACK
+        tcp_send_ack(sk);
+    } else {
+        // 延迟发送ACK
+        tcp_send_delayed_ack(sk);
+    }
+}
+```
+
+通常，内核立即发送 ACK 的三个条件（满足任一即立即发送）：
+
+| 条件 | 含义 | 目的 |
+|------|------|------|
+| `(rcv_nxt - rcv_wup) > rcv_mss` 且窗口可以前进 | 累计收到超过一个 full-size 段的数据 | RFC 建议每收两个全尺寸段发一次 ACK |
+| `tcp_in_quickack_mode(sk)` | 处于 QuickACK 模式 | 连接初期 / 丢包恢复期需要快速反馈 |
+| `ofo_possible` 且乱序队列非空 | 有乱序数据 | 立即发送 dupACK 触发快速重传 |
+
+`tcp_ack_snd_check` 是 `__tcp_ack_snd_check` 的包装，增加了一个前置检查：
+
+```cpp
+// net/ipv4/tcp_input.c
+static inline void tcp_ack_snd_check(struct sock *sk)
+{
+    if (!inet_csk_ack_scheduled(sk)) {
+        // 没有需要发送的ACK（可能已经通过数据包捎带发出了）
+        return;
+    }
+    __tcp_ack_snd_check(sk, 1);    // ofo_possible=1，允许检查乱序队列
+}
+```
+
+**3. Delayed ACK 定时器：`tcp_send_delayed_ack`**
+
+当决定延迟发送时，[`tcp_send_delayed_ack`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_output.c#L3302) 启动定时器：
+
+```cpp
+// net/ipv4/tcp_output.c
+void tcp_send_delayed_ack(struct sock *sk)
+{
+    struct inet_connection_sock *icsk = inet_csk(sk);
+    int ato = icsk->icsk_ack.ato;
+    unsigned long timeout;
+
+    tcp_ca_event(sk, CA_EVENT_DELAYED_ACK);
+
+    if (ato > TCP_DELACK_MIN) {
+        int max_ato = HZ / 2;     // 默认最大 500ms
+
+        if (icsk->icsk_ack.pingpong ||
+            (icsk->icsk_ack.pending & ICSK_ACK_PUSHED))
+            max_ato = TCP_DELACK_MAX;    // 交互模式下最大 200ms
+
+        // 用 RTT 约束延迟上限
+        if (tp->srtt_us) {
+            int rtt = max_t(int, usecs_to_jiffies(tp->srtt_us >> 3),
+                    TCP_DELACK_MIN);
+            if (rtt < max_ato)
+                max_ato = rtt;
+        }
+        ato = min(ato, max_ato);
+    }
+
+    timeout = jiffies + ato;
+
+    // 如果已有定时器且即将到期，立即发送
+    if (icsk->icsk_ack.pending & ICSK_ACK_TIMER) {
+        if (icsk->icsk_ack.blocked ||
+            time_before_eq(icsk->icsk_ack.timeout, jiffies + (ato >> 2))) {
+            tcp_send_ack(sk);
+            return;
+        }
+    }
+
+    // 设置定时器
+    icsk->icsk_ack.pending |= ICSK_ACK_SCHED | ICSK_ACK_TIMER;
+    icsk->icsk_ack.timeout = timeout;
+    sk_reset_timer(sk, &icsk->icsk_delack_timer, timeout);
+}
+```
+
+**4. 定时器到期：`tcp_delack_timer_handler`**
+
+[`tcp_delack_timer_handler`](https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp_timer.c#L245) 在定时器到期时发送 ACK：
+
+```cpp
+// net/ipv4/tcp_timer.c
+void tcp_delack_timer_handler(struct sock *sk)
+{
+    struct tcp_sock *tp = tcp_sk(sk);
+    struct inet_connection_sock *icsk = inet_csk(sk);
+
+    // 状态检查
+    if (((1 << sk->sk_state) & (TCPF_CLOSE | TCPF_LISTEN)) ||
+        !(icsk->icsk_ack.pending & ICSK_ACK_TIMER))
+        goto out;
+
+    // 还没到时间
+    if (time_after(icsk->icsk_ack.timeout, jiffies)) {
+        sk_reset_timer(sk, &icsk->icsk_delack_timer, icsk->icsk_ack.timeout);
+        goto out;
+    }
+
+    icsk->icsk_ack.pending &= ~ICSK_ACK_TIMER;
+
+    // 处理prequeue中的残留包
+    if (!skb_queue_empty(&tp->ucopy.prequeue)) {
+        while ((skb = __skb_dequeue(&tp->ucopy.prequeue)) != NULL)
+            sk_backlog_rcv(sk, skb);
+        tp->ucopy.memory = 0;
+    }
+
+    if (inet_csk_ack_scheduled(sk)) {
+        if (!icsk->icsk_ack.pingpong) {
+            icsk->icsk_ack.ato = min(icsk->icsk_ack.ato << 1, icsk->icsk_rto);
+        } else {
+            icsk->icsk_ack.pingpong = 0;
+            icsk->icsk_ack.ato = TCP_ATO_MIN;
+        }
+        tcp_send_ack(sk);           // 最终发送ACK
+    }
+    // ...
+}
+```
+
+注意，如果 `tcp_delack_timer` 触发时 socket 被用户进程持有（`sock_owned_by_user`），则设置 `icsk_ack.blocked = 1` 并延迟到 `tcp_release_cb` 中执行
+
+**5. Piggybacking：ACK 捎带**
+
+如果在延迟等待期间，本端有数据要发送，`tcp_transmit_skb` 构造 TCP 头时会自动携带最新的 ACK 信息（`rcv_nxt` 和通告窗口），从而取消 Delayed ACK 定时器。这就是 piggybacking 机制，即ACK "免费"搭载在数据包中
+
+以下流程图展示 Delayed ACK 的完整决策和处理过程：
+
+```mermaid
+flowchart TD
+    RCV["收到数据包<br/>tcp_rcv_established"] --> EDR["tcp_event_data_recv<br/>inet_csk_schedule_ack<br/>调整ATO"]
+    EDR --> ASC["__tcp_ack_snd_check"]
+
+    ASC --> C1{"累计数据 > rcv_mss<br/>且窗口可前进?"}
+    C1 -->|"是"| IMM["tcp_send_ack<br/>立即发送ACK"]
+
+    C1 -->|"否"| C2{"QuickACK模式?"}
+    C2 -->|"是"| IMM
+
+    C2 -->|"否"| C3{"有乱序数据?"}
+    C3 -->|"是"| IMM
+
+    C3 -->|"否"| DEL["tcp_send_delayed_ack<br/>设置icsk_delack_timer"]
+
+    DEL --> W{"等待期间<br/>是否有数据要发送?"}
+    W -->|"有数据"| PB["tcp_transmit_skb<br/>ACK捎带在数据包中<br/>Piggybacking"]
+    W -->|"无数据<br/>定时器到期"| TMR["tcp_delack_timer_handler"]
+    TMR --> BLK{"socket被用户进程持有?"}
+    BLK -->|"否"| SACK["tcp_send_ack<br/>发送纯ACK"]
+    BLK -->|"是"| DEFER["设置blocked=1<br/>延迟到tcp_release_cb"]
+    DEFER --> SACK
+```
+
+####    Delayed ACK 的关键参数
+
+| 参数 | 值 | 说明 |
+|------|---|------|
+| `TCP_DELACK_MIN` | 40ms（`HZ/25`） | ATO 最小值 |
+| `TCP_DELACK_MAX` | 200ms（`HZ/5`） | 交互模式最大延迟 |
+| `TCP_ATO_MIN` | 40ms | ATO 初始值 |
+| `HZ/2` | 500ms | 非交互模式最大延迟 |
+| `icsk_ack.pingpong` | 0/1 | 交互模式标记（影响 `max_ato` 选择） |
+| `icsk_ack.quick` | 计数 | QuickACK 模式剩余快速 ACK 数量 |
+
+##  0x0B    滑动窗口变量主动 / 被动修改总结
+
+本节将 `tcp_sock` 中与滑动窗口相关的所有字段，按照"本端主动修改"和"被动接受对端数据包驱动修改"两个维度进行分类。这一分类有助于理解：哪些字段完全由本端控制，哪些字段的值取决于对端的行为
+
+####    发送侧窗口变量
+
+| 字段 | 主动/被动 | 修改时机 | 内核函数 | 说明 |
+|------|-----------|----------|----------|------|
+| `snd_una` | **被动** | 收到对端 ACK | `tcp_ack` | 完全由对端 ACK 确认号决定，本端无法主动修改 |
+| `snd_nxt` | **主动** | 本端发送新数据 | `tcp_event_new_data_sent` | 发送时自增，不依赖对端 |
+| `write_seq` | **主动** | 用户进程写入数据 | `tcp_sendmsg` | 用户态 `send`/`write` 推进，不依赖网络事件 |
+| `snd_wnd` | **被动** | 对端通告窗口 | `tcp_may_update_window`（`tcp_ack` 内） | 值直接取自对端 TCP 头中的 window 字段 |
+| `snd_wl1` | **被动** | 窗口更新判断 | `tcp_update_wl`（`tcp_ack` 内） | 记录触发窗口更新的报文序列号 |
+| `snd_wl2` | **被动** | 窗口更新判断 | `tcp_may_update_window` | 记录触发窗口更新的 ACK 确认号 |
+| `snd_cwnd` | **主动**（ACK 事件触发） | 收到有效 ACK 后拥塞算法计算 | `tcp_cong_avoid` | 虽由 ACK 事件触发，但具体值由本端拥塞控制算法（如 CUBIC）独立计算 |
+| `snd_ssthresh` | **主动** | 丢包/拥塞事件 | `tcp_enter_loss` / `tcp_enter_recovery` | 本端检测到拥塞后自主调整 |
+| `packets_out` | **双向** | 发送时 +1，收到 ACK 时 -N | `tcp_event_new_data_sent`（+）/ `tcp_clean_rtx_queue`（-） | 发送增加是主动的，ACK 确认减少是被动的 |
+| `retrans_out` | **双向** | 重传时 +1，收到 ACK 时 -N | `tcp_retransmit_skb`（+）/ `tcp_clean_rtx_queue`（-） | 同 `packets_out` |
+| `sacked_out` | **被动** | 收到 SACK 选项 | `tcp_sacktag_write_queue`（`tcp_ack` 内） | 完全由对端 SACK 信息决定 |
+| `lost_out` | **主动** | 本端丢包检测算法 | `tcp_mark_head_lost` / `tcp_update_scoreboard` | 基于 dupACK/SACK 信息由本端算法判定 |
+
+####    接收侧窗口变量
+
+| 字段 | 主动/被动 | 修改时机 | 内核函数 | 说明 |
+|------|-----------|----------|----------|------|
+| `rcv_nxt` | **主动** | 收到按序数据后推进 | `tcp_rcv_established` / `tcp_data_queue` | 本端根据收到的数据自主推进 |
+| `rcv_wnd` | **主动** | 发送 ACK/数据时计算 | `tcp_select_window` | 基于本端接收缓冲区可用空间计算 |
+| `rcv_wup` | **主动** | 发送 ACK/数据时更新 | `tcp_select_window` | 记录上次通告窗口时的 `rcv_nxt` |
+| `window_clamp` | **主动** | 接收缓冲区自适应调整 | `tcp_rcv_space_adjust` | 基于本端接收速率动态调整上限 |
+| `rcv_ssthresh` | **主动** | 接收窗口慢启动 | `__tcp_select_window` / `tcp_grow_window` | 避免窗口突然增大 |
+
+####    核心洞察
+
+**1. 发送侧："左边界被动，右边界混合"**
+
+- 发送窗口左边界（`snd_una`）**完全被动**：只有对端发来的 ACK 才能推进它，本端无法主动改变
+- 发送窗口右边界由 `min(snd_cwnd * mss, snd_wnd)` 决定：
+  - `snd_wnd` 是**被动**的（对端通告值）
+  - `snd_cwnd` 是**主动**的（本端拥塞算法计算，虽然由 ACK 事件触发但值由本端决定）
+
+这意味着：发送能力的上限由**对端的接收能力**（`snd_wnd`）和**网络的承载能力**（`snd_cwnd`）共同决定，前者完全被动，后者半主动
+
+**2. 接收侧："全部主动"**
+
+接收侧的所有窗口变量都由本端主动管理：
+- `rcv_nxt` 由收到的数据推进（但推进是本端决定的）
+- `rcv_wnd` 完全基于本端缓冲区状态计算
+- `window_clamp` 基于本端接收速率调整
+
+接收方唯一"被动"的方面是：对端发送的数据触发了 `rcv_nxt` 的推进和 `rcv_wnd` 的重新计算，但这些值的最终确定完全由本端控制
+
+**3. 对称性与非对称性**
+
+在全双工通信中，同一个 `tcp_sock` 同时维护发送侧和接收侧的窗口变量。一端的接收侧行为（如 `rcv_wnd` 的通告）直接影响对端发送侧的被动变量（对端的 `snd_wnd`）：
+
+```
+主机A                              主机B
+┌─────────────────┐               ┌─────────────────┐
+│ 发送侧（主动）    │               │ 接收侧（主动）    │
+│ snd_nxt: 主动推进 │───DATA──→    │ rcv_nxt: 主动推进 │
+│ snd_cwnd: 主动算  │               │ rcv_wnd: 主动算   │
+│                  │               │                  │
+│ 发送侧（被动）    │               │ 接收侧（反馈）    │
+│ snd_una: 被动更新 │←──ACK+WIN──  │ 通告窗口=rcv_wnd  │
+│ snd_wnd: 被动更新 │               │                  │
+└─────────────────┘               └─────────────────┘
+```
+
+A 的 `snd_wnd` 被动更新值 = B 的 `rcv_wnd` 主动计算值。这种"发送被动、接收主动"的非对称设计，确保了接收方始终能控制数据流入的速率
+
+##  0x0C    Nagle 算法与发送时机
 
 Nagle 算法的目标是减少网络中的小包数量。它在 `tcp_write_xmit` 的门控检查中通过 `tcp_nagle_test` 实现
 
@@ -1623,7 +2215,7 @@ case TCP_CORK:
 
 解决方案：对延迟敏感的应用设置 `TCP_NODELAY`
 
-##  0x0B    TCP 内存管理与背压
+##  0x0D    TCP 内存管理与背压
 
 TCP 的内存管理涉及发送缓冲区限制、TSQ 机制和全局内存压力，这些机制共同防止单个连接占用过多内存
 
@@ -1754,7 +2346,7 @@ $ sudo sysctl -w net.ipv4.tcp_rmem="4096 87380 16777216"
 $ sudo sysctl -w net.ipv4.tcp_limit_output_bytes=524288
 ```
 
-##  0x0C    参考
+##  0x0E    参考
 
 -   [内核之旅（十）：内核数据包发送](https://pandaychen.github.io/2025/04/02/A-LINUX-KERNEL-TRAVEL-10/)
 -   [内核之旅（十二）：内核视角下的 TCP 完整通信过程](https://pandaychen.github.io/2025/04/25/A-LINUX-KERNEL-TRAVEL-12/)
