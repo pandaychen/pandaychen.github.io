@@ -21,7 +21,28 @@ tags:
 ![linux_memory_management.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/linux_memory_management.png)
 
 ####    虚拟内存地址
-TODO
+虚拟内存地址（Virtual Address）是 CPU 在执行程序指令时所使用的地址，它并不直接对应物理内存中的位置，而是需要通过 **MMU（Memory Management Unit，内存管理单元）** 进行地址翻译后才能访问到真正的物理内存
+
+在分页（Paging）机制下，虚拟地址由两部分组成：**页号（Page Number）** 和 **页内偏移（Page Offset）**。以 `4KB` 页大小为例，虚拟地址的低 `12` 位为页内偏移，高位为页号。地址翻译过程如下：
+
+1.  CPU 发出虚拟地址，MMU 提取页号部分
+2.  MMU 首先查找 **TLB（Translation Lookaside Buffer，地址翻译后备缓冲器）**，TLB 是页表的硬件高速缓存，缓存了最近使用的虚拟页号到物理页帧号的映射
+3.  如果 TLB 命中（TLB Hit），则直接获取物理页帧号，拼接页内偏移得到物理地址
+4.  如果 TLB 未命中（TLB Miss），则 MMU 遍历内存中的多级页表（Page Table Walk）来查找对应的物理页帧号
+5.  如果页表项（PTE）不存在或标记为不在内存中（`Present` 位为 `0`），则触发 **缺页中断（Page Fault）**，由内核的缺页中断处理程序分配物理内存页并建立映射
+
+```mermaid
+flowchart LR
+    CPU["CPU 发出虚拟地址"] --> MMU["MMU 提取页号"]
+    MMU --> TLB{"TLB 查找"}
+    TLB -->|命中| PA["拼接物理页帧号+偏移 = 物理地址"]
+    TLB -->|未命中| PTW["Page Table Walk（遍历多级页表）"]
+    PTW --> PTE{"PTE 存在且 Present=1?"}
+    PTE -->|是| FillTLB["填充 TLB + 得到物理地址"]
+    PTE -->|否| PF["触发缺页中断（Page Fault）"]
+    PF --> Kernel["内核分配物理页并建立映射"]
+    Kernel --> Retry["重新执行访存指令"]
+```
 
 ####    虚拟内存空间分布（32位）
 
@@ -37,7 +58,29 @@ TODO
 
 ####    虚拟内存空间分布（64位）
 
-TODO
+在 `64` 位（x86_64）系统中，虽然理论上可以寻址 `2^64` 字节的地址空间，但当前硬件和内核实际只使用了 `48` 位虚拟地址（即 `256TB`），高 `16` 位必须是第 `47` 位的符号扩展（Canonical Address），这将整个虚拟地址空间分成了三个区域：
+
+-   **用户空间**：`0x0000 0000 0000 0000` ~ `0x0000 7FFF FFFF FFFF`，共 `128TB`，每个进程独立
+-   **Canonical Hole（非法地址空洞）**：`0x0000 8000 0000 0000` ~ `0xFFFF 7FFF FFFF FFFF`，访问此区间的地址会直接触发 `General Protection Fault`，这个巨大的空洞将用户空间和内核空间彻底隔离开来
+-   **内核空间**：`0xFFFF 8000 0000 0000` ~ `0xFFFF FFFF FFFF FFFF`，共 `128TB`，所有进程共享
+
+```mermaid
+flowchart TB
+    subgraph VM64["64位虚拟地址空间（48位寻址）"]
+        direction TB
+        KernelEnd["0xFFFF FFFF FFFF FFFF"]
+        KernelSpace["内核空间 128TB<br/>所有进程共享"]
+        KernelStart["0xFFFF 8000 0000 0000"]
+        CanonicalHole["Canonical Hole<br/>非法地址空洞<br/>访问触发 GPF"]
+        UserEnd["0x0000 7FFF FFFF FFFF"]
+        UserSpace["用户空间 128TB<br/>每个进程独立"]
+        UserStart["0x0000 0000 0000 0000"]
+    end
+    KernelEnd --- KernelSpace --- KernelStart --- CanonicalHole --- UserEnd --- UserSpace --- UserStart
+```
+
+用户空间内部的布局与 `32` 位类似（代码段、数据段、BSS段、堆、mmap区、栈），但各区域的可用空间大大增加。内核空间内部则包含了直接映射区、vmalloc 区、内核模块区等（参考：[Linux 内核之旅（七）：虚拟内存管理（下）](https://pandaychen.github.io/2025/03/01/A-LINUX-KERNEL-TRAVEL-7/)）
+
 ![64-vm](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/64-vm.png)
 
 
@@ -51,9 +94,32 @@ TODO
 ##  0x01    进程虚拟内存空间管理
 无论是在 `32` 位机器上还是在 `64` 位机器上，进程虚拟内存空间的核心区域分布的相对位置是一样的，这个结构是怎么在内核反映的？
 
-TODO
+内核通过 `mm_struct` 结构来描述进程的**整个虚拟内存空间**，通过 `vm_area_struct`（VMA）结构来描述虚拟内存空间中的**各个逻辑区域**（代码段、数据段、堆、栈等），二者的关系如下：
 
-![]()
+```mermaid
+flowchart TB
+    subgraph TaskStruct["task_struct（进程描述符）"]
+        mm_ptr["*mm（指向 mm_struct）"]
+    end
+    subgraph MmStruct["mm_struct（内存描述符）"]
+        direction LR
+        mmap_field["*mmap（VMA 链表头）"]
+        mm_rb_field["mm_rb（VMA 红黑树根）"]
+        pgd_field["*pgd（页目录指针）"]
+        fields["start_code/end_code<br/>start_brk/brk<br/>mmap_base<br/>start_stack<br/>..."]
+    end
+    subgraph VMAList["vm_area_struct 双向链表 + 红黑树"]
+        VMA1["VMA: 代码段"]
+        VMA2["VMA: 数据段"]
+        VMA3["VMA: 堆"]
+        VMA4["VMA: mmap区域"]
+        VMA5["VMA: 栈"]
+    end
+    mm_ptr --> MmStruct
+    mmap_field --> VMA1
+    VMA1 --> VMA2 --> VMA3 --> VMA4 --> VMA5
+    mm_rb_field --> VMAList
+```
 
 ####    进程虚拟内存描述符：mm_struct
 已知每个内核进程描述符结构体`task_struct`中嵌套了一个`mm_struct`结构体指针，该结构体中包含了的该进程虚拟内存空间的全部信息。同时每个进程都有唯一的 `mm_struct` 结构体，这说明每个进程的虚拟地址空间都是独立，互不干扰的。当调用 `fork()` 函数创建进程的时候，表示进程地址空间的 `mm_struct` 结构会随着进程描述符 `task_struct` 的创建而创建
@@ -68,124 +134,132 @@ struct task_struct {
     //.......
 }
 struct mm_struct {
-          struct vm_area_struct * mmap;       /* list of VMAs */
-          struct rb_root mm_rb;     /*红黑树的根节点*/
-          struct vm_area_struct * mmap_cache;      /* last find_vma result */
+          struct vm_area_struct *mmap;        /* VMA 双向链表 */
+          struct rb_root mm_rb;              /* VMA 红黑树的根节点 */
+          u32 vmacache_seqnum;               /* per-thread VMA 缓存序列号 */
         //.......
 }
 ```
 
-`mm_struct`结构体定义如下：
+`mm_struct`结构体定义如下（基于 [4.11.6 内核版本](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/mm_types.h#L390)）：
 
 ```cpp
 struct mm_struct {
-    //mmap指向虚拟区间链表
-    struct vm_area_struct * mmap;       /* list of VMAs */
-    //指向红黑树的根节点
+    // mmap 指向 VMA 双向链表的头节点
+    struct vm_area_struct *mmap;           /* list of VMAs */
+    // 管理 VMA 的红黑树根节点
     struct rb_root mm_rb;
-    //指向最近的虚拟空间
-    struct vm_area_struct * mmap_cache; /* last find_vma result */
-    //
+    // vmacache 的序列号，用于 per-thread VMA 缓存的失效判断（替代旧版的 mmap_cache）
+    u32 vmacache_seqnum;
+
+#ifdef CONFIG_MMU
+    // 在文件映射与匿名映射区中寻找未使用的虚拟地址空间
     unsigned long (*get_unmapped_area) (struct file *filp,
                 unsigned long addr, unsigned long len,
                 unsigned long pgoff, unsigned long flags);
-    void (*unmap_area) (struct mm_struct *mm, unsigned long addr);
-    unsigned long mmap_base;        /* base of mmap area */
-    unsigned long task_size;        /* size of task vm space */
-    unsigned long cached_hole_size;     /* if non-zero, the largest hole below free_area_cache */
-    unsigned long free_area_cache;      /* first hole of size cached_hole_size or larger */
-    //指向进程的页目录
-    pgd_t * pgd;
-    //空间中有多少用户
-    atomic_t mm_users;          /* How many users with user space? */
-    //引用计数；描述有多少指针指向当前的mm_struct
-    atomic_t mm_count;          /* How many references to "struct mm_struct" (users count as 1) */
-    //虚拟区间的个数
-    int map_count;              /* number of VMAs */
-    struct rw_semaphore mmap_sem;
-    //保护任务页表
-    spinlock_t page_table_lock;     /* Protects page tables and some counters */
-    //所有mm的链表
-    struct list_head mmlist;        /* List of maybe swapped mm's.  These are globally strung
-                         * together off init_mm.mmlist, and are protected
-                         * by mmlist_lock
-                         */
+#endif
+    unsigned long mmap_base;              /* mmap 区域的基地址 */
+    unsigned long mmap_legacy_base;       /* 传统布局（bottom-up）的 mmap 基地址 */
+    unsigned long task_size;              /* 用户态虚拟地址空间的大小 */
+    unsigned long highest_vm_end;         /* 当前最高的 VMA 结束地址 */
 
-    /* Special counters, in some configurations protected by the
-     * page_table_lock, in other configurations by being atomic.
-     */
-    mm_counter_t _file_rss;
-    mm_counter_t _anon_rss;
+    // 指向进程的顶级页目录（PGD）
+    pgd_t *pgd;
 
-    unsigned long hiwater_rss;  /* High-watermark of RSS usage */
-    unsigned long hiwater_vm;   /* High-water virtual memory usage */
+    // 共享此 mm 的用户态线程数（进程 + 线程）
+    atomic_t mm_users;
+    // mm_struct 的引用计数（mm_users 算作 1 个引用）
+    atomic_t mm_count;
 
-    unsigned long total_vm, locked_vm, shared_vm, exec_vm;
-    unsigned long stack_vm, reserved_vm, def_flags, nr_ptes;
-    //start_code:代码段的起始地址
-    //end_code:代码段的结束地址
-    //start_data:数据段起始地址
-    //end_data:数据段结束地址
+    // 页表相关的计数器
+    atomic_long_t nr_ptes;                /* PTE 页表页的数量 */
+#if CONFIG_PGTABLE_LEVELS > 2
+    atomic_long_t nr_pmds;                /* PMD 页表页的数量 */
+#endif
+
+    int map_count;                        /* VMA 的总数量 */
+
+    spinlock_t page_table_lock;           /* 保护页表和部分计数器 */
+    struct rw_semaphore mmap_sem;         /* 保护 VMA 链表和红黑树 */
+
+    // 所有 mm_struct 的全局链表，用于 swap 等场景
+    struct list_head mmlist;
+
+    unsigned long hiwater_rss;            /* RSS 使用量的高水位 */
+    unsigned long hiwater_vm;             /* 虚拟内存使用量的高水位 */
+
+    unsigned long total_vm;               /* 映射的总页数 */
+    unsigned long locked_vm;              /* PG_mlocked 页数 */
+    unsigned long pinned_vm;              /* 引用计数永久增加的页数 */
+    unsigned long data_vm;                /* VM_WRITE & ~VM_SHARED & ~VM_STACK */
+    unsigned long exec_vm;                /* VM_EXEC & ~VM_WRITE & ~VM_STACK */
+    unsigned long stack_vm;               /* VM_STACK */
+    unsigned long def_flags;
+
+    // 代码段、数据段的起止地址
     unsigned long start_code, end_code, start_data, end_data;
-    //start_brk:堆的起始地址
-    //brk:堆的结束地址
-    //start_stack:栈的起始地址
+    // 堆的起始和当前结束地址，栈的起始地址
     unsigned long start_brk, brk, start_stack;
-    //arg_start,arg_end:参数段的起始和结束地址
-    //env_start,env_end:环境段的起始和结束地址
+    // 参数列表和环境变量的起止地址
     unsigned long arg_start, arg_end, env_start, env_end;
 
     unsigned long saved_auxv[AT_VECTOR_SIZE]; /* for /proc/PID/auxv */
 
+    // RSS（Resident Set Size）统计信息
+    struct mm_rss_stat rss_stat;
+
     struct linux_binfmt *binfmt;
 
-    cpumask_t cpu_vm_mask;
+    cpumask_var_t cpu_vm_mask_var;
 
     /* Architecture-specific MM context */
     mm_context_t context;
 
-    /* Swap token stuff */
-    /*
-     * Last value of global fault stamp as seen by this process.
-     * In other words, this value gives an indication of how long
-     * it has been since this task got the token.
-     * Look at mm/thrash.c
-     */
-    unsigned int faultstamp;
-    unsigned int token_priority;
-    unsigned int last_interval;
+    unsigned long flags;                  /* Must use atomic bitops to access */
 
-    unsigned long flags; /* Must use atomic bitops to access the bits */
+    struct core_state *core_state;        /* coredumping support */
 
-    struct core_state *core_state; /* coredumping support */
 #ifdef CONFIG_AIO
-    spinlock_t      ioctx_lock;
-    struct hlist_head   ioctx_list;
+    spinlock_t          ioctx_lock;
+    struct kioctx_table __rcu *ioctx_table;
 #endif
-#ifdef CONFIG_MM_OWNER
+
     /*
      * "owner" points to a task that is regarded as the canonical
-     * user/owner of this mm. All of the following must be true in
-     * order for it to be changed:
-     *
-     * current == mm->owner
-     * current->mm != mm
-     * new_owner->mm == mm
-     * new_owner->alloc_lock is held
+     * user/owner of this mm.
      */
-    struct task_struct *owner;
-#endif
+    struct task_struct __rcu *owner;
 
-#ifdef CONFIG_PROC_FS
     /* store ref to file /proc/<pid>/exe symlink points to */
-    struct file *exe_file;
-    unsigned long num_exe_file_vmas;
-#endif
+    struct file __rcu *exe_file;
+
 #ifdef CONFIG_MMU_NOTIFIER
     struct mmu_notifier_mm *mmu_notifier_mm;
 #endif
+
+#ifdef CONFIG_NUMA_BALANCING
+    unsigned long numa_next_scan;
+    unsigned long numa_scan_offset;
+    int numa_scan_seq;
+#endif
+
+    // 用于标记 TLB 是否需要刷新
+    struct uprobes_state uprobes_state;
+    atomic_long_t hugetlb_usage;
 };
 ```
+
+`mm_struct`结构中有几个位置的成员，单独罗列一下：
+
+-   `start_code`：代码段的起始地址
+-   `end_code`：代码段的结束地址
+-   `start_data`：数据段起始地址
+-   `end_data`：数据段结束地址
+-   `start_brk`：堆的起始地址
+-   `brk`：堆的结束地址
+-   `start_stack`：栈的起始地址
+-   `arg_start,arg_end`：参数段的起始和结束地址
+-   `env_start,env_end`：环境段的起始和结束地址
 
 ####    task_size：用户地址空间和内核地址空间的分界线
 `task_size`定义了用户态地址空间与内核态地址空间之间的分界线，如`64` 位系统中用户地址空间和内核地址空间的分界线在 `0x0000 7FFF FFFF F000` 地址处，那么`task_struct.mm_struct` 结构中的 `task_size` 为 `0x0000 7FFF FFFF F000`
@@ -360,7 +434,114 @@ struct mm_struct {
 
 ####    VMA的主要操作函数
 
-TODO
+内核提供了一组核心函数用于操作 VMA，主要包含查找、插入、合并、拆分、删除等操作：
+
+1、[`find_vma`](https://elixir.bootlin.com/linux/v4.11.6/source/mm/mmap.c#L2089)：在红黑树中查找第一个满足 `vma->vm_end > addr` 的 VMA
+
+```c
+struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)
+{
+    struct rb_node *rb_node;
+    struct vm_area_struct *vma;
+
+    // 首先检查 vmacache（per-thread VMA 缓存），加速热点查找
+    vma = vmacache_find(mm, addr);
+    if (likely(vma))
+        return vma;
+
+    rb_node = mm->mm_rb.rb_node;
+    while (rb_node) {
+        struct vm_area_struct *tmp;
+        tmp = rb_entry(rb_node, struct vm_area_struct, vm_rb);
+
+        if (tmp->vm_end > addr) {
+            vma = tmp;
+            if (tmp->vm_start <= addr)
+                break;          // 找到：addr 在 [vm_start, vm_end) 内
+            rb_node = rb_node->rb_left;
+        } else
+            rb_node = rb_node->rb_right;
+    }
+
+    if (vma)
+        vmacache_update(addr, vma);   // 更新缓存
+    return vma;
+}
+```
+
+`find_vma` 的红黑树查找逻辑如下：
+
+```mermaid
+flowchart TD
+    Start["find_vma(mm, addr)"] --> Cache{"vmacache 命中?"}
+    Cache -->|是| ReturnCache["返回缓存的 VMA"]
+    Cache -->|否| InitRB["从 mm->mm_rb.rb_node 开始"]
+    InitRB --> Loop{"当前节点非空?"}
+    Loop -->|否| CheckResult{"vma != NULL?"}
+    Loop -->|是| Compare{"tmp->vm_end > addr?"}
+    Compare -->|否| GoRight["rb_node = rb_right"]
+    GoRight --> Loop
+    Compare -->|是| SaveVMA["vma = tmp"]
+    SaveVMA --> InRange{"tmp->vm_start <= addr?"}
+    InRange -->|是| Found["找到：addr 在 VMA 范围内"]
+    InRange -->|否| GoLeft["rb_node = rb_left"]
+    GoLeft --> Loop
+    Found --> UpdateCache["vmacache_update 并返回"]
+    CheckResult -->|是| UpdateCache
+    CheckResult -->|否| ReturnNULL["返回 NULL"]
+```
+
+2、[`find_vma_prev`](https://elixir.bootlin.com/linux/v4.11.6/source/mm/mmap.c#L2122)：查找 VMA 的同时返回其前驱节点
+
+```c
+struct vm_area_struct *find_vma_prev(struct mm_struct *mm, unsigned long addr,
+                                     struct vm_area_struct **pprev)
+```
+
+3、[`insert_vm_struct`](https://elixir.bootlin.com/linux/v4.11.6/source/mm/mmap.c#L2992)：将新的 VMA 同时插入到双向链表和红黑树中
+
+```c
+int insert_vm_struct(struct mm_struct *mm, struct vm_area_struct *vma)
+{
+    struct vm_area_struct *prev;
+    struct rb_node **rb_link, *rb_parent;
+
+    if (find_vma_links(mm, vma->vm_start, vma->vm_end,
+                       &prev, &rb_link, &rb_parent))
+        return -ENOMEM;
+
+    // 如果是文件映射，建立与 address_space 的关联
+    if (vma->vm_file) {
+        // ...
+    }
+
+    vma_link(mm, vma, prev, rb_link, rb_parent);
+    return 0;
+}
+```
+
+4、[`vma_merge`](https://elixir.bootlin.com/linux/v4.11.6/source/mm/mmap.c#L1011)：尝试将新的映射区域与相邻的 VMA 合并（要求权限、标志和映射文件等属性一致），合并可以减少 VMA 数量，提高查找效率
+
+```c
+struct vm_area_struct *vma_merge(struct mm_struct *mm,
+    struct vm_area_struct *prev, unsigned long addr, unsigned long end,
+    unsigned long vm_flags, struct anon_vma *anon_vma, struct file *file,
+    pgoff_t pgoff, struct mempolicy *policy, struct vm_userfaultfd_ctx vm_userfaultfd_ctx)
+```
+
+5、[`__split_vma`](https://elixir.bootlin.com/linux/v4.11.6/source/mm/mmap.c#L2567)：将一个 VMA 在指定地址处拆分为两个独立的 VMA，常用于 `munmap` 只释放 VMA 的部分区域时
+
+```c
+static int __split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
+                       unsigned long addr, int new_below)
+```
+
+6、[`do_munmap`](https://elixir.bootlin.com/linux/v4.11.6/source/mm/mmap.c#L2600)：删除指定地址范围内的 VMA 映射，解除虚拟内存与物理内存的关联
+
+```c
+int do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
+              struct list_head *uf)
+```
 
 ####    小结
 单个进程虚拟内存空间中的所有 VMA 在内核中有两种组织形式：
@@ -441,7 +622,7 @@ sys_execve
 
 ```cpp
 //这段代码的逻辑主要是读取应用程序的 ELF 头，然后检查 ELF 头信息是否合法
-static int load_elf_binary(struct linux_binprm *bprm, struct pt_regs *regs)
+static int load_elf_binary(struct linux_binprm *bprm)
 {
     //...
     struct {
@@ -481,7 +662,7 @@ static int load_elf_binary(struct linux_binprm *bprm, struct pt_regs *regs)
 -   调用 `kernel_read` 函数从 ELF 文件中读取程序头表的数据，保存到 `elf_phdata` 变量中，程序头表的偏移量可以通过 ELF 头的 `e_phoff` 字段获取
 
 ```cpp
-static int load_elf_binary(struct linux_binprm *bprm, struct pt_regs *regs)
+static int load_elf_binary(struct linux_binprm *bprm)
 {
     // ......
     // ......
@@ -540,11 +721,13 @@ static int load_elf_binary(struct linux_binprm *bprm, struct pt_regs *regs)
 
 4、 `elf_map` 函数的调用栈及核心流程，`elf_map` 函数最终会调用 `mmap_region` 来完成加载段到虚拟内存
 
-```BASH
+```text
 elf_map
- |--> do_mmap
-   |--> do_mmap_pgoff
-      |--> mmap_region
+ |--> vm_mmap
+   |-->vm_mmap_pgoff
+     |-->do_mmap_pgoff
+       |--> do_mmap
+         |--> mmap_region
 ```
 
 `mmap_region`的主要流程如下：
@@ -557,7 +740,8 @@ elf_map
 ```cpp
 unsigned long 
 mmap_region(struct file *file, unsigned long addr, unsigned long len, 
-            unsigned long flags, unsigned int vm_flags, unsigned long pgoff)
+            vm_flags_t vm_flags, unsigned long pgoff,
+            struct list_head *uf)
 {
     struct mm_struct *mm = current->mm;
     struct vm_area_struct *vma, *prev;
@@ -898,7 +1082,43 @@ struct vm_area_struct {
 
 ####    mmap匿名映射的原理
 
-TODO
+匿名映射与文件映射的核心区别在于，匿名映射不关联任何磁盘文件，VMA 的 `vm_file` 字段为 `NULL`，`vm_ops` 也不会被设置为文件系统的操作集。`mmap` 匿名映射的内核处理过程如下：
+
+```mermaid
+sequenceDiagram
+    participant User as 用户进程
+    participant Kernel as 内核
+    participant VMA as vm_area_struct
+    participant PT as 页表
+
+    User->>Kernel: mmap(NULL, len, prot, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+    Kernel->>Kernel: sys_mmap -> do_mmap -> mmap_region
+    Kernel->>VMA: kmem_cache_zalloc 分配 VMA
+    Kernel->>VMA: vm_start/vm_end = addr/addr+len
+    Kernel->>VMA: vm_file = NULL（匿名映射）
+    Kernel->>VMA: vm_ops = NULL（无文件操作）
+    Kernel->>Kernel: vma_link 插入链表和红黑树
+    Kernel-->>User: 返回映射的虚拟地址 addr
+    Note over User,PT: 此时仅分配了 VMA，尚未分配物理内存和页表项
+    User->>PT: 首次访问 addr（读或写）
+    PT-->>Kernel: PTE 为空，触发缺页中断
+    Kernel->>Kernel: do_page_fault -> handle_mm_fault -> handle_pte_fault
+    Kernel->>Kernel: do_anonymous_page
+    alt 读访问
+        Kernel->>PT: 映射到全局零页（zero page），PTE 只读
+    else 写访问
+        Kernel->>Kernel: alloc_zeroed_user_highpage_movable 分配新物理页并清零
+        Kernel->>PT: set_pte_at 建立可写 PTE 映射
+    end
+    Kernel-->>User: 返回用户态，重新执行访存指令
+```
+
+匿名映射的关键实现细节：
+
+-   `mmap_region` 中，对于匿名映射不会调用 `call_mmap`（文件映射才会调用），`vm_file` 始终为 `NULL`
+-   读访问触发缺页时，内核会将 PTE 映射到一个全局共享的零页（`ZERO_PAGE`），以避免为仅读取的页面分配物理内存
+-   写访问触发缺页时（或者对零页的写入触发写保护缺页），内核通过 [`alloc_zeroed_user_highpage_movable`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/highmem.h#L184) 分配一个新的物理页并用零填充，然后通过 `set_pte_at` 建立可写的 PTE 映射
+-   私有匿名映射的 VMA 设置了 `VM_WRITE` 标志但不设置 `VM_SHARED`，因此每个进程的映射是独立的
 
 ####    mmap文件映射的原理
 
@@ -1004,7 +1224,27 @@ struct vm_area_struct {
 
 VFS的`struct inode`结构中，关联page cache的成员主要是`i_mapping`，page cache 在内核中是使用 `struct address_space` 结构来描述的。page cache 在内核中是使用基树 radix_tree 结构来表示的，简单描述下即文件页（page cache）是挂在 radix_tree 的叶子结点上，radix_tree 中的 `root` 节点和 `node` 节点是文件页（叶子节点）的索引节点
 
-TODO
+Radix Tree 是一种压缩前缀树，内核用它以文件页偏移量（`pgoff`，以 `PAGE_SIZE` 为单位）为 key 来组织和索引 page cache 中的所有文件页。其结构如下：
+
+```mermaid
+flowchart TB
+    subgraph AddressSpace["struct address_space"]
+        PageTree["page_tree<br/>（radix_tree_root）"]
+    end
+    PageTree --> Root["radix_tree_node<br/>（根索引节点）"]
+    Root -->|"slots[0]"| Node1["radix_tree_node<br/>（中间索引节点）"]
+    Root -->|"slots[1]"| Node2["radix_tree_node<br/>（中间索引节点）"]
+    Node1 -->|"slots[0] pgoff=0"| Page0["struct page<br/>文件页 0"]
+    Node1 -->|"slots[1] pgoff=1"| Page1["struct page<br/>文件页 1"]
+    Node1 -->|"slots[2] pgoff=2"| Page2["struct page<br/>文件页 2"]
+    Node2 -->|"slots[0] pgoff=64"| Page64["struct page<br/>文件页 64"]
+    Node2 -->|"slots[1] pgoff=65"| PageNull["NULL（未缓存）"]
+```
+
+当内核需要访问文件的某个页面时，以 `pgoff` 作为索引 key，调用 [`find_get_page`](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/pagemap.h#L258)（内部调用 `radix_tree_lookup`）在 radix tree 中查找对应的 `struct page`：
+
+-   如果找到，说明该文件页已在 page cache 中（缓存命中），直接返回
+-   如果未找到（返回 `NULL`），说明需要从磁盘读取该页内容，分配新的物理页后通过 `add_to_page_cache_lru` 加入 radix tree
 
 ```cpp
 struct inode {
@@ -1152,7 +1392,66 @@ echo HugePageNum > /sys/devices/system/node/node_id/hugepages/hugepages-2048kB/n
 
 4、`mmap`中使用大页
 
-TODO
+在用户态通过 `mmap` 使用大页主要有两种方式：
+
+**方式一：通过 `MAP_HUGETLB` 标志直接使用**
+
+这是最简单的方式，不需要手动挂载 hugetlbfs 文件系统，内核会自动从大页内存池中分配大页：
+
+```cpp
+#include <sys/mman.h>
+
+#define MAP_HUGE_2MB    (21 << MAP_HUGE_SHIFT)  // 2MB 大页
+#define MAP_HUGE_1GB    (30 << MAP_HUGE_SHIFT)  // 1GB 大页
+
+void *addr = mmap(NULL, 2 * 1024 * 1024,    // 映射 2MB
+                  PROT_READ | PROT_WRITE,
+                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_2MB,
+                  -1, 0);
+if (addr == MAP_FAILED) {
+    perror("mmap hugetlb");
+    exit(1);
+}
+// 使用 addr ...
+munmap(addr, 2 * 1024 * 1024);
+```
+
+**方式二：通过 hugetlbfs 文件系统**
+
+先挂载 hugetlbfs，然后在该文件系统中创建文件并进行 mmap 映射：
+
+```bash
+# 挂载 hugetlbfs
+mkdir -p /mnt/huge
+mount -t hugetlbfs nodev /mnt/huge
+
+# 指定大页尺寸
+mount -t hugetlbfs -o pagesize=2M nodev /mnt/huge
+```
+
+示例代码如下：
+
+```cpp
+int fd = open("/mnt/huge/my_huge_file", O_CREAT | O_RDWR, 0666);
+if (fd < 0) {
+    perror("open");
+    exit(1);
+}
+
+void *addr = mmap(NULL, 2 * 1024 * 1024,
+                  PROT_READ | PROT_WRITE,
+                  MAP_SHARED, fd, 0);
+if (addr == MAP_FAILED) {
+    perror("mmap");
+    exit(1);
+}
+// 使用 addr ...
+munmap(addr, 2 * 1024 * 1024);
+close(fd);
+unlink("/mnt/huge/my_huge_file");
+```
+
+大页映射的内核处理与普通页映射的区别在于：大页不走常规的 `4K` 分页逻辑，而是通过 [`hugetlb_fault`](https://elixir.bootlin.com/linux/v4.11.6/source/mm/hugetlb.c#L3719) 处理缺页中断，直接在 PMD 级别（`2MB`大页）或 PUD 级别（`1GB`大页）建立映射，跳过了低级别的页表层级，从而减少 TLB Miss 和页表遍历开销
 
 ##  0x05  参考
 -   [4.6 深入理解 Linux 虚拟内存管理](https://www.xiaolincoding.com/os/3_memory/linux_mem.html)

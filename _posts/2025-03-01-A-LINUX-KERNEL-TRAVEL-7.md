@@ -16,7 +16,7 @@ tags:
 
 对于进程虚拟内存空间而言，不同进程之间的虚拟内存空间是相互隔离的，彼此之间相互独立（相互无感知），使得进程以为自己拥有所有的内存资源。而内核态虚拟内存空间是所有进程共享的，不同进程进入内核态之后看到的虚拟内存空间全部是一样的
 
-本文涵盖以下内容（基于 [4.11.6 内核](https://elixir.bootlin.com/linux/v4.11.6/source)）：
+本文涵盖以下内容（虚拟内存管理部分基于 [4.11.6 内核](https://elixir.bootlin.com/linux/v4.11.6/source)，eBPF 相关章节基于 [6.6.47 内核](https://elixir.bootlin.com/linux/v6.6.47/source)）：
 
 -   内核态虚拟内存空间布局
 -   符号表（kallsyms）
@@ -25,6 +25,8 @@ tags:
 -   缺页中断处理流程
 -   物理内存分配与虚拟内存关联
 -   从 mmap 到写入物理内存的端到端过程
+-   64 位下内核访问内核态/用户态虚拟地址空间的机制
+-   `bpf_probe_read_user` 与 `bpf_probe_read_kernel` 的底层实现区别
 
 ##  0x01    内核态虚拟空间地址布局
 由于内核会涉及到物理内存的管理，**有一个错误结论是只要进入了内核态就开始使用物理地址了**，进程进入内核态之后使用的仍然是虚拟内存地址，只不过在内核中使用的虚拟内存地址被限制在了内核态虚拟内存空间范围中
@@ -893,7 +895,355 @@ flowchart TB
     vma -->|"vm_pgoff"| radix
 ```
 
-##  0x08  参考
+##  0x08    64 位下内核访问内核/用户虚拟地址空间的机制
+
+> 说明：本节的 eBPF 相关章节基于 [6.6.47 内核版本](https://elixir.bootlin.com/linux/v6.6.47/source)
+
+前文分析了内核态虚拟地址空间的布局。在 eBPF 开发中，也有一个极易踩坑的问题：**内核代码在访问「内核虚拟地址」和「用户虚拟地址」时，走的是完全不同的两条路径**。理解这一点，才能理解 `bpf_probe_read_kernel` 与 `bpf_probe_read_user` 为什么要分成两个 helper
+
+####    64 位地址空间的二分与共享
+
+在 x86\_64（4 级页表、48 位有效虚拟地址）上，虚拟地址空间被划分为两个不相交的半区：
+
+```text
+用户半区（低）: 0x0000_0000_0000_0000 ~ 0x0000_7FFF_FFFF_FFFF   （128TB，每进程独立）
+   ...canonical 空洞（非法地址）...
+内核半区（高）: 0xFFFF_8000_0000_0000 ~ 0xFFFF_FFFF_FFFF_FFFF   （128TB，全进程共享）
+```
+
+上述知识点引入了如下关键事实：
+
+-   **内核半区在每个进程的页表中都存在且内容一致**（内核页表项被同步/共享到所有进程的 PGD 高半部分），因此不论当前运行在哪个进程上下文，内核虚拟地址始终是有效且指向同一份物理内存的
+-   **用户半区随进程而变**：`CR3` 寄存器在进程切换时被换成新进程的 PGD 物理地址，用户半区的映射随之切换。也就是说，一个用户虚拟地址只有在其所属进程为当前进程（`current`）时才有意义
+
+####    路径一：内核访问内核虚拟地址（直接解引用）
+
+内核代码访问内核地址时，**直接解引用即可**，因为该地址恒定有效、恒定映射：
+
+```cpp
+// 直接读取内核全局变量 / 内核对象字段，无需任何保护
+extern const sys_call_ptr_t sys_call_table[];
+unsigned long addr = (unsigned long)sys_call_table[__NR_openat];   // 直接访问
+
+struct task_struct *p = current;
+pid_t pid = p->pid;            // 直接解引用内核指针
+```
+
+在这条路径上，内核**不需要做任何地址合法性校验**：如果这里发生了缺页（Page Fault），说明内核逻辑本身出了 bug（比如解引用了野指针），缺页处理程序会判定故障地址落在内核空间且无对应 VMA/映射，直接触发 `oops`（内核崩溃），而不是优雅返回错误
+
+####    路径二：内核访问用户虚拟地址（受控访问）
+
+内核在系统调用等场景中经常需要读写用户态传入的缓冲区（如 `read()`/`write()` 的 `buf`），但**绝不能像访问内核地址那样直接解引用用户指针**，原因有四：
+
+1.  **用户页可能尚未映射或被换出**：用户内存是惰性分配的（见 0x05 缺页中断），直接访问可能触发缺页，必须以可恢复的方式访问
+2.  **指针可能非法或恶意**：用户指针来自用户态，可能指向内核地址、非 canonical 地址或未映射区。若不校验，用户程序就能诱导内核读写任意地址（经典的越权/提权漏洞）
+3.  **SMAP（Supervisor Mode Access Prevention）**：自 Intel Broadwell 起，CPU 默认禁止内核态（ring0）直接访问用户页，除非临时置位 `EFLAGS.AC`。内核通过 `STAC`/`CLAC` 指令在访问用户内存前后开关该标志
+4.  **进程上下文约束**：用户地址只在 `current->mm` 正确时才有意义。在硬中断、部分内核线程（`current->mm == NULL`）等上下文中，当前 `CR3` 未必指向目标进程的地址空间，此时访问某个用户地址就是错误的
+
+因此内核统一通过 **`access_ok()` + `copy_from_user()`/`copy_to_user()`/`get_user()`/`put_user()`** 这套 uaccess 接口访问用户内存，它们完成三件事：
+
+-   **`access_ok(addr, size)`**：校验 `[addr, addr+size)` 完整落在用户地址区间（6.x 内核中退化为对 `TASK_SIZE_MAX` 的纯范围检查；4.x/5.x 内核早期依赖 `set_fs()` 设置的 `addr_limit`）
+-   **`STAC`/`CLAC`**：临时放开 SMAP，访问结束立即关闭
+-   **异常修复表（`_ASM_EXTABLE`）**：为每条用户内存访问指令登记一个修复地址。一旦访问触发缺页且无法修复（坏地址），缺页处理程序不会 `oops`，而是跳转到修复地址，让 uaccess 函数返回 `-EFAULT`
+
+以 `read()` 系统调用把内核数据拷回用户缓冲区为例（简化）：
+
+```c
+// 内核态：kbuf 是内核地址（直接用），buf 是用户地址（必须走 copy_to_user）
+ssize_t xx_read(char __user *buf, const char *kbuf, size_t n)
+{
+    // copy_to_user 内部：access_ok(buf, n) → STAC → 逐字拷贝(带异常修复) → CLAC
+    if (copy_to_user(buf, kbuf, n))
+        return -EFAULT;      // 坏地址被优雅转换为错误码，而非崩溃
+    return n;
+}
+```
+
+####    两条路径对比
+
+```mermaid
+flowchart TD
+    KernCode["内核代码需要访问地址 addr"]
+    KernCode --> Which{"addr 属于哪个半区?"}
+
+    Which -->|"内核半区<br/>(0xFFFF8000... 以上)"| DirectPath["直接解引用<br/>*(type *)addr"]
+    DirectPath --> DirectOK["恒有效: 内核映射全局共享"]
+    DirectPath -.->|"若缺页"| Oops["内核 bug → oops 崩溃"]
+
+    Which -->|"用户半区<br/>(0x00007FFF... 以下)"| UserPath["uaccess 接口<br/>copy_from/to_user, get/put_user"]
+    UserPath --> AccessOk["access_ok: 范围校验"]
+    AccessOk --> Smap["STAC 放开 SMAP"]
+    Smap --> Copy["拷贝(登记异常修复表)"]
+    Copy --> Clac["CLAC 关闭 SMAP"]
+    Copy -.->|"坏地址缺页"| Fixup["异常修复 → 返回 -EFAULT"]
+```
+
+| 对比维度 | 内核访问内核 VA | 内核访问用户 VA |
+| --- | --- | --- |
+| 访问方式 | 直接解引用 | `copy_from_user` 等 uaccess 接口 |
+| 是否 `access_ok` 校验 | 否 | 是（须落在用户区间） |
+| 是否处理 SMAP（STAC/CLAC） | 否 | 是 |
+| 映射是否恒有效 | 是（全局共享） | 否（随进程切换，可能未分配/被换出） |
+| 上下文要求 | 无 | 需 `current->mm` 正确 |
+| 访问坏地址的后果 | `oops`（视为内核 bug） | 优雅返回 `-EFAULT`（异常修复表兜底） |
+
+这套**内核地址直接访问、用户地址受控访问**的差异，正是 eBPF 两个 helper 分开实现的根本原因
+
+##  0x09    bpf_probe_read_user 与 bpf_probe_read_kernel 的实现
+
+####    为什么 eBPF 必须用专门的 helper
+
+eBPF 程序运行在内核态，但它是**受限、不可信**的代码，verifier 禁止它直接解引用任意指针（否则一个坏指针就能让内核崩溃）。而在 `kprobe`/`tracepoint` 等挂载点，开发者拿到的函数参数往往是指针，指向的内存对 eBPF 而言是 unsafe 的，可能是用户地址、可能是尚未映射的内核地址。因此 eBPF 只能通过**带缺页保护（fault-safe）的 helper** 来读取目标内存，即 `bpf_probe_read_*` 系列
+
+####    版本演进：从一个 helper 到两个
+
+结合上一节内容可知，读取用户内存和读取内核内存在底层是两条不同路径，eBPF helper 的演进也正是围绕这一点：
+
+```text
+≤ 5.4   仅有 bpf_probe_read
+        └─ probe_kernel_read()  →  set_fs(KERNEL_DS) + __copy_from_user_inatomic
+           在 x86_64 上「恰好」能读用户/内核地址，但语义含糊、不可移植
+
+  5.5   拆分为 bpf_probe_read_user / bpf_probe_read_kernel（+ *_str）
+        ├─ probe_user_read()   →  set_fs(USER_DS)   + access_ok + __copy_from_user_inatomic
+        └─ probe_kernel_read() →  set_fs(KERNEL_DS) + __copy_from_user_inatomic
+           (commit 6ae08ae3dea2, Daniel Borkmann)
+
+5.10~5.18  set_fs()/addr_limit 机制被彻底移除
+           probe_user_read   → copy_from_user_nofault
+           probe_kernel_read → copy_from_kernel_nofault
+
+  6.x   当前形态（本文）
+        ├─ bpf_probe_read_user   → copy_from_user_nofault
+        └─ bpf_probe_read_kernel → copy_from_kernel_nofault
+```
+
+> 注：`bpf_probe_read_user`/`bpf_probe_read_kernel` 是 5.5 才正式引入的（部分发行版5.4也已支持）
+
+####    6.x 实现剖析
+
+**（1）`bpf_probe_read_user` → `copy_from_user_nofault`**
+
+[`kernel/trace/bpf_trace.c`](https://elixir.bootlin.com/linux/v6.6/source/kernel/trace/bpf_trace.c)：
+
+```cpp
+static __always_inline int
+bpf_probe_read_user_common(void *dst, u32 size, const void __user *unsafe_ptr)
+{
+    int ret = copy_from_user_nofault(dst, unsafe_ptr, size);
+    if (unlikely(ret < 0))
+        memset(dst, 0, size);       // 出错时清零目标缓冲区
+    return ret;
+}
+
+BPF_CALL_3(bpf_probe_read_user, void *, dst, u32, size,
+           const void __user *, unsafe_ptr)
+{
+    return bpf_probe_read_user_common(dst, size, unsafe_ptr);
+}
+```
+
+[`mm/maccess.c`](https://elixir.bootlin.com/linux/v6.6/source/mm/maccess.c)：
+
+```cpp
+long copy_from_user_nofault(void *dst, const void __user *src, size_t size)
+{
+    long ret = -EFAULT;
+
+    if (!__access_ok(src, size))    // 1、src 必须落在用户地址区间
+        return ret;
+    if (!nmi_uaccess_okay())        // 2、当前 CR3/mm 上下文必须正确（NMI 等场景保护）
+        return ret;
+
+    pagefault_disable();            // 3、关缺页：不允许睡眠去做缺页换入
+    ret = __copy_from_user_inatomic(dst, src, size);  // 4、uaccess 原语：STAC/CLAC + 异常修复
+    pagefault_enable();
+
+    return ret ? -EFAULT : 0;
+}
+```
+
+上述代码实现要点，走的是**用户内存访问原语** `__copy_from_user_inatomic`，因此天然带 SMAP 的 `STAC/CLAC`、`access_ok` 用户区间校验，并通过 `current` 的页表（用户半区）读取；`pagefault_disable()` 保证即使目标页未驻留也不会去走睡眠式缺页换入，而是直接经异常修复返回 `-EFAULT`
+
+**（2）`bpf_probe_read_kernel` → `copy_from_kernel_nofault`**
+
+```cpp
+BPF_CALL_3(bpf_probe_read_kernel, void *, dst, u32, size,
+           const void *, unsafe_ptr)
+{
+    return bpf_probe_read_kernel_common(dst, size, unsafe_ptr);   // 内部同样出错清零
+}
+```
+
+```cpp
+long copy_from_kernel_nofault(void *dst, const void *src, size_t size)
+{
+    unsigned long align = 0;
+    ...
+    if (!copy_from_kernel_nofault_allowed(src, size))   // 1、架构钩子：可拒绝非法内核区间
+        return -ERANGE;
+
+    pagefault_disable();
+    // 2、按对齐用内核访问原语逐字长拷贝（u64/u32/u16/u8）
+    if (!(align & 7))
+        copy_from_kernel_nofault_loop(dst, src, size, u64, Efault);
+    ...
+    copy_from_kernel_nofault_loop(dst, src, size, u8,  Efault);
+    pagefault_enable();
+    return 0;
+Efault:
+    pagefault_enable();
+    return -EFAULT;         // 3、坏地址经异常修复跳到这里
+}
+// 循环体展开为 __get_kernel_nofault()，即内核内存访问原语，无 SMAP 切换、无用户区间校验
+```
+
+要点：走的是**内核内存访问原语** `__get_kernel_nofault`，**不做** SMAP `STAC/CLAC`（访问的是内核页）、**不做** `access_ok` 用户区间校验；取而代之的是架构相关的 `copy_from_kernel_nofault_allowed()` 钩子（在用户/内核地址空间不重叠的架构上可拒绝非法区间），同样以 `pagefault_disable()` + 异常修复保证不会 `oops`
+
+此外，`bpf_probe_read_kernel`/`bpf_probe_read_kernel_str` 在 `func_proto` 查找处还受 `security_locked_down(LOCKDOWN_BPF_READ_KERNEL)` 管控（内核 lockdown 打开时禁用读内核内存）
+
+####    核心差异对比
+
+```mermaid
+flowchart LR
+    subgraph U ["bpf_probe_read_user"]
+        direction TB
+        U1["copy_from_user_nofault"] --> U2["__access_ok 用户区间校验"]
+        U2 --> U3["nmi_uaccess_okay 上下文校验"]
+        U3 --> U4["__copy_from_user_inatomic<br/>(STAC/CLAC + 异常修复)"]
+    end
+    subgraph K ["bpf_probe_read_kernel"]
+        direction TB
+        K1["copy_from_kernel_nofault"] --> K2["copy_from_kernel_nofault_allowed<br/>架构区间钩子"]
+        K2 --> K3["__get_kernel_nofault 逐字拷贝<br/>(无 SMAP, 异常修复)"]
+    end
+```
+
+| 维度 | `bpf_probe_read_user` | `bpf_probe_read_kernel` |
+| --- | --- | --- |
+| 目标地址空间 | 用户半区（`< TASK_SIZE`） | 内核半区 |
+| 底层函数 | `copy_from_user_nofault` | `copy_from_kernel_nofault` |
+| 访问原语 | `__copy_from_user_inatomic` | `__get_kernel_nofault` |
+| 地址校验 | `__access_ok`（用户区间） | `copy_from_kernel_nofault_allowed`（架构相关） |
+| SMAP（STAC/CLAC） | 需要 | 不需要 |
+| 上下文要求 | 需 `current->mm`/CR3 正确 | 无特殊要求 |
+| 缺页处理 | `pagefault_disable` + 异常修复 → `-EFAULT` | 同左 |
+| lockdown 管控 | 无 | `LOCKDOWN_BPF_READ_KERNEL` |
+| 典型数据 | `filename`、`sockaddr`、`argv` 等用户缓冲 | `sk_buff`、`task_struct`、`sock` 等内核对象 |
+
+####    为什么不合并成一个 helper
+
+-   **可移植性**：在 s390 等用户/内核地址空间不重叠的架构上，必须用对应的访问原语才能寻址正确的空间，用内核原语去读用户地址会失败
+-   **SMAP 正确性**：读用户内存必须开关 `AC` 标志，读内核内存则不能
+-   **语义需清晰**：在 x86\_64 上老式 `bpf_probe_read` 混用，但语义含糊、跨架构不可移植。显式区分 user/kernel 让 verifier 与 CO-RE 能做正确处理
+
+##  0x0A    bpf_probe_read_user / bpf_probe_read_kernel 的典型使用
+
+以 `libbpf`与 CO-RE 举例，核心原则为**判断被读指针指向用户空间还是内核空间，用户指针用 `_user` 变体，内核指针用 `_kernel` 变体**
+
+####    挂载点：内核内部函数 vs 系统调用入口
+
+-   `do_sys_openat2` 是**内核内部函数**，参数即为普通函数入参，直接用 `BPF_KPROBE` 宏取参
+-   `__x64_sys_connect` 是 x86\_64 上的**系统调用入口封装**（`SYSCALL_DEFINE` 展开生成），其真实参数被打包在 `struct pt_regs *regs` 中，需用 `BPF_KPROBE_SYSCALL` 宏解包
+
+####    kprobe/do_sys_openat2：读用户空间字符串
+
+内核原型（[`fs/open.c`](https://elixir.bootlin.com/linux/v6.6/source/fs/open.c)）：
+
+```cpp
+// filename 带 __user 标注，指向用户空间
+static long do_sys_openat2(int dfd, const char __user *filename, struct open_how *how);
+```
+
+对eBPF 程序而言，因为`filename` 是用户指针，必须用 `bpf_probe_read_user_str()`，sample如下：
+
+```cpp
+#include <vmlinux.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
+
+char LICENSE[] SEC("license") = "GPL";   // probe_read 系列要求 GPL
+
+SEC("kprobe/do_sys_openat2")
+int BPF_KPROBE(k_openat2, int dfd, const char *filename, struct open_how *how)
+{
+    char fname[256];
+
+    // filename 指向用户空间 → 必须用 _user 变体；_str 会在遇到 '\0' 时停止
+    long n = bpf_probe_read_user_str(fname, sizeof(fname), filename);
+    if (n > 0)
+        bpf_printk("openat2 dfd=%d file=%s", dfd, fname);
+    return 0;
+}
+```
+
+####    kprobe/__x64_sys_connect：读用户空间结构体
+
+内核原型（[`net/socket.c`](https://elixir.bootlin.com/linux/v6.6/source/net/socket.c)
+
+```cpp
+// uservaddr 带 __user 标注，指向用户空间的 sockaddr
+int __sys_connect(int fd, struct sockaddr __user *uservaddr, int addrlen);
+```
+
+对eBPF 程序而言，用 `BPF_KPROBE_SYSCALL` 解包系统调用参数，`uservaddr` 是用户指针，用 `bpf_probe_read_user()` 拷贝定长结构体。sample代码如下：
+
+```cpp
+SEC("kprobe/__x64_sys_connect")
+int BPF_KPROBE_SYSCALL(k_connect, int fd, struct sockaddr *uservaddr, int addrlen)
+{
+    struct sockaddr_in sa = {};
+
+    // uservaddr 指向用户空间 → _user 变体，按定长拷贝
+    if (bpf_probe_read_user(&sa, sizeof(sa), uservaddr) != 0)
+        return 0;
+
+    if (sa.sin_family == AF_INET) {
+        __u16 dport = bpf_ntohs(sa.sin_port);
+        __u32 daddr = sa.sin_addr.s_addr;
+        bpf_printk("connect fd=%d daddr=%x dport=%d", fd, daddr, dport);
+    }
+    return 0;
+}
+```
+
+> 说明：`BPF_KPROBE_SYSCALL` 会自动处理（syscall 参数封装在 `pt_regs` 里），这层间接（等价于先取 `regs`，再从中提取 `di/si/dx` 等寄存器）。若直接用 `BPF_KPROBE`，拿到的第一个参数会是 `struct pt_regs *`，取不到真实入参
+
+####    kprobe/tcp_sendmsg：读内核空间结构体
+
+作为内核调用函数，`sk` 指向的是内核对象，必须用 `bpf_probe_read_kernel()`：
+
+```cpp
+// tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
+SEC("kprobe/tcp_sendmsg")
+int BPF_KPROBE(k_tcp_sendmsg, struct sock *sk)
+{
+    __u16 dport = 0;
+
+    // &sk->__sk_common.skc_dport 是内核地址 → _kernel 变体
+    bpf_probe_read_kernel(&dport, sizeof(dport), &sk->__sk_common.skc_dport);
+    bpf_printk("tcp_sendmsg dport=%d", bpf_ntohs(dport));
+    return 0;
+}
+```
+
+在 CO-RE 场景中，`BPF_CORE_READ(sk, __sk_common.skc_dport)` 底层展开即为 `bpf_probe_read_kernel()`；若要读用户指针链，应使用 `bpf_probe_read_user()` 或 `BPF_CORE_READ_USER()`
+
+####    小结
+
+| 指针来源 | 应使用 |
+| --- | --- |
+| 带 `__user` 标注 / 来自 syscall 用户入参（`filename`、`buf`、`sockaddr`、`argv`...） | `bpf_probe_read_user[_str]` |
+| 内核对象字段 / 内核函数返回的内核指针（`sk`、`task`、`skb`、`dentry`...） | `bpf_probe_read_kernel[_str]` / `BPF_CORE_READ` |
+
+一些常见问题：
+
+-   **用错变体**：在 x86\_64 上用 `bpf_probe_read_user` 读内核地址会被 `__access_ok` 直接拒绝（返回 `-EFAULT`）；用 `bpf_probe_read_kernel` 读用户地址在多数情况会失败或读到错误数据。出错时目标缓冲区被 `memset(0)`，容易表现为「读到全 0」的静默错误
+-   **字符串 vs 定长**：读 C 字符串用 `_str` 变体（遇 `\0` 停止并返回长度）；读定长结构体用非 `_str` 变体
+-   **License**：`probe_read` 系列为 GPL-only，程序需声明 `char LICENSE[] SEC("license") = "GPL";`
+-   **上下文**：读用户内存依赖 `current` 为目标进程；在与目标进程无关的上下文（如无关的软/硬中断）中读用户地址无意义
+
+##  0x0B  参考
 -   [4.6 深入理解 Linux 虚拟内存管理](https://www.xiaolincoding.com/os/3_memory/linux_mem.html)
 -   [4.7 深入理解 Linux 物理内存管理](https://www.xiaolincoding.com/os/3_memory/linux_mem2.html#_6-1-%E5%8C%BF%E5%90%8D%E9%A1%B5%E7%9A%84%E5%8F%8D%E5%90%91%E6%98%A0%E5%B0%84)
 -   [mmap 源码分析](https://leviathan.vip/2019/01/13/mmap%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90/)
@@ -904,3 +1254,10 @@ flowchart TB
 -   [一步一图带你深入理解 Linux 虚拟内存管理](https://mp.weixin.qq.com/s?__biz=Mzg2MzU3Mjc3Ng==&mid=2247486732&idx=1&sn=435d5e834e9751036c96384f6965b328)
 -   [一步一图带你构建 Linux 页表体系](https://mp.weixin.qq.com/s?__biz=Mzg2MzU3Mjc3Ng==&mid=2247488477&idx=1&sn=f8531b3220ea3a9ca2a0fdc2fd9dabc6)
 -   [Linux Documentation/x86/x86_64/mm.txt](https://elixir.bootlin.com/linux/v4.11.6/source/Documentation/x86/x86_64/mm.txt)
+-   [bpf: Add probe_read_{user, kernel} and probe_read_{user,kernel}_str helpers（commit 6ae08ae3dea2）](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=6ae08ae3dea2)
+-   [maccess: rename probe_kernel_{read,write} to copy_{from,to}_kernel_nofault（commit fe557319aa06）](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=fe557319aa06)
+-   [v6.6 mm/maccess.c](https://elixir.bootlin.com/linux/v6.6/source/mm/maccess.c)
+-   [v6.6 kernel/trace/bpf_trace.c](https://elixir.bootlin.com/linux/v6.6/source/kernel/trace/bpf_trace.c)
+-   [BPF and eBPF - bpf-helpers(7) man page（bpf_probe_read_user / bpf_probe_read_kernel）](https://man7.org/linux/man-pages/man7/bpf-helpers.7.html)
+-   [libbpf: bpf_tracing.h（BPF_KPROBE / BPF_KPROBE_SYSCALL 宏）](https://github.com/libbpf/libbpf/blob/master/src/bpf_tracing.h)
+-   [x86: uaccess、SMAP 与 STAC/CLAC](https://www.kernel.org/doc/html/latest/x86/index.html)
