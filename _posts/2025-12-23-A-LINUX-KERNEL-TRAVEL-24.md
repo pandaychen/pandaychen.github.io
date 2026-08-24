@@ -1956,3 +1956,5 @@ flowchart TD
 -   [The multi-block allocator - LWN.net](https://lwn.net/Articles/297696/)
 -   [内核之旅（二十一）：page cache](https://pandaychen.github.io/2025/11/02/A-LINUX-KERNEL-TRAVEL-21/)
 -   [内核之旅（二十二）：内核视角下的 IO 读写（三）](https://pandaychen.github.io/2025/12/02/A-LINUX-KERNEL-TRAVEL-22/)
+-   [pread for very large files](https://stackoverflow.com/questions/36565209/pread-for-very-large-files)
+-   [Why Linux read() avoids using full 2 GiB in one call](https://unix.stackexchange.com/questions/794316/why-linux-read-avoids-using-full-2-gib-in-one-call)
