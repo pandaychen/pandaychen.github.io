@@ -23,7 +23,7 @@ tags:
 -   高端内存
 -   页表体系构建与管理
 -   缺页中断处理流程
--   物理内存分配与虚拟内存关联
+-   物理内存分配与虚拟内存关联（PTE关联到物理内存，Page Table）
 -   从 mmap 到写入物理内存的端到端过程
 -   64 位下内核访问内核态/用户态虚拟地址空间的机制
 -   `bpf_probe_read_user` 与 `bpf_probe_read_kernel` 的底层实现区别
@@ -582,7 +582,7 @@ static int do_wp_page(struct vm_fault *vmf)
 
 ##  0x06    物理内存分配与虚拟内存关联
 
-缺页中断处理过程中需要分配物理内存页，内核提供了多层次的物理内存分配接口
+缺页中断处理过程中需要分配物理内存页，内核提供了多层次的物理内存分配接口，核心机制有如下几个：
 
 ####    伙伴系统（Buddy System）
 
@@ -648,9 +648,9 @@ void *kmalloc(size_t size, gfp_t flags);
 vma = kmem_cache_zalloc(vm_area_cachep, GFP_KERNEL);
 ```
 
-####    物理页到 PTE 的关联
+####    重要：物理页到 PTE 的关联
 
-物理内存分配完成后，需要将物理页帧号填入 PTE 中，并设置相应的权限标志位，这一步通过 [`set_pte_at`](https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/include/asm/pgtable.h#L80) 完成：
+**物理内存分配完成后，需要将物理页帧号填入 PTE 中，并设置相应的权限标志位**，这一步通过 [`set_pte_at`](https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/include/asm/pgtable.h#L80) 完成：
 
 ```cpp
 // 将物理页和权限组装成 PTE 条目
@@ -833,7 +833,7 @@ flowchart TB
         direction TB
         SF_VMA["VMA: vm_file=文件, vm_ops=文件系统ops"]
         SF_PF["缺页 -> do_shared_fault"]
-        SF_PC["查找/填充 Page Cache"]
+        SF_PC["查找/填充 Page Cache（idr树）"]
         SF_PTE["PTE 可写, 指向 Page Cache 中的文件页"]
         SF_WB["写入 Page Cache → pdflush 回写磁盘"]
         SF_VMA --> SF_PF --> SF_PC --> SF_PTE --> SF_WB
@@ -887,7 +887,7 @@ flowchart TB
         pud["PUD"]
         pmd["PMD"]
         pte["PTE"]
-        mm -->|"*pgd"| pgd
+        mm -->|"*pgd（指向进程的页目录）"| pgd
         pgd --> pud --> pmd --> pte
         pte -->|"物理页帧号 PFN"| page
     end
@@ -900,6 +900,50 @@ flowchart TB
 > 说明：本节的 eBPF 相关章节基于 [6.6.47 内核版本](https://elixir.bootlin.com/linux/v6.6.47/source)
 
 前文分析了内核态虚拟地址空间的布局。在 eBPF 开发中，也有一个极易踩坑的问题：**内核代码在访问「内核虚拟地址」和「用户虚拟地址」时，走的是完全不同的两条路径**。理解这一点，才能理解 `bpf_probe_read_kernel` 与 `bpf_probe_read_user` 为什么要分成两个 helper
+
+####    内核需要访问用户空间的场景
+当用户态进程通过系统调用（System Call）陷入内核态时，进程的上下文并没有切换，当前的页表（CR3寄存器）依然包含了该用户进程的虚拟内存映射，常见于如下场景：
+
+-   系统调用传参： 当执行如 `sys_read(fd, buf, count)` 或 `sys_write()` 等系统调用时，传递的 `buf` 指针是一个用户空间地址。内核必须访问这个低地址区间的内存，将数据从内核态缓存拷贝到用户态，或者从用户态拷贝到内核态
+-   信号处理与异常： 内核在向用户进程投递信号（Signal）时，需要修改用户空间的栈（Signal Frame），这也是直接操作用户空间地址
+-   缺页中断处理（Page Fault）： 当用户进程访问未映射的内存引发缺页时，内核的缺页中断处理程序需要读取引发缺页的用户态虚拟地址，以为其分配真实的物理页
+
+由于内核与用户态的隔离机制，当在内核层面捕获事件时，必须明确你要读取的指针属于哪个空间。如在 eBPF 中，早期的 `bpf_probe_read()` 会尝试自动猜测地址类型，但在现代内核中建议（强制）开发者使用：
+-   `bpf_probe_read_user()`：专门用于安全地读取用户空间地址
+-   `bpf_probe_read_kernel()`：专门用于读取内核空间地址
+
+####    一个细节：bpf_probe_read_user 缺页？
+当在 eBPF 探针中使用 `bpf_probe_read_user` 读取用户态内存，且该内存页刚好被换出（Swapped out）或尚未分配真实物理页，从而引发缺页中断（Page Fault）时，**内核的处理方式是立即中止读取、不进行真正的缺页处理（不分配内存或读磁盘），并通过异常修复机制安全返回错误码（`-EFAULT`）**
+
+简单描述下这种异常处理机制
+
+1、为什么不能真正处理缺页？（内核上下文限制）
+
+真正的缺页处理（如从 Swap 分区读取数据或分配新的物理页）是一个可能休眠（Sleepable）的操作。在这个过程中，当前线程会被挂起，交出 CPU 给其他任务，直到磁盘 I/O 完成。然而传统的 eBPF 探针通常运行在原子上下文（Atomic Context）中，如：
+
+-   禁用了抢占（Preemption disabled）
+-   禁用了本地中断（IRQs disabled）
+-   处于 RCU 读侧临界区（RCU read-side critical section）
+
+在原子上下文中发生休眠是内核的致命错误，会导致死锁或系统崩溃（触发 scheduling while atomic 级别的 Kernel Panic）。因此内核绝对不允许 eBPF 探针触发真正的缺页处理
+
+2、内核如何拦截并安全处理这次缺页？
+
+为了防止读取未映射内存引发内核panic，`bpf_probe_read_user` 在底层调用了内核提供的安全拷贝机制，通常是 `copy_from_user_nofault()`。内核拦截并处理缺页的底层流程如下：
+
+-   第一步：显式禁用缺页中断。在执行实际的内存读取指令前，内核会调用 `pagefault_disable()`。这会在当前任务的 `task_struct` 中增加缺页中断禁用计数器
+-   第二步：触发硬件异常。 当 CPU 执行读取指令（如 x86 上的 `mov`）访问那个缺失的用户态虚拟地址时，MMU 依然会产生一个真实的硬件缺页异常（硬件中断 14，#PF）
+-   第三步：进入缺页处理程序（Page Fault Handler）。CPU 陷入内核的缺页中断处理函数（如 x86 的 `do_page_fault`等）
+-   第四步：快速退出（Fast Path Exit）。缺页处理程序首先会检查当前的上下文状态（`faulthandler_disabled()`）。因为它发现缺页中断已被禁用（第一步设置的），它会立刻放弃处理，不会去调用 `handle_mm_fault()` 进行复杂的内存分配或磁盘 I/O
+
+3、内核的异常修复表机制（Exception Table Fixup）：放弃处理后，如果内核直接返回，CPU 依然会尝试重新执行那条会导致缺页的指令，从而陷入死循环；或者因为在内核态发生未处理的缺页而直接触发 Oops。内核是如何优雅脱身的？
+
+所以，内核提供了异常修复表（`__ex_table`）机制来解决这个问题：
+
+1.  在编译内核时，带有 `nofault` 属性的汇编读取指令周围会被插入特定的宏（如 `_ASM_EXTABLE`），这些宏会在内核二进制文件的一个独立段（Section）中记录一对地址：`[出错指令的地址, 修复代码的地址]`
+2.  当 `do_page_fault` 决定放弃处理缺页时，它会调用 `fixup_exception()` 函数。该函数获取当前触发异常的指令寄存器（RIP/PC）的值，并在 `__ex_table` 表中进行二分查找
+3.  找到匹配项后，内核会修改中断返回栈上的指令寄存器值，使其指向修复代码的地址
+4.  如此，中断返回后，CPU 不再执行那条出错的读取指令，而是跳转到修复代码。修复代码通常只做一件事：将返回值设置为 `-EFAULT` 并跳转出读取函数
 
 ####    64 位地址空间的二分与共享
 
@@ -990,6 +1034,7 @@ flowchart TD
 这套**内核地址直接访问、用户地址受控访问**的差异，正是 eBPF 两个 helper 分开实现的根本原因
 
 ##  0x09    bpf_probe_read_user 与 bpf_probe_read_kernel 的实现
+这两个函数的底层核心逻辑都依赖于**禁用缺页中断 + 异常修复表（Exception Table）**，但它们在地址校验和硬件状态控制上有着本质的区别
 
 ####    为什么 eBPF 必须用专门的 helper
 
@@ -1065,6 +1110,15 @@ long copy_from_user_nofault(void *dst, const void __user *src, size_t size)
 
 上述代码实现要点，走的是**用户内存访问原语** `__copy_from_user_inatomic`，因此天然带 SMAP 的 `STAC/CLAC`、`access_ok` 用户区间校验，并通过 `current` 的页表（用户半区）读取；`pagefault_disable()` 保证即使目标页未驻留也不会去走睡眠式缺页换入，而是直接经异常修复返回 `-EFAULT`
 
+由于该函数的作用是让处于内核态的 eBPF 探针安全地读取用户空间内存。由于跨越了特权级边界，它的实现要复杂和严格得多。底层调用链为
+`bpf_probe_read_user() -> copy_from_user_nofault()`。核心机制总结为如下：
+
+1.  严格的 `access_ok()` 校验：在尝试读取之前，内核必须调用 `access_ok(ptr, size)` 宏。这个宏会严格校验指针 `ptr` 及其加上 `size` 后的范围，是否完全落在当前进程的合法的用户空间边界内（即小于 `TASK_SIZE_MAX`）
+2.  切换硬件访问防御机制（SMAP / PAN）：在现代 CPU 上，为了防止内核代码意外解引用用户态指针（导致提权漏洞），硬件提供了强制隔离机制
+    -   x86_64架构：开启了 SMAP 功能。`copy_from_user_nofault` 在实际执行 `mov` 读取前，必须通过 stac（Set AC flag）指令临时挂起 SMAP 保护。读取完成后，必须立刻执行 clac（Clear AC flag）指令恢复保护
+    -   ARM64架构： 对应的是 PAN（Privileged Access Never）机制，内核需要通过切换 `PSTATE.PAN` 寄存器位来临时放行
+3.  nofault 保护与用户态特定的异常修复：同样调用 `pagefault_disable()`。在执行读取的内联汇编时，使用的宏（如 `__get_user_size`）不仅会依赖 `__ex_table` 进行修复，还会处理与 SMAP 状态恢复相关的逻辑。如果在读取时发生缺页异常，异常处理程序在利用修复表跳出死循环前，会确保 clac 被正确执行，防止 SMAP 处于永久关闭的危险状态
+
 **（2）`bpf_probe_read_kernel` → `copy_from_kernel_nofault`**
 
 ```cpp
@@ -1102,6 +1156,12 @@ Efault:
 
 此外，`bpf_probe_read_kernel`/`bpf_probe_read_kernel_str` 在 `func_proto` 查找处还受 `security_locked_down(LOCKDOWN_BPF_READ_KERNEL)` 管控（内核 lockdown 打开时禁用读内核内存）
 
+本函数的作用是安全地读取内核空间内存。其底层的调用链大致为`bpf_probe_read_kernel() -> copy_from_kernel_nofault()`，核心机制如下：
+
+1.  地址边界校验：内核首先会检查目标指针是否真正落在内核地址空间内。通常会检查该地址是否大于 `TASK_SIZE`（或者体系结构定义的内核空间起始地址）。如果指针是一个伪造的用户态地址，读取会直接被拒绝，防止 eBPF 探针被利用进行跨边界的恶意读取
+2.  纯粹的内存拷贝（无硬件提权操作）：因为当前上下文已经处于 Ring 0（内核态），并且目标地址也是内核地址，所以不需要修改诸如 SMAP（Supervisor Mode Access Prevention）这样的硬件状态
+3.  nofault 保护：调用 `pagefault_disable()` 关闭缺页处理，随后使用带有 `__ex_table` 保护的内联汇编（通常是 `__get_kernel_nofault` 宏）执行直接内存读取（如 `mov` 指令）。如果地址无效（例如读取了未映射的内核模块地址），通过异常表修复跳转，安全返回 `-EFAULT`
+
 ####    核心差异对比
 
 ```mermaid
@@ -1122,14 +1182,14 @@ flowchart LR
 | 维度 | `bpf_probe_read_user` | `bpf_probe_read_kernel` |
 | --- | --- | --- |
 | 目标地址空间 | 用户半区（`< TASK_SIZE`） | 内核半区 |
-| 底层函数 | `copy_from_user_nofault` | `copy_from_kernel_nofault` |
+| 底层函数（核心 API） | `copy_from_user_nofault()` | `copy_from_kernel_nofault()` |
 | 访问原语 | `__copy_from_user_inatomic` | `__get_kernel_nofault` |
-| 地址校验 | `__access_ok`（用户区间） | `copy_from_kernel_nofault_allowed`（架构相关） |
-| SMAP（STAC/CLAC） | 需要 | 不需要 |
+| 地址校验 | `__access_ok`（用户区间），必须通过 `access_ok()` 校验，属于用户低地址 | `copy_from_kernel_nofault_allowed`（架构相关），必须属于内核高地址空间 |
+| SMAP（STAC/CLAC） | 需要，必须临时挂起（stac），用完立即恢复（clac） | 不需要，无需操作（全程保持开启，拦截用户态访问） |
 | 上下文要求 | 需 `current->mm`/CR3 正确 | 无特殊要求 |
 | 缺页处理 | `pagefault_disable` + 异常修复 → `-EFAULT` | 同左 |
 | lockdown 管控 | 无 | `LOCKDOWN_BPF_READ_KERNEL` |
-| 典型数据 | `filename`、`sockaddr`、`argv` 等用户缓冲 | `sk_buff`、`task_struct`、`sock` 等内核对象 |
+| 典型数据 | `filename`、`sockaddr`、`argv` 等用户缓冲，读取 `sys_execve` 的命令行参数、HTTP/HTTPS 请求的明文 Buffer 等 | `sk_buff`、`task_struct`、`sock` 等内核对象等 |
 
 ####    为什么不合并成一个 helper
 
@@ -1194,9 +1254,22 @@ int BPF_KPROBE_SYSCALL(k_connect, int fd, struct sockaddr *uservaddr, int addrle
 {
     struct sockaddr_in sa = {};
 
+    // 需要在 eBPF 栈上分配空间来存放读取到的数据
+    short family = 0;
+
+    // 从 user_addr (用户态地址) 安全读取 2 个字节 (sa_family) 到 eBPF 栈上的 family 变量中
+    // 底层会临时关闭 SMAP 硬件防护
+    long ret = bpf_probe_read_user(&family, sizeof(family), &user_addr->sa_family);
+    if (ret != 0) {
+        // 如果用户传入的指针非法，或者该内存页恰好被 swap out 导致缺页，这里会返回 -EFAULT
+        return 0; 
+    }
+
     // uservaddr 指向用户空间 → _user 变体，按定长拷贝
-    if (bpf_probe_read_user(&sa, sizeof(sa), uservaddr) != 0)
+    if (bpf_probe_read_user(&sa, sizeof(sa), uservaddr) != 0){
+        // 如果用户传入的指针非法，或者该内存页恰好被 swap out 导致缺页，这里会返回 -EFAULT
         return 0;
+    }
 
     if (sa.sin_family == AF_INET) {
         __u16 dport = bpf_ntohs(sa.sin_port);
@@ -1228,6 +1301,39 @@ int BPF_KPROBE(k_tcp_sendmsg, struct sock *sk)
 ```
 
 在 CO-RE 场景中，`BPF_CORE_READ(sk, __sk_common.skc_dport)` 底层展开即为 `bpf_probe_read_kernel()`；若要读用户指针链，应使用 `bpf_probe_read_user()` 或 `BPF_CORE_READ_USER()`
+
+####    bpf_probe_read_kernel：进程溯源
+
+当进程调用系统调用（如 `open/execve`）时，想要获取触发该调用的父进程 PID。此时需要从当前执行的 `task_struct` 结构体中，顺着指针链（task -> real_parent -> tgid）去读取。这些数据完全存放在内核地址空间中
+
+```c
+#include <vmlinux.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
+
+SEC("kprobe/do_sys_openat2")
+int BPF_KPROBE(trace_openat2) {
+    // bpf_get_current_task() 返回的是当前线程的 task_struct 指针，它是一个内核态指针
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    
+    struct task_struct *parent_task;
+    pid_t parent_pid;
+
+    // 步骤 1: 解引用 task->real_parent
+    // 从 task (内核地址) 中读取 real_parent 指针到 eBPF 栈变量 parent_task 中
+    long ret = bpf_probe_read_kernel(&parent_task, sizeof(parent_task), &task->real_parent);
+    if (ret != 0) {
+        return 0; // 读取失败，可能遇到 page fault 被拦截
+    }
+
+    // 步骤 2: 解引用 parent_task->tgid
+    // 从 parent_task (内核地址) 中读取 tgid 到 eBPF 栈变量 parent_pid 中
+    bpf_probe_read_kernel(&parent_pid, sizeof(parent_pid), &parent_task->tgid);
+
+    bpf_printk("Syscall triggered, Parent PID: %d\n", parent_pid);
+    return 0;
+}
+```
 
 ####    小结
 
