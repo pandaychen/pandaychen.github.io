@@ -199,25 +199,582 @@ dr-xr-xr-x 9 root root  0 Feb 10 10:43 ..
 ####	proc下的主要目录&&文件
 参考：[Linux Procfs (一) /proc/* 文件实例解析](https://juejin.cn/post/7055321925463048228)
 
-####	seq_file机制
-TODO
+####	procfs架构
 
-在procfs的内核实现中，大量出现了`seq_*`相关实现，`seq_read`在普通的文件`read`中加入了内核缓冲的功能，从而实现顺序多次遍历，读取大数据量的简单接口
+![procfs_arch]()
 
-游标机制的详细介绍
+##	0x02	seq_file机制
 
--	[`seq_read`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/seq_file.c#L169)
+####	seq_file机制介绍
+
+在procfs的内核实现中，大量使用了`seq_*`相关代码。`seq_file` 是内核提供的一套标准框架，专门用于解决通过虚拟文件系统输出大量内核数据时的缓冲区管理问题
+
+####	设计动机
+
+传统的 procfs `read` 回调中，开发者需要手动管理用户态缓冲区的偏移（`*ppos`）、分页、截断等细节，极易出现如下问题：
+-	数据量超过单次 `read` 的缓冲区大小时，需要手动维护"读到哪里了"的状态
+-	多个数据项拼接时，边界计算容易出错
+-	缓冲区溢出时缺乏统一的扩容机制
+
+`seq_file` 将这些复杂逻辑封装在内核框架中，开发者只需定义四个回调函数（`start/next/show/stop`），即可实现对任意大小数据的顺序遍历输出
+
+####	核心数据结构
+
+1、`struct seq_file`：每个打开的 seq 文件实例对应一个该结构体，存储在 `file->private_data` 中，结构定义如下：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/seq_file.h#L17
+struct seq_file {
+	char *buf;          // 内核缓冲区指针
+	size_t size;        // 缓冲区总大小（初始为 PAGE_SIZE，溢出时翻倍扩容）
+	size_t from;        // 当前待拷贝到用户态的起始偏移（buf 内部偏移）
+	size_t count;       // 缓冲区中待拷贝的有效数据字节数
+	size_t pad_until;   // seq_pad 的对齐目标位置
+	loff_t index;       // 当前迭代器的逻辑位序（第几个元素）
+	loff_t read_pos;    // 已经拷贝到用户态的累计字节数
+	u64 version;        // 版本号，用于跨 read 调用的断点续传（如 maps 中记录 vm_start）
+	struct mutex lock;  // 保护 seq_file 结构的互斥锁
+	const struct seq_operations *op;  // 迭代器操作函数表
+	int poll_event;
+	const struct file *file;  // 关联的文件指针
+	void *private;      // 私有数据指针（如 proc_maps_private）
+};
+```
+
+2、`struct seq_operations`：迭代器操作函数表，定义了遍历数据集合的四个回调方法
+
+```cpp
+struct seq_operations {
+	void * (*start) (struct seq_file *m, loff_t *pos);  // 定位到第 pos 个元素，返回迭代器指针
+	void (*stop) (struct seq_file *m, void *v);          // 遍历结束时的清理（如释放锁）
+	void * (*next) (struct seq_file *m, void *v, loff_t *pos);  // 移动到下一个元素
+	int (*show) (struct seq_file *m, void *v);           // 将当前元素格式化输出到缓冲区
+};
+```
+
+四个回调的契约：
+-	`start` 返回 `NULL` 表示遍历结束，返回 `ERR_PTR(error)` 表示出错
+-	`show` 返回 `0` 表示成功，返回负数表示出错，返回 `SEQ_SKIP`（值为`1`）表示跳过当前元素
+-	`stop` 无论遍历是否成功都**必定被调用**（类似于 `finally` 语义）
+
+![seq-file-pic1]()
+
+####	两种使用模式
+
+**模式一：多条目迭代模式**（`seq_open` + 自定义 `seq_operations`）
+
+适用于需要遍历多条记录的场景，如 `/proc/[pid]/maps`（遍历 VMA 链表）、`/proc/net/tcp`（遍历 TCP 连接表）等。使用者需要实现完整的 `start/next/show/stop` 四个回调函数
+
+```cpp
+// 典型用法示例（以 /proc/[pid]/maps 为例）
+// https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/task_mmu.c#L378
+static const struct seq_operations proc_pid_maps_op = {
+	.start	= m_start,     // 加锁、定位到起始 VMA
+	.next	= m_next,      // 移动到下一个 VMA
+	.stop	= m_stop,      // 释放锁
+	.show	= show_pid_map // 格式化输出单个 VMA 信息
+};
+
+static int pid_maps_open(struct inode *inode, struct file *file)
+{
+	return do_maps_open(inode, file, &proc_pid_maps_op);
+}
+
+const struct file_operations proc_pid_maps_operations = {
+	.open    = pid_maps_open,
+	.read    = seq_read,      // 使用标准的 seq_read
+	.llseek  = seq_lseek,
+	.release = proc_map_release,
+};
+```
+
+**模式二：单次输出模式**（`single_open` + 单个 `show` 回调）
+
+适用于数据量较小、一次性输出的场景，如 `/proc/meminfo`、`/proc/[pid]/limits` 等。`single_open` 内部自动构造了一组特殊的 `seq_operations`，其 `start` 只在 `pos==0` 时返回非空，`next` 永远返回 `NULL`
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/seq_file.c#L573
+int single_open(struct file *file, int (*show)(struct seq_file *, void *),
+		void *data)
+{
+	struct seq_operations *op = kmalloc(sizeof(*op), GFP_KERNEL);
+	int res = -ENOMEM;
+
+	if (op) {
+		op->start = single_start;  // pos==0 时返回非空，否则返回 NULL
+		op->next  = single_next;   // 永远返回 NULL（只遍历一次）
+		op->stop  = single_stop;   // 空操作
+		op->show  = show;          // 用户提供的 show 回调
+		res = seq_open(file, op);
+		if (!res)
+			((struct seq_file *)file->private_data)->private = data;
+		else
+			kfree(op);
+	}
+	return res;
+}
+
+static void *single_start(struct seq_file *p, loff_t *pos)
+{
+	return NULL + (*pos == 0);  // pos==0 返回 (void*)1，否则返回 NULL
+}
+
+static void *single_next(struct seq_file *p, void *v, loff_t *pos)
+{
+	++*pos;
+	return NULL;  // 永远返回 NULL，终止遍历
+}
+```
+
+####	`seq_read` 核心流程分析
+
+[`seq_read`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/seq_file.c#L169) 是 `seq_file` 框架的核心函数，当用户态调用 `read()` 系统调用时，VFS 层最终调用到此函数。其整体逻辑如下：
+
+```cpp
+ssize_t seq_read(struct file *file, char __user *buf, size_t size, loff_t *ppos)
+{
+	struct seq_file *m = file->private_data;
+	size_t copied = 0;
+	void *p;
+	int err = 0;
+
+	mutex_lock(&m->lock);
+	m->version = file->f_version;
+
+	// 阶段1：位置校验——如果 ppos 与上次不一致（如 lseek 后），通过 traverse 重新定位
+	if (*ppos == 0)
+		m->index = 0;
+	if (unlikely(*ppos != m->read_pos)) {
+		while ((err = traverse(m, *ppos)) == -EAGAIN)
+			;
+		if (err) {
+			m->read_pos = 0;
+			m->version = 0;
+			m->index = 0;
+			m->count = 0;
+			goto Done;
+		} else {
+			m->read_pos = *ppos;
+		}
+	}
+
+	// 阶段2：如果缓冲区中有上次剩余数据，先拷贝给用户
+	if (!m->buf) {
+		m->buf = seq_buf_alloc(m->size = PAGE_SIZE);
+		if (!m->buf)
+			goto Enomem;
+	}
+	if (m->count) {
+		n = min(m->count, size);
+		err = copy_to_user(buf, m->buf + m->from, n);
+		// ... 更新 count/from/size/buf/copied
+		if (!size)
+			goto Done;
+	}
+
+	// 阶段3：核心迭代循环——调用 start -> show -> next 填充缓冲区
+	pos = m->index;
+	p = m->op->start(m, &pos);       // 定位到当前位置
+	while (1) {
+		if (!p || IS_ERR(p))
+			break;
+		err = m->op->show(m, p);      // 格式化当前元素到 buf
+		if (err < 0)
+			break;
+		if (unlikely(err))            // SEQ_SKIP：跳过当前元素
+			m->count = 0;
+		if (unlikely(!m->count)) {
+			p = m->op->next(m, p, &pos);
+			m->index = pos;
+			continue;
+		}
+		if (m->count < m->size)
+			goto Fill;                // 有数据且未溢出，进入填充阶段
+		// 缓冲区溢出：扩容后重试
+		m->op->stop(m, p);
+		kvfree(m->buf);
+		m->count = 0;
+		m->buf = seq_buf_alloc(m->size <<= 1);  // 缓冲区翻倍
+		if (!m->buf)
+			goto Enomem;
+		m->version = 0;
+		pos = m->index;
+		p = m->op->start(m, &pos);   // 从当前位置重新开始
+	}
+	m->op->stop(m, p);
+	m->count = 0;
+	goto Done;
+
+Fill:
+	// 阶段4：继续填充更多元素到缓冲区（尽量填满用户请求的 size）
+	while (m->count < size) {
+		size_t offs = m->count;
+		loff_t next = pos;
+		p = m->op->next(m, p, &next);
+		if (!p || IS_ERR(p))
+			break;
+		err = m->op->show(m, p);
+		if (seq_has_overflowed(m) || err) {
+			m->count = offs;          // 回退到上一个成功位置
+			if (likely(err <= 0))
+				break;
+		}
+		pos = next;
+	}
+	m->op->stop(m, p);
+
+	// 阶段5：将缓冲区数据拷贝到用户空间
+	n = min(m->count, size);
+	err = copy_to_user(buf, m->buf, n);
+	copied += n;
+	m->count -= n;
+	if (m->count)
+		m->from = n;                  // 记录未拷贝完的偏移
+	else
+		pos++;
+	m->index = pos;
+
+Done:
+	if (!copied)
+		copied = err;
+	else {
+		*ppos += copied;
+		m->read_pos += copied;
+	}
+	file->f_version = m->version;
+	mutex_unlock(&m->lock);
+	return copied;
+}
+```
+
+`seq_read` 的核心流程可以用下图表示：
+
+```mermaid
+flowchart TD
+    A["用户态 read(fd, buf, size)"] --> B["mutex_lock"]
+    B --> C{"缓冲区有剩余数据?"}
+    C -->|是| D["copy_to_user 剩余数据"]
+    D --> E{"用户 buf 已满?"}
+    E -->|是| Z["Done: 返回 copied"]
+    E -->|否| F["调用 op->start(m, &pos)"]
+
+    C -->|否| F
+    F --> G{"p 有效?"}tgid_base_stuff
+    G -->|否/ERR| H["op->stop(m, p)"]
+    H --> Z
+
+    G -->|是| I["op->show(m, p)"]
+    I --> J{"缓冲区溢出?<br/>m->count == m->size"}
+    J -->|是| K["op->stop → 释放 buf<br/>m->size <<= 1 翻倍扩容<br/>重新 op->start"]
+    K --> G
+
+    J -->|否| L["进入 Fill 阶段"]
+    L --> M["op->next(m, p, &next)"]
+    M --> N{"还有元素 && buf 未满?"}
+    N -->|是| O["op->show(m, p)"]
+    O --> P{"溢出?"}
+    P -->|是| Q["回退 m->count = offs"]
+    P -->|否| M
+    Q --> R["op->stop(m, p)"]
+    N -->|否| R
+    R --> S["copy_to_user(buf, m->buf, n)"]
+    S --> Z
+    Z --> T["mutex_unlock, 返回"]
+```
+
+####	seq_read 流程的关键设计
+
+1、**缓冲区自动扩容**：初始分配 `PAGE_SIZE`（4KB）大小的内核缓冲区。如果单个元素的 `show` 输出超过缓冲区容量（`m->count == m->size`），则释放旧缓冲区，分配两倍大小的新缓冲区（`m->size <<= 1`），然后从当前 `index` 重新调用 `start` + `show`
+
+2、**断点续传机制**：通过三个游标协作实现：
+-	`m->index`：逻辑位序，记录当前遍历到第几个元素
+-	`m->read_pos`：字节位置，记录已拷贝到用户态的累计字节数
+-	`m->version`：由使用者自定义的位置标记（如 `/proc/[pid]/maps` 中记录 `vm_start` 地址），用于在多次 `read` 之间恢复遍历位置
+
+3、**溢出检测**：`seq_has_overflowed(m)` 判断 `m->count == m->size`。当 `show` 输出的数据超过缓冲区剩余空间时，内核回退到上一个元素（`m->count = offs`），在下次 `read` 调用时重试
+
+####	辅助输出函数
+
+seq_file 提供了一组函数用于在 `show` 回调中向缓冲区写入数据：
+
+| 函数 | 用途 |
+|------|------|
+| `seq_printf(m, fmt, ...)` | 格式化输出，类似 `printf` |
+| `seq_puts(m, s)` | 输出字符串 |
+| `seq_putc(m, c)` | 输出单个字符 |
+| `seq_put_decimal_ull(m, delim, num)` | 高性能无符号整数输出（避免 `sprintf` 的开销） |
+| `seq_put_decimal_ll(m, delim, num)` | 高性能有符号整数输出 |
+| `seq_write(m, data, len)` | 写入原始字节数据 |
+| `seq_escape(m, s, esc)` | 转义输出（将特殊字符替换为八进制序列） |
+| `seq_path(m, path, esc)` | 输出文件路径 |
+| `seq_setwidth(m, size)` + `seq_pad(m, c)` | 设置列宽并填充空格对齐 |
+
+这些函数内部都会检查缓冲区剩余空间，空间不足时标记溢出（`seq_set_overflow`），由 `seq_read` 负责后续的扩容重试
+
+####	大白话描述
+
+todo
 
 ##  0x02 procfs 的内核视角
 
 ####    pseudo FS的实现本质
-在传统的磁盘文件系统（如 ext4）中，文件代表的是一段存储在物理介质上的静态数据（对应于inode），在 procfs 中，文件只是一个内核窗口（如`/proc/cpuinfo`并不是一个真正的磁盘文件），即触发读取时，内核会捕获到 `read` 系统调用，并立即触发了与该文件绑定的回调函数，实时搜集当前的硬件信息并格式化成文本返回。
+在传统的磁盘文件系统（如 ext4）中，文件代表的是一段存储在物理介质上的静态数据（对应于inode），在 procfs 中，文件只是一个内核窗口（如`/proc/cpuinfo`并不是一个真正的磁盘文件），即触发读取时，内核会捕获到 `read` 系统调用，并立即触发了与该文件绑定的回调函数，实时搜集当前的硬件信息并格式化成文本返回
+
+procfs 整体架构中，用户态访问通过 VFS 层路由到 procfs 的各个数据结构：
+
+```mermaid
+graph TD
+    subgraph userspace [用户空间]
+        cat["cat /proc/meminfo"]
+        ls["ls /proc/1234/fd"]
+        echo["echo 1 > /proc/sys/..."]
+    end
+
+    subgraph vfs_layer [VFS层]
+        syscall["系统调用 open/read/getdents"]
+        vfs_ops["vfs_read / iterate_shared"]
+    end
+
+    subgraph procfs_layer [procfs层]
+        proc_root["proc_root<br/>proc_dir_entry"]
+        pde_static["静态PDE节点<br/>meminfo/cpuinfo/sys/..."]
+        pde_pid["动态PID目录<br/>/proc/1234/"]
+        pid_entry_table["pid_entry表<br/>tgid_base_stuff"]
+        pid_sub["子文件/目录<br/>status/maps/fd/..."]
+    end
+
+    subgraph kernel_data [内核数据结构]
+        task["task_struct"]
+        mm["mm_struct"]
+        files["files_struct"]
+        signal["signal_struct"]
+    end
+
+    cat --> syscall
+    ls --> syscall
+    echo --> syscall
+    syscall --> vfs_ops
+    vfs_ops --> proc_root
+    proc_root -->|proc_lookup| pde_static
+    proc_root -->|proc_pid_lookup| pde_pid
+    pde_pid --> pid_entry_table
+    pid_entry_table --> pid_sub
+    pid_sub -->|回调函数| task
+    task --> mm
+    task --> files
+    task --> signal
+```
 
 每个 `/proc` 节点都可以定义自己的 `struct file_operations`，在procfs中，常用的成员如下：
 -	`.read`： 对应用户态的 `read()`，定义如何生成数据。
 -	`.write`： 对应用户态的 `write()`，允许用户通过向文件写入字符串来修改内核参数（如 `echo 1 > /proc/sys/net/ipv4/ip_forward`）
 -	`.open`： 定义打开文件时的初始化操作
 -	对于比较复杂、需要输出大量结构化数据的文件（如 `/proc/net/dev`等），内核通常会使用 `seq_file` 接口，常用于处理大数据量的分页读取
+
+####	内核视角：动态与静态
+在4.11.6版本内核中，`/proc` 目录下的文件来源复杂且庞大，内核将它们分为了两大阵营，即全局静态文件（如 `/proc/meminfo`）和 进程动态文件（如 `/proc/{pid}/fd/0`）。虽然用户态最终发起的都是标准的 `read()/open()` 等系统调用，但在内核的 VFS层之下，这两类文件绑定 hook 函数的路径截然不同
+
+1、全局静态文件（如`/proc/meminfo`）：这类文件反映的是整个系统的全局状态，它们在系统启动或模块加载时就被硬编码注册到了 procfs 中
+
+-	预先分配：内核启动时，内存子系统会主动[调用](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/proc_fs.h#L31) `proc_create("meminfo", 0, NULL, &meminfo_proc_fops)`，会在内存中生成一个持久的 `proc_dir_entry` 结构体，其中保存了文件的主名和处理该文件的 Hook 集合（在 4.11.6 版本对应的结构是`file_operations`）
+-	VFS 查找&&组装：当执行 `cat /proc/meminfo` 时，VFS 层在路径解析阶段（关联`open`系统调用）找到了这个 `proc_dir_entry`，并基于它在内存中创建一个对应的 inode。内核会直接把 `proc_dir_entry->proc_fops`（也就是 `meminfo_proc_fops`）赋值给 `inode->i_fop`，后面会对这部分操作进行完整的分析
+-	读取处理：后续，读操作就会顺理成章地路由到 `meminfo_proc_fops` 中定义的 `.read` 函数（通常结合 `seq_file` 机制一段段输出内存信息）
+
+2、进程动态文件：由于进程是动态变化的，且每个进程都有海量的属性（fd、maps、status等），如果为每个进程的每个属性预先创建 `proc_dir_entry`，会瞬间耗尽系统内存。因此，`/proc/{pid}` 下的所有内容都是按需动态生成（非常驻）。以VFS试图解析路径 `/proc/{pid}/fd/0` 为例，内核的动态查找机制一般如下：
+
+-	解析到 `123` 时，`/proc` 根目录的查找 Hook （`proc_root_lookup`函数）会验证 PID `123` 是否存在，若存在，实时生成一个代表该进程的 inode
+-	解析到 fd 目录时，会根据`tgid_base_stuff`定位到`DIR("fd"...)`，进入特定的子系统，调用 `proc_fd_lookup` Hook
+-	解析到 `0` 时，内核会去审查 PID `123` 进程的 `task_struct` 中的打开文件表。确认文件描述符 `0` 存在后，内核会创建出一个新的 inode
+
+注意，此时生成的 `fd/0` 是一个符号链接，内核不会给它绑定像 meminfo 那样的普通文件读取 Hook，而是给它的 `inode->i_op`（inode 操作集）绑定 `proc_pid_link_inode_operations`。当用户态尝试读取 OR 跳转这个文件时，触发的是软链接解析 hook，内核会找到目标进程真正打开的底层物理文件（如 `/dev/pts/1`）
+
+####	tgid_base_stuff数组
+`tgid_base_stuff`可以理解为硬编码图纸，在 Linux 4.11.6 内核中，它定义了 `/proc/{pid}/` 目录下每个子目录或子文件的元数据和行为 Hook
+
+```c
+static const struct pid_entry tgid_base_stuff[] = {
+	DIR("task",       S_IRUGO|S_IXUGO, proc_task_inode_operations, proc_task_operations),
+	DIR("fd",         S_IRUSR|S_IXUSR, proc_fd_inode_operations, proc_fd_operations),
+	DIR("map_files",  S_IRUSR|S_IXUSR, proc_map_files_inode_operations, proc_map_files_operations),
+	DIR("fdinfo",     S_IRUSR|S_IXUSR, proc_fdinfo_inode_operations, proc_fdinfo_operations),
+	DIR("ns",	  S_IRUSR|S_IXUGO, proc_ns_dir_inode_operations, proc_ns_dir_operations),
+	REG("environ",    S_IRUSR, proc_environ_operations),
+	REG("auxv",       S_IRUSR, proc_auxv_operations),
+	......
+	LNK("cwd",        proc_cwd_link),
+	LNK("root",       proc_root_link),
+	LNK("exe",        proc_exe_link),
+	......
+}
+```
+
+数组中每个成员，都是由宏定义的一个`pid_entry`对象。以`DIR`宏为例（用于在数组中声明一个目录），`DIR` 宏展开后的本质是初始化一个 `struct pid_entry` 结构体：
+
+```c
+// 宏展开伪代码
+{
+    .name = "task",
+    .len  = 4,
+    .mode = S_IFDIR | S_IRUGO | S_IXUGO,  /* 目录标识 + 0555 权限 */
+    .iop  = &proc_task_inode_operations,  /* 负责解析 task/{tid} */
+    .fop  = &proc_task_operations,        /* 负责 ls /proc/{pid}/task */
+}
+```
+
+以 `DIR("task", S_IRUGO|S_IXUGO, proc_task_inode_operations, proc_task_operations)`为例，其四个参数分别代表以下含义：
+
+-	参数1（名字`"task"`）：该条目在 `/proc/{pid}/` 目录下的文件名/目录名，当用户访问 `/proc/1234/task` 时，内核遍历数组匹配到字符串 `"task"`
+-	参数2（权限与类型`S_IRUGO|S_IXUGO`）：定义了访问权限模式（Permission Mode），`DIR` 宏会在内部自动叠加 `S_IFDIR` 标志，标记这是一个目录。如 fd 目录的权限是 `S_IRUSR|S_IXUSR`（`0500`），出于安全保护，仅允许进程所有者（或 `root`）读取和进入
+	-	`S_IRUGO (0444)`：User、Group、Other 用户皆可读
+	-	`S_IXUGO (0111)`：User、Group、Other 用户皆可进入（搜索）该目录
+-	参数3（Inode 操作集`proc_task_inode_operations`）：指向 `struct inode_operations`，即**VFS 层级的目录/文件控制 Hook**，主要作用是控制这个目录本身的路径解析行为。最核心的是其中 `.lookup` 钩子（对于 task 目录，这里绑定的就是 `proc_task_lookup`），当用户接着访问 `/proc/1234/task/5678 `时，VFS 就会调用这个操作集去解析下一级 `{tid}`
+-	参数4（File 操作集`proc_task_operations`）：指向 `struct file_operations`，即**文件系统层级的文件/目录操作 Hook**，主要作用是控制用户对这个目录进行打开、读取列出等操作。比如当在终端执行 `ls /proc/1234/task` 时，触发的就是这里绑定的 `.iterate_shared` (或 `.readdir`) 钩子，由内核去遍历主进程下的所有线程并展示出来
+
+这里区分第三和第四个参数的作用，这两个参数分别对应 VFS 中的 句柄操作（File Level） 和 元数据/结构操作（Inode Level）：
+
+-	第四个参数（`file_operations/fop`）：完全是对当前分量（本身）的操作作用，当用户直接 `open()` 并对当前目录/文件进行读写或遍历时使用。功能类似内容提供者，当停在当前节点并执行 `ls` 或 `read` 等操作时，由它来提供当前节点的数据。如用户执行 `ls /proc/1234/task`，内核打开的是 `task` 这个目录本身，触发的就是第四个参数里的 `.iterate_shared/.readdir`钩子，用来列出当前目录里的内容
+-	第三个参数（`inode_operations/iop`）：核心用于对下一级引路，但也兼管本身的属性对下一级的操作。功能是负责检查访问权限，并在路径继续深入时查找/定位下一级的节点。如访问 `/proc/1234/task/5678` 时：	
+	-	控制对下一级（子目录/文件）进行查找和定位：内核需要知道如何从 `task` 找到 `5678`，触发的就是第三个参数里的 `.lookup` 钩子
+	-	对本身的操作：除了引路之外，它还包含了对当前目录节点自身的管理 Hook，比如检查权限（`.permission`，判断你有没有权限进入当前目录）和获取属性（`.getattr`）
+
+除了`DIR`之外，todo
+
+####	基于 tgid_base_stuff 的查找过程
+在 Linux 4.11.6 内核中，所有 proc 函数的调用时机完全由用户态系统调用（如 `open/ls/readlink/stat`）触发 VFS（虚拟文件系统）的执行流程决定，内核通过将不同的 proc 函数绑定到对应节点的 `inode_operations`（节点操作）和 `file_operations`（文件操作）句柄上，在特定的 VFS 阶段自动回调它们。`tgid_base_stuff`数组的查找入口是`proc_tgid_base_lookup`
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/base.c#L2950
+static struct dentry *proc_tgid_base_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
+{
+	return proc_pident_lookup(dir, dentry,
+				  tgid_base_stuff, ARRAY_SIZE(tgid_base_stuff));
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/base.c#L2385
+static struct dentry *proc_pident_lookup(struct inode *dir, 
+					 struct dentry *dentry,
+					 const struct pid_entry *ents,
+					 unsigned int nents)
+{
+	int error;
+	struct task_struct *task = get_proc_task(dir);
+	const struct pid_entry *p, *last;
+
+	error = -ENOENT;
+
+	if (!task)
+		goto out_no_task;
+
+	/*
+	 * Yes, it does not scale. And it should not. Don't add
+	 * new entries into /proc/<tgid>/ without very good reasons.
+	 */
+	last = &ents[nents];
+	for (p = ents; p < last; p++) {
+		if (p->len != dentry->d_name.len)
+			continue;
+		if (!memcmp(dentry->d_name.name, p->name, p->len))
+			break;
+	}
+	if (p >= last)
+		goto out;
+
+	error = proc_pident_instantiate(dir, dentry, task, p);
+out:
+	put_task_struct(task);
+out_no_task:
+	return ERR_PTR(error);
+}
+```
+
+todo
+
+####	典型hook举例
+
+#####	路径解析阶段
+主要关联`inode_operations.lookup`这个hook，当用户发起任何带有路径的系统调用（如 `open("/proc/...")`、`stat("/proc/...")`）时，VFS 的 namei 子系统会从左到右逐层解析路径。每跨越一级目录，就会调用上一级目录 inode 的 `.lookup` 钩子，典型的hook有如下几类：
+
+1、`proc_root_lookup`
+
+-	绑定位置：`proc_root_inode_operations.lookup`
+-	触发时机：VFS 刚进入 `/proc` 根目录，试图解析第一级子项时（例如 `/proc/meminfo` 或 `/proc/1234`）
+-	执行动作：判断第一级是数字（PID）还是静态节点名；如果是 PID，调用 `proc_pid_instantiate` 实例化进程目录
+
+2、`proc_tgid_base_lookup`（内部调用 `proc_pident_lookup`），通常会关联`tgid_base_stuff`
+
+-	绑定位置：`proc_tgid_base_inode_operations.lookup`
+-	触发时机：解析 `/proc/{pid}/` 下的直接子项时（如 `/proc/1234/status` 或 `/proc/1234/task`）
+-	执行动作：遍历 `tgid_base_stuff` 数组匹配文件名，匹配成功后创建对应的 inode
+
+3、 `proc_task_lookup`
+
+-	绑定位置：`proc_task_inode_operations.lookup`
+-	触发时机：解析 `/proc/{pid}/task/` 下的线程目录时（如 `/proc/1234/task/5678`）
+-	执行动作：校验线程 `5678` 是否属于进程 `1234`，成功后实例化该线程的目录节点
+
+4、`proc_fd_lookup`
+
+-	绑定位置：`proc_fd_inode_operations.lookup`
+-	触发时机：解析 `/proc/{pid}/fd/` 下的具体描述符时（如 `/proc/1234/fd/0`）
+-	执行动作：检查进程 `1234` 的 `files_struct` 表，判断 `0` 号描述符是否存在，若存在则生成指向目标文件的符号链接 inode
+
+#####	目录遍历阶段
+
+主要关联`file_operations.iterate_shared`这个hook。调用时机一般是当用户使用 `ls` 命令或调用 `getdents64` 系统调用读取某个目录的内容时触发
+
+1、`proc_root_readdir`
+
+-	绑定位置：`proc_root_operations.iterate_shared`
+-	触发时机：执行 `ls /proc` 时
+-	执行动作：先输出静态注册的全局文件（如 `meminfo`等），再遍历系统的 PID 链表，将所有进程 PID 动态填充进输出列表
+
+2、`proc_pident_readdir`
+
+-	绑定位置：`proc_tgid_base_operations.iterate_shared`
+-	触发时机：执行 `ls /proc/1234` 时
+-	执行动作：直接遍历 `tgid_base_stuff` 图纸数组，把该进程支持的所有文件和目录项（status, maps, fd 等）返回给用户态
+
+3、`proc_fd_readdir`
+
+-	绑定位置：`proc_fd_operations.iterate_shared`
+-	触发时机：执行 `ls /proc/1234/fd` 时
+-	执行动作：锁住进程的 `files_struct`，扫描该进程当前打开的所有数字 fd，依次拼装成目录条目
+
+#####	软链接解引用阶段
+
+主要关联`inode_operations.get_link`，调用时机通常为，访问 `/proc` 下的符号链接（如 `/proc/{pid}/fd/N`、`/proc/{pid}/cwd`、`/proc/{pid}/exe`）时
+
+1、`proc_pid_get_link/proc_fd_link_get_link`
+
+-	绑定位置：`proc_fd_link_inode_operations.get_link`
+-	触发时机：用户执行 `ls -l /proc/1234/fd/0`、`readlink` 或直接 `cat /proc/1234/fd/0` 时
+-	执行动作：从 PID `1234` 的 `task_struct->files` 找到 `0` 号 fd 对应的 `struct file`，取出其真正的 path 结构，使 VFS 重定向到真实的物理文件路径（如 `/dev/pts/1`）
+
+######	文件内容读取阶段
+主要关联`file_operations.read`，调用时机为，用户调用 open + read 系统调用（如 `cat` 命令）读取具体的 proc 普通文件时
+
+1、`seq_read`
+
+-	绑定位置：通用于大部分 `proc_fops` 的 `.read` 字段（如 `meminfo_proc_fops`）
+-	触发时机：对静态全局文件或使用 `seq_file` 框架的文件执行 `read()` 调用时
+-	执行动作：管理内核缓冲区与用户态缓冲区的拷贝，自动处理多次 read 时的 `offset` 偏移
+
+最后，以执行 `cat /proc/1234/fd/0` 为例，内核函数的触发时序如下：
+
+```text
+用户态系统调用: `cat /proc/1234/fd/0`
+  │
+  ├─ 1. VFS 解析 "/proc"     ──► 触发 proc_root_lookup("1234") 
+  ├─ 2. VFS 解析 "1234"      ──► 触发 proc_tgid_base_lookup("fd")，
+  ├								 线性遍历 tgid_base_stuff 数组，拿 "fd" 比对字符串，匹配到 DIR("fd", ...)，
+  ├								 提取出 S_IRUSR|S_IXUSR 检查是否有权限访问，确认过权限
+  ├							     动态分配一个 inode，并将 proc_fd_inode_operations 填入 inode->i_op，
+  ├								 将 proc_fd_operations 填入 inode->i_fop
+  ├
+  ├─ 3. VFS 解析 "fd"        ──► 触发 proc_fd_lookup("0")
+  └─ 4. VFS 操作 "0" 软链接   ──► 触发 proc_fd_link_get_link() 获取目标路径
+                                 └─► 最终 VFS 转向目标文件执行真实 read()
+```
 
 ####    核心数据结构
 -   [`proc_dir_entry`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/internal.h#L33)：对`/proc`目录的描述
@@ -378,10 +935,11 @@ static const struct super_operations proc_sops = {
 };
 ```
 
-####    proc_dir_entry
+####    proc_dir_entry（PDE）
 `proc_dir_entry`的结构如下：
 
 ```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/internal.h#L33
 struct proc_dir_entry {
 	unsigned int low_ino;
 	umode_t mode;
@@ -408,6 +966,33 @@ struct proc_dir_entry {
 
 注意，在高版本的内核中，`subdir`、`subdir_node`已经调整为红黑树的实现了，2.6的内核实现是链表。数据结构`proc_dir_entry`在内核中代表了一个proc入口，在procfs中表现为一个文件，可以在这个结构体中看到一些文件特有的属性成员，如`uid`、`gid`、`mode`、`name`等
 
+`proc_dir_entry` 与 `inode` 的生命周期关系如下图所示：
+
+```mermaid
+graph LR
+    subgraph persistent ["内存常驻（PDE 生命周期）"]
+        PDE_meminfo["PDE: meminfo<br/>proc_fops=meminfo_proc_fops<br/>mode=S_IRUGO"]
+        PDE_cpuinfo["PDE: cpuinfo<br/>proc_fops=cpuinfo_proc_fops"]
+        PDE_sys["PDE: sys/"]
+    end
+
+    subgraph temporary ["按需创建/销毁（inode 生命周期）"]
+        inode1["proc_inode<br/>pde → PDE_meminfo<br/>vfs_inode"]
+        inode2["proc_inode<br/>pde → PDE_cpuinfo<br/>vfs_inode"]
+    end
+
+    open_meminfo["open /proc/meminfo"] -->|proc_get_inode| inode1
+    inode1 -->|pde 指针| PDE_meminfo
+    close_meminfo["close / 引用归零"] -->|proc_destroy_inode| inode1
+
+    open_cpuinfo["open /proc/cpuinfo"] -->|proc_get_inode| inode2
+    inode2 -->|pde 指针| PDE_cpuinfo
+
+    boot["内核启动 / 模块加载"] -->|proc_create| PDE_meminfo
+    boot -->|proc_create| PDE_cpuinfo
+    boot -->|proc_mkdir| PDE_sys
+```
+
 `proc_dir_entry`的本质是什么？因为本身procfs就是一个伪文件系统，不像`ext4`这种有文件实体（inode）可以使用，内核需要一种方式在内存里持久化地维护目录结构，所以`proc_dir_entry` 本质上是一个内存驻留的结构体，代表了 `/proc` 树中的一个节点。当调用 `proc_create()/proc_mkdir()` 时，内核就在内存中实例化了一个 PDE，可以理解`proc_dir_entry`与`struct file`结构体的功能有点类似。此外，PDE 与 Inode 的关系如下：
 
 -	PDE：持久的，只要内核没卸载，`meminfo` 的 PDE 就一直存在于内存中
@@ -420,15 +1005,18 @@ PDE 核心成员如下：
 -	`proc_fops`： 指向 `file_operations` 的指针
 -	`data`：一个私有指针 `void *data`
 
+
 下面成员维护了整个 `/proc` 的层级关系：
 
 -	`parent`： 指向父目录的指针
--	`subdir`： 指向第一个子节点的指针
--	`next`： 指向同级兄弟节点的指针
+-	`subdir`：子节点红黑树的根（`rb_root`），在 v4.11.6 中已从链表改为红黑树实现
+-	`subdir_node`：在父节点红黑树中的节点（`rb_node`）
+
+todo：pde的成员作用
 
 `/proc/`下文件（目录）的两种生成策略：
 
--	如`ls /proc/sys/vm/*`，内核就是通过遍历 PDE 形成的这棵兄弟链表树来找到目标节点的，此类节点是内核模块在加载时显式注册到这棵 PDE 树上的
+-	如`ls /proc/sys/vm/*`，内核就是通过遍历 PDE 形成的红黑树来找到目标节点的（通过`pde_subdir_find`函数在红黑树中按名称查找），此类节点是内核模块在加载时显式注册到这棵 PDE 树上的
 -	如 `ls /proc/`下面的pid目录，PID 目录是动态扫描 `task_struct` 产生的（动态计算）
 
 ####    pid_entry
@@ -446,6 +1034,7 @@ struct pid_entry {
 `pid_entry`下面所有的文件的操作方法都定义在[`tgid_base_stuff`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/base.c#L2843)结构中
 
 ```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/base.c#L2843
 static const struct pid_entry tgid_base_stuff[] = {
 	DIR("task",       S_IRUGO|S_IXUGO, proc_task_inode_operations, proc_task_operations),
 	DIR("fd",         S_IRUSR|S_IXUSR, proc_fd_inode_operations, proc_fd_operations),
@@ -594,7 +1183,7 @@ static const struct file_operations proc_environ_operations = {
 };
 ```
 
-3、`ONE`：单一文件条目，`ONE("status", S_IRUGO, proc_pid_status)`，创建一个只读的常规文件，使用简化的回调函数，如`/proc/<pid>/status`文件是显示进程状态信息，参数分别是文件名、权限、数据生成函数指针。与 `REG` 的区别是`ONE` 使用简单的 `C`，而 `REG` 需要完整的文件操作结构体
+3、`ONE`：单一文件条目，`ONE("status", S_IRUGO, proc_pid_status)`，创建一个只读的常规文件，使用简化的回调函数，如`/proc/<pid>/status`文件是显示进程状态信息，参数分别是文件名、权限、数据生成函数指针。与 `REG` 的区别是`ONE` 使用内置的 `proc_single_file_operations`（内含 `single_open` + `seq_read`），只需提供一个 `proc_show` 回调函数；而 `REG` 需要自定义完整的 `file_operations` 结构体
 
 ```cpp
 int proc_pid_status(struct seq_file *m, struct pid_namespace *ns,
@@ -807,15 +1396,16 @@ struct proc_dir_entry proc_root = {
 上面的`proc_root`节点不仅包含正常的文件及目录，还要管理进程指定的pid文件，`proc_root`必须能够处理inode和file，`proc_root_inode_operations`与`proc_root_operations`的定义如下：
 
 ```cpp
-static struct file_operations proc_root_operations = {
-    .read        = generic_read_dir,               
-    .readdir     = proc_root_readdir,		//目录遍历
+static const struct file_operations proc_root_operations = {
+    .read		= generic_read_dir,
+    .iterate_shared	= proc_root_readdir,	//目录遍历（v3.11起由.readdir改为.iterate，v4.7起升级为.iterate_shared）
+    .llseek		= generic_file_llseek,
 };
- 
+
 /*
  * proc root can do almost nothing..
  */
-static struct inode_operations proc_root_inode_operations = {
+static const struct inode_operations proc_root_inode_operations = {
     .lookup     = proc_root_lookup,			//对应vfs架构中的real_lookup函数
     .getattr    = proc_root_getattr,
 };
@@ -969,6 +1559,28 @@ struct dentry *proc_lookup_de(struct proc_dir_entry *de, struct inode *dir,
 }
 ```
 
+`proc_root_lookup` 的两阶段查找流程：
+
+```mermaid
+flowchart TD
+    A["VFS: inode->i_op->lookup()"] --> B["proc_root_lookup(dir, dentry, flags)"]
+    B --> C["proc_pid_lookup(dir, dentry, flags)"]
+    C --> D{"name_to_int: 文件名是数字?"}
+    D -->|是| E["find_task_by_pid_ns(tgid, ns)"]
+    E --> F{"找到进程?"}
+    F -->|是| G["proc_pid_instantiate<br/>创建进程目录 inode<br/>绑定 proc_tgid_base_*"]
+    G --> H["返回 NULL（成功）"]
+    F -->|否| I["返回 -ENOENT"]
+
+    D -->|否| I
+    I --> J["proc_lookup(dir, dentry, flags)"]
+    J --> K["proc_lookup_de: 在 PDE 红黑树中查找"]
+    K --> L{"找到匹配的 proc_dir_entry?"}
+    L -->|是| M["proc_get_inode<br/>创建 inode 并绑定 proc_fops"]
+    M --> N["d_add 加入 dentry cache"]
+    L -->|否| O["返回 -ENOENT"]
+```
+
 为什么`proc_root_lookup`中的设计要优先进程id其次再内核呢？这是考虑到进程目录数量远大于内核文件数量，先匹配高频访问如进程相关的查找（`ps/top` 等）比内核状态文件访问更频繁，其次快速失败机制如果查找的不是数字（非PID），`proc_pid_lookup` 会快速返回失败以切换到查找内核文件
 
 ####	file_operations：proc_root_readdir
@@ -995,11 +1607,11 @@ static int proc_root_readdir(struct file *file, struct dir_context *ctx)
 
 系统中对于一个目录有多种读取子目录的方式（如`ls`和`ls -al`显示的结果不同），这是由传入过程中对`file->f_ops`设定不同的偏移决定的。对于`/proc`根目录而言：
 
--	`f_ops = 0`：为`.`目录链接，链接到自身
--	`f_ops = 1`：为`..`目录链接，链接到父目录
--	`f_ops` 如果是在`2~FIRST_PROCESS_ENTRY-1`之间：表示`/proc/`下的静态目录或者静态文件
--	`f_ops` 如果是在`FIRST_PROCESS_ENTRY~FIRST_PROCESS_ENTRY+ ARRAY_SIZE(proc_base_stuff)-1`：为`self`子目录内容
--	`f_ops = FIRST_PROCESS_ENTRY+ ARRAY_SIZE(proc_base_stuff)`：为`init_task`即`0`号初始进程
+-	`f_pos = 0`：为`.`目录链接，链接到自身
+-	`f_pos = 1`：为`..`目录链接，链接到父目录
+-	`f_pos` 如果是在`2~FIRST_PROCESS_ENTRY-1`之间：表示`/proc/`下的静态目录或者静态文件
+-	`f_pos` 如果是在`FIRST_PROCESS_ENTRY~FIRST_PROCESS_ENTRY+ ARRAY_SIZE(proc_base_stuff)-1`：为`self`子目录内容
+-	`f_pos = FIRST_PROCESS_ENTRY+ ARRAY_SIZE(proc_base_stuff)`：为`init_task`即`0`号初始进程
 -	`f_pos = PID_MAX_LIMIT + TGID_OFFSET`：标识目录遍历结束
 
 继续分析`proc_pid_readdir`的实现，该函数用于列出 `/proc`目录时生成进程列表，包括
@@ -1190,9 +1802,217 @@ const struct inode_operations proc_ns_dir_inode_operations = {
 
 ##  0x04 pid_entry主要功能分析
 
-TODO
+本节分析 `/proc/[pid]/` 下子目录和子文件的创建与查找机制
 
-##	0x05	/proc/下个几个典型实现
+####	pid_entry 的宏展开机制
+
+`pid_entry` 结构体的实例化通过一组宏完成，底层统一使用 `NOD` 宏：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/base.c#L115
+struct pid_entry {
+	const char *name;
+	unsigned int len;
+	umode_t mode;
+	const struct inode_operations *iop;
+	const struct file_operations *fop;
+	union proc_op op;
+};
+
+#define NOD(NAME, MODE, IOP, FOP, OP) {			\
+	.name = (NAME),					\
+	.len  = sizeof(NAME) - 1,			\
+	.mode = MODE,					\
+	.iop  = IOP,					\
+	.fop  = FOP,					\
+	.op   = OP,					\
+}
+
+#define DIR(NAME, MODE, iops, fops)	\
+	NOD(NAME, (S_IFDIR|(MODE)), &iops, &fops, {} )
+
+#define LNK(NAME, get_link)					\
+	NOD(NAME, (S_IFLNK|S_IRWXUGO),			\
+		&proc_pid_link_inode_operations, NULL,		\
+		{ .proc_get_link = get_link } )
+
+#define REG(NAME, MODE, fops)	\
+	NOD(NAME, (S_IFREG|(MODE)), NULL, &fops, {})
+
+#define ONE(NAME, MODE, show)					\
+	NOD(NAME, (S_IFREG|(MODE)),				\
+		NULL, &proc_single_file_operations,		\
+		{ .proc_show = show } )
+```
+
+其中 `ONE` 宏的回调链路为：`proc_single_file_operations.open` -> `proc_single_open` -> `single_open(filp, proc_single_show, inode)` -> `proc_single_show` -> `PROC_I(inode)->op.proc_show(m, ns, pid, task)`，最终调用到用户注册的 `show` 函数（如 `proc_pid_status`）
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/base.c#L730
+static int proc_single_show(struct seq_file *m, void *v)
+{
+	struct inode *inode = m->private;
+	struct pid_namespace *ns;
+	struct pid *pid;
+	struct task_struct *task;
+	int ret;
+
+	ns = inode->i_sb->s_fs_info;
+	pid = proc_pid(inode);
+	task = get_pid_task(pid, PIDTYPE_PID);
+	if (!task)
+		return -ESRCH;
+	ret = PROC_I(inode)->op.proc_show(m, ns, pid, task);
+	put_task_struct(task);
+	return ret;
+}
+
+static const struct file_operations proc_single_file_operations = {
+	.open		= proc_single_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+```
+
+####	tgid_base_stuff 与 tid_base_stuff 的区别
+
+内核维护了两张 `pid_entry` 表：
+
+-	`tgid_base_stuff`：描述 `/proc/[pid]/` 下的文件和目录，用于进程（线程组领头）级别的信息展示
+-	`tid_base_stuff`：描述 `/proc/[pid]/task/[tid]/` 下的文件和目录，用于单个线程级别的信息展示
+
+两者的主要差异：
+
+| 差异点 | `tgid_base_stuff` | `tid_base_stuff` |
+|--------|-------------------|------------------|
+| 路径 | `/proc/[pid]/` | `/proc/[pid]/task/[tid]/` |
+| `task` 子目录 | 有（包含所有线程） | 无（自身即线程） |
+| `stat` 使用的函数 | `proc_tgid_stat` | `proc_tid_stat` |
+| `map_files` 目录 | 有 | 无 |
+| `children` 文件 | 有 | 无 |
+
+####	进程子目录的创建流程：proc_pid_instantiate
+
+当首次访问 `/proc/[pid]` 目录时（如 `ls /proc/1234`），内核通过 `proc_pid_lookup` -> `proc_pid_instantiate` 动态创建该进程目录的 inode：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/base.c#L3049
+static int proc_pid_instantiate(struct inode *dir,
+				struct dentry * dentry,
+				struct task_struct *task, const void *ptr)
+{
+	struct inode *inode;
+
+	// 创建一个 proc_inode（内含 vfs inode），并关联到 task 的 pid
+	inode = proc_pid_make_inode(dir->i_sb, task, S_IFDIR | S_IRUGO | S_IXUGO);
+	if (!inode)
+		goto out;
+
+	// 绑定进程目录的操作函数
+	inode->i_op = &proc_tgid_base_inode_operations;
+	inode->i_fop = &proc_tgid_base_operations;
+	inode->i_flags|=S_IMMUTABLE;
+
+	set_nlink(inode, nlink_tgid);
+	d_set_d_op(dentry, &pid_dentry_operations);
+	d_add(dentry, inode);
+
+	if (pid_revalidate(dentry, 0))
+		return 0;
+out:
+	return -ENOENT;
+}
+```
+
+这里绑定的 `proc_tgid_base_inode_operations` 的 `lookup` 函数是 `proc_tgid_base_lookup`，它负责在 `/proc/[pid]/` 下查找子文件（如 `status`、`maps`、`fd` 等）
+
+####	proc_pident_lookup：进程子目录下的通用查找
+
+`proc_tgid_base_lookup` 和 `proc_tid_base_lookup` 都委托给了通用函数 `proc_pident_lookup`，该函数通过线性扫描 `pid_entry` 数组来查找匹配的文件名：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/base.c#L2950
+static struct dentry *proc_tgid_base_lookup(struct inode *dir,
+					    struct dentry *dentry, unsigned int flags)
+{
+	return proc_pident_lookup(dir, dentry,
+				  tgid_base_stuff, ARRAY_SIZE(tgid_base_stuff));
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/base.c#L2385
+static struct dentry *proc_pident_lookup(struct inode *dir, 
+					 struct dentry *dentry,
+					 const struct pid_entry *ents,
+					 unsigned int nents)
+{
+	int error;
+	struct task_struct *task = get_proc_task(dir);
+	const struct pid_entry *p, *last;
+
+	error = -ENOENT;
+	if (!task)
+		goto out_no_task;
+
+	// 线性扫描 pid_entry 数组（注释明确说明"不需要 scale"）
+	last = &ents[nents];
+	for (p = ents; p < last; p++) {
+		if (p->len != dentry->d_name.len)
+			continue;
+		if (!memcmp(dentry->d_name.name, p->name, p->len))
+			break;
+	}
+	if (p >= last)
+		goto out;
+
+	// 找到匹配项后，创建对应的 inode
+	error = proc_pident_instantiate(dir, dentry, task, p);
+out:
+	put_task_struct(task);
+out_no_task:
+	return ERR_PTR(error);
+}
+```
+
+注意代码中的注释 `"Yes, it does not scale. And it should not."`，由于每个进程的子目录/文件数量是有限的（约几十个），线性扫描的性能完全足够
+
+todo
+
+####	proc_pident_readdir：进程子目录下的通用遍历
+
+当执行 `ls /proc/[pid]/` 时，`iterate_shared` 回调最终调用 `proc_pident_readdir`，遍历 `pid_entry` 数组生成目录列表：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/base.c#L2420
+static int proc_pident_readdir(struct file *file, struct dir_context *ctx,
+			       const struct pid_entry *ents, unsigned int nents)
+{
+	struct task_struct *task = get_proc_task(file_inode(file));
+	const struct pid_entry *p;
+
+	if (!task)
+		return -ENOENT;
+
+	if (!dir_emit_dots(file, ctx))  // 输出 . 和 .. 目录
+		goto out;
+
+	if (ctx->pos >= nents + 2)
+		goto out;
+
+	// 从 ctx->pos-2 开始遍历（减去 . 和 .. 的两个位置）
+	for (p = ents + (ctx->pos - 2); p < ents + nents; p++) {
+		if (!proc_fill_cache(file, ctx, p->name, p->len,
+				     proc_pident_instantiate, task, p))
+			break;
+		ctx->pos++;
+	}
+out:
+	put_task_struct(task);
+	return 0;
+}
+```
+
+##	0x05	/proc/下的典型实现
 在示例说明前，先简单介绍下procfs读取（输出）数据的一些范式，大部分都遵从`open then read`机制，即如下流程：
 
 1、open 阶段，主要完成：
@@ -1201,7 +2021,7 @@ TODO
 -	引用绑定：将 `mm_struct` 的指针存入 `file->private_data`（如 `proc_maps_private` 结构体）
 -	`file_operation`绑定
 -	此时不加 `mmap_sem` 锁，因为现在只是打开文件，还没有真正开始读数据
--	对于可能较大的数据（文件），内核会采用`seq_read`进制进行多次批量`read`
+-	对于可能较大的数据（文件），内核会采用`seq_read`机制进行多次批量`read`
 
 2、read 阶段 （`seq_read -> m_start`）：可能多次调用
 
@@ -1270,7 +2090,7 @@ void si_meminfo(struct sysinfo *val)
 	val->mem_unit = PAGE_SIZE;
 }
 
-//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/meminfo .c#L45
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/meminfo.c#L45
 static int meminfo_proc_show(struct seq_file *m, void *v)
 {
 	struct sysinfo i;
@@ -1314,8 +2134,115 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 ```
 
 ####	ls /proc/${pid}/fd
+`ls /proc/[pid]/fd` 会列出该进程当前打开的所有文件描述符（以符号链接形式呈现）。其内核实现位于 `fs/proc/fd.c`，核心调用链为：`iterate_shared` -> `proc_readfd` -> `proc_readfd_common`
 
-TODO
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/fd.c
+const struct file_operations proc_fd_operations = {
+	.read		= generic_read_dir,
+	.iterate_shared	= proc_readfd,
+	.llseek		= generic_file_llseek,
+};
+
+static int proc_readfd(struct file *file, struct dir_context *ctx)
+{
+	return proc_readfd_common(file, ctx, proc_fd_instantiate);
+}
+```
+
+`proc_readfd_common` 是遍历进程 fd 表的核心函数：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/fd.c#L206
+static int proc_readfd_common(struct file *file, struct dir_context *ctx,
+			      instantiate_t instantiate)
+{
+	struct task_struct *p = get_proc_task(file_inode(file));
+	struct files_struct *files;
+	unsigned int fd;
+
+	if (!p)
+		return -ENOENT;
+
+	// 输出 . 和 .. 目录项
+	if (!dir_emit_dots(file, ctx))
+		goto out;
+
+	// 获取目标进程的文件描述符表
+	files = get_files_struct(p);
+	if (!files)
+		goto out;
+
+	//rcu并发
+	rcu_read_lock();
+	// 从 ctx->pos-2 开始遍历（减去 . 和 .. 占的两个位置）
+	for (fd = ctx->pos - 2;
+	     fd < files_fdtable(files)->max_fds;
+	     fd++, ctx->pos++) {
+		char name[PROC_NUMBUF];
+		int len;
+
+		// 检查 fd 是否有效（在 fdtable 的位图中查找）
+		if (!fcheck_files(files, fd))
+			continue;
+		rcu_read_unlock();
+
+		// 将 fd 编号转换为字符串
+		len = snprintf(name, sizeof(name), "%u", fd);
+
+		// 调用 proc_fill_cache 创建目录缓存条目
+		// instantiate 即 proc_fd_instantiate，用于为每个 fd 创建 inode
+		if (!proc_fill_cache(file, ctx,
+				     name, len, instantiate, p,
+				     (void *)(unsigned long)fd))
+			goto out_fd_loop;
+		cond_resched();
+		rcu_read_lock();
+	}
+	rcu_read_unlock();
+out_fd_loop:
+	put_files_struct(files);
+out:
+	put_task_struct(p);
+	return 0;
+}
+```
+
+其中 `proc_fd_instantiate` **负责为每个有效的 fd 创建一个符号链接类型的 inode**：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/fd.c#L152
+static int proc_fd_instantiate(struct inode *dir, struct dentry *dentry,
+			       struct task_struct *task, const void *ptr)
+{
+	unsigned fd = (unsigned long)ptr;
+	struct proc_inode *ei;
+	struct inode *inode;
+
+	// 创建一个link类型的inode
+	inode = proc_pid_make_inode(dir->i_sb, task, S_IFLNK);
+	if (!inode)
+		goto out;
+
+	ei = PROC_I(inode);
+	ei->fd = fd;  // 在 proc_inode 中记录 fd 编号
+
+	inode->i_op = &proc_pid_link_inode_operations;
+	inode->i_size = 64;
+	ei->op.proc_get_link = proc_fd_link;  // 符号链接解析函数
+
+	d_set_d_op(dentry, &tid_fd_dentry_operations);
+	// 加入denty cache
+	d_add(dentry, inode);
+
+	if (tid_fd_revalidate(dentry, 0))
+		return 0;
+out:
+	return -ENOENT;
+}
+```
+
+该函数的关键设计：每个 fd 条目是一个**符号链接**（`S_IFLNK`），当 `ls -l` 或 `readlink` 读取时，内核通过 `proc_fd_link` 实时查找该 fd 对应的实际文件路径
 
 ####	cat /proc/${pid}/maps
 `cat /proc/[pid]/maps`可以查看某个进程的虚拟内存布局情况（该例子展示了内核如何将复杂的内存管理数据结构红黑树、链表等实时翻译成文本），这里主要是遍历对应进程的虚拟内存区的vma
@@ -1558,7 +2485,7 @@ read_unlock(&tasklist_lock);
 所以，这里核心查找路径是`inode->proc_inode->[struct pid]->task_struct`
 
 ```cpp
-//https://elixir.bootlin.com/linux/v6.18.3/source/fs/proc/internal.h#L142
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/internal.h#L138
 static inline struct pid *proc_pid(const struct inode *inode)
 {
 	// 根据vfs_node获取到对应的pid结构
@@ -1572,7 +2499,7 @@ static inline struct task_struct *get_proc_task(const struct inode *inode)
 	return get_pid_task(proc_pid(inode), PIDTYPE_PID);
 }
 
-//https://elixir.bootlin.com/linux/v6.18.3/source/kernel/pid.c#L466
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid.c#L419
 struct task_struct *get_pid_task(struct pid *pid, enum pid_type type)
 {
 	struct task_struct *result;
@@ -1584,7 +2511,7 @@ struct task_struct *get_pid_task(struct pid *pid, enum pid_type type)
 	return result;
 }
 
-//https://elixir.bootlin.com/linux/v6.18.3/source/kernel/pid.c#L414
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/pid.c#L380
 struct task_struct *pid_task(struct pid *pid, enum pid_type type)
 {
 	struct task_struct *result = NULL;
@@ -1593,15 +2520,16 @@ struct task_struct *pid_task(struct pid *pid, enum pid_type type)
 		first = rcu_dereference_check(hlist_first_rcu(&pid->tasks[type]),
 					      lockdep_tasklist_lock_is_held());
 		if (first)
-			result = hlist_entry(first, struct task_struct, pid_links[(type)]);
+			// 注意：v4.11.6 使用 pids[type].node，v5.0+ 改为 pid_links[type]
+			result = hlist_entry(first, struct task_struct, pids[(type)].node);
 	}
 	return result;
 }
 
-//https://elixir.bootlin.com/linux/v6.18.3/source/include/linux/sched/task.h#L114
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/sched/task.h#L88
 static inline struct task_struct *get_task_struct(struct task_struct *t)
 {
-	refcount_inc(&t->usage);
+	atomic_inc(&t->usage);
 	return t;
 }
 ```
@@ -1845,7 +2773,7 @@ static void vma_stop(struct proc_maps_private *priv)
 -	重新获取锁，通过 `find_vma(mm, last_addr)` 重新定位
 -	如果 VMA 真的变了，用户看到的输出可能是跳跃的，但**这保证了内核不会崩溃**
 
-##  0x05 proc 函数钩子实例分析（进程属性相关）
+##  0x06 proc 函数钩子实例分析（进程属性相关）
 
 ####    proc_pid_limit的实现
 `/proc/x/limits`实时反映当前进程的资源限制
@@ -1912,52 +2840,164 @@ static int proc_pid_limits(struct seq_file *m, struct pid_namespace *ns,
 sudosu-root
 ```
 
-对应的VFS read实现方法`proc_pid_cmdline`：通过该方法获取进程对应的cmdline文件的信息
+在 v4.11.6 中，对应的实现函数是 `proc_pid_cmdline_read`（注意：与 2.6.x 内核的旧接口 `proc_pid_cmdline` 不同，v4.11.6 直接实现了 `.read` 回调而非通过 seq_file），通过 `proc_pid_cmdline_ops` 注册：
 
 ```cpp
-static int proc_pid_cmdline(struct task_struct *task, char * buffer)
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/base.c#L207
+static ssize_t proc_pid_cmdline_read(struct file *file, char __user *buf,
+				     size_t _count, loff_t *pos)
 {
-    int res = 0;
-    unsigned int len;
-    struct mm_struct *mm = get_task_mm(task);
-    if (!mm)
-        goto out;
-    if (!mm->arg_end)
-        goto out_mm;    /* Shh! No looking before we're done */
- 
-    // 获取所有参数的个数
-    len = mm->arg_end - mm->arg_start;
-  
-    if (len > PAGE_SIZE)
-        len = PAGE_SIZE;
-  
-    // 获取第一个参数
-    res = access_process_vm(task, mm->arg_start, buffer, len, 0);
- 
-    // If the nul at the end of args has been overwritten, then
-    // assume application is using setproctitle(3).
-    // 循环获取所有的参数
-    if (res > 0 && buffer[res-1] != '\0' && len < PAGE_SIZE) {
-        len = strnlen(buffer, res);
-        if (len < res) {
-            res = len;
-        } else {
-            len = mm->env_end - mm->env_start;
-            if (len > PAGE_SIZE - res)
-                len = PAGE_SIZE - res;
-            // 获取参数,拼接参数得到cmdline
-            res += access_process_vm(task, mm->env_start, buffer+res, len, 0);
-            res = strnlen(buffer, res);
-        }
-    }
-out_mm:
-    mmput(mm);
-out:
-    return res;
+	struct task_struct *tsk;
+	struct mm_struct *mm;
+	char *page;
+	unsigned long count = _count;
+	unsigned long arg_start, arg_end, env_start, env_end;
+	unsigned long len1, len2, len;
+	unsigned long p;
+	char c;
+	ssize_t rv;
+
+	BUG_ON(*pos < 0);
+
+	tsk = get_proc_task(file_inode(file));
+	if (!tsk)
+		return -ESRCH;
+	mm = get_task_mm(tsk);
+	put_task_struct(tsk);
+	if (!mm)
+		return 0;
+	if (!mm->env_end) {
+		rv = 0;
+		goto out_mmput;
+	}
+
+	page = (char *)__get_free_page(GFP_TEMPORARY);
+	if (!page) {
+		rv = -ENOMEM;
+		goto out_mmput;
+	}
+
+	// 获取参数和环境变量的地址范围
+	down_read(&mm->mmap_sem);
+	arg_start = mm->arg_start;
+	arg_end = mm->arg_end;
+	env_start = mm->env_start;
+	env_end = mm->env_end;
+	up_read(&mm->mmap_sem);
+
+	BUG_ON(arg_start > arg_end);
+	BUG_ON(env_start > env_end);
+
+	len1 = arg_end - arg_start;
+	len2 = env_end - env_start;
+
+	if (len1 == 0) {
+		rv = 0;
+		goto out_free_page;
+	}
+
+	// 检查 ARGV 末尾是否为 '\0'，判断是标准参数还是 setproctitle 场景
+	rv = access_remote_vm(mm, arg_end - 1, &c, 1, 0);
+	if (rv <= 0)
+		goto out_free_page;
+
+	rv = 0;
+
+	if (c == '\0') {
+		// 标准场景：命令行参数以 '\0' 分隔，占满整个 ARGV 区域
+		if (len1 <= *pos)
+			goto out_free_page;
+		p = arg_start + *pos;
+		len = len1 - *pos;
+		while (count > 0 && len > 0) {
+			unsigned int _count;
+			int nr_read;
+			_count = min3(count, len, PAGE_SIZE);
+			nr_read = access_remote_vm(mm, p, page, _count, 0);
+			if (nr_read < 0)
+				rv = nr_read;
+			if (nr_read <= 0)
+				goto out_free_page;
+			if (copy_to_user(buf, page, nr_read)) {
+				rv = -EFAULT;
+				goto out_free_page;
+			}
+			p += nr_read;
+			len -= nr_read;
+			buf += nr_read;
+			count -= nr_read;
+			rv += nr_read;
+		}
+	} else {
+		// setproctitle 场景：命令行可能延伸到 ENVP 区域
+		// 使用两段式读取（ARGV + ENVP）
+		struct {
+			unsigned long p;
+			unsigned long len;
+		} cmdline[2] = {
+			{ .p = arg_start, .len = len1 },
+			{ .p = env_start, .len = len2 },
+		};
+		loff_t pos1 = *pos;
+		unsigned int i;
+
+		i = 0;
+		while (i < 2 && pos1 >= cmdline[i].len) {
+			pos1 -= cmdline[i].len;
+			i++;
+		}
+		while (i < 2) {
+			p = cmdline[i].p + pos1;
+			len = cmdline[i].len - pos1;
+			while (count > 0 && len > 0) {
+				unsigned int _count, l;
+				int nr_read;
+				bool final;
+				_count = min3(count, len, PAGE_SIZE);
+				nr_read = access_remote_vm(mm, p, page, _count, 0);
+				if (nr_read < 0)
+					rv = nr_read;
+				if (nr_read <= 0)
+					goto out_free_page;
+				final = false;
+				l = strnlen(page, nr_read);
+				if (l < nr_read) {
+					nr_read = l;
+					final = true;
+				}
+				if (copy_to_user(buf, page, nr_read)) {
+					rv = -EFAULT;
+					goto out_free_page;
+				}
+				p += nr_read;
+				len -= nr_read;
+				buf += nr_read;
+				count -= nr_read;
+				rv += nr_read;
+				if (final)
+					goto out_free_page;
+			}
+			pos1 = 0;
+			i++;
+		}
+	}
+
+out_free_page:
+	free_page((unsigned long)page);
+out_mmput:
+	mmput(mm);
+	if (rv > 0)
+		*pos += rv;
+	return rv;
 }
+
+static const struct file_operations proc_pid_cmdline_ops = {
+	.read	= proc_pid_cmdline_read,
+	.llseek	= generic_file_llseek,
+};
 ```
 
-##	0x06	proc 函数钩子实例分析（进程内存相关）
+##	0x07	proc 函数钩子实例分析（进程内存相关）
 先梳理下进程的内存统计的背景知识，业务进程使用的内存主要有以下几种情况（其中前两者算作进程的`RSS`，后两者属于page cache）
 
 -	用户空间的匿名映射页（Anonymous pages in User Mode address spaces）：比如调用`malloc`分配的内存，以及使用`MAP_ANONYMOUS`的`mmap`等场景；当系统内存不够时，内核可以将这部分内存交换出去
@@ -2101,7 +3141,528 @@ int proc_pid_statm(struct seq_file *m, struct pid_namespace *ns,
 }
 ```
 
-##  0x07  参考
+##	0x08	总结：`cat /proc/${pid}/fd` 的全路径追踪
+
+本节以 `ls -l /proc/1234/fd` 命令为例，完整追踪从用户态到内核态的每个环节，揭示 procfs 如何将进程的文件描述符表实时映射为可见的符号链接目录
+
+完整调用链概览：
+
+```mermaid
+sequenceDiagram
+    participant U as 用户态 ls
+    participant V as VFS
+    participant PR as proc_root
+    participant PP as proc_pid
+    participant PF as proc_fd
+    participant K as 内核数据
+
+    U->>V: open("/proc/1234/fd")
+    V->>PR: proc_root_lookup("1234")
+    PR->>PP: proc_pid_lookup → find_task_by_pid_ns
+    PP-->>PR: proc_pid_instantiate（创建 PID 目录 inode）
+    PR-->>V: 返回 dentry
+
+    V->>PP: proc_tgid_base_lookup("fd")
+    PP->>PP: proc_pident_lookup(tgid_base_stuff)
+    PP-->>V: proc_pident_instantiate（绑定 proc_fd_operations）
+
+    U->>V: getdents(fd)
+    V->>PF: proc_readfd → proc_readfd_common
+    PF->>K: get_files_struct(task)
+    K-->>PF: files_struct → fdtable
+
+    loop 遍历每个有效 fd
+        PF->>K: fcheck_files(files, fd)
+        K-->>PF: struct file *
+        PF->>PF: proc_fd_instantiate（创建符号链接 inode）
+    end
+    PF-->>V: 目录条目列表
+    V-->>U: fd 列表
+
+    U->>V: readlink("/proc/1234/fd/0")
+    V->>PF: proc_fd_link
+    PF->>K: fcheck_files → fd_file->f_path
+    K-->>PF: 真实路径
+    PF-->>V: path
+    V-->>U: "/dev/pts/1"
+```
+
+####	阶段一：路径解析（VFS path lookup）
+
+用户态执行 `ls /proc/1234/fd` 时，shell 调用 `open("/proc/1234/fd", O_RDONLY|O_DIRECTORY)`，内核进入 VFS 路径解析流程。路径 `/proc/1234/fd` 被分解为三个路径分量：`proc` -> `1234` -> `fd`
+
+**第一步：解析 `/proc`（挂载点）**
+
+todo
+
+VFS 通过挂载表识别 `/proc` 是一个 procfs 挂载点，获取到 procfs 的根 `proc_root` 的 inode，其 `i_op` 为 `proc_root_inode_operations`
+
+**第二步：在 `/proc` 下查找 `1234`**
+
+VFS 调用 `proc_root_inode_operations->lookup`，即 `proc_root_lookup`：
+
+```cpp
+static struct dentry *proc_root_lookup(struct inode *dir,
+				       struct dentry *dentry, unsigned int flags)
+{
+	// 先尝试按 PID 查找（"1234" 是纯数字，匹配成功）
+	if (!proc_pid_lookup(dir, dentry, flags))
+		return NULL;
+	// 如果不是数字，才查找静态文件（如 meminfo）
+	return proc_lookup(dir, dentry, flags);
+}
+```
+
+`proc_pid_lookup` 的核心逻辑：
+1. `name_to_int(&dentry->d_name)`：将 `"1234"` 转换为整数 `tgid=1234`
+2. `find_task_by_pid_ns(tgid, ns)`：在当前 PID namespace 中查找对应的 `task_struct`
+3. `proc_pid_instantiate(dir, dentry, task, NULL)`：为该进程创建一个目录 inode，绑定 `proc_tgid_base_inode_operations`
+
+**第三步：在 `/proc/1234` 下查找 `fd`**
+
+VFS 调用 `proc_tgid_base_inode_operations->lookup`，即 `proc_tgid_base_lookup`：
+
+```cpp
+static struct dentry *proc_tgid_base_lookup(struct inode *dir,
+					    struct dentry *dentry, unsigned int flags)
+{
+	return proc_pident_lookup(dir, dentry,
+				  tgid_base_stuff, ARRAY_SIZE(tgid_base_stuff));
+}
+```
+
+`proc_pident_lookup` 线性扫描 `tgid_base_stuff` 数组，匹配到：
+
+```cpp
+DIR("fd", S_IRUSR|S_IXUSR, proc_fd_inode_operations, proc_fd_operations)
+```
+
+然后调用 `proc_pident_instantiate` 创建 `fd` 子目录的 inode，绑定 `proc_fd_inode_operations`（lookup = `proc_lookupfd`）和 `proc_fd_operations`（iterate_shared = `proc_readfd`）
+
+其中，lookup用于在`fd`目录查找指定的文件，iterate_shared用于遍历读取`fd`目录，这点前文已描述过
+
+####	阶段二：目录读取（getdents 系统调用）
+
+`ls` 命令随后调用 `getdents` 系统调用读取 `/proc/1234/fd` 目录内容。VFS 调用 `proc_fd_operations->iterate_shared`，即 `proc_readfd`，最终委托给 `proc_readfd_common`函数：
+
+```cpp
+static int proc_readfd_common(struct file *file, struct dir_context *ctx,
+			      instantiate_t instantiate)
+{
+	// 1. 获取目标进程的 task_struct
+	struct task_struct *p = get_proc_task(file_inode(file));
+	struct files_struct *files;
+	unsigned int fd;
+
+	if (!p)
+		return -ENOENT;
+
+	// 2. 输出 . 和 .. 目录
+	if (!dir_emit_dots(file, ctx))
+		goto out;
+
+	// 3. 获取进程的文件描述符表 files_struct
+	files = get_files_struct(p);
+	if (!files)
+		goto out;
+
+	// 4. 遍历 fd 表，为每个有效 fd 生成目录条目
+	rcu_read_lock();
+	for (fd = ctx->pos - 2;
+	     fd < files_fdtable(files)->max_fds;
+	     fd++, ctx->pos++) {
+		char name[PROC_NUMBUF];
+		int len;
+
+		// fcheck_files：在 fdtable 的位图中检查该 fd 是否正在使用
+		if (!fcheck_files(files, fd))
+			continue;
+		rcu_read_unlock();
+
+		len = snprintf(name, sizeof(name), "%u", fd);
+
+		// proc_fill_cache：创建 dentry 缓存条目
+		// proc_fd_instantiate：为该 fd 创建符号链接 inode
+		if (!proc_fill_cache(file, ctx, name, len,
+				     instantiate, p,
+				     (void *)(unsigned long)fd))
+			goto out_fd_loop;
+
+		// 允许被调度
+		cond_resched();
+		rcu_read_lock();
+	}
+	rcu_read_unlock();
+	// ...
+}
+```
+
+这里的关键数据结构关系：`task_struct` -> `files_struct` -> `fdtable` -> `fd[]`（`struct file *` 数组）。`fcheck_files(files, fd)` 的本质是检查 `fdtable->fd[fd]` 是否为非 NULL（即该 fd 槽位是否被占用），其实现通过 RCU 读侧保护以避免与 `close()` 等操作的竞态
+
+####	阶段三：符号链接解析（readlink / follow_link）
+
+当 `ls -l` 显示每个 fd 的链接目标时（如 `0 -> /dev/pts/1`），VFS 调用符号链接的 `get_link` 操作。在 `proc_fd_instantiate` 中（上一小节），每个 fd 的 inode 被设置为：
+
+```c
+inode->i_op = &proc_pid_link_inode_operations;
+ei->op.proc_get_link = proc_fd_link;
+```
+
+`proc_fd_link` 的实现：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/fd.c#L135
+static int proc_fd_link(struct dentry *dentry, struct path *path)
+{
+	struct files_struct *files = NULL;
+	struct task_struct *task;
+	int ret = -ENOENT;
+
+	// 获取进程的 task_struct
+	task = get_proc_task(d_inode(dentry));
+	if (task) {
+		files = get_files_struct(task);
+		put_task_struct(task);
+	}
+
+	if (files) {
+		unsigned int fd = proc_fd(d_inode(dentry));
+		struct file *fd_file;
+
+		// 加锁查找 fd 对应的 struct file
+		spin_lock(&files->file_lock);
+		fd_file = fcheck_files(files, fd);
+		if (fd_file) {
+			// 获取该文件的真实路径（如 /dev/pts/1、pipe:[12345] 等）
+			*path = fd_file->f_path;
+			path_get(&fd_file->f_path);
+			ret = 0;
+		}
+		spin_unlock(&files->file_lock);
+		put_files_struct(files);
+	}
+
+	return ret;
+}
+```
+
+核心逻辑：通过 `proc_fd(inode)` 从 `proc_inode->fd` 成员获取 fd 编号，然后在进程的 `files_struct` 中查找对应的 `struct file`，最终返回 `file->f_path`（即该文件的真实路径信息）
+
+####	阶段四：权限控制（proc_fd_permission）
+
+访问 `/proc/[pid]/fd/` 目录需要特殊的权限检查：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/fd.c#L280
+int proc_fd_permission(struct inode *inode, int mask)
+{
+	struct task_struct *p;
+	int rv;
+
+	// 先进行标准的 Unix 权限检查
+	rv = generic_permission(inode, mask);
+	if (rv == 0)
+		return rv;
+
+	// 特殊放行：如果访问者和目标进程属于同一线程组，则允许访问
+	rcu_read_lock();
+	p = pid_task(proc_pid(inode), PIDTYPE_PID);
+	if (p && same_thread_group(p, current))
+		rv = 0;
+	rcu_read_unlock();
+
+	return rv;
+}
+```
+
+这个特殊逻辑解决了一个实际问题：当进程执行 `setuid()` 后，其 `fd` 目录的 owner 变为 root（`S_IRUSR|S_IXUSR`），但该进程仍然需要访问自身的 `/proc/self/fd`。`same_thread_group` 检查确保了这种合理的自我访问不被拒绝
+
+####	阶段五：dentry 缓存验证（tid_fd_revalidate）
+
+由于进程的 fd 可能随时被 `close()`，已缓存的 dentry 可能已经过期。内核通过 `tid_fd_revalidate` 在每次访问时验证 fd 是否仍然有效：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/fd.c#L79
+static int tid_fd_revalidate(struct dentry *dentry, unsigned int flags)
+{
+	struct files_struct *files;
+	struct task_struct *task;
+	struct inode *inode;
+	unsigned int fd;
+
+	if (flags & LOOKUP_RCU)
+		return -ECHILD;  // RCU walk 模式不支持，回退到 ref walk
+
+	inode = d_inode(dentry);
+	task = get_proc_task(inode);
+	fd = proc_fd(inode);
+
+	if (task) {
+		files = get_files_struct(task);
+		if (files) {
+			struct file *file;
+
+			rcu_read_lock();
+			file = fcheck_files(files, fd);
+			if (file) {
+				unsigned f_mode = file->f_mode;
+				rcu_read_unlock();
+				put_files_struct(files);
+
+				// 根据文件的读写模式更新 inode 权限
+				task_dump_owner(task, 0, &inode->i_uid, &inode->i_gid);
+				if (S_ISLNK(inode->i_mode)) {
+					unsigned i_mode = S_IFLNK;
+					if (f_mode & FMODE_READ)
+						i_mode |= S_IRUSR | S_IXUSR;
+					if (f_mode & FMODE_WRITE)
+						i_mode |= S_IWUSR | S_IXUSR;
+					inode->i_mode = i_mode;
+				}
+				security_task_to_inode(task, inode);
+				put_task_struct(task);
+				return 1;  // dentry 有效
+			}
+			rcu_read_unlock();
+			put_files_struct(files);
+		}
+		put_task_struct(task);
+	}
+	return 0;  // dentry 无效，fd 已关闭或进程已退出
+}
+```
+
+该函数不仅验证 fd 是否有效，还会动态更新 inode 的权限位：如果 fd 以只读方式打开（`FMODE_READ`），则符号链接显示为 `lr-x------`；如果同时可读写（`FMODE_READ|FMODE_WRITE`），则显示为 `lrwx------`，这就是 `ls -l /proc/[pid]/fd` 输出中权限位的来源
+
+##	0x09	番外：一些补充
+
+####	/proc/sys/ sysctl 接口
+
+`/proc/sys/` 是 procfs 中一个特殊的可读写子树，用于动态调整内核运行参数。与 procfs 中其他只读文件不同，`/proc/sys/` 下的文件支持 `write` 操作（如 `echo 1 > /proc/sys/net/ipv4/ip_forward`）
+
+`/proc/sys/` 的初始化入口是 `proc_sys_init`，在 `proc_root_init` 中被调用：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/proc_sysctl.c
+static const struct file_operations proc_sys_file_operations = {
+	.open		= proc_sys_open,
+	.poll		= proc_sys_poll,
+	.read		= proc_sys_read,    // 读取内核参数值
+	.write		= proc_sys_write,   // 修改内核参数值
+	.llseek		= default_llseek,
+};
+
+static const struct file_operations proc_sys_dir_file_operations = {
+	.read		= generic_read_dir,
+	.iterate_shared	= proc_sys_readdir,
+	.llseek		= generic_file_llseek,
+};
+
+static const struct inode_operations proc_sys_inode_operations = {
+	.lookup		= proc_sys_lookup,
+	.permission	= proc_sys_permission,
+	.setattr	= proc_sys_setattr,
+	.getattr	= proc_sys_getattr,
+};
+```
+
+sysctl 参数通过 `ctl_table` 结构体注册，每个表项定义了参数名、数据指针、最大长度和读写回调：
+
+```cpp
+struct ctl_table {
+	const char *procname;           // 在 /proc/sys/ 下显示的名称
+	void *data;                     // 指向内核变量的指针
+	int maxlen;                     // 数据最大长度
+	umode_t mode;                   // 文件权限
+	struct ctl_table *child;        // 子目录表项（形成目录层级）
+	proc_handler *proc_handler;     // 读写回调（如 proc_dointvec、proc_dostring）
+	// ...
+};
+```
+
+内核模块可以通过 `register_sysctl_table` 或 `register_sysctl` 动态注册 sysctl 参数：
+
+```cpp
+// 内核模块注册 sysctl 参数示例
+static int my_param = 0;
+
+static struct ctl_table my_table[] = {
+	{
+		.procname	= "my_param",
+		.data		= &my_param,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,  // 整数类型的读写处理
+	},
+	{ }
+};
+
+static struct ctl_table_header *my_header;
+
+static int __init my_init(void)
+{
+	my_header = register_sysctl("my_module", my_table);
+	return my_header ? 0 : -ENOMEM;
+}
+
+static void __exit my_exit(void)
+{
+	unregister_sysctl_table(my_header);
+}
+```
+
+当用户执行 `cat /proc/sys/my_module/my_param` 时，`proc_sys_read` -> `proc_handler`（即 `proc_dointvec`）被调用，将 `my_param` 的当前值转换为字符串返回；`echo 42 > /proc/sys/my_module/my_param` 则触发 `proc_sys_write` -> `proc_dointvec`，将字符串 `"42"` 解析为整数写入 `my_param`
+
+####	内核模块中 proc 节点的创建 API
+
+内核提供了一组 API 用于在 `/proc` 下动态创建文件和目录：
+
+**1、`proc_create`：创建常规文件**
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/generic.c#L470
+struct proc_dir_entry *proc_create(const char *name, umode_t mode,
+				   struct proc_dir_entry *parent,
+				   const struct file_operations *proc_fops)
+{
+	return proc_create_data(name, mode, parent, proc_fops, NULL);
+}
+
+struct proc_dir_entry *proc_create_data(const char *name, umode_t mode,
+					struct proc_dir_entry *parent,
+					const struct file_operations *proc_fops,
+					void *data)
+{
+	struct proc_dir_entry *p;
+
+	BUG_ON(proc_fops == NULL);
+
+	if ((mode & S_IFMT) == 0)
+		mode |= S_IFREG;
+	if (!S_ISREG(mode)) {
+		WARN_ON(1);
+		return NULL;
+	}
+
+	// 分配并初始化 proc_dir_entry
+	p = proc_create_reg(name, mode, &parent, data);
+	if (!p)
+		return NULL;
+	p->proc_fops = proc_fops;
+	// 将 PDE 插入到父目录的红黑树中
+	return proc_register(parent, p);
+}
+```
+
+**2、`proc_mkdir`：创建目录**
+
+```cpp
+struct proc_dir_entry *proc_mkdir(const char *name, struct proc_dir_entry *parent)
+{
+	return proc_mkdir_data(name, 0, parent, NULL);
+}
+```
+
+**3、`proc_symlink`：创建符号链接**
+
+```cpp
+struct proc_dir_entry *proc_symlink(const char *name,
+				    struct proc_dir_entry *parent,
+				    const char *dest);
+```
+
+**4、`remove_proc_entry`：删除节点**
+
+```cpp
+void remove_proc_entry(const char *name, struct proc_dir_entry *parent);
+```
+
+内核模块中的典型使用模式：
+
+```cpp
+static struct proc_dir_entry *my_proc_dir;
+static struct proc_dir_entry *my_proc_file;
+
+static int my_proc_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "Hello from /proc/mymodule/info\n");
+	return 0;
+}
+
+static int my_proc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, my_proc_show, NULL);
+}
+
+static const struct file_operations my_proc_fops = {
+	.open    = my_proc_open,
+	.read    = seq_read,
+	.llseek  = seq_lseek,
+	.release = single_release,
+};
+
+static int __init my_init(void)
+{
+	my_proc_dir = proc_mkdir("mymodule", NULL);      // 创建 /proc/mymodule/
+	if (!my_proc_dir)
+		return -ENOMEM;
+	my_proc_file = proc_create("info", 0444, my_proc_dir, &my_proc_fops);
+	if (!my_proc_file) {
+		remove_proc_entry("mymodule", NULL);
+		return -ENOMEM;
+	}
+	return 0;
+}
+
+static void __exit my_exit(void)
+{
+	remove_proc_entry("info", my_proc_dir);
+	remove_proc_entry("mymodule", NULL);
+}
+```
+
+####	/proc/[pid]/status 的详细实现
+
+`/proc/[pid]/status` 是一个以人类可读格式展示进程状态的综合文件，通过 `ONE("status", S_IRUGO, proc_pid_status)` 宏注册。其核心函数 `proc_pid_status` 依次调用多个子函数来收集不同维度的信息：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/array.c#L358
+int proc_pid_status(struct seq_file *m, struct pid_namespace *ns,
+			struct pid *pid, struct task_struct *task)
+{
+	struct mm_struct *mm = get_task_mm(task);
+
+	task_name(m, task);           // Name: 进程名（task->comm）
+	task_state(m, ns, pid, task); // State/Tgid/Ngid/Pid/PPid/TracerPid/Uid/Gid
+	if (mm) {
+		task_mem(m, mm);          // VmPeak/VmSize/VmLck/VmPin/VmHWM/VmRSS/...
+		mmput(mm);
+	}
+	task_sig(m, task);            // Threads/SigQ/SigPnd/ShdPnd/SigBlk/SigIgn/SigCgt
+	task_cap(m, task);            // CapInh/CapPrm/CapEff/CapBnd/CapAmb
+	task_seccomp(m, task);        // Seccomp
+	task_cpus_allowed(m, task);   // Cpus_allowed/Cpus_allowed_list
+	cpuset_task_status_allowed(m, task);  // Mems_allowed/Mems_allowed_list
+	task_context_switch_counts(m, task);  // voluntary_ctxt_switches/nonvoluntary_ctxt_switches
+	return 0;
+}
+```
+
+各子函数的输出对应关系：
+
+| 子函数 | 输出字段 | 数据来源 |
+|--------|---------|---------|
+| `task_name` | `Name` | `task->comm`（最长 16 字节） |
+| `task_state` | `State/Tgid/Pid/PPid/Uid/Gid` | `task->state`、`pid_nr_ns()`、`task->real_parent` |
+| `task_mem` | `VmSize/VmRSS/VmData/VmStk/VmExe/...` | `mm->total_vm`、`get_mm_rss()`、`mm->data_vm` 等 |
+| `task_sig` | `Threads/SigPnd/SigBlk/SigIgn/SigCgt` | `task->signal->count`、`task->pending`、`task->blocked` |
+| `task_cap` | `CapInh/CapPrm/CapEff/CapBnd/CapAmb` | `task->cred->cap_*` |
+| `task_seccomp` | `Seccomp` | `task->seccomp.mode` |
+| `task_context_switch_counts` | `voluntary_ctxt_switches` | `task->nvcsw`、`task->nivcsw` |
+
+与 `/proc/[pid]/stat` 的对比：`status` 以 `Key: Value` 的人类可读格式输出，适合人工查看和简单的 `grep` 解析；`stat` 以空格分隔的数字序列输出，适合程序化解析（如 `top`、`ps` 等工具），且 `stat` 包含更多运行时统计字段（如 CPU 时间、调度策略、启动时间等）
+
+##  0x0A  参考
 -   [Linux进程网络流量统计方法及实现](https://zhuanlan.zhihu.com/p/49981590)
 -   [使用 golang gopacket 实现进程级流量监控](https://github.com/rfyiamcool/notes/blob/main/netflow.md)
 -   [从内核代码角度详解proc目录](https://blog.spoock.com/2019/10/26/proc-from-kernel/)
@@ -2111,3 +3672,4 @@ int proc_pid_statm(struct seq_file *m, struct pid_namespace *ns,
 -	[聊聊 Linux 的内存统计](https://www.0xffffff.org/2019/07/17/42-linux-memory-monitor/)
 -	[Linux中进程内存与cgroup内存的统计](https://hustcat.github.io/memory-usage-in-process-and-cgroup/?spm=a2c6h.12873639.article-detail.4.4db57092lEvNeV)
 -	[proc_pid_statm(5) — Linux manual page](https://man7.org/linux/man-pages/man5/proc_pid_statm.5.html)
+-	[一文吃透 Linux proc 文件系统](https://zhuanlan.zhihu.com/p/2015438400728113341)
