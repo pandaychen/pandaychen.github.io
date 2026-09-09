@@ -6036,7 +6036,38 @@ struct saved {
 
 当符号链接目标被解析完毕后，内核从 `nd->stack` 中恢复之前保存的剩余路径，递减 `nd->depth`，继续解析原始路径的后续部分
 
-##  0x0A 参考
+##	0x0A	总结
+
+####	路径解析的本质
+通过本文可了解到，路径解析是一个严格的状态机模型（State Machine），内核根本不在乎**上一个分量的名字叫什么**，它**只关心现在脚踩在哪一个实际的目录节点（dentry）上？以及下一步要找的单名（qstr）是什么？**，即**上一个路径分量的dentry+inode，与下一个分量的qstr结构**
+
+从上文的描述可知，核心结构体 `struct nameidata`（即上下文中一直在传的 `nd`）一直贯穿open路径解析（查找）过程始终
+
+1、**上一个分量的 dentry + inode** （作为当前上下文 / 父节点），对应 `nd` 中如下成员：
+
+-	`nd->path.dentry`：代表在目录树里的拓扑坐标。它用来确认当前节点是不是挂载点（`d_mountpoint`）、是不是脱离了系统根目录、它的父节点是谁
+-	`nd->inode`：代表当前踩着的这个目录的实体操作接口（inode）。所有的具体动作都要靠它：
+	-	查权限：调用当前 `inode->i_op->permission`
+	-	查底层硬盘（下级目录）：调用当前 `inode->i_op->lookup`
+
+2、**下一个分量的 qstr** （作为搜索目标），对应 `nd` 中如下成员：
+
+-	`nd->last`：类型 `struct qstr`，`qstr` 包含了三部分
+	-	`name`：指向字符串片段的指针（比如指向 `"b"`）
+	-	`len`：字符串的长度（比如 `1`）
+	-	`hash`：内核在解析路径文本时，只要切出一个分量，就会立刻计算出它的哈希值并存进 `qstr`
+
+####	关于nameidata对象的两个问题
+
+1、`struct nameidata`结构中，`nd->path`与`nd->inode`的更新时机
+
+todo
+
+2、`struct nameidata`结构中，如果当前某个路径分量是挂载点时，那么`nameidata`保存的是挂载点这个dentry、inode，还是该挂载点对应的上一级文件系统的dentry、inode?
+
+todo
+
+##  0x0B 参考
 -   [open 系统调用（一）](https://www.kerneltravel.net/blog/2021/open_syscall_szp1/)
 -   [走马观花： Linux 系统调用 open 七日游](http://blog.chinaunix.net/uid-20522771-id-4419678.html)
 -   [Open() 函数的内核追踪](https://blog.csdn.net/blue95wind/article/details/7472350)
