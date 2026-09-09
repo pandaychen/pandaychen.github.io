@@ -31,7 +31,7 @@ tags:
 -	`sched_entity`：调度实体
 -	`cfs_rq`：每个CPU独立维护的就绪队列
 
-根据上文的介绍，了解到CFS调度器使用`sched_entity`跟踪调度信息。CFS调度器使用`cfs_rq`跟踪就绪队列信息以及管理就绪态调度实体，并维护一棵按照虚拟时间排序的红黑树，`tasks_timeline->rb_root`是红黑树的根节点，`tasks_timeline->rb_leftmost`指向红黑树中最左边的调度实体节点（虚拟时间最小的调度实体），为了更快的选择最适合运行的调度实体，`rb_leftmost`相当于一个缓存。每个就绪态的调度实体`sched_entity`包含插入红黑树中使用的节点`rb_node`，同时`vruntime`成员记录已经运行的`task_struct`虚拟时间。CFS算法会选择红黑树最左边的进程运行，随着系统时间的推移，原来左边运行过的进程慢慢的会移动到红黑树的右边，原来右边的进程也会最终跑到最左边。它们之间的关系如下图：
+根据上文的介绍，了解到CFS调度器使用`sched_entity`跟踪调度信息。CFS调度器使用`cfs_rq`跟踪就绪队列信息以及管理就绪态调度实体，并维护一棵按照虚拟时间排序的红黑树，`cfs_rq->tasks_timeline`（类型 `struct rb_root`）是红黑树的根节点，`cfs_rq->rb_leftmost`指向红黑树中最左边的调度实体节点（虚拟时间最小的调度实体），为了更快的选择最适合运行的调度实体，`rb_leftmost`相当于一个缓存。每个就绪态的调度实体`sched_entity`包含插入红黑树中使用的节点`rb_node`，同时`vruntime`成员记录已经运行的`task_struct`虚拟时间。CFS算法会选择红黑树最左边的进程运行，随着系统时间的推移，原来左边运行过的进程慢慢的会移动到红黑树的右边，原来右边的进程也会最终跑到最左边。它们之间的关系如下图：
 
 ![cfs_relation](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/scheduler/cfs_process_schedule_impl.jpeg)
 
@@ -111,7 +111,10 @@ struct cfs_rq {
 	//记录就绪队列上进程的最小虚拟运行时间。这个值是计算就绪队列虚拟运行时间的基础，大部分情况下是CFS红黑树最小子节点（最左节点）的虚拟运行时间，但实际情况下可能有时候会比最小子节点的虚拟运行时间稍大一些
 	u64 min_vruntime;
 
-	struct rb_root_cached tasks_timeline;
+	//v4.11.6 中红黑树根节点用 struct rb_root，最左节点单独用 rb_leftmost 指针缓存
+	//（注：4.15+ 合并为 struct rb_root_cached tasks_timeline，内部自带 leftmost 缓存）
+	struct rb_root tasks_timeline;
+	struct rb_node *rb_leftmost;
 };
 ```
 
@@ -119,11 +122,10 @@ struct cfs_rq {
 `sched_entity`描述进程调度的实体信息：
 
 ```cpp
-// kernel/linux/sched.h
+// include/linux/sched.h（v4.11.6，注意此版本 sched_entity 尚无 runnable_weight 字段，该字段为 4.15+ PELT 重写引入）
 struct sched_entity {
 	// 权重信息，在计算虚拟时间的时候会用到inv_weight成员
 	struct load_weight		load;
-	unsigned long			runnable_weight;
 	// CFS调度器使用红黑树维护调度的进程信息
 	struct rb_node			run_node;
 	// 进入就绪队列是为1
@@ -140,21 +142,25 @@ struct sched_entity {
 
 ##	0x02	CFS相关的一些概念
 
-####	调度周期：sysctl_sched_latency
-调度周期表示所有可运行任务（runnable tasks）在一个调度周期内至少被运行一次的时间窗口，调度器会尝试在这个时间窗口内，让所有就绪状态的进程（线程）至少获得一次 CPU 时间片。调度周期默认为 `6ms`，但会根据 CPU 数量动态调整，参考公式为`sched_latency_ns = 6ms * (1 + log2(nr_cpus))`
+####	调度延迟（目标延迟）：sysctl_sched_latency
+> 说明：这里先厘清两个容易混淆的术语。`sysctl_sched_latency` 在内核中被称为**调度延迟**（scheduling latency，也叫 target latency，即"目标延迟"），它是 CFS 期望的一个"所有可运行任务至少被调度一次"的时间窗口；而下文的 `__sched_period()` 计算得到的是**实际调度周期**（scheduling period）。二者在就绪任务数较少（`nr_running <= sched_nr_latency`，默认 `8`）时相等，其余情况下调度周期会大于调度延迟。原文两个小节的命名此前存在互换/混淆，这里统一订正。
+
+调度延迟 `sysctl_sched_latency` 表示调度器期望让所有就绪状态的进程（线程）在这个时间窗口内至少获得一次 CPU 的时间跨度。其默认值为 `6ms`，但会根据 CPU 数量动态调整。
+
+需要注意，这个"按 CPU 数缩放"并非无条件生效：仅当调节策略 `sysctl_sched_tunable_scaling == SCHED_TUNABLESCALING_LOG`（默认值）时，内核才会在初始化及 CPU 上下线时通过 `update_sysctl()`/`sched_init_granularity()` 按 `1 + ilog2(nr_cpus)` 的因子放大 `sysctl_sched_latency` 与 `sysctl_sched_min_granularity`，即参考公式 `sysctl_sched_latency = 6ms * (1 + log2(nr_cpus))`；若策略为 `NONE`，则保持常量 `6ms` 不缩放。
 
 ```bash
-# 实际结果与公式可能有出入
+# 该机器为多核，故实际值大于默认 6ms（按 CPU 数缩放的结果）
 [root@VM-x-x-centos ~]# sysctl -a|grep sched|grep sched_latency_ns
 kernel.sched_latency_ns = 18000000
 ```
 
-####	调度延迟：sched_period
-调度延迟是保证每一个可运行进程都至少运行（完成）一次的时间间隔。例如每个进程都运行`10ms`，系统中总共有`2`个进程，那么调度延迟就是`20ms`。如果现在保证调度延迟不变，固定是`6ms`，如果有`100`个进程，那么每个进程分配到的时间就是`0.06ms`。随着进程的增加，每个进程分配的时间在减少，进程调度过于频繁，上下文切换时间开销就会变大。因此，CFS调度器的调度延迟时间的设定并不是固定的。当系统处于就绪态的进程少于一个定值（默认值`8`）的时候，调度延迟也是固定一个值不变（默认值`6ms`）。当系统就绪态进程个数超过这个值时，需要保证每个进程至少运行一定的时间才让出CPU，至少一定的时间被称为最小粒度时间（在CFS默认设置中，最小粒度时间是`0.75ms`，关联变量`sysctl_sched_min_granularity`）
+####	调度周期：__sched_period
+调度周期是保证每一个可运行进程都至少运行（完成）一次的时间间隔。例如每个进程都运行`10ms`，系统中总共有`2`个进程，那么调度周期就是`20ms`。如果现在保证调度周期不变，固定是`6ms`，如果有`100`个进程，那么每个进程分配到的时间就是`0.06ms`。随着进程的增加，每个进程分配的时间在减少，进程调度过于频繁，上下文切换时间开销就会变大。因此，CFS调度器的调度周期并不是固定的：当系统处于就绪态的进程少于一个定值（`sched_nr_latency`，默认值`8`）的时候，调度周期就固定等于调度延迟 `sysctl_sched_latency`（默认值`6ms`）；当系统就绪态进程个数超过这个值时，需要保证每个进程至少运行一定的时间才让出CPU，这个"至少一定的时间"被称为最小粒度时间（在CFS默认设置中，最小粒度时间是`0.75ms`，关联变量`sysctl_sched_min_granularity`），此时调度周期 = `nr_running * sysctl_sched_min_granularity`
 
 ```cpp
 //调度周期是一个动态变化的值，使用__sched_period计算调度周期
-//nr_running是系统中就绪进程数量，当超过sched_nr_latency时，无法保证调度延迟，因此转为保证调度最小粒度。如果nr_running并没有超过sched_nr_latency，那么调度周期就等于调度延迟sysctl_sched_latency（6ms）
+//nr_running是系统中就绪进程数量，当超过sched_nr_latency时，无法在一个调度延迟内轮转完所有进程，因此转为保证调度最小粒度。如果nr_running并没有超过sched_nr_latency，那么调度周期就等于调度延迟sysctl_sched_latency（6ms）
 static u64 __sched_period(unsigned long nr_running)
 {
 	if (unlikely(nr_running > sched_nr_latency))
@@ -230,7 +236,7 @@ vriture_runtime = wall_time * ----------------
 
 2、`weight` && `inv_weight`
 
-其中，`inv_weight`的值可根据`weight`计算（而权重`weight`的值已经计算保存到`sched_prio_to_weight`数组中，计算公式`sched_prio_to_wmult[i] = 232/sched_prio_to_weight[i]`），在使用时只需要查表`sched_prio_to_wmult`就可以的到`inv_weigth`的值
+其中，`inv_weight`的值可根据`weight`计算（而权重`weight`的值已经计算保存到`sched_prio_to_weight`数组中，计算公式`sched_prio_to_wmult[i] = 2^32 / sched_prio_to_weight[i]`），在使用时只需要查表`sched_prio_to_wmult`就可以得到`inv_weight`的值
 
 ```TEXT
                   2^32
@@ -263,7 +269,7 @@ const u32 sched_prio_to_wmult[40] = {
 ```cpp
 struct load_weight {
 	unsigned long		weight;		//进程的权重
-	u32			inv_weight;			//inv_weight等于232/weight
+	u32			inv_weight;			//inv_weight等于2^32/weight
 };
 ```
 
@@ -582,8 +588,8 @@ static struct task_struct *copy_process(...){
 }
 
 int sched_fork(unsigned long clone_flags, struct task_struct *p){
-    __schedd_fork(clone_flags, p);
-    p->__state = TASK_NEW;
+    __sched_fork(clone_flags, p);
+    p->state = TASK_NEW;
     if (rt_prio(p->prio))
         p->sched_class = &rt_sched_class;
     else
@@ -700,7 +706,6 @@ static void update_curr(struct cfs_rq *cfs_rq)
 static void update_min_vruntime(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *curr = cfs_rq->curr;
-	struct rb_node *leftmost = rb_first_cached(&cfs_rq->tasks_timeline);
 	u64 vruntime = cfs_rq->min_vruntime;
  
 	if (curr) {
@@ -710,9 +715,10 @@ static void update_min_vruntime(struct cfs_rq *cfs_rq)
 			curr = NULL;
 	}
  
-	if (leftmost) { /* non-empty tree */
+	//v4.11.6 直接使用 cfs_rq->rb_leftmost 缓存的最左节点（而非 4.15+ 的 rb_first_cached）
+	if (cfs_rq->rb_leftmost) { /* non-empty tree */
 		struct sched_entity *se;
-		se = rb_entry(leftmost, struct sched_entity, run_node);
+		se = rb_entry(cfs_rq->rb_leftmost, struct sched_entity, run_node);
  
 		if (!curr)
 			vruntime = se->vruntime;
@@ -1027,7 +1033,7 @@ static void account_entity_enqueue(struct cfs_rq *cfs_rq, struct sched_entity *s
 至此，对新建进程已经成功加入了CPU的CFS就绪队列，这里只需要等待CFS算法在合适的时机进行调度
 
 ##	0x06	调度方式二：周期性调度
-除了对新建进程的调度方式外，还有另外一种核心调度模式即周期性调度。周期性调度是指Linux定时周期性地检查当前任务是否耗尽当前进程的时间片（关于耗尽检测的说法见后文分析），并检查是否应该抢占当前进程。一般会在定时器的中断函数中，通过一层层函数调用最终到`scheduler_tick()`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/core.c#L3091)，周期性调度的核心方法如下：
+除了对新建进程的调度方式外，还有另外一种核心调度模式即周期性调度。需要强调的是，CFS 并没有传统意义上的"固定时间片"，所谓"检查时间片是否耗尽"更准确的表述是：周期性地检查当前任务本轮已运行的物理时间是否超过了 `sched_slice()` 计算出的理想运行时间（`ideal_runtime`），以及是否满足最小粒度（`sysctl_sched_min_granularity`）等抢占条件（关于耗尽检测的说法见后文分析），并据此决定是否应该抢占当前进程。一般会在定时器的中断函数中，通过一层层函数调用最终到`scheduler_tick()`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/core.c#L3091)，周期性调度的核心方法如下：
 
 -	`scheduler_tick`
 -	`entity_tick`
@@ -1126,8 +1132,8 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	if (delta < 0)                                
 		return;
 
-	//这里把虚拟时间和实际时间比较，看起来很奇怪
-	//感觉就像是bug一样，然后经过查看提交记录，作者的意图是：希望权重小的任务更容易被抢
+	//这里 delta 是 vruntime 差值（虚拟时间），而 ideal_runtime 是 sched_slice 得到的物理时间，二者量纲并不严格一致
+	//这看似"bug"，实则是内核有意为之的近似：由于 vruntime 的增长速率与权重成反比，对权重小（低优先级）的任务而言相同物理时间会换算出更大的 vruntime 差值，因此该判断会让轻权重任务更容易被抢占，符合 CFS 让高优先级任务获得更多 CPU 的目标
 	if (delta > ideal_runtime)                    
 		resched_curr(rq_of(cfs_rq));
 }
@@ -1389,7 +1395,379 @@ static void account_entity_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *s
 }
 ```
 
-##	0x09	唤醒抢占
+##	0x09	内核软中断收包对 CFS 时间计费的"偷用"与补偿
+本节讨论一个非常经典且容易被忽视的问题：**Linux 内核协议栈收包时会"偷偷"借用当前 CPU 上正在运行进程的执行态（上下文）来处理报文，那么这部分被"偷走"的 CPU 时间，CFS 是如何做区分与补偿的？** 
+
+这直接关系到 CFS 记账的公平性，先描述一下现象
+
+####	问题本质：软中断"借用"当前进程的执行态
+网卡收包的下半部处理运行在 `NET_RX_SOFTIRQ` 软中断上下文中。软中断并不是一个独立的调度实体（`task_struct`），它没有自己的 `sched_entity`、也不会进入 CFS 就绪队列，而是在如下两条主要时机"借用"当前被打断进程的内核栈/上下文就地执行：
+
+-	硬中断返回时：`irq_exit()` -> `invoke_softirq()` -> `__do_softirq()` -> `net_rx_action()`（最常见路径）
+-	`local_bh_enable()`（开启下半部）时
+
+关键点在于：软中断执行时，`current` 指针仍然指向那个**恰好在该 CPU 上被中断的进程**。如果不加区分地把这段收包耗时按普通运行时间累加到 `current->se.vruntime` 上（即在 `update_curr` 中计入），那么这个"无辜"的进程就会平白无故地被抬高 `vruntime`，在红黑树中被推向右侧、更晚被调度，形成对它的不公平调度。这就是所谓"协议栈偷用当前进程执行态"的公平性隐患
+
+那么 CFS 是如何解决的？核心思路分两层：
+
+1.	**时间维度上做区分**：借助 `CONFIG_IRQ_TIME_ACCOUNTING`，把硬/软中断消耗的时间单独统计出来，并在推进"任务时钟" `rq->clock_task` 时**扣除**掉这部分中断时间，从而使得 `update_curr` 计算的 `delta_exec` 不含中断时间
+2.	**负载维度上做公平化下沉**：当软中断负载过高时，将其转交给 `ksoftirqd/N` 内核线程处理，而 `ksoftirqd` 是一个正常的 `SCHED_NORMAL` 任务，会以自己的 `vruntime` 公平地参与 CFS 竞争
+
+下面结合 v4.11.6 源码逐层展开
+
+####	完整收包软中断链路（v4.11.6）
+1、硬中断中触发软中断：驱动在硬中断里调用 `napi_schedule()`，将本设备的 `napi_struct` 挂到 per-cpu 的 `softnet_data.poll_list`，并 raise `NET_RX_SOFTIRQ`
+
+```cpp
+// net/core/dev.c
+static inline void ____napi_schedule(struct softnet_data *sd,
+				     struct napi_struct *napi)
+{
+	list_add_tail(&napi->poll_list, &sd->poll_list);
+	__raise_softirq_irqoff(NET_RX_SOFTIRQ);   // 置位软中断 pending 位
+}
+```
+
+2、硬中断退出时执行软中断：`irq_exit()` 在确认不处于中断嵌套且有 pending 软中断时调用 `invoke_softirq()`
+
+```cpp
+// kernel/softirq.c
+void irq_exit(void)
+{
+	......
+	account_irq_exit_time(current);              // 结算本段硬中断时间（见下文 irqtime）
+	preempt_count_sub(HARDIRQ_OFFSET);
+	if (!in_interrupt() && local_softirq_pending())
+		invoke_softirq();
+	......
+}
+
+static inline void invoke_softirq(void)
+{
+	//若 ksoftirqd 已经在运行，则不在此就地处理，交给 ksoftirqd（避免重复/抢占）
+	if (ksoftirqd_running())
+		return;
+
+	if (!force_irqthreads) {
+#ifdef CONFIG_HAVE_IRQ_EXIT_ON_IRQ_STACK
+		__do_softirq();                      // 就地在（软）中断栈上执行
+#else
+		do_softirq_own_stack();
+#endif
+	} else {
+		wakeup_softirqd();                   // 强制线程化：唤醒 ksoftirqd
+	}
+}
+```
+
+3、`__do_softirq()`：软中断总处理入口，带有**时间预算**与**重启次数**双重限制，避免软中断长时间独占 CPU
+
+```cpp
+// kernel/softirq.c
+#define MAX_SOFTIRQ_TIME  msecs_to_jiffies(2)   // 软中断最长连续处理 2ms
+#define MAX_SOFTIRQ_RESTART 10                  // 最多重启 10 轮
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/softirq.c#L241
+asmlinkage __visible void __softirq_entry __do_softirq(void)
+{
+	unsigned long end = jiffies + MAX_SOFTIRQ_TIME;
+	int max_restart = MAX_SOFTIRQ_RESTART;
+	__u32 pending;
+	int softirq_bit;
+
+	pending = local_softirq_pending();
+
+	//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/softirq.c#L259
+	//注意，下面会详细说明
+	account_irq_enter_time(current);             // 软中断开始，结算前一段时间
+	__local_bh_disable_ip(_RET_IP_, SOFTIRQ_OFFSET);
+restart:
+	set_softirq_pending(0);
+	local_irq_enable();
+	//... 遍历 pending 逐个执行 h->action(h)，NET_RX_SOFTIRQ 对应 net_rx_action ...
+	local_irq_disable();
+
+	pending = local_softirq_pending();
+	if (pending) {
+		//预算未耗尽且无需重新调度，则继续下一轮；否则唤醒 ksoftirqd 处理剩余软中断
+		if (time_before(jiffies, end) && !need_resched() &&
+		    --max_restart)
+			goto restart;
+
+		wakeup_softirqd();                   // 负载过高：下沉到 ksoftirqd
+	}
+	
+	//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/softirq.c#L309
+	account_irq_exit_time(current);              // 软中断结束，结算本段时间
+	__local_bh_enable(SOFTIRQ_OFFSET);
+}
+```
+
+4、`net_rx_action()`：`NET_RX_SOFTIRQ` 的处理函数，同样有 `budget`（报文数）与 `time_limit`（时间）两个约束
+
+```cpp
+// net/core/dev.c
+int netdev_budget __read_mostly = 300;           // 一轮 poll 最多处理的报文数
+
+static __latent_entropy void net_rx_action(struct softirq_action *h)
+{
+	struct softnet_data *sd = this_cpu_ptr(&softnet_data);
+	//v4.11.6 此处为硬编码的 2 jiffies；netdev_budget_usecs 是 4.12 才引入的可调 sysctl
+	unsigned long time_limit = jiffies + 2;
+	int budget = netdev_budget;
+	LIST_HEAD(list);
+	LIST_HEAD(repoll);
+
+	local_irq_disable();
+	list_splice_init(&sd->poll_list, &list);
+	local_irq_enable();
+
+	for (;;) {
+		struct napi_struct *n;
+
+		if (list_empty(&list)) {
+			if (!sd_has_rps_ipi_waiting(sd) && list_empty(&repoll))
+				goto out;
+			break;
+		}
+
+		n = list_first_entry(&list, struct napi_struct, poll_list);
+		budget -= napi_poll(n, &repoll);       // 调用驱动注册的 poll 收包
+
+		/* If softirq window is exhausted then punt. */
+		//预算或时间耗尽：记一次 time_squeeze，跳出（剩余留待下一轮软中断/ksoftirqd）
+		if (unlikely(budget <= 0 ||
+			     time_after_eq(jiffies, time_limit))) {
+			sd->time_squeeze++;
+			break;
+		}
+	}
+	//... 若仍有 napi 待处理，重新 raise NET_RX_SOFTIRQ ...
+	if (!list_empty(&sd->poll_list))
+		__raise_softirq_irqoff(NET_RX_SOFTIRQ);
+out:
+	......
+}
+```
+
+`sd->time_squeeze` 即 `/proc/net/softnet_stat` 中的 `squeezed` 计数，表示软中断在预算/时间耗尽时仍有报文未处理完的次数，是收包侧观测软中断压力的重要指标
+
+####	CFS 如何"区分/补偿"：irqtime + rq_clock_task
+这一小节是本章节的核心。CFS 之所以能"不冤枉"被借用执行态的进程，关键在于**任务时钟 `rq->clock_task` 会扣除中断时间**，而 `update_curr()` 记账时用的正是 `rq_clock_task()`
+
+1、中断时间的采集：`irqtime_account_irq`。该函数在硬/软中断进出（`account_irq_enter_time`/`account_irq_exit_time`，即 `irq_enter/irq_exit`、软中断进出）时被调用，用 `sched_clock_cpu()` 采样并把中断耗时累加进 per-cpu 的 `struct irqtime`
+
+`account_irq_enter_time/account_irq_exit_time`的调用，在前面`__do_softirq`函数中有说明
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/vtime.h#L111
+static inline void account_irq_enter_time(struct task_struct *tsk)
+{
+	vtime_account_irq_enter(tsk);
+
+	//主要是调用irqtime_account_irq
+	irqtime_account_irq(tsk);
+}
+
+static inline void account_irq_exit_time(struct task_struct *tsk)
+{
+	vtime_account_irq_exit(tsk);
+	irqtime_account_irq(tsk);
+}
+```
+
+`irqtime_account_irq`的实现如下：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/cputime.c#L37
+static void irqtime_account_delta(struct irqtime *irqtime, u64 delta,
+				  enum cpu_usage_stat idx)
+{
+	u64 *cpustat = kcpustat_this_cpu->cpustat;
+
+	u64_stats_update_begin(&irqtime->sync);
+
+	//把中断耗时累加进 per-cpu 的 `struct irqtime`
+
+	cpustat[idx] += delta;          // 供 /proc/stat 的 hi/si 展示
+	irqtime->total += delta;        // 供调度器读取（irq_time_read）
+	irqtime->tick_delta += delta;	
+	u64_stats_update_end(&irqtime->sync);
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/cputime.c#L53
+void irqtime_account_irq(struct task_struct *curr)
+{
+	struct irqtime *irqtime = this_cpu_ptr(&cpu_irqtime);
+	s64 delta;
+	int cpu;
+
+	if (!sched_clock_irqtime)       // 未开启 IRQ_TIME_ACCOUNTING 则直接返回
+		return;
+
+	cpu = smp_processor_id();
+	delta = sched_clock_cpu(cpu) - irqtime->irq_start_time;
+	irqtime->irq_start_time += delta;
+
+	/*
+	 * We do not account for softirq time from ksoftirqd here.
+	 * We want to continue accounting softirq time to ksoftirqd thread
+	 * in that case, so as not to confuse scheduler with a special task
+	 * that do not consume any time, but still wants to run.
+	 */
+	//硬中断时间 -> CPUTIME_IRQ
+	if (hardirq_count())
+		irqtime_account_delta(irqtime, delta, CPUTIME_IRQ);
+	//软中断时间 -> CPUTIME_SOFTIRQ，但【当且仅当】当前不是 ksoftirqd 时才计入
+	else if (in_serving_softirq() && curr != this_cpu_ksoftirqd())
+		irqtime_account_delta(irqtime, delta, CPUTIME_SOFTIRQ);
+}
+```
+
+这里有一个极其关键的判断 `curr != this_cpu_ksoftirqd()`：如果软中断本来就是在 `ksoftirqd` 线程里跑的，那么这段时间就**不应该**被当作"需要从任务时钟里扣掉的中断时间"，因为 `ksoftirqd` 本身就是一个真实的调度实体，它跑软中断消耗的时间理应正常计入它自己的 `vruntime`（否则 `ksoftirqd` 会把自己的运行时间从自己身上减掉，导致其 `sum_exec_runtime` 永远不前进，进而被调度器"饿不死也跑不动"，这正是 commit `25e2d8c1`（*sched/cputime: Fix ksoftirqd cputime accounting regression*）修复的问题）
+
+2、中断时间被"扣除"进 `rq->clock_task`：`update_rq_clock_task`
+
+这里回顾下`update_rq_clock`的调用位置：`enqueue_task`、`scheduler_tick`等
+
+```cpp
+// kernel/sched/core.c
+static void update_rq_clock_task(struct rq *rq, s64 delta)
+{
+#if defined(CONFIG_IRQ_TIME_ACCOUNTING) || defined(CONFIG_PARAVIRT_TIME_ACCOUNTING)
+	s64 steal = 0, irq_delta = 0;
+#endif
+#ifdef CONFIG_IRQ_TIME_ACCOUNTING
+	//本次时间片内新增的中断时间 = 当前累计 irqtime - 上次已结算的 prev_irq_time
+	irq_delta = irq_time_read(cpu_of(rq)) - rq->prev_irq_time;
+
+	/*
+	 * Since irq_time is only updated on {soft,}irq_exit, we might run into
+	 * this case when a previous update_rq_clock() happened inside a
+	 * {soft,}irq region. ...
+	 * 保证 ->clock_task 单调：若中断时间比本次 delta 还大，先只吃掉 delta 部分
+	 */
+	if (irq_delta > delta)
+		irq_delta = delta;
+
+	rq->prev_irq_time += irq_delta;
+	delta -= irq_delta;             // 关键：从 delta 中扣除中断时间
+#endif
+#ifdef CONFIG_PARAVIRT_TIME_ACCOUNTING
+	//虚拟化场景下再扣除 steal time（被 hypervisor 偷走的时间），思路完全一致
+	if (static_key_false((&paravirt_steal_rq_enabled))) {
+		steal = paravirt_steal_clock(cpu_of(rq));
+		steal -= rq->prev_steal_time_rq;
+		if (unlikely(steal > delta))
+			steal = delta;
+		rq->prev_steal_time_rq += steal;
+		delta -= steal;
+	}
+#endif
+
+	rq->clock_task += delta;        // 任务时钟只累加"纯任务执行时间"
+	//...
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/core.c#L226
+void update_rq_clock(struct rq *rq)
+{
+	s64 delta;
+	//...
+	delta = sched_clock_cpu(cpu_of(rq)) - rq->clock;
+	if (delta < 0)
+		return;
+	rq->clock += delta;             // rq->clock：墙上时间（含中断）
+	update_rq_clock_task(rq, delta);// rq->clock_task：扣除中断/steal 后的任务时间
+}
+```
+
+可以看到 `rq` 维护了两个时钟：`rq->clock`（墙上时间，包含中断）与 `rq->clock_task`（扣除了硬/软中断、steal time 后的纯任务时间）
+
+3、`update_curr` 用的是 `rq_clock_task`，天然不含中断时间。回顾前文 `update_curr` 的第一行：
+
+```cpp
+static void update_curr(struct cfs_rq *cfs_rq)
+{
+	struct sched_entity *curr = cfs_rq->curr;
+	//注意：这里取的是 rq_clock_task（任务时钟），不是 rq_clock（墙上时钟）
+	u64 now = rq_clock_task(rq_of(cfs_rq));
+	u64 delta_exec;
+	//...
+	delta_exec = now - curr->exec_start;   // 因此 delta_exec 不含中断时间
+	//...
+	curr->vruntime += calc_delta_fair(delta_exec, curr);  // vruntime 也就不含中断时间
+	update_min_vruntime(cfs_rq);
+}
+```
+
+```cpp
+// kernel/sched/sched.h
+static inline u64 rq_clock(struct rq *rq)        // 墙上时钟
+{
+	return rq->clock;
+}
+static inline u64 rq_clock_task(struct rq *rq)   // 任务时钟（已扣除中断/steal）
+{
+	return rq->clock_task;
+}
+```
+
+至此闭环形成：软中断收包虽然借用了当前进程 `current` 的执行态，但这段时间被计入 per-cpu `irqtime`，并在 `update_rq_clock_task` 里从 `rq->clock_task` 增量中扣除；而 `update_curr` 恰恰使用 `rq_clock_task` 来计算 `delta_exec` 与 `vruntime`。因此**被借用执行态的进程的 `vruntime` 不会因为替协议栈"背锅"而被抬高**，这就是 CFS 对"偷用执行态"的补偿与区分
+
+需要特别说明：上述扣除依赖 `CONFIG_IRQ_TIME_ACCOUNTING` 且 `sched_clock_irqtime` 使能（`irq_time_read` 有效）。若内核未开启该特性，则 `rq->clock_task == rq->clock`，软中断时间会实打实计入当前进程的 `vruntime`，此时确实存在"背锅"的不公平，这也是该特性存在的意义
+
+####	负载维度的公平化：ksoftirqd 参与 CFS 竞争
+当软中断压力过大（`__do_softirq` 超过 `MAX_SOFTIRQ_TIME`/`MAX_SOFTIRQ_RESTART`，或 `net_rx_action` 预算耗尽），处理会 `wakeup_softirqd()` 下沉给 per-cpu 的 `ksoftirqd/N` 内核线程。`ksoftirqd` 是普通 `SCHED_NORMAL` 任务，拥有自己的 `sched_entity`、正常入队 CFS 红黑树、按 `vruntime` 公平参与调度。此时收包耗时以 `ksoftirqd` 自身的运行时间计入它的 `vruntime`，与其他普通进程公平竞争 CPU
+
+配合前面 `irqtime_account_irq` 中 `curr != this_cpu_ksoftirqd()` 的判断，`ksoftirqd` 跑软中断的时间**不会**被从任务时钟里扣除（因为它就是任务本身），而是通过 `irqtime_account_process_tick` 单独归属到 `ksoftirqd` 的系统时间（`CPUTIME_SOFTIRQ`）：
+
+```cpp
+// kernel/sched/cputime.c（irqtime_account_process_tick 节选）
+	if (this_cpu_ksoftirqd() == p) {
+		/*
+		 * ksoftirqd time do not get accounted in cpu_softirq_time.
+		 * So, we have to handle it separately here.
+		 * Also, p->stime needs to be updated for ksoftirqd.
+		 */
+		account_system_index_time(p, cputime, CPUTIME_SOFTIRQ);
+	}
+```
+
+由此形成两条互补的公平化路径：
+-	**就地软中断**（借用他人执行态）：靠 `irqtime` + `rq_clock_task` 把时间从"受害进程"身上扣除
+-	**下沉 ksoftirqd**（自己就是调度实体）：靠正常的 `vruntime` 记账，公平参与 CFS
+
+####	计费流向图
+```mermaid
+flowchart TD
+	hardirq["硬中断处理 (napi_schedule)"] --> irqexit["irq_exit -> invoke_softirq"]
+	irqexit --> dosoftirq["__do_softirq (预算/重启限制)"]
+	dosoftirq -->|"预算内就地执行"| netrx["net_rx_action (budget=300, 2 jiffies)"]
+	dosoftirq -->|"负载过高 wakeup_softirqd"| ksd["ksoftirqd/N (普通 SCHED_NORMAL 任务)"]
+
+	netrx --> acct["irqtime_account_irq()"]
+	acct -->|"非 ksoftirqd 上下文: 计入 irqtime"| irqtime["per-cpu irqtime.total"]
+	acct -->|"in ksoftirqd: 跳过 irqtime"| skip["不计入 irqtime"]
+
+	irqtime --> read["irq_time_read(cpu)"]
+	read --> clk["update_rq_clock_task(): delta -= irq_delta"]
+	clk --> ctask["rq->clock_task (任务时钟, 已扣中断)"]
+	ctask --> uc["update_curr(): now = rq_clock_task()"]
+	uc --> vr["受害进程 vruntime 仅累计真实任务时间 (被补偿)"]
+
+	ksd --> vr2["ksoftirqd 以自身 vruntime 公平参与 CFS"]
+	skip --> vr2
+```
+
+####	小结
+-	**结论**：软中断收包会借用当前进程执行态，但在开启 `CONFIG_IRQ_TIME_ACCOUNTING` 后，这段时间通过 `irqtime` 统计并在 `update_rq_clock_task` 中从 `rq->clock_task` 扣除；由于 `update_curr` 使用 `rq_clock_task`，被借用执行态的进程 `vruntime` 不会被抬高，实现了"区分与补偿"。高负载下软中断下沉到 `ksoftirqd` 则通过正常 `vruntime` 公平参与调度
+-	**可观测手段**：
+	-	`/proc/stat` 与 `mpstat -P ALL`：`hi`（硬中断时间）、`si`（软中断时间）来源于 `cpustat[CPUTIME_IRQ/SOFTIRQ]`
+	-	`/proc/net/softnet_stat`：第三列 squeezed 即 `sd->time_squeeze`，反映 `net_rx_action` 预算/时间耗尽的次数
+	-	`bpftrace`：`tracepoint:irq:softirq_entry`/`softirq_exit`（含 `vec==NET_RX`）度量软中断耗时，结合 `tracepoint:sched:sched_switch` 观察 `ksoftirqd` 的调度行为
+
+##	0x0A	唤醒抢占
 唤醒抢占的逻辑是下图中的第二条路线，即`wake_up_new_task`-->`check_preempt_curr`-->`check_preempt_wakeup`
 
 ```text
@@ -1520,7 +1898,7 @@ se3             se2    curr         se1
      wakeup_preempt_entity(curr, se3) =  1
 ```
 
-##	0x0A	总结
+##	0x0B	总结
 
 ####	进程调度
 
@@ -1572,7 +1950,7 @@ static inline u64 max_vruntime(u64 max_vruntime, u64 vruntime)
 }
 ```
 
-##	0x	一些细节
+##	0x0C	一些细节
 
 ####	为什么说CFS是公平的？
 在 CFS中，尽管所有进程的 vruntime 最终会趋向于同步增长，但高优先级进程（权重更高的进程）实际获得的 CPU 时间更多。这是 CFS 实现公平的核心机制：通过调整虚拟运行时间的增长速度，让高优先级进程在虚拟运行时间维度上看似公平，而在物理时间维度上获得更多资源
@@ -1689,7 +2067,142 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 -	`sched_wakeup`/`sched_wakeup_new`：用于标记任务进入运行队列的时间戳，与 `sched_switch` 结合可计算任务等待调度延迟（从唤醒到实际运行、等待CPU的时间），对 Voluntary/Involuntary Switch 而言，无论主动还是被动切换，任务唤醒时均会触发这两个钩子
 -	`sched_switch`：无论是主动还是被动切换，均通过此钩子记录上下文切换信息（如 `prev` 和 `next` 任务的 PID、优先级、状态等），并且可以通过`prev->state`字段判断切换类型，对于Voluntary Switch，`prev->state` 的状态值非 `TASK_RUNNING`（如阻塞）;而对Involuntary Switch：`prev->state` 为 `TASK_RUNNING`（仍可运行但被抢占），[参考](https://github.com/iovisor/bcc/blob/master/libbpf-tools/runqslower.bpf.c#L53)
 
-##  0x0B  参考
+##	0x0D	扩展：CFS 的其他关键机制
+前文主要围绕单个 CPU 上普通进程的入队、记账、抢占与选择展开，最后补充一些CPU调度的其他重要机制
+
+####	组调度：CONFIG_FAIR_GROUP_SCHED
+在前文中多处出现的 `for_each_sched_entity(se)` 循环，其真正意义在**组调度**下才体现。开启 `CONFIG_FAIR_GROUP_SCHED` 后，调度实体 `sched_entity` 不再只对应一个进程，而是可以对应一个**任务组** `task_group`（对应 cgroup v1/v2 的 cpu 子系统），形成层级：
+
+-	每个 `task_group` 在每个 CPU 上都有一个 `sched_entity`（`tg->se[cpu]`）和一个 `cfs_rq`（`tg->cfs_rq[cpu]`）
+-	组内进程挂在组的 `cfs_rq` 红黑树上；组的 `sched_entity` 又挂在父级 `cfs_rq` 上，逐级向上直到根 `rq->cfs`
+-	`for_each_sched_entity` 就是**从叶子 se 沿 `se->parent` 一路向上遍历**，逐层更新每一级 `cfs_rq` 的权重、`vruntime`、负载
+
+```cpp
+// kernel/sched/sched.h
+struct task_group {
+	struct sched_entity	**se;        // 每 CPU 一个组调度实体
+	struct cfs_rq		**cfs_rq;    // 每 CPU 一个组的 CFS 就绪队列
+	unsigned long		shares;      // 组权重（对应 cpu.shares）
+	......
+};
+
+#define for_each_sched_entity(se) \
+		for (; se; se = se->parent)
+```
+
+组权重 `shares` 决定了该组相对于同级其他实体分到的 CPU 比例，再在组内按各进程权重二次分配。未开启组调度时，`se->parent` 恒为 `NULL`，`for_each_sched_entity` 退化为只循环一次
+
+####	PELT：Per-Entity Load Tracking（负载跟踪）
+前文中， `set_next_entity`/`put_prev_entity` 中调用的 `update_load_avg()`，属于 PELT 机制。PELT 以调度实体为粒度，跟踪其**可运行负载 `load_avg`** 与**利用率 `util_avg`**，采用几何级数衰减（每 `1024us` 为一个周期，历史贡献按 `y=0.978...` 衰减，`y^32 ≈ 0.5`）。这些量是 SMP 负载均衡与 CPU 调频（schedutil）的决策依据
+
+```cpp
+// v4.11.6：sched_entity 内嵌 sched_avg（注意此版本尚无 runnable_weight/runnable_avg）
+struct sched_avg {
+	u64		last_update_time;
+	u64		load_sum;
+	u32		util_sum;
+	u32		period_contrib;
+	unsigned long	load_avg;    // 加权可运行负载均值
+	unsigned long	util_avg;    // 利用率均值
+};
+```
+
+PELT 与 `vruntime` 是两套独立体系，`vruntime` 决定"在本 CPU 上谁先运行"（公平性），PELT 的 `load_avg` 决定"CPU 之间如何均衡负载"以及"该跑多高频率"
+
+####	CFS 带宽控制：CONFIG_CFS_BANDWIDTH
+前文 `update_curr()` 末尾调用的 `account_cfs_rq_runtime()` 函数属于**带宽控制**，用于实现 cgroup 的 `cpu.cfs_quota_us`/`cpu.cfs_period_us`（即限制一个组在每个周期内最多能用多少 CPU 时间）：
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/fair.c#L4097
+static __always_inline
+void account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec)
+{
+	if (!cfs_bandwidth_used() || !cfs_rq->runtime_enabled)
+		return;
+
+	__account_cfs_rq_runtime(cfs_rq, delta_exec);
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/fair.c#L4079
+static void __account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec)
+{
+	/* dock delta_exec before expiring quota (as it could span periods) */
+	cfs_rq->runtime_remaining -= delta_exec;
+	expire_cfs_rq_runtime(cfs_rq);
+
+	if (likely(cfs_rq->runtime_remaining > 0))
+		return;
+
+	/*
+	 * if we're unable to extend our runtime we resched so that the active
+	 * hierarchy can be throttled
+	 */
+	if (!assign_cfs_rq_runtime(cfs_rq) && likely(cfs_rq->curr))
+		resched_curr(rq_of(cfs_rq));
+}
+```
+
+-	每个 `task_group` 有一个带宽池 `struct cfs_bandwidth`（`quota`/`period`/`runtime`）
+-	`account_cfs_rq_runtime()` 在记账时从本地 `cfs_rq->runtime_remaining` 扣减；不足时向全局池 `assign_cfs_rq_runtime()` 申请
+-	配额耗尽则 `throttle_cfs_rq()` 将该组**限流**（移出可运行队列，即使有任务也不给跑）；到下一个 period 由定时器 `unthrottle_cfs_rq()` 解除限流并补充 `runtime`
+
+这解释了为什么"进程明明可运行、CPU 也空闲，却被限流不跑"，正是被 CFS 带宽控制 throttle 了
+
+####	SMP 负载均衡
+CFS 的 `vruntime` 只保证**单个 CPU 内**的公平；跨 CPU 的均衡由负载均衡子系统完成，主要入口：
+
+-	唤醒/新建选核：`select_task_rq_fair()`，结合 `wake_affine`（倾向唤醒者所在 CPU 以复用 cache）与 `find_idlest_group`/`find_idlest_cpu`（找最空闲 CPU）；这正是前文 `wake_up_new_task -> select_task_rq` 的 CFS 实现
+-	周期性均衡：`scheduler_tick() -> trigger_load_balance()` 在 `SCHED_SOFTIRQ` 中触发 `run_rebalance_domains() -> load_balance()`，沿调度域 `sched_domain`（SMT/MC/NUMA 层级）从最忙的组 `find_busiest_group()` 迁移任务到较空闲 CPU
+-	迁移涉及 `vruntime` 的加减 `min_vruntime`（前文 `dequeue_entity`/`enqueue_entity` 已述），以及 PELT 负载的迁移
+
+####	调度类全景与 pick_next_task 全局逻辑
+Linux 调度器按调度类（`sched_class`）分层，优先级从高到低通过 `->next` 单链串起：
+
+```text
+stop_sched_class -> dl_sched_class -> rt_sched_class -> fair_sched_class -> idle_sched_class
+```
+
+`__schedule -> pick_next_task` 会**按调度类优先级依次询问**：只要高优先级类有可运行任务就先选它，因此实时（RT/DL）任务总是优先于 CFS 普通任务。前文 `check_preempt_curr` 中 `for_each_class` 的跨类抢占判断即源于此。CFS 只是 `fair_sched_class` 这一层的实现
+
+```cpp
+// kernel/sched/core.c（快速路径：全是 CFS 任务时直接走 fair 类）
+static inline struct task_struct *
+pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
+{
+	const struct sched_class *class;
+	struct task_struct *p;
+
+	if (likely(prev->sched_class == &fair_sched_class &&
+		   rq->nr_running == rq->cfs.h_nr_running)) {
+		p = fair_sched_class.pick_next_task(rq, prev, rf);
+		......
+		return p;
+	}
+	//慢速路径：按调度类优先级依次尝试
+	for_each_class(class) {
+		p = class->pick_next_task(rq, prev, rf);
+		if (p)
+			return p;
+	}
+}
+```
+
+####	抢占模型与"进程调度第一定律"
+前文多次提到"设置 `TIF_NEED_RESCHED` 只是标记，真正切换要等 `__schedule`"。这里补充抢占的完整时机和步骤：
+
+-	`resched_curr()` 只是给当前任务打上 `TIF_NEED_RESCHED` 标志（必要时发 IPI 让目标 CPU 尽快检查）
+-	`preempt_count`：记录抢占禁用嵌套层数（硬中断/软中断/显式 `preempt_disable` 都会增加），只有归零时才允许内核抢占
+-	真正的重新调度发生在这些**抢占点**：
+	-	返回用户态时（系统调用/中断返回路径检查 `TIF_NEED_RESCHED`）
+	-	开启了 `CONFIG_PREEMPT` 时，中断返回内核态且 `preempt_count==0`
+	-	`preempt_enable()` 递减计数到 0 时
+	-	进程主动调用 `schedule()`（阻塞/让出）
+-	所谓"进程调度第一定律"即：**上下文切换总是发生在某个 CPU 主动或被动调用 `__schedule()` 时**，标志位只是"预约"，不等于立即切换
+
+####	演进说明：从 CFS 到 EEVDF
+需要指出，本文基于 v4.11.6 讲解经典 CFS。内核自 **v6.6** 起，主线内核已用 **EEVDF（Earliest Eligible Virtual Deadline First）** 取代 CFS 作为默认的 fair 调度器。EEVDF 算法在保留 `vruntime` 加权公平思想的基础上，引入了 `vlag`（相对 `min_vruntime` 的滞后量）与 `deadline`（虚拟截止时间），用"是否 eligible + 最早虚拟截止时间"来选择任务，从而更好地兼顾公平性与延迟。`sysctl_sched_latency`/`sysctl_sched_min_granularity` 等旋钮也随之调整为 `base_slice` 等。本文所述 CFS 机制仍是理解 EEVDF 的重要基础，二者在权重、`vruntime`、就绪队列红黑树等核心概念上一脉相承
+
+##  0x0E  参考
 -   [【原创】（五）Linux进程调度-CFS调度器](https://www.cnblogs.com/LoyenWang/p/12495319.html)
 -   [CFS调度器（1）-基本原理](http://www.wowotech.net/process_management/447.html)
 -   [调度系统设计精要](https://mp.weixin.qq.com/s/R3BZpYJrBPBI0DwbJYB0YA)
