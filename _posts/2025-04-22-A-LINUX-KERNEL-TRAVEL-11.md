@@ -2052,6 +2052,8 @@ static struct file *path_openat(struct nameidata *nd,
 
 todo
 
+`walk_component`函数的作用是 **负责查找路径解析过程中的当前单个分量（尝试无锁查缓存或加锁读盘），在处理完挂载点映射后，将 nameidata 的当前坐标（nd->path 和 nd->inode）向前推进一步，正式踏入该子节点**
+
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1763
 static int walk_component(struct nameidata *nd, int flags)
@@ -6057,15 +6059,95 @@ struct saved {
 	-	`len`：字符串的长度（比如 `1`）
 	-	`hash`：内核在解析路径文本时，只要切出一个分量，就会立刻计算出它的哈希值并存进 `qstr`
 
-####	关于nameidata对象的两个问题
+####	关于nameidata对象的几个问题
 
 1、`struct nameidata`结构中，`nd->path`与`nd->inode`的更新时机
 
-todo
+在前文描述中，可以了解到`nd->path` 和 `nd->inode` 是内核在目录树中穿梭时的当前坐标，先回答这个问题，**为什么有了 nd->path.dentry，里面已经包含了 d_inode，内核为何还要在 nameidata 里单独存一个 nd->inode？**
+
+> 核心原因是RCU-walk 无锁并发的安全要求
+> 在无锁状态下，dentry->d_inode 随时可能被其他进程清空（比如文件被另一个 CPU 删除了）。如果每次都去读 dentry->d_inode，极易踩到空指针或读取到错误数据。因此，内核在每次安全获取到 dentry 后，会立刻通过 `d_backing_inode()` 安全地读取出 inode 地址，并缓存到 nd->inode 中。在当前这一步的后续无锁校验中，只准用 nd->inode，绝不再碰 dentry->d_inode
+
+-	场景 1：查找过程开始：路径解析的初始化（`path_init`），在开始解析字符串之前，内核必须先决定从哪里起步，这里是`nd->path` 和 `nd->inode` 的首次赋值，大致有如下几种case
+	-	绝对路径（以 `/` 开头）：`nd->path` 被赋值为当前进程的根目录（`current->fs->root`），`nd->inode` 被赋值为根目录的 inode
+	-	相对路径（`open("a/b/c")`）：`nd->path`被赋值为当前进程的工作目录（`current->fs->pwd`），`nd->inode` 被赋值为工作目录的 inode
+	-	`openat(dfd, "a/b/c")`：会被更新为 dfd 这个文件描述符所代表的目录
+-	场景 2：普通推进过程：正常目录分量的穿越（`step_into(nd, &new_path, inode...)`），这是在 `link_path_walk` 循环中最频繁发生的更新。每次成功查找`walk_component`到路径的下一个分量（比如从 `a` 目录找到了 `b`），内核需要把立足点移动到新的位置，更新逻辑如下：
+	-	旧坐标（`nd->path`）被释放（如果是 Ref-walk 则递减旧 dentry 的引用计数）
+	-	`nd->path` 被整体替换为刚找到的 `new_path`（包含该分量的 dentry 和所在的 mnt）
+	-	`nd->inode` 被更新为这个新分量（如`b`）的 inode
+-	场景 3：特殊处理：挂载点与符号链接穿越，包含如下几种典型的case：
+	-	跨越挂载点向下（`follow_managed`）：如果当前迈入的目录是一个挂载点，`nd->path` 会瞬间被替换为子文件系统的根目录 dentry 和 mnt，`nd->inode` 更新为新文件系统根目录的 inode
+	-	跨越挂载点向上（遇到 `..` 时触发 `follow_up`）：如果 `nd->path` 当前所在的位置是一个文件系统的根目录，且用户路径在请求 `..`，内核会剥离当前的挂载层，将 `nd->path` 和 `nd->inode` 恢复为底层被覆盖的那个目录
+	-	解析符号链接（`pick_link/get_link`）：如果当前步入的是一个符号链接，`nd->path` 依然会先更新为这个链接文件本身的坐标，但紧接着 `nd->path` 的状态会被压入栈中保存，开始解析链接指向的新字符串
+-	场景 4：退回父目录的情况，解析 `..`（`follow_dotdot`），当路径字符串里出现 `..`（`open("a/../b")`）时，需要后退一步。调用 `handle_dots -> follow_dotdot`。此时更新逻辑是，内核会读取当前 `nd->path.dentry` 的 `d_parent`（父目录）
+	-	`nd->path.dentry` 更新为其父目录
+	-	`nd->inode` 同步更新为父目录的 inode
+-	场景 5：open 的最后逻辑（`do_last`），对于最后一个分量，`nd->path` 和 `nd->inode` 的更新会出现特殊的分支，举例来说：
+	-	普通打开（文件存在，无创建意图）：和 `step_into` 一样平滑过渡，`nd->path` 指向目标文件，`nd->inode` 拿到目标文件的 inode
+	-	文件不存在，但用户带了 `O_CREAT`（创建文件）：当`lookup_fast/lookup_slow` 在哈希表/磁盘里找不到文件，于是它们会创建一个Negative Dentry（负目录项）返回。此时 `nd->path.dentry` 会被更新为这个刚分配出来的空 dentry，由于文件还没在磁盘上创建，所以 `nd->inode` 会被明确赋值为 `NULL`。随后内核调用到底层文件系统（如ext4）的 `vfs_create`，在磁盘上分配真实的 inode 并绑定到那个空的 dentry 上
+	-	带了 `O_PATH` 标志（仅获取路径句柄，不真打开）：内核不再做后续的权限校验和实际截断（truncate），只要最后一个分量能正常 `step_into`，立刻停止，并拿着最后的 `nd->path` 去生成一个只具备路径属性的 file 结构体
+
 
 2、`struct nameidata`结构中，如果当前某个路径分量是挂载点时，那么`nameidata`保存的是挂载点这个dentry、inode，还是该挂载点对应的上一级文件系统的dentry、inode?
 
-todo
+当路径分量是一个挂载点时，`nd`最终保存的是【新挂载的文件系统（上一级/覆盖层）的根目录的 dentry 和 inode】，而那个原本的、被挂载的底层目录（Mount Point）会被“隐藏”起来，nd 中不再保留它的状态，回到先前的`walk_component`函数进行说明：
+
+1、第一步：查找到当前dentry最底层的传送门，通过`lookup_fast` 或 `lookup_slow` 查到的是底层被覆盖（挂载点）的那个目录的 dentry（路径查找是至上而下）
+
+```c
+//step1
+err = lookup_fast(nd, &path, &inode, &seq);
+path.dentry = lookup_slow(...);
+......
+
+//step2
+err = follow_managed(&path, nd);
+......
+
+//step3
+inode = d_backing_inode(path.dentry); // 提取的是掉包后的“新 dentry”的 inode
+return step_into(nd, &path, flags, inode, seq);
+```
+
+2、第二步：触发挂载点穿越，内核发现这个底层 dentry 的标志位上带有 `DCACHE_MOUNTED`，说明它是一个挂载点。`follow_managed` 内部会调用 `follow_down`函数，它以当前的 `(mnt, dentry)` 为key，去内核的全局挂载哈希表（Mount Hash Table）中查找，找到挂载在它上面的子文件系统实例（`child_mnt`），此时内核会直接修改传入的 `path` 结构：
+
+-	将 `path.mnt` 替换为新的子文件系统挂载点 `child_mnt`
+-	将 `path.dentry` 替换为新文件系统的根目录 `child_mnt->mnt_root`
+
+3、第三步：获取新的 inode 并更新到 `nameidata`。此时，经过 `follow_managed` 后，`path.dentry` 已经是挂载后的文件系统的根目录（`/`）了，这里获取的 inode，也是挂载后文件系统的根目录的 inode。最后，内核调用 `step_into` 将这个全新的 path 和 inode 保存到 `nd->path` 和 `nd->inode` 中
+
+这里再考虑一个有趣的场景，如果在上面的场景下，用户在这个挂载的目录下执行了 `cd ..`，内核如何退回到原来的文件系统呢？这就体现了 `struct path`（包含 mnt 和 dentry 两个变量）双重坐标系的作用了
+
+1.	当内核解析 `..` 时，内核会调用 `handle_dots() -> follow_dotdot()`，[实现](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1455)
+2.	内核发现当前要找 `..`，但当前所处的位置（坐标）正是本文件系统的根目录（[满足](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1460)`nd->path.dentry == nd->path.mnt->mnt_root`），在一个文件系统的根目录下往上退（`..`），这就意味着需要跨越文件系统边界，回到挂载点之外了
+3.	内核会[调用](https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1083) `follow_up(&nd->path)`，这个函数会顺着 `mnt->mnt_parent` 找到父挂载点实例，然后顺着 `mnt->mnt_mountpoint` 瞬间找回并恢复先前路径查找过程中那个被遮盖的底层 dentry
+4.	内核重新将底层的 dentry 和父 mnt 写回到 nameidata 中
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/namei.c#L1460
+static int follow_dotdot(struct nameidata *nd)
+{
+	while(1) {
+		if (nd->path.dentry == nd->root.dentry &&
+		    nd->path.mnt == nd->root.mnt) {
+			break;
+		}
+		if (nd->path.dentry != nd->path.mnt->mnt_root) {
+			int ret = path_parent_directory(&nd->path);
+			if (ret)
+				return ret;
+			break;
+		}
+		if (!follow_up(&nd->path))
+			break;
+	}
+	follow_mount(&nd->path);
+	// 重新恢复保存
+	nd->inode = nd->path.dentry->d_inode;
+	return 0;
+}
+```
 
 ##  0x0B 参考
 -   [open 系统调用（一）](https://www.kerneltravel.net/blog/2021/open_syscall_szp1/)
