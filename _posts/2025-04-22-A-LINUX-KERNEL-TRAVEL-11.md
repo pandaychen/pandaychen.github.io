@@ -1618,6 +1618,49 @@ out2:
 }
 ```
 
+下面给出 `path_openat` 的详细流程图（包含 `do_filp_open` 的三态调用、`link_path_walk`/`do_last` 主循环、`trailing_symlink` 回环以及最后的 `vfs_open -> ext4_file_open` 与 ext4 交互）：
+
+```mermaid
+flowchart TD
+    A["do_filp_open"] --> A1["path_openat(nd, op, LOOKUP_RCU): RCU-walk"]
+    A1 --> A2{"返回值?"}
+    A2 -->|"-ECHILD"| A3["path_openat(nd, op, flags): ref-walk"]
+    A2 -->|"成功/其他错误"| RET["返回 filp 给调用者"]
+    A3 --> A4{"返回值?"}
+    A4 -->|"-ESTALE"| A5["path_openat(nd, op, flags | LOOKUP_REVAL): 强制重验证"]
+    A4 -->|"成功/其他错误"| RET
+    A5 --> RET
+
+    subgraph po ["path_openat 内部"]
+        B["get_empty_filp: 分配空 struct file"] --> C{"O_PATH?"}
+        C -->|"是"| C1["do_o_path"] --> OUT2["out2"]
+        C -->|"否"| D["path_init: 确定起点\nRCU 则 rcu_read_lock + 设置 nd->seq/m_seq"]
+        D --> E["进入 while 主循环"]
+        E --> F["link_path_walk(s, nd): 解析中间分量"]
+        F -->|"返回 0: 成功"| G["do_last(nd, file, op, &opened): 处理最后分量"]
+        F -->|"返回 <0: 错误"| ERR["error != 0, 跳出循环"]
+        G -->|"返回 >0: 尾部是 symlink"| H["trailing_symlink(nd): get_link 读取链接目标 s"]
+        H -->|"新路径 s"| F
+        H -->|"IS_ERR(s)"| ERR
+        G -->|"返回 0: 已打开"| DONE["文件已打开: vfs_open -> ext4_file_open"]
+        G -->|"返回 <0: 错误"| ERR
+        DONE --> OUT2
+        ERR --> TW["terminate_walk: 释放 dentry/mount 引用"]
+        TW --> OUT2
+        OUT2 --> ST{"error == -EOPENSTALE?"}
+        ST -->|"是 且 LOOKUP_RCU"| ST1["error = -ECHILD"]
+        ST -->|"是 且 ref-walk"| ST2["error = -ESTALE"]
+        ST -->|"否"| POR["返回 file 或 ERR_PTR(error)"]
+        ST1 --> POR
+        ST2 --> POR
+    end
+
+    A1 -.-> B
+    A3 -.-> B
+    A5 -.-> B
+    POR -.-> A2
+```
+
 这里稍微整理一下`while(....)`中的实现过程和部分关键代码，对于路径 `/a/b/c/d/e`的处理，在进入 `do_last`之前，路径中除最后一个分量外的所有目录分量（`a`、`b`、`c`、`d`）都已经成功解析，并且它们的 dentry 通常已经存在于 dcache 中，最后一个分量（`e`）的处理在 `do_last`中完成
 
 1、目录分量缓存机制，在路径解析过程中遵循如下规则：
@@ -2109,6 +2152,74 @@ static int walk_component(struct nameidata *nd, int flags)
 }
 ```
 
+下图总结了 **一轮 `walk_component` 的查找过程**，重点覆盖 `.`/`..`、挂载点、符号链接以及「进入挂载点之后再 `..`」等场景，涉及 `handle_dots`/`follow_dotdot(_rcu)`/`follow_up`/`follow_managed`/`follow_mount`/`__follow_mount_rcu`/`step_into`/`unlazy_walk` 等核心函数，并标注与 ext4 的交互：
+
+```mermaid
+flowchart TD
+    Start["walk_component(nd, flags)"] --> T{"nd->last_type?"}
+
+    T -->|"LAST_DOT (.)"| Dot["handle_dots: 直接返回 0, 路径不变"]
+    T -->|"LAST_DOTDOT (..)"| DD{"nd->flags & LOOKUP_RCU?"}
+    T -->|"LAST_NORM (普通分量)"| LF["lookup_fast(nd, &path, &inode, &seq)"]
+
+    %% ---- .. 分支 ----
+    DD -->|"是 RCU"| DDR["follow_dotdot_rcu"]
+    DD -->|"否 ref"| DDN["follow_dotdot"]
+    DDR --> UP{"nd->path.dentry == mnt_root?"}
+    DDN --> UP
+    UP -->|"否: 未到 mount 根"| UPP["取父 dentry: old->d_parent"]
+    UP -->|"是: 到达 mount 根"| FUP["follow_up: 经 mnt_parent + mnt_mountpoint 跨越到父 mount"]
+    FUP --> UP2{"到达 nd->root?"}
+    UP2 -->|"否, 且仍是 mount 根"| FUP
+    UP2 -->|"是"| StopUp["停止回退 (/.. 等价于 /)"]
+    UPP --> DotDone["更新 nd->inode, 返回"]
+    StopUp --> DotDone
+
+    %% ---- 普通分量: lookup_fast ----
+    LF --> MODE{"nd->flags & LOOKUP_RCU?"}
+    MODE -->|"是: RCU-walk 分支"| R1["__d_lookup_rcu: 无锁遍历 hash 桶"]
+    R1 --> R2{"命中?"}
+    R2 -->|"否"| RUL["unlazy_walk 尝试退出 RCU"]
+    RUL -->|"成功: 返回 0"| SLOW
+    RUL -->|"失败: 返回 -ECHILD"| ECHILD["返回 -ECHILD (触发全局回退)"]
+    R2 -->|"是"| R3["read_seqcount_retry: 校验子/父 dentry seq"]
+    R3 -->|"失败"| ECHILD
+    R3 -->|"通过"| R4["d_revalidate"]
+    R4 --> R5["__follow_mount_rcu: 无锁 __lookup_mnt 穿越挂载点"]
+    R5 --> STEP
+
+    MODE -->|"否: ref-walk 分支"| F1["__d_lookup + dget (spin_lock, 增引用计数)"]
+    F1 --> F2{"命中?"}
+    F2 -->|"否: 返回 0"| SLOW
+    F2 -->|"是"| F3["d_revalidate + d_is_negative 检查"]
+    F3 --> F4["follow_managed -> follow_mount: lookup_mnt 循环穿越 (dget/dput/mntget/mntput)"]
+    F4 --> STEP
+
+    %% ---- lookup_slow: dcache 未命中, 读盘创建 dentry ----
+    SLOW["lookup_slow(&nd->last, parent, flags)"] --> S1["inode_lock_shared(父 inode)"]
+    S1 --> S2["d_alloc_parallel: 分配新 dentry (DCACHE_PAR_LOOKUP)"]
+    S2 --> S3["inode->i_op->lookup == ext4_lookup"]
+    S3 --> E1["ext4_find_entry: 读父目录数据块 (磁盘 IO), 得到 ext4_dir_entry_2"]
+    E1 --> E2["ext4_iget(inode number): 加载磁盘 inode 到内存"]
+    E2 --> E3["d_splice_alias: 绑定 dentry->d_inode (创建并关联)"]
+    E3 --> S4["d_lookup_done: 移出 in-lookup hash, 唤醒等待者"]
+    S4 --> S5["follow_managed: 处理挂载点/自动挂载"]
+    S5 --> STEP
+
+    %% ---- step_into: 符号链接 / 更新 nd ----
+    STEP["step_into(nd, &path, flags, inode, seq)"] --> SY{"d_is_symlink 且需跟随?"}
+    SY -->|"否"| PN["path_to_nameidata: 更新 nd->path/inode/seq, 返回 0"]
+    SY -->|"是"| PL["pick_link: total_link_count++ (>MAXSYMLINKS 则 -ELOOP)"]
+    PL --> NA["nd_alloc_stack"]
+    NA -->|"-ECHILD"| LGP{"legitimize_path 成功?"}
+    LGP -->|"否"| DROP["drop_links + 清 LOOKUP_RCU + rcu_read_unlock, 返回错误"]
+    LGP -->|"是"| ULW["unlazy_walk 退出 RCU 后重试 nd_alloc_stack"]
+    ULW --> SAVE["压栈 nd->stack, 返回 1 (交由 link_path_walk 调 get_link)"]
+    NA -->|"成功"| SAVE
+
+    Dot --> DotDone
+```
+
 这里**补充一个细节**，当`lookup_fast`函数返回`-ECHILD`时（`err<0`），直接通过`lookup_fast-->link_path_walk-->path_lookupat-->filename_lookup`调用链返回到`filename_lookup`，从代码中可以看到会进入`retval = path_lookupat(&nd, flags, path);`的逻辑，即全局回退（从头开始）ref-walk模式下的查找
 
 ```c
@@ -2371,6 +2482,78 @@ static int follow_dotdot_rcu(struct nameidata *nd)
 -	ref-walk：实现是`__d_lookup()`+`lookup_slow`，简单描述就是在 Ref-walk（引用行走）模式下，首先尝试使用 `__d_lookup()`进行快速缓存查找；如果失败（缓存未命中），则回退到使用 `lookup_slow`进行慢速查找，后者可能会涉及访问底层文件系统的lookup函数`__d_lookup`也是用于在目录项缓存（dcache）中查找匹配的 dentry 的函数，它根据给定的父目录 dentry 和文件名（包含哈希值）进行查找，该函数在非 RCU 模式下工作，使用自旋锁来保护并发访问，确保数据一致性
 
 **即在快速模式，慢速模式都会调用`lookup_fast`，快速模式中的`lookup_fast`对应的实现是`__d_lookup_rcu`，而慢速模式下的`lookup_fast`对应的是`__d_lookup`**
+
+为便于对比两种模式的完整路径查找过程，这里先给出两张全景图
+
+**图A：rcu-walk 的完整过程**（全程持有 `rcu_read_lock`，无锁、无引用计数、无阻塞操作，任一 seqcount 校验失败即返回 `-ECHILD`）：
+
+```mermaid
+flowchart TD
+    A["path_init(flags | LOOKUP_RCU)"] --> A1["rcu_read_lock() + 记录 nd->seq / nd->m_seq"]
+    A1 --> B["link_path_walk: 逐分量循环"]
+    B --> C{"nd->last_type?"}
+    C -->|".."| DR["follow_dotdot_rcu: 无锁回退父目录/跨 mount 边界"]
+    C -->|"普通分量"| D["lookup_fast (RCU 分支)"]
+    DR --> B
+
+    D --> E["__d_lookup_rcu: 无锁遍历 dentry_hashtable 冲突链"]
+    E --> F{"找到 dentry?"}
+    F -->|"否"| ECH["dcache 未命中: 需退出 RCU (见回退图)"]
+    F -->|"是"| G["读取 d_backing_inode + 记录 negative"]
+    G --> H["read_seqcount_retry(子 dentry->d_seq): 校验"]
+    H -->|"失败"| ECHILD["返回 -ECHILD"]
+    H -->|"通过"| I["__read_seqcount_retry(父 parent->d_seq): 校验"]
+    I -->|"失败"| ECHILD
+    I -->|"通过"| J["d_revalidate (ext4 无 d_op->d_revalidate, 直接返回 1)"]
+    J --> K["__follow_mount_rcu: 无锁 __lookup_mnt 循环穿越挂载点"]
+    K --> L["step_into: path_to_nameidata 或 pick_link(symlink)"]
+    L --> M{"还有下一分量?"}
+    M -->|"是"| B
+    M -->|"否"| N["complete_walk: unlazy_walk 收尾, 转入 ref 完成 open"]
+
+    ECHILD --> RB["error 逐层上传 path_openat -> do_filp_open 全局回退 ref-walk"]
+
+    %% ext4 说明: RCU 命中 dcache 全程不触碰 ext4;
+    %% 仅当未命中(ECH)退出 RCU 后, 才由 ref 模式的 lookup_slow 调 ext4_lookup 读盘
+```
+
+**图B：ref-walk 的完整过程**（用 `dentry->d_lockref` 引用计数 + `inode->i_rwsem` 锁，允许阻塞的磁盘 IO，未命中时读盘创建 dentry 并与 ext4 inode 关联）：
+
+```mermaid
+flowchart TD
+    A["path_openat(flags, 无 LOOKUP_RCU)"] --> A1["path_init: 对起点 dentry/mnt 执行 dget/mntget"]
+    A1 --> B["link_path_walk: 逐分量循环"]
+    B --> C{"nd->last_type?"}
+    C -->|".."| DN["follow_dotdot: 带引用计数回退, follow_up 跨 mount 边界"]
+    C -->|"普通分量"| D["lookup_fast (ref 分支)"]
+    DN --> B
+
+    D --> E["__d_lookup: spin_lock + dget (增引用计数)"]
+    E --> F{"命中?"}
+    F -->|"是"| G["d_revalidate + d_is_negative 检查"]
+    G --> H["follow_managed -> follow_mount"]
+    H --> H1["lookup_mnt 循环: dput/mntput 旧, dget(mnt_root)/mntget 新"]
+    H1 --> STEP["step_into"]
+
+    F -->|"否: 返回 0"| SLOW["lookup_slow"]
+    SLOW --> S1["inode_lock_shared(父 inode)"]
+    S1 --> S2["d_alloc_parallel: 分配新 dentry"]
+    S2 --> S3["inode->i_op->lookup == ext4_lookup"]
+    S3 --> E1["ext4_find_entry: 读父目录数据块 (磁盘 IO, ext4_bread)"]
+    E1 --> E2["ext4_iget(i_ino): 加载磁盘 inode"]
+    E2 --> E3["d_splice_alias: 绑定 dentry->d_inode"]
+    E3 --> S4["d_lookup_done: 唤醒等待者"]
+    S4 --> S5["inode_unlock_shared + follow_managed"]
+    S5 --> STEP
+
+    STEP --> SY{"symlink?"}
+    SY -->|"是"| PL["pick_link: mntget(link->mnt), 压栈, 返回 1"]
+    SY -->|"否"| PN["path_to_nameidata: 更新 nd"]
+    PN --> M{"还有下一分量?"}
+    PL --> M
+    M -->|"是"| B
+    M -->|"否"| DONE["do_last -> vfs_open -> ext4_file_open"]
+```
 
 ```cpp
 |- lookup_fast()
@@ -5497,6 +5680,40 @@ static inline int d_revalidate(struct dentry *dentry, unsigned int flags)
 
 ####	open实现中的回退视角：局部回退 VFS 全局回退
 思考一个问题，对路径`/a/b/c/d/e`的查找过程中，假设`a`、`b`都已经成功的使用RCU模式查找，此时`c`查找过程中使用RCU方式失败，那么回退之后的查询过程是如何的？
+
+RCU-walk 失败后的回退分为两个层次：**原地局部降级**（`unlazy_walk` 成功，保留已解析进度、当前分量在 ref 模式继续）与 **全局回退**（`unlazy_walk` 失败，`-ECHILD` 逐层上传，`do_filp_open` 无 `LOOKUP_RCU` 重新调用 `path_openat` 从头 ref-walk）。下图汇总了这两个层次以及最后的 `-ESTALE -> LOOKUP_REVAL` 收尾：
+
+```mermaid
+flowchart TD
+    RCU["RCU-walk 进行中"] --> P{"遇到需退出 RCU 的点"}
+    P -->|"dcache 未命中: __d_lookup_rcu 返回 NULL"| U["unlazy_walk(nd)"]
+    P -->|"symlink 需读盘: get_link 返回 -ECHILD"| U
+    P -->|"非目录: !d_can_lookup"| U
+
+    U --> LG["legitimize_links + legitimize_path(nd->path, nd->root)"]
+    LG --> Q{"全部校验通过?"}
+
+    Q -->|"是: 成功"| OK["清 LOOKUP_RCU + 获取 dget/mntget 引用 + rcu_read_unlock, 返回 0"]
+    OK --> LOCAL["原地局部降级: 保留 a/b 已解析进度"]
+    LOCAL --> CONT{"退出点类型?"}
+    CONT -->|"dcache 未命中"| SLOW["当前分量 c 走 lookup_slow -> ext4_lookup 读盘"]
+    CONT -->|"symlink"| GL["ref 模式重跑 get_link 读链接目标"]
+    CONT -->|"非目录"| NOTDIR["返回 -ENOTDIR (语义永久错误, 不再回退)"]
+    SLOW --> GOON["继续后续分量的 ref-walk (进度不丢)"]
+    GL --> GOON
+
+    Q -->|"否: seqcount 失效 / lockref 死亡 / mnt 失效"| FAIL["返回 -ECHILD"]
+    FAIL --> UP["error 逐层上传: lookup_fast -> walk_component -> link_path_walk -> path_openat"]
+    UP --> DO["do_filp_open 检测到 -ECHILD"]
+    DO --> GLOBAL["全局回退: 重新调用 path_openat(nd, op, flags) 无 LOOKUP_RCU"]
+    GLOBAL --> RESTART["从 path_init 起, a/b/c/d/e 全部从头 ref-walk"]
+
+    RESTART --> EST{"ref-walk 返回 -ESTALE?"}
+    EST -->|"是 (如 NFS inode 过期)"| REVAL["path_openat(nd, op, flags | LOOKUP_REVAL): 强制 d_revalidate"]
+    EST -->|"否"| END["完成 open 或返回具体错误"]
+    REVAL --> END
+```
+
 回到上面的`walk_component`函数，这里有一个容易被忽视的小细节：
 
 ```cpp
