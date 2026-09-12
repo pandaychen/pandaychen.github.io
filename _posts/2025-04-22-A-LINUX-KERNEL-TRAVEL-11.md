@@ -2827,6 +2827,40 @@ seqretry:
 }
 ```
 
+下图是 `__d_lookup_rcu` 的完整实现（无锁遍历主 dcache 哈希桶 `dentry_hashtable`，每个候选都做 seqcount 验证与名字比较）：
+
+```mermaid
+flowchart TD
+    A["__d_lookup_rcu(parent, name, seqp)"] --> B["hashlen = name->hash_len\nb = d_hash(hashlen_hash(hashlen)): 定位哈希桶"]
+    B --> C["hlist_bl_for_each_entry_rcu: 无锁遍历冲突链 (RCU 保护)"]
+    C --> D{"还有下一个 dentry?"}
+    D -->|"否: 遍历结束"| Z["返回 NULL (未命中, 回退 lookup_slow)"]
+    D -->|"是"| E["seqretry: seq = raw_seqcount_begin(&dentry->d_seq)"]
+    E --> F{"dentry->d_parent == parent?"}
+    F -->|"否"| C
+    F -->|"是"| G{"d_unhashed(dentry)?"}
+    G -->|"是: 已摘链"| C
+    G -->|"否"| H{"parent->d_flags & DCACHE_OP_COMPARE?"}
+
+    H -->|"是: 自定义比较 (如大小写不敏感)"| I{"dentry->d_name.hash == hashlen_hash?"}
+    I -->|"否"| C
+    I -->|"是"| J["读取 tlen/tname"]
+    J --> K{"read_seqcount_retry(&d_seq, seq)?"}
+    K -->|"是: 期间被改"| L["cpu_relax(); goto seqretry"]
+    L --> E
+    K -->|"否"| M{"d_op->d_compare(...) == 0?"}
+    M -->|"否: 名字不符"| C
+    M -->|"是"| Y["*seqp = seq; 返回 dentry (命中)"]
+
+    H -->|"否: 标准比较"| N{"dentry->d_name.hash_len == hashlen?"}
+    N -->|"否"| C
+    N -->|"是"| O{"dentry_cmp(dentry, str, len) == 0?"}
+    O -->|"否"| C
+    O -->|"是"| Y
+```
+
+需要强调：`__d_lookup_rcu` 本身只做**无锁查找 + seqcount 一致性校验**，**不增加引用计数、不加自旋锁**，其调用方（`lookup_fast` 的 RCU 分支、以及后文的 `d_alloc_parallel`）在拿到 dentry 后还需各自完成后续的二次校验或引用获取
+
 那么，**哪些可能的场景是会导致 `read_seqcount_retry` 检测失败呢（不一致）？以下是典型场景**：
 
 1.	**并发 `rename`**：另一个 CPU 正在对当前查找路径上的 dentry 执行 `rename` 操作（`vfs_rename` -> `__d_move`），修改了 dentry 的 `d_name`、`d_parent` 或哈希位置，导致序列号递增
@@ -5648,6 +5682,108 @@ static inline void __d_set_inode_and_type(struct dentry *dentry,
 -	并行查找：通过 RCU（Read-Copy-Update）机制无锁遍历哈希桶，直接检查目标 dentry 是否已存在于父目录的哈希链表中
 -	条件分配：若 dentry 不存在，则分配一个新 dentry 并尝试将其插入哈希链；若已存在，则直接返回现有 dentry（通过 `res` 参数返回）
 -	无磁盘 I/O：整个过程仅操作内存中的 dentry 缓存，不触发文件系统底层的磁盘读取或复杂逻辑（如加载 inode）
+
+`d_alloc_parallel` 的完整实现流程如下图（注意它同时操作两张哈希表：主 dcache 表 `dentry_hashtable`，由 `__d_lookup_rcu` 通过 `d_hash` 访问；以及 in-lookup 表 `in_lookup_hashtable`，由 `in_lookup_hash(parent, hash)` 访问，用于协调同一目录同名分量的并发查找）：
+
+```mermaid
+flowchart TD
+    A["d_alloc_parallel(parent, name, wq)"] --> B["new = d_alloc(parent, name): 先预分配一个新 dentry"]
+    B --> B1{"new == NULL?"}
+    B1 -->|"是"| BERR["返回 -ENOMEM"]
+    B1 -->|"否"| R["retry: rcu_read_lock()"]
+
+    R --> C["seq = smp_load_acquire(&parent->d_inode->i_dir_seq) & ~1\nr_seq = read_seqbegin(&rename_lock)"]
+    C --> D["dentry = __d_lookup_rcu(parent, name, &d_seq): 无锁二次查主 dcache"]
+    D --> E{"主表命中 dentry?"}
+
+    E -->|"是"| F{"lockref_get_not_dead(&dentry->d_lockref)?"}
+    F -->|"否: 正在释放"| RU1["rcu_read_unlock(); goto retry"]
+    RU1 --> R
+    F -->|"是"| G{"read_seqcount_retry(&dentry->d_seq, d_seq)?"}
+    G -->|"是: 期间被改"| RU2["rcu_read_unlock(); dput(dentry); goto retry"]
+    RU2 --> R
+    G -->|"否"| H["rcu_read_unlock(); dput(new): 丢弃预分配, 返回已存在 dentry"]
+
+    E -->|"否: 主表未命中"| I{"read_seqretry(&rename_lock, r_seq)?"}
+    I -->|"是: 有并发 rename"| RU3["rcu_read_unlock(); goto retry"]
+    RU3 --> R
+    I -->|"否"| J["hlist_bl_lock(b): 锁 in-lookup 桶"]
+    J --> K{"parent->d_inode->i_dir_seq != seq?"}
+    K -->|"是: 目录被并发改"| RU4["hlist_bl_unlock(b); rcu_read_unlock(); goto retry"]
+    RU4 --> R
+    K -->|"否"| L["遍历 in-lookup 桶: 是否有他人正在查同名?"]
+
+    L --> M{"找到 in-lookup 匹配?"}
+    M -->|"是: 别的线程在查"| N["hlist_bl_unlock(b)\nlockref_get_not_dead 取引用\nrcu_read_unlock()"]
+    N --> O["spin_lock; d_wait_lookup(dentry): 睡眠等待对方 lookup 完成"]
+    O --> P{"唤醒后 hash/parent/unhashed/name 仍匹配?"}
+    P -->|"否: mismatch"| Q["spin_unlock; dput(dentry); goto retry"]
+    Q --> R
+    P -->|"是"| S["spin_unlock; dput(new): 复用对方结果, 返回该 dentry"]
+
+    M -->|"否: 无人在查"| T["rcu_read_unlock()\nnew->d_flags |= DCACHE_PAR_LOOKUP\nnew->d_wait = wq"]
+    T --> U["hlist_bl_add_head_rcu: 把 new 挂入 in-lookup 桶\nhlist_bl_unlock(b)"]
+    U --> V["返回 new: 由 lookup_slow 调 ext4_lookup 填充"]
+```
+
+结合上一节 `lookup_slow` 的实现可知：`d_alloc_parallel` 返回后，若 `d_in_lookup(dentry)` 为真（即返回的是新挂入 in-lookup 桶的 `new`），才会真正调用 `inode->i_op->lookup`（`ext4_lookup`）读盘；否则说明命中了主表或复用了并发线程的结果，直接走 `d_revalidate` 分支即可
+
+####	小结：lookup_fast、lookup_slow 与 d_alloc_parallel 中的 RCU 关系？
+
+这里回答笔者遇到的几个容易混淆的问题
+
+**1、`lookup_fast` 与 `lookup_slow` 的分工**
+
+-	`lookup_fast`：只在内存 dcache（`dentry_hashtable`）里查，**rcu-walk 与 ref-walk 都会调用`lookup_fast`**。区别仅在于内部实现二选一，即RCU 模式走无锁的 `__d_lookup_rcu`，ref 模式走加锁（自旋锁 + 引用计数）的 `__d_lookup`。它是快速路径，命中即返回，不涉及任何磁盘 I/O
+-	`lookup_slow`：只在 `lookup_fast` **未命中**（`err == 0`）时进入，负责调用具体文件系统的 `->lookup`（如 `ext4_lookup`）读盘、创建并关联 dentry/inode。由于它需要获取 `inode` 锁、可能阻塞在磁盘 I/O 上，**只能在 ref-walk 流程中运行**
+
+关键点在于：RCU-walk 全程持有 `rcu_read_lock()` 且严禁阻塞，所以 RCU 模式下一旦 dcache 未命中，**必须先 `unlazy_walk` 退出 RCU（原地降级为 ref-walk）**，之后才由上层 `walk_component` 调用 `lookup_slow`。这也是为什么 `lookup_slow` 永远运行在 ref 语境下，它是**RCU 命中不了 → 降级到 ref → 才读盘 这条链路的终点**
+
+```mermaid
+flowchart LR
+    A["walk_component"] --> B["lookup_fast"]
+    B --> RCU{"当前模式?"}
+    RCU -->|"rcu-walk"| C["__d_lookup_rcu (无锁)"]
+    RCU -->|"ref-walk"| D["__d_lookup (自旋锁+dget)"]
+    C --> E{"命中?"}
+    D --> F{"命中?"}
+    E -->|"是"| OK["返回 dentry"]
+    E -->|"否"| G["unlazy_walk 退出 RCU 降级为 ref"]
+    G -->|"成功"| SLOW["lookup_slow (ref 语境)"]
+    G -->|"失败 -ECHILD"| GB["全局回退"]
+    F -->|"是"| OK
+    F -->|"否"| SLOW
+    SLOW --> H["d_alloc_parallel + ext4_lookup 读盘"]
+```
+
+**2、`lookup_slow` 为什么要调用 `d_alloc_parallel`？**
+
+`lookup_slow` 的职责是为一个 dcache 里不存在的分量创建 dentry 并让底层文件系统填充它。但创建 dentry这一步不能简单地 `d_alloc` + 插入哈希表，因为存在并发竞争：`lookup_slow` 对父目录 inode 加的是**共享锁** `inode_lock_shared`，这意味着**同一目录下、针对不同名字的多个查找可以并行**进行。于是就可能出现两个线程同时为同一个名字创建 dentry的场景，若不加协调就会重复分配、甚至产生两个指向同一文件的 dentry
+
+`d_alloc_parallel` 正是为了解决这个问题而存在，它通过一张独立的 **in-lookup 哈希表**（`in_lookup_hashtable`）配合每个 dentry 上的等待队列（`d_wait` / `d_wait_lookup`）来串行化同名分量的并发查找，核心步骤如下：
+
+-	第一个到达的线程把预分配的 `new` 打上 `DCACHE_PAR_LOOKUP` 标志、挂入 in-lookup 桶，然后去调 `ext4_lookup`
+-	后到的线程在 in-lookup 桶里发现已经有其他线程在查同名了，于是 `d_wait_lookup` 睡眠等待，待对方 `d_lookup_done` 唤醒后直接复用其结果，避免重复读盘
+
+**3、`d_alloc_parallel` 内部为何又调用了RCU机制函数 `__d_lookup_rcu`？**
+
+注意这段代码：
+
+```cpp
+rcu_read_lock();
+seq = smp_load_acquire(&parent->d_inode->i_dir_seq) & ~1;
+r_seq = read_seqbegin(&rename_lock);
+dentry = __d_lookup_rcu(parent, name, &d_seq);
+```
+
+原因有两层：
+
+-	**这是一次「双重检查」（double-checked locking）**：从 `lookup_fast` 判定未命中，到 `lookup_slow` 真正拿到锁、进入 `d_alloc_parallel`，中间存在一个时间窗口。由于父目录只加了共享锁，别的线程完全可能在这个窗口里已经把该 dentry 创建好并插入了**主 dcache 表**。因此 `d_alloc_parallel` 在动手分配/挂 in-lookup 之前，必须先用 `__d_lookup_rcu` 再查一遍主表：若已存在（且 `lockref_get_not_dead` + `read_seqcount_retry` 校验通过），就丢弃预分配的 `new`、直接返回已有 dentry，省掉一次昂贵的读盘
+-	**这里的 RCU 与前述「路径查找的 RCU-walk 模式」是两码事**：在`d_alloc_parallel` 函数里的 `rcu_read_lock()/rcu_read_unlock()` 只是**局部、短暂**地保护一次无锁哈希桶遍历（`__d_lookup_rcu` 依赖 RCU 保证遍历期间链表节点不被释放），遍历一结束就退出 RCU 临界区；后续的 `d_alloc`、`hlist_bl_lock`、`ext4_lookup` 等都在 RCU 之外执行（RCU临界区不能做加锁操作！），可以安全地加锁和阻塞。正因为它对 RCU 的使用是自包含且短暂的，所以哪怕整个 `lookup_slow` 运行在 ref-walk 语境下，`d_alloc_parallel` 仍可放心地用 `__d_lookup_rcu` 做这次无锁快查
+
+此外，`i_dir_seq`（父目录内容变更序号）与 `rename_lock`（全局 rename 序号）用于兜住这个窗口内目录被并发修改/重命名的情况，一旦发现序号变化（`read_seqretry` / `i_dir_seq != seq`），就 `goto retry` 从头再来，确保并发正确性
+
+一句话总结三者关系：**`lookup_fast` 是无/轻量锁的缓存快查（两类 walk 机制都用）；`lookup_slow` 是降级到 ref 后才走的读盘慢路径；而 `d_alloc_parallel` 是慢路径里 安全地创建 dentry 机制的并发协调器，它内部再借 `__d_lookup_rcu` 做一次无锁双重检查以避免重复读盘**
 
 ####	为什么经常调用`d_revalidate`？
 `d_revalidate`的实现如下，经常在各种`*lookup*`方法之后调用，其作用是什么？
