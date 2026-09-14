@@ -26,6 +26,8 @@ tags:
 
 本文代码基于 [v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source/include) 版本
 
+在 Linux 内核中，调度的触发严格来说分为主动调度和抢占调度（被动调度）两大类，而本文介绍的周期调度和新进程创建（调度）本质上都是触发抢占调度的具体场景
+
 ##  0x01    CFS数据结构及关系
 -	`task_struct`：每一个调度类并不是直接管理`task_struct`，而是关联调度实体
 -	`sched_entity`：调度实体
