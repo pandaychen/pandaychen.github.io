@@ -8,6 +8,7 @@ header-img:
 catalog: true
 tags:
     - Linux
+    - Kernel
 ---
 
 ##  0x00    前言
@@ -199,11 +200,46 @@ dr-xr-xr-x 9 root root  0 Feb 10 10:43 ..
 ####	proc下的主要目录&&文件
 参考：[Linux Procfs (一) /proc/* 文件实例解析](https://juejin.cn/post/7055321925463048228)
 
-####	procfs架构
+```bash
+/proc/cpuinfo：CPU 硬件信息
+/proc/meminfo：内存总大小、空闲、缓存、Swap 等状态
+/proc/loadavg：系统平均负载
+/proc/uptime：系统启动总时间、空闲时间
+/proc/cmdline：内核启动参数
+/proc/filesystems：内核支持的文件系统列表
+/proc/stat：系统整体 CPU 使用率、中断、进程切换统计
+/proc/partitions：块设备与分区信息
+/proc/mounts：当前已挂载文件系统列表
+
+/proc/net/dev：网卡流量、错误、丢包统计
+/proc/net/tcp：TCP 连接表
+/proc/net/udp：UDP 连接表
+/proc/net/route：内核路由表
+/proc/net/arp：ARP 表
+/proc/net/netstat：网络栈统计
+/proc/net/sockstat：套接字使用统计
+
+/proc/[PID]/cmdline：进程启动命令与参数
+/proc/[PID]/status：进程状态
+/proc/[PID]/maps：进程虚拟内存映射
+/proc/[PID]/fd/：进程打开的文件描述符列表
+/proc/[PID]/environ：进程环境变量
+/proc/[PID]/limits：进程资源限制
+/proc/[PID]/io：进程 I/O 统计
+/proc/[PID]/sched：进程调度信息与优先级
+```
+
+####	procfs架构：内核视角
+理解 proc 文件系统的关键在于理解 proc 文件系统内部树，此内部树是指独立于 VFS 的文件树，procfs内核实现原理如下：
 
 ![procfs_arch]()
 
+####	procfs 与 VFS
+通过VFS的接口，如何访问到proc 内部文件树的文件节点呢？下文可以了解到，procfs 的文件节点由内核通过 `proc_mkdir` 和 `proc_create` 函数来创建。当用户程序需要访问 procfs 文件节点时，内核会基于 proc 文件节点动态生成 `struct inode` 结构，并将访问 procfs 的方法（函数表）也赋值给inode。这样用户程序就可以能够通过 VFS 来访问 proc 文件了
+
 ##	0x02	seq_file机制
+
+seq_file 是用于简化procfs的创建和读取操作的机制，提供了一种迭代式、分块输出的方式来生成动态内容
 
 ####	seq_file机制介绍
 
@@ -225,13 +261,13 @@ dr-xr-xr-x 9 root root  0 Feb 10 10:43 ..
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/seq_file.h#L17
 struct seq_file {
-	char *buf;          // 内核缓冲区指针
+	char *buf;          // 内核缓冲区指针（输出缓冲区）
 	size_t size;        // 缓冲区总大小（初始为 PAGE_SIZE，溢出时翻倍扩容）
-	size_t from;        // 当前待拷贝到用户态的起始偏移（buf 内部偏移）
-	size_t count;       // 缓冲区中待拷贝的有效数据字节数
-	size_t pad_until;   // seq_pad 的对齐目标位置
-	loff_t index;       // 当前迭代器的逻辑位序（第几个元素）
-	loff_t read_pos;    // 已经拷贝到用户态的累计字节数
+	size_t from;        // 当前待拷贝到用户态的起始偏移（buf 内部偏移），也可理解为用户空间已读取的位置
+	size_t count;       // 缓冲区中待拷贝的有效数据字节数，buf 中有效数据量
+	size_t pad_until;   // seq_pad 的对齐目标位置，填充位置
+	loff_t index;       // 当前迭代器的逻辑位序（第几个元素），当前迭代位置
+	loff_t read_pos;    // 已经拷贝到用户态的累计字节数，当前读取位置
 	u64 version;        // 版本号，用于跨 read 调用的断点续传（如 maps 中记录 vm_start）
 	struct mutex lock;  // 保护 seq_file 结构的互斥锁
 	const struct seq_operations *op;  // 迭代器操作函数表
@@ -241,7 +277,7 @@ struct seq_file {
 };
 ```
 
-2、`struct seq_operations`：迭代器操作函数表，定义了遍历数据集合的四个回调方法
+2、`struct seq_operations`：迭代器操作函数表，定义了遍历数据集合的四个回调方法（特别注意，由file结构的`private_data`成员指向）
 
 ```cpp
 struct seq_operations {
@@ -253,11 +289,63 @@ struct seq_operations {
 ```
 
 四个回调的契约：
--	`start` 返回 `NULL` 表示遍历结束，返回 `ERR_PTR(error)` 表示出错
--	`show` 返回 `0` 表示成功，返回负数表示出错，返回 `SEQ_SKIP`（值为`1`）表示跳过当前元素
--	`stop` 无论遍历是否成功都**必定被调用**（类似于 `finally` 语义）
+-	`start`：遍历起始回调，找到第`pos`个数据节点（遍历的起点）。 返回 `NULL` 表示遍历结束，返回 `ERR_PTR(error)` 表示出错
+-	`show`：内容输出回调，将单个节点的数据格式化输出到`seq_file`缓冲区。返回 `0` 表示成功，返回负数表示出错，返回 `SEQ_SKIP`（值为`1`）表示跳过当前元素
+-	`stop`：遍历结束回调，清理资源（解锁、释放内存等）。无论遍历是否成功都**必定被调用**（类似于 `finally` 语义）
+-	`next`：遍历下一个回调，获取当前节点的下一个节点
 
 ![seq-file-pic1]()
+
+小结下，**seq_file 就是一个内核缓冲区，proc 文件中的数据需要先格式化输出到 seq_file 内核缓冲区，再拷贝至用户缓冲区。格式化输出的过程需要使用`struct seq_operations`定义的方法执行**
+
+####	seq_operations的工作机制
+
+![seq_operations]()
+
+1、以当用户程序执行 `cat /proc/xxx` 的过程进行说明。首先会`open`打开文件，打开文件的过程会创建 file 对象，然后将 file 对象的私有指针（`private_data`）指向 proc 文件对应的 `seq_file`
+
+todo
+
+2、接着，`cat` 命令会读取 proc 文件数据，读取的过程需要用到 `seq_file` 对象中的 `op` 函数表，即`struct struct seq_operations`，具体过程如下：
+
+-	步骤1：调用 `start` 函数开始迭代，获取第一个数据项（整型数、字符串、结构体等），并调用 `show` 函数格式化输出该数据项至 `seq_file` 内核缓冲区
+-	步骤2：调用 `next` 函数获取下一个数据项，并调用 `show` 函数格式化输出该数据项至 `seq_file` 内核缓冲区
+-	步骤3：持续执行步骤2，直至所有数据项都格式化输出到 `seq_file` 内核缓冲区
+-	步骤4：调用 `stop` 函数停止迭代，清理资源
+-	步骤5：将 `seq_file` 收集到数据拷贝至用户缓冲区
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/meminfo.c#L169
+static const struct file_operations meminfo_proc_fops = {
+	.open		= meminfo_proc_open,
+	.read		= seq_read,		
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/cmdline.c
+static const struct file_operations cmdline_proc_fops = {
+	.open		= cmdline_proc_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/root.c
+static const struct file_operations proc_root_operations = {
+	.read		 = generic_read_dir,
+	.iterate_shared	 = proc_root_readdir,
+	.llseek		= generic_file_llseek,
+};
+```
+
+todo
+
+####  	open/read系统调用 && seq_open/seq_read与seq_operations的关系
+
+在开始介绍`seq_open`、`seq_read`之前，先搞懂上述三者之间的联系。直观上看，VFS 系统调用（`open`/`read`）负责触发，seq_file 核心函数（`seq_open`/`seq_read`）充当管理缓冲区和状态机的引擎，而 seq_operations 的四个成员（`start/show/next/stop`）则是提供底层数据的业务逻辑，下面介绍下这里大致的内核流程：
+
+todo
 
 ####	两种使用模式
 
@@ -936,7 +1024,7 @@ static const struct super_operations proc_sops = {
 ```
 
 ####    proc_dir_entry（PDE）
-`proc_dir_entry`的结构如下：
+proc 内部文件树的节点类型（文件或目录）为 `struct proc_dir_entry` 结构，`proc_dir_entry`的结构如下：
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/internal.h#L33
@@ -949,9 +1037,9 @@ struct proc_dir_entry {
 	loff_t size;
 	const struct inode_operations *proc_iops;     // 文件inode操作函数
 	const struct file_operations *proc_fops;     // 文件操作函数
-	struct proc_dir_entry *parent;
-	struct rb_root subdir;
-	struct rb_node subdir_node;
+	struct proc_dir_entry *parent;		  /* 父目录指针，指向包含此节点的父目录 */
+	struct rb_root subdir;			  /* 子目录红黑树根 */
+	struct rb_node subdir_node;		 /* 红黑树节点，子节点插入父目录红黑树的节点 */
 	void *data;
 	atomic_t count;		/* use count */
 	atomic_t in_use;	/* number of callers into module in progress; */
@@ -964,7 +1052,9 @@ struct proc_dir_entry {
 };
 ```
 
-注意，在高版本的内核中，`subdir`、`subdir_node`已经调整为红黑树的实现了，2.6的内核实现是链表。数据结构`proc_dir_entry`在内核中代表了一个proc入口，在procfs中表现为一个文件，可以在这个结构体中看到一些文件特有的属性成员，如`uid`、`gid`、`mode`、`name`等
+`struct proc_dir_entry`（简称 PDE）是内核管理 `/proc` 文件系统所有节点（文件、目录、链接）的数据结构，每个节点在内核中都对应一个PDE，PDE用于存储节点的名称、权限、所属目录、操作回调、私有数据等关键信息
+
+注意，在高版本的内核中，`subdir`、`subdir_node`已经调整为红黑树的实现了，2.6的内核实现是链表。数据结构`proc_dir_entry`在内核中代表了一个proc入口，在procfs中表现为一个文件，可以在这个结构体中看到一些文件特有的属性成员，如`uid`、`gid`、`mode`、`name`等。即如果 PDE 是一个目录，那么 PDE 的 `subdir` 成员将会生效，`subdir` 是子节点（文件和目录）的红黑树根，子节点通过 PDE 的 `subdir_node` 成员插入父节点红黑树，这样就构成了树形结构
 
 `proc_dir_entry` 与 `inode` 的生命周期关系如下图所示：
 
@@ -1257,7 +1347,7 @@ static inline void get_fs_pwd(struct fs_struct *fs, struct path *pwd)
 ##  0x03 proc_dir_entry 主要功能分析
 本小节主要基于内核代码，分析下`/proc`及子目录的初始化流程
 
-1、内核初始化创建`/proc`目录，[代码](https://elixir.bootlin.com/linux/v4.11.6/source/init/main.c#L488)
+1、内核初始化创建`/proc`目录，[代码](https://elixir.bootlin.com/linux/v4.11.6/source/init/main.c#L488)，内核初始化时会调用 `start_kernel` 函数，该函数会调用 `proc_root_init` 函数来初始化 proc 内部文件树
 
 ```cpp
 asmlinkage void __init start_kernel(void)
@@ -1270,7 +1360,21 @@ asmlinkage void __init start_kernel(void)
 
 2、`proc_root_init->register_filesystem->proc_sys_init`
 
-```cpp
+proc文件系统的内核定义如下：
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/root.c#L116
+static struct file_system_type proc_fs_type = {
+	.name		= "proc",
+	.mount		= proc_mount,
+	.kill_sb	= proc_kill_sb,
+	.fs_flags	= FS_USERNS_MOUNT,
+};
+```
+
+继续跟踪下内核的初始化过程：
+
+```c
 void __init proc_root_init(void)
 {
 	int err;
@@ -1379,6 +1483,7 @@ enum {
 };
 
 //https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/root.c#L204
+//proc 内部文件树的根节点是 /proc 目录，它是一个特殊的PDE
 struct proc_dir_entry proc_root = {
 	.low_ino	= PROC_ROOT_INO, 	  // 根的索引节点号
 	.namelen	= 5, 					 // 根文件名长度、文件名
@@ -1388,7 +1493,7 @@ struct proc_dir_entry proc_root = {
 	.proc_iops	= &proc_root_inode_operations, 	// 根文件的具体索引节点操作
 	.proc_fops	= &proc_root_operations,		// 根文件支持的文件操作
 	.parent		= &proc_root,
-	.subdir		= RB_ROOT,
+	.subdir		= RB_ROOT,		//根指向的rb根
 	.name		= "/proc",
 };
 ```
@@ -1410,6 +1515,8 @@ static const struct inode_operations proc_root_inode_operations = {
     .getattr    = proc_root_getattr,
 };
 ```
+
+`proc_root` 是 Linux 内核中 `/proc` 文件系统根节点，所有 `/proc` 下的文件或目录都是挂载到这个根节点下的子节点，它是整个 proc 内部文件树的根
 
 ####	proc_root_lookup：proc下的inode查找
 当用户空间访问proc文件的时候（通过`open`系统调用打开`/proc/xxxx`时），vfs就会调用`real_lookup()`，它就会调用`inode_operations`中的`proc_root_lookup`函数，实际上就是调用`proc_root_lookup()`函数
@@ -3139,6 +3246,73 @@ int proc_pid_statm(struct seq_file *m, struct pid_namespace *ns,
 
 	return 0;
 }
+```
+
+####	/proc/partitions实现
+
+`/proc/partitions` 是 procfs 中专门用于暴露系统块设备（磁盘 / 分区）信息的核心虚拟文件，通常一台主机通常会有多个块设备
+
+```bash
+[root@VM-x-x-tencentos ~]# cat /proc/partitions 
+major minor  #blocks  name
+
+ 253        0  104857600 vda
+ 253        1  104856559 vda1
+ 253       16  209715200 vdb
+```
+
+![partitions]()
+
+`/proc/partitions` 文件的数据项是 `struct gendisk` 结构（通用磁盘结构体），`struct gendisk`是内核块设备子系统的核心数据结构，用于抽象和管理系统中所有块设备，定义：
+
+```c
+struct gendisk
+{
+    int major; // 主设备号
+    int first_minor; // 起始次设备号
+    int minors; // 次设备号
+    char disk_name[DISK_NAME_LEN]; // 磁盘名称
+    struct xarray part_tbl; // 分区表
+    struct block_device *part0; //主设备块设备对象
+    ......
+};
+```
+
+调用 `start` 函数后，内核会查询块设备列表获取到第一个块设备。 接着内核调用 `show` 函数格式化输出块设备信息，该场景下的 `show` 函数具体实现如下：
+
+```c
+static int show_partition(struct seq_file *seqf, void *v)
+{
+	struct gendisk *sgp = v;
+	struct disk_part_iter piter;
+	struct hd_struct *part;
+	char buf[BDEVNAME_SIZE];
+
+	/* Don't show non-partitionable removeable devices or empty devices */
+	if (!get_capacity(sgp) || (!disk_max_parts(sgp) &&
+				   (sgp->flags & GENHD_FL_REMOVABLE)))
+		return 0;
+	if (sgp->flags & GENHD_FL_SUPPRESS_PARTITION_INFO)
+		return 0;
+
+	/* show the full disk and all non-0 size partitions of it */
+	disk_part_iter_init(&piter, sgp, DISK_PITER_INCL_PART0);
+	while ((part = disk_part_iter_next(&piter)))
+		seq_printf(seqf, "%4d  %7d %10llu %s\n",
+			   MAJOR(part_devt(part)), MINOR(part_devt(part)),
+			   (unsigned long long)part_nr_sects_read(part) >> 1,
+			   disk_name(sgp, part->partno, buf));
+	disk_part_iter_exit(&piter);
+
+	return 0;
+}
+
+static const struct seq_operations partitions_op = {
+	.start	= show_partition_start,
+	.next	= disk_seqf_next,
+	.stop	= disk_seqf_stop,
+	.show	= show_partition
+};
 ```
 
 ##	0x08	总结：`cat /proc/${pid}/fd` 的全路径追踪
