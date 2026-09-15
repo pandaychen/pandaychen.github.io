@@ -632,7 +632,7 @@ flowchart TD
     E -->|否| F["调用 op->start(m, &pos)"]
 
     C -->|否| F
-    F --> G{"p 有效?"}tgid_base_stuff
+    F --> G{"p 有效?"}
     G -->|否/ERR| H["op->stop(m, p)"]
     H --> Z
 
@@ -3490,7 +3490,7 @@ major minor  #blocks  name
  253       16  209715200 vdb
 ```
 
-![partitions]()
+![partitions](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/procfs/procfs_partitions.jpg)
 
 `/proc/partitions` 文件的数据项是 `struct gendisk` 结构（通用磁盘结构体），`struct gendisk`是内核块设备子系统的核心数据结构，用于抽象和管理系统中所有块设备，定义：
 
