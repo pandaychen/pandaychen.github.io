@@ -232,7 +232,7 @@ dr-xr-xr-x 9 root root  0 Feb 10 10:43 ..
 ####	procfs架构：内核视角
 理解 proc 文件系统的关键在于理解 proc 文件系统内部树，此内部树是指独立于 VFS 的文件树，procfs内核实现原理如下：
 
-![procfs_arch]()
+![procfs_arch](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/procfs/procfs_arch.jpg)
 
 ####	procfs 与 VFS
 通过VFS的接口，如何访问到proc 内部文件树的文件节点呢？下文可以了解到，procfs 的文件节点由内核通过 `proc_mkdir` 和 `proc_create` 函数来创建。当用户程序需要访问 procfs 文件节点时，内核会基于 proc 文件节点动态生成 `struct inode` 结构，并将访问 procfs 的方法（函数表）也赋值给inode。这样用户程序就可以能够通过 VFS 来访问 proc 文件了
@@ -277,7 +277,11 @@ struct seq_file {
 };
 ```
 
-2、`struct seq_operations`：迭代器操作函数表，定义了遍历数据集合的四个回调方法（特别注意，由file结构的`private_data`成员指向）
+2、`struct seq_operations`：迭代器操作函数表，定义了遍历数据集合的四个回调方法（特别注意，由file结构的`private_data`成员指向）。seq_file 框架的核心设计理念是遍历与打印过程解耦：
+
+-	`start()` 和 `next()` 函数专门负责遍历底层的数据结构（如链表、数组、rbtree等），它们找到下一个数据节点后，将其指针作为返回值抛给 VFS 框架
+-	VFS 框架拿到这个指针后，直接作为 `void *v` 传递给 `show()`
+-	`show()` 函数只负责打印（转换为需要的结构）
 
 ```cpp
 struct seq_operations {
@@ -294,13 +298,65 @@ struct seq_operations {
 -	`stop`：遍历结束回调，清理资源（解锁、释放内存等）。无论遍历是否成功都**必定被调用**（类似于 `finally` 语义）
 -	`next`：遍历下一个回调，获取当前节点的下一个节点
 
-![seq-file-pic1]()
 
 小结下，**seq_file 就是一个内核缓冲区，proc 文件中的数据需要先格式化输出到 seq_file 内核缓冲区，再拷贝至用户缓冲区。格式化输出的过程需要使用`struct seq_operations`定义的方法执行**
 
+注意几个细节问题：
+1、`start`的第二个参数`loff_t *pos`，这里`pos`为指针类型的原因是什么？从内核实现看，`start` 函数不仅需要读取当前的读取位置（Index/Offset），还需要修改
+
+-	处理定位与跳过无效节点：当用户态通过 `lseek()` 调整读取偏移量，或者在多次 `read()` 之间内核数据结构发生了变化（例如链表节点被删除）时，传入的 `*pos` 目标索引可能已失效，若 `*pos` 对应的位置无效，`start` 可以直接在函数内部修改 `*pos` 的值（如 `(*pos)++`），将其修正为下一个真实的有效节点索引，然后再返回该有效节点的指针。这样能保证内核的读取位置指针与实际返回的数据条目保持同步
+-	同步 seq_file 的内部状态（`m->index`）：对应于`seq_read`实现中主循环的代码`p = m->op->start(m, &m->index)`，注意这里的`m->index`实际上是 `struct seq_file` 结构体中的 `m->index` 的地址，如果 `start` 函数修改了 `*pos`，就会直接更新 `m->index`，从而让 `seq_file` 了解当前文件会话读取记录的位置
+-	`start`与 `next` 函数回调保持接口设计的一致性，二者都可以通过直接修改 *pos 来控制迭代器在数据集合中的绝对位置。不过这里需要区分单次输出模式（如 `/proc/meminfo` 的 `single_start`）与列表/多条目迭代模式（如 `/proc/modules` 或 `/proc/net/tcp`）
+
+```c
+//单次输出模式（如 /proc/meminfo 的 single_start）
+//由于只有一条记录，它只读取 *pos 判断是否为 0，不需要修改它
+static void *single_start(struct seq_file *p, loff_t *pos)
+{
+    return *pos ? NULL : SEQ_START_TOKEN; // *pos 为 0 返回 TOKEN，>0 返回 NULL (EOF)
+}
+
+//列表/多条目迭代模式（如 /proc/modules 或 /proc/net/tcp）
+//start 会依据 *pos 去查找第 N 项，如果在搜索过程中发现需要跳过某些项，就会直接修改 *pos
+static void *xxx_seq_start(struct seq_file *m, loff_t *pos)
+{
+    /* 根据 *pos 遍历寻找目标节点 */
+    struct node *p = find_node_at(*pos);
+
+	//检测p的状态，非法可跳过
+    if (p && p->is_deleted) {
+        (*pos)++; // 修改 pos，跳过已被删除的节点
+        p = p->next;
+    }
+    return p;
+}
+```
+
+2、`show`的第二个参数`void *v`的使用场景是什么？第二个参数 `void *v` 的本质是**当前正在遍历的数据节点（迭代器指针）**，分三种情况讨论：
+
+-	case 1：类型转换，提取当前节点数据（最常见场景）。当 `/proc` 或 `/sys` 文件需要输出一个列表（如 `/proc/net/dev` 输出所有网卡，`/proc/modules` 输出所有内核模块）时，`v` 就是当前被遍历到的具体结构体指针，通常就是将 `v` 强转回其真实的结构体类型，然后打印其成员
+-	case 2：判断是否需要打印表头（Header），对应`/proc` 文件在输出第一行时，需要打印列名（表头）场景。在 `start()` 函数中，如果检测到偏移量 `*pos == 0`，通常会返回一个特殊的宏 `SEQ_START_TOKEN`（本质上是 `(void *)1`），而不是真实的数据节点指针。`show` 函数通过判断 `v` 是否等于这个特殊 Token，来决定是否打印表头
+-	case 3：`single_open` 机制下的占位符，对于像 `/proc/meminfo` 这种不需要遍历链表、只需要一次性全部打印的文件，它使用了 `single_open`，在 `single_open` 底层自动绑定的 `single_start` 中，当 `*pos == 0` 时固定返回 `SEQ_START_TOKEN`，当 `*pos > 0` 时返回 `NULL`
+
+```c
+static int xxx_seq_show(struct seq_file *m, void *v)
+{
+    // 如果 v 是起始标志，说明当前是第一行，打印表头
+    if (v == SEQ_START_TOKEN) {
+        seq_puts(m, "Name RX-Bytes TX-Bytes\n");
+        return 0;
+    }
+
+    // 否则，v 就是真实的数据节点，正常打印数据
+    struct my_data *data = v;
+    seq_printf(m, "%-10s %8llu %8llu\n", data->name, data->rx, data->tx);
+    return 0;
+}
+```
+
 ####	seq_operations的工作机制
 
-![seq_operations]()
+![seq_operations](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/procfs/seq_operations.jpg)
 
 1、以当用户程序执行 `cat /proc/xxx` 的过程进行说明。首先会`open`打开文件，打开文件的过程会创建 file 对象，然后将 file 对象的私有指针（`private_data`）指向 proc 文件对应的 `seq_file`
 
@@ -345,7 +401,35 @@ todo
 
 在开始介绍`seq_open`、`seq_read`之前，先搞懂上述三者之间的联系。直观上看，VFS 系统调用（`open`/`read`）负责触发，seq_file 核心函数（`seq_open`/`seq_read`）充当管理缓冲区和状态机的引擎，而 seq_operations 的四个成员（`start/show/next/stop`）则是提供底层数据的业务逻辑，下面介绍下这里大致的内核流程：
 
-todo
+1、阶段一：准备工作（`open/seq_open`）
+
+首先，由用户态触发，即用户程序调用 `open("/proc/meminfo", O_RDONLY)`，走`open`的内核调用链，会触发 Linux 虚拟文件系统 (VFS) 的路径解析并初始化文件描述符，包含如下几步：
+
+-	VFS 路径解析：内核遍历 procfs，当解析到 `meminfo` 节点时，获取对应的 `proc_dir_entry` 并实例化一个 VFS inode，在这个实例化过程中，`inode->i_fop` 指针会被赋值为该文件特定的操作集合，即 `meminfo_proc_fops`
+-	分配 File 对象： 在内核的 `do_dentry_open` 函数中，内核会分配一个新的 `struct file` 结构来代表进程打开的这个文件句柄。随后将 inode 的文件操作指针挂载到 file 结构体上，即执行 `file->f_op = inode->i_fop`
+-	继续直接调用 `f_op->open`： 同样在 `do_dentry_open` 中，内核会检查 `file->f_op->open` 是否存在。由于 `meminfo_proc_fops` 注册了该函数，内核会直接执行 `file->f_op->open(inode, file)`，即直接调用 `meminfo_proc_open(inode, file)`
+-	`meminfo_proc_open`的核心是调用 `single_open`，并将回调函数`meminfo_proc_show`（格式化输出内存信息）传入；其他文件类型也可以调用`seq_open`
+
+[`single_open`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/seq_file.c#L573)/seq_open的实现细节如下：
+
+-	内核分配一个 `struct seq_file` 对象（负责内存缓冲和状态记录）
+-	将`meminfo_proc_show`单函数（类型为`int (*show)(struct seq_file *, void *)`）或[`cpuinfo_op`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/cpuinfo.c#L9)，类型为`struct seq_operations`，赋值给 `seq_file->op`，然后将这个 `seq_file` 对象存入 VFS 的 `file->private_data` 中
+
+2、阶段二：数据读取过程（`read/vfs_read/seq_read`），一次完整的读取`/proc/meminfo`可能需要多次调用`read(fd, buf, size)`
+
+-	首先，由用户态触发调用 `read(fd, buf, size)`，继而进入VFS 层直接调用 `file->f_op->read`，对于配置了 `seq_file` 的节点指向了`seq_read()` 
+-	`seq_read` 从 `file->private_data` 中提取出之前绑定的 `struct seq_file` 对象，开始执行 while 循环，并在循环中按顺序调用 `seq_operations` 的四个成员
+
+3、阶段三：`seq_operations` 在 `seq_read` 中的执行流，上述四个成员的作用如下：
+
+-	`start(m, &pos)`：每次读取循环开始时调用，负责起点与加锁。根据全局游标 `pos`，在底层数据结构（如进程链表、CPU 数组等）中找到起始元素并返回其指针。为了防止读取过程中数据被销毁，通常在这里执行加锁操作（如 `rcu_read_lock` 或自旋锁）
+-	`show(m, v)`：在`start` 或 `next`函数，返回有效的元素指针后，主要用于装载数据。其接收元素指针 `v`，解析数据，通过 `seq_printf` 格式化后，**写入 `seq_file` 内部维护的内核缓冲区（`m->buf`，默认大小 `4KB`），而不是直接写给用户态**
+-	`next(m, v, &pos)`：当`show`函数执行完毕且内核缓冲区（`m->buf`）还未满时调用，将底层数据指针移动到下一个元素，更新 `pos`，返回新指针。随后 `seq_read` 会使用新指针再次调用 `show`
+-	`stop(m, v)`：当 `next` 返回 `NULL`时调用（底层数据遍历完）或 `show` 发现 `seq_file` 的 `4KB` 内部缓冲区已经被塞满写不下时，强制退出循环并调用，此时执行清理工作，必须释放 `start` 中加的锁
+
+4、执行收尾工作：当 `stop` 执行完毕后，`seq_operations` 的工作暂时结束，交回控制权。`seq_read` 最后会调用 `copy_to_user()`，将填满数据的内核缓冲区（`m->buf`），安全地拷贝到用户态 read 提供的 buf 中，随后返回读取的字节数
+
+详细实现见下 **`seq_read` 核心流程分析**
 
 ####	两种使用模式
 
@@ -421,15 +505,16 @@ static void *single_next(struct seq_file *p, void *v, loff_t *pos)
 ```cpp
 ssize_t seq_read(struct file *file, char __user *buf, size_t size, loff_t *ppos)
 {
-	struct seq_file *m = file->private_data;
+	struct seq_file *m = file->private_data;	//读取内核save的数据
 	size_t copied = 0;
 	void *p;
 	int err = 0;
 
+	//加锁
 	mutex_lock(&m->lock);
 	m->version = file->f_version;
 
-	// 阶段1：位置校验——如果 ppos 与上次不一致（如 lseek 后），通过 traverse 重新定位
+	// 阶段1：位置校验，如果 ppos 与上次不一致（如 lseek 后），通过 traverse 重新定位
 	if (*ppos == 0)
 		m->index = 0;
 	if (unlikely(*ppos != m->read_pos)) {
@@ -460,7 +545,7 @@ ssize_t seq_read(struct file *file, char __user *buf, size_t size, loff_t *ppos)
 			goto Done;
 	}
 
-	// 阶段3：核心迭代循环——调用 start -> show -> next 填充缓冲区
+	// 阶段3：核心迭代循环，调用 start -> show -> next 填充缓冲区
 	pos = m->index;
 	p = m->op->start(m, &pos);       // 定位到当前位置
 	while (1) {
@@ -478,7 +563,7 @@ ssize_t seq_read(struct file *file, char __user *buf, size_t size, loff_t *ppos)
 		}
 		if (m->count < m->size)
 			goto Fill;                // 有数据且未溢出，进入填充阶段
-		// 缓冲区溢出：扩容后重试
+		// 缓冲区溢出：扩容后重试（m->count >= m->size）
 		m->op->stop(m, p);
 		kvfree(m->buf);
 		m->count = 0;
@@ -598,6 +683,150 @@ seq_file 提供了一组函数用于在 `show` 回调中向缓冲区写入数据
 | `seq_setwidth(m, size)` + `seq_pad(m, c)` | 设置列宽并填充空格对齐 |
 
 这些函数内部都会检查缓冲区剩余空间，空间不足时标记溢出（`seq_set_overflow`），由 `seq_read` 负责后续的扩容重试
+
+####	/proc/meminfo的seq_read的实现
+`/proc/meminfo` 使用的是 `single_open` 接口，直接复用了内核 seq_file 框架统一提供的通用函数 `single_start`
+
+通用实现函数如下：
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/seq_file.c#L558
+static void *single_start(struct seq_file *p, loff_t *pos)
+{
+	return NULL + (*pos == 0);
+}
+
+static void *single_next(struct seq_file *p, void *v, loff_t *pos)
+{
+	++*pos;
+	return NULL;
+}
+
+static void single_stop(struct seq_file *p, void *v){}
+```
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/seq_file.c#L573
+int single_open(struct file *file, int (*show)(struct seq_file *, void *),
+		void *data)
+{
+	struct seq_operations *op = kmalloc(sizeof(*op), GFP_KERNEL);
+	int res = -ENOMEM;
+
+	if (op) {
+		// 注册seq_operation的四个函数
+		op->start = single_start;	
+		op->next = single_next;
+		op->stop = single_stop;
+		op->show = show;		//对应meminfo_proc_show
+
+		//调用seq_open
+		res = seq_open(file, op);
+		if (!res)
+			((struct seq_file *)file->private_data)->private = data;
+		else
+			kfree(op);
+	}
+	return res;
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/seq_file.c#L573
+int seq_open(struct file *file, const struct seq_operations *op)
+{
+	struct seq_file *p;
+
+	WARN_ON(file->private_data);
+
+	p = kzalloc(sizeof(*p), GFP_KERNEL);
+	if (!p)
+		return -ENOMEM;
+
+	file->private_data = p;
+
+	//init lock
+	mutex_init(&p->lock);
+	p->op = op;
+	p->file = file;
+	file->f_version = 0;
+	file->f_mode &= ~FMODE_PWRITE;
+	return 0;
+}
+```
+
+再回到针对meminfo读取的`seq_read`函数，通过`->start()`定位到读位置，通过[`meminfo_proc_show`](https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/meminfo.c#L45)函数将数据格式化写入内核缓冲区，注意到`meminfo_proc_show`的传入参数是`seq_file *`（参数`v`为`NULL`，来源于`->start()`函数的返回值）
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/meminfo.c#L45
+static int meminfo_proc_show(struct seq_file *m, void *v)
+{
+	struct sysinfo i;
+	unsigned long committed;
+	long cached;
+	long available;
+	unsigned long pages[NR_LRU_LISTS];
+	int lru;
+
+	//内核相关数据结构数据
+
+	si_meminfo(&i);
+	si_swapinfo(&i);
+	committed = percpu_counter_read_positive(&vm_committed_as);
+
+	cached = global_node_page_state(NR_FILE_PAGES) -
+			total_swapcache_pages() - i.bufferram;
+	if (cached < 0)
+		cached = 0;
+
+	for (lru = LRU_BASE; lru < NR_LRU_LISTS; lru++)
+		pages[lru] = global_node_page_state(NR_LRU_BASE + lru);
+
+	available = si_mem_available();
+
+	show_val_kb(m, "MemTotal:       ", i.totalram);
+	show_val_kb(m, "MemFree:        ", i.freeram);
+	show_val_kb(m, "MemAvailable:   ", available);
+	show_val_kb(m, "Buffers:        ", i.bufferram);
+	show_val_kb(m, "Cached:         ", cached);
+	show_val_kb(m, "SwapCached:     ", total_swapcache_pages());
+	show_val_kb(m, "Active:         ", pages[LRU_ACTIVE_ANON] +
+					   pages[LRU_ACTIVE_FILE]);
+	show_val_kb(m, "Inactive:       ", pages[LRU_INACTIVE_ANON] +
+					   pages[LRU_INACTIVE_FILE]);
+	show_val_kb(m, "Active(anon):   ", pages[LRU_ACTIVE_ANON]);
+	show_val_kb(m, "Inactive(anon): ", pages[LRU_INACTIVE_ANON]);
+	show_val_kb(m, "Active(file):   ", pages[LRU_ACTIVE_FILE]);
+	show_val_kb(m, "Inactive(file): ", pages[LRU_INACTIVE_FILE]);
+	show_val_kb(m, "Unevictable:    ", pages[LRU_UNEVICTABLE]);
+	show_val_kb(m, "Mlocked:        ", global_page_state(NR_MLOCK));
+
+	......
+	hugetlb_report_meminfo(m);
+
+	arch_report_meminfo(m);
+
+	return 0;
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/fs/proc/meminfo.c#L26
+static void show_val_kb(struct seq_file *m, const char *s, unsigned long num)
+{
+	char v[32];
+	static const char blanks[7] = {' ', ' ', ' ', ' ',' ', ' ', ' '};
+	int len;
+
+	len = num_to_str(v, sizeof(v), num << (PAGE_SHIFT - 10));
+
+	seq_write(m, s, 16);
+
+	if (len > 0) {
+		if (len < 8)
+			seq_write(m, blanks, 8 - len);	//seq_write写入内核buf
+
+		seq_write(m, v, len);
+	}
+	seq_write(m, " kB\n", 4);
+}
+```
 
 ####	大白话描述
 
@@ -1352,9 +1581,9 @@ static inline void get_fs_pwd(struct fs_struct *fs, struct path *pwd)
 ```cpp
 asmlinkage void __init start_kernel(void)
 {
-	//...
+	......
     proc_root_init();
-	//...
+	......
 }
 ```
 
@@ -3836,7 +4065,129 @@ int proc_pid_status(struct seq_file *m, struct pid_namespace *ns,
 
 与 `/proc/[pid]/stat` 的对比：`status` 以 `Key: Value` 的人类可读格式输出，适合人工查看和简单的 `grep` 解析；`stat` 以空格分隔的数字序列输出，适合程序化解析（如 `top`、`ps` 等工具），且 `stat` 包含更多运行时统计字段（如 CPU 时间、调度策略、启动时间等）
 
-##  0x0A  参考
+##	0x0A	/proc/modules实现
+
+```bash
+[root@VM-x-x-tencentos ~]# cat /proc/modules
+veth 36864 0 - Live 0xffffffffa06c2000
+tls 139264 0 - Live 0xffffffffa0698000
+binfmt_misc 24576 1 - Live 0xffffffffa0680000
+mptcp_diag 12288 0 - Live 0xffffffffa0692000
+xsk_diag 12288 0 - Live 0xffffffffa0672000
+tcp_diag 12288 0 - Live 0xffffffffa0684000
+udp_diag 12288 0 - Live 0xffffffffa067a000
+raw_diag 12288 0 - Live 0xffffffffa065f000
+inet_diag 24576 4 mptcp_diag,tcp_diag,udp_diag,raw_diag, Live 0xffffffffa0655000
+unix_diag 12288 0 - Live 0xffffffffa0663000
+af_packet_diag 12288 0 - Live 0xffffffffa0659000
+netlink_diag 12288 0 - Live 0xffffffffa064f000
+xt_conntrack 12288 1 - Live 0xffffffffa0649000
+xt_MASQUERADE 16384 1 - Live 0xffffffffa0641000
+nf_conntrack_netlink 53248 0 - Live 0xffffffffa0621000
+iptable_nat 12288 1 - Live 0xffffffffa05c5000
+nf_nat 57344 2 xt_MASQUERADE,iptable_nat, Live 0xffffffffa062f000
+nf_conntrack 192512 4 xt_conntrack,xt_MASQUERADE,nf_conntrack_netlink,nf_nat, Live 0xffffffffa05f4000
+nf_defrag_ipv6 24576 1 nf_conntrack, Live 0xffffffffa05d8000
+nf_defrag_ipv4 12288 1 nf_conntrack, Live 0xffffffffa05bd000
+xt_addrtype 12288 2 - Live 0xffffffffa05b7000
+iptable_filter 12288 1 - Live 0xffffffffa05b1000
+overlay 180224 0 - Live 0xffffffffa0581000
+isofs 49152 0 - Live 0xffffffffa0576000
+sr_mod 24576 0 - Live 0xffffffffa05eb000
+cdrom 77824 2 isofs,sr_mod, Live 0xffffffffa0566000
+i2c_piix4 28672 0 - Live 0xffffffffa0549000
+floppy 90112 0 - Live 0xffffffffa054d000
+pcspkr 12288 0 - Live 0xffffffffa0543000
+virtio_balloon 24576 0 - Live 0xffffffffa0489000
+sunrpc 774144 1 - Live 0xffffffffa0498000
+sch_fq_codel 20480 3 - Live 0xffffffffa0426000
+fuse 184320 1 - Live 0xffffffffa03f5000
+nfnetlink 20480 3 nf_conntrack_netlink, Live 0xffffffffa03ef000
+ip_tables 28672 2 iptable_nat,iptable_filter, Live 0xffffffffa0314000
+cirrus 16384 0 - Live 0xffffffffa0336000
+drm_shmem_helper 24576 1 cirrus, Live 0xffffffffa02ef000
+drm_kms_helper 241664 3 cirrus, Live 0xffffffffa0434000
+crct10dif_pclmul 12288 1 - Live 0xffffffffa02c3000
+crc32_pclmul 12288 0 - Live 0xffffffffa02f3000
+crc32c_intel 16384 4 - Live 0xffffffffa02e8000
+drm 724992 4 cirrus,drm_shmem_helper,drm_kms_helper, Live 0xffffffffa0338000
+virtio_net 77824 0 - Live 0xffffffffa0319000
+ghash_clmulni_intel 16384 0 - Live 0xffffffffa02b7000
+sha512_ssse3 49152 0 - Live 0xffffffffa0305000
+sha256_ssse3 32768 1 - Live 0xffffffffa02f5000
+i2c_core 114688 3 i2c_piix4,drm_kms_helper,drm, Live 0xffffffffa02c8000
+sha1_ssse3 32768 0 - Live 0xffffffffa0258000
+aesni_intel 356352 0 - Live 0xffffffffa0265000
+net_failover 20480 1 virtio_net, Live 0xffffffffa022c000
+backlight 24576 1 drm, Live 0xffffffffa0239000
+crypto_simd 16384 1 aesni_intel, Live 0xffffffffa023e000
+failover 12288 1 net_failover, Live 0xffffffffa0233000
+cryptd 24576 2 ghash_clmulni_intel,crypto_simd, Live 0xffffffffa0225000
+dm_multipath 45056 0 - Live 0xffffffffa0216000
+autofs4 53248 2 - Live 0xffffffffa0201000
+```
+
+下面分析下`/proc/modules`的读取实现
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/module.c#L4141
+static const struct seq_operations modules_op = {
+	.start	= m_start,
+	.next	= m_next,
+	.stop	= m_stop,
+	.show	= m_show
+};
+
+/* Called by the /proc file system to return a list of modules. */
+static void *m_start(struct seq_file *m, loff_t *pos)
+{
+	mutex_lock(&module_mutex);
+	return seq_list_start(&modules, *pos);
+}
+
+static void *m_next(struct seq_file *m, void *p, loff_t *pos)
+{
+	return seq_list_next(p, &modules, pos);
+}
+
+static void m_stop(struct seq_file *m, void *p)
+{
+	mutex_unlock(&module_mutex);
+}
+
+static int m_show(struct seq_file *m, void *p)
+{
+	struct module *mod = list_entry(p, struct module, list);
+	char buf[MODULE_FLAGS_BUF_SIZE];
+
+	/* We always ignore unformed modules. */
+	if (mod->state == MODULE_STATE_UNFORMED)
+		return 0;
+
+	seq_printf(m, "%s %u",
+		   mod->name, mod->init_layout.size + mod->core_layout.size);
+	print_unload_info(m, mod);
+
+	/* Informative for users. */
+	seq_printf(m, " %s",
+		   mod->state == MODULE_STATE_GOING ? "Unloading" :
+		   mod->state == MODULE_STATE_COMING ? "Loading" :
+		   "Live");
+	/* Used by oprofile and other similar tools. */
+	seq_printf(m, " 0x%pK", mod->core_layout.base);
+
+	/* Taints info */
+	if (mod->taints)
+		seq_printf(m, " %s", module_flags(mod, buf));
+
+	seq_puts(m, "\n");
+	return 0;
+}
+```
+
+todo
+
+##  0x0B  参考
 -   [Linux进程网络流量统计方法及实现](https://zhuanlan.zhihu.com/p/49981590)
 -   [使用 golang gopacket 实现进程级流量监控](https://github.com/rfyiamcool/notes/blob/main/netflow.md)
 -   [从内核代码角度详解proc目录](https://blog.spoock.com/2019/10/26/proc-from-kernel/)
