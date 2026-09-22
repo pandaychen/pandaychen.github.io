@@ -15,7 +15,7 @@ tags:
 
 本文代码基于 [v4.11.6](https://elixir.bootlin.com/linux/v4.11.6/source) 版本，架构为x86_64
 
-内核是一个天生高度并发的程序：同一份数据结构（`task_struct`、`dentry`、`sk_buff`、路由表）可能被**多个 CPU 上运行的进程上下文、软中断、硬中断**同时访问。如何在保证正确性的前提下把同步开销降到最低，是内核设计的核心命题之一。本文系统梳理 v4.11.6 中的并发与同步机制，覆盖：
+内核是一个天生高度并发的程序，同一份数据结构变量（`task_struct`、`dentry`、`sk_buff`、路由表等）可能被**多个 CPU 上运行的进程上下文、软中断、硬中断**同时访问。如何在保证正确性的前提下把同步开销降到最低，是内核设计的核心命题之一。本文系统梳理下内核中常见的并发与同步机制，覆盖如下场景：
 
 -   基石：内存屏障、原子操作、抢占/中断控制
 -   自旋类（不可睡眠）：`spinlock`（qspinlock）、`rwlock`（qrwlock）、`seqlock`
@@ -36,7 +36,38 @@ tags:
 | 内核抢占（`CONFIG_PREEMPT`） | 一个进程在内核态执行时被更高优先级进程抢占 | 是 |
 | 中断/软中断 | 硬中断、软中断、tasklet 打断当前执行流 | 是 |
 
-这解释了为什么内核锁总要区分「关不关抢占」「关不关中断」「关不关下半部」——因为竞争对手可能来自另一个 CPU，也可能来自本 CPU 上打断你的那个中断处理程序。
+这解释了为什么内核锁总要区分如下三个典型场景：
+-   关不关抢占
+-   关不关中断
+-   关不关下半部
+
+因为竞争对手可能来自另一个 CPU，也可能来自本 CPU 上打断本端的那个中断处理程序
+
+### 执行上下文与「能否睡眠」
+
+由于内核代码运行在若干上下文中，是否允许睡眠（调用 `schedule()` 主动让出）是选锁的第一判断要素，参考下文（注意一些禁止的场景）：
+
+```mermaid
+flowchart TD
+    subgraph proc [进程上下文 process context]
+        SYS["系统调用/内核线程<br/>可睡眠 可抢占"]
+    end
+    subgraph atomic [原子上下文 atomic context 禁止睡眠]
+        SIRQ["软中断 softirq/tasklet"]
+        HIRQ["硬中断 hardirq"]
+        SPIN["持有 spinlock 期间"]
+    end
+    SYS -->|"可用: mutex/rwsem/semaphore<br/>wait_event/RCU/spinlock"| OK1["可睡 + 不可睡都行"]
+    SIRQ -->|"只能用: spinlock/rwlock<br/>seqlock/RCU/per-cpu/atomic"| OK2["禁止 mutex/semaphore/wait_event"]
+    HIRQ --> OK2
+    SPIN --> OK2
+```
+
+这里简单小结下，**只要处在"原子上下文"（硬/软中断、持自旋锁、显式关抢占），就绝不能调用任何可能睡眠的函数**（`mutex_lock`、`kmalloc(GFP_KERNEL)`、`copy_from_user`、`msleep` 等）。违反会触发 `scheduling while atomic` 或死锁问题
+
+那么什么叫可能睡眠呢？
+
+todo
 
 ### 并发的本质：交错，而不一定是并行
 
@@ -435,7 +466,9 @@ todo
 
 ### 同步原语选型总表
 
-| 原语 | 可否睡眠(持有时) | 典型场景 | 开销/特点 |
+先给出一些总结性结论：
+
+| 原语 | 可否睡眠（持有时） | 典型场景 | 开销/特点 |
 | --- | --- | --- | --- |
 | 原子操作 `atomic_t` | 不睡 | 计数器、标志位 | 最轻，无临界区 |
 | `spinlock` | 持有时禁抢占，不可睡 | 短临界区、可能被中断访问 | 忙等，临界区必须短 |
@@ -448,13 +481,11 @@ todo
 | Per-CPU | —— | 每 CPU 独立数据、统计 | 消除共享，靠关抢占 |
 | 等待队列 | 可睡 | 阻塞等待某条件成立 | 配合条件谓词 |
 
-执行上下文的嵌套关系与「各原语在哪些上下文可用」的总览，见架构图（drawio 源文件）：[context-and-primitives.drawio](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/kernel/concurrency/context-and-primitives.drawio)。
-
-下面自底向上展开
+下面各个章节自底向上展开
 
 ##  0x02    基石：内存屏障与原子操作
 
-在讲锁之前，必须先理解两个更底层的问题：**编译器/CPU 会乱序**，以及**普通读写不是原子的**。锁本质上是在这两个基石之上构建的。
+在深入学习内核的并发机制之前，必须先理解两个更底层的问题：**一、编译器/CPU 会乱序**，以及**二、普通读写不是原子的**。锁的本质上是在这两个基石之上构建的
 
 ### 编译器屏障与 `READ_ONCE`/`WRITE_ONCE`
 
@@ -462,6 +493,19 @@ todo
 
 ```c
 #define READ_ONCE(x)  __READ_ONCE(x, 1)
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/compiler.h#L314
+#define __READ_ONCE(x, check)						\
+({									\
+	union { typeof(x) __val; char __c[1]; } __u;			\
+	if (check)							\
+		__read_once_size(&(x), __u.__c, sizeof(x));		\
+	else								\
+		__read_once_size_nocheck(&(x), __u.__c, sizeof(x));	\
+	__u.__val;							\
+})
+#define READ_ONCE(x) __READ_ONCE(x, 1)
+
 #define WRITE_ONCE(x, val) \
 ({                          \
     union { typeof(x) __val; char __c[1]; } __u = { .__val = (val) }; \
@@ -470,7 +514,7 @@ todo
 })
 ```
 
-一个经典误区——「先置 flag 再读数据」的忙等循环：
+一个经典误区是，**先置 flag 再读数据的忙等循环**：
 
 ```c
 /* 错误：编译器可能把 flag 缓存进寄存器，永远读不到更新 */
@@ -478,11 +522,11 @@ while (!flag) ;
 use(data);
 ```
 
-必须写成 `while (!READ_ONCE(flag)) ;`。
+必须写成 `while (!READ_ONCE(flag)) ;`
 
 ### CPU 内存屏障
 
-多 CPU 下，即使编译器不乱序，CPU 和缓存也会让**另一个 CPU 观察到的写顺序**与程序顺序不同。内核提供（[include/asm-generic/barrier.h](https://elixir.bootlin.com/linux/v4.11.6/source/include/asm-generic/barrier.h)、[arch/x86/include/asm/barrier.h](https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/include/asm/barrier.h)）：
+在多 CPU 下，即使编译器不乱序，CPU 和缓存也会让**另一个 CPU 观察到的写顺序**与程序顺序不同。因此内核提供（[include/asm-generic/barrier.h](https://elixir.bootlin.com/linux/v4.11.6/source/include/asm-generic/barrier.h)、[arch/x86/include/asm/barrier.h](https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/include/asm/barrier.h)）：
 
 | 宏 | 作用 |
 | --- | --- |
@@ -491,7 +535,7 @@ use(data);
 | `smp_rmb()` | 读屏障，屏障前的读先于屏障后的读完成 |
 | `smp_store_release()` / `smp_load_acquire()` | release/acquire 语义，成对使用 |
 
-经典的「发布数据」范式（这正是 `rcu_assign_pointer` 的底层）：
+经典的发布数据范式（这正是 `rcu_assign_pointer` 的底层实现）：
 
 ```c
 /* 生产者 */
@@ -508,11 +552,27 @@ if (p) {
 }
 ```
 
-**关键认知：屏障解决的是"可见性/顺序"，不是"互斥"。** 它不能替代锁，只是无锁编程和锁实现的构件。
+**关键认知：屏障解决的是"可见性/顺序"，不是"互斥"** ，它不能替代锁，只是无锁编程和锁实现的构件和基础
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/rcupdate.h#L594
+#define rcu_assign_pointer(p, v)					      \
+({									      \
+	uintptr_t _r_a_p__v = (uintptr_t)(v);				      \
+									      \
+	if (__builtin_constant_p(v) && (_r_a_p__v) == (uintptr_t)NULL)	      \
+		WRITE_ONCE((p), (typeof(p))(_r_a_p__v));		      \
+	else								      \
+		smp_store_release(&p, RCU_INITIALIZER((typeof(p))_r_a_p__v)); \
+	_r_a_p__v;							      \
+})
+```
+
+todo
 
 ### 原子操作与引用计数
 
-`atomic_t` / `atomic64_t`（[include/linux/atomic.h](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/atomic.h)、[arch/x86/include/asm/atomic.h](https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/include/asm/atomic.h)）在 x86 上用 `lock` 前缀指令实现，无需临界区即可完成不可分割的读-改-写：
+`atomic_t` / `atomic64_t`（[include/linux/atomic.h](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/atomic.h)、[arch/x86/include/asm/atomic.h](https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/include/asm/atomic.h)）在 x86 上用 `lock` 前缀指令实现，**无需临界区即可完成不可分割的读-改-写**：
 
 ```c
 static __always_inline void atomic_inc(atomic_t *v)
@@ -521,9 +581,12 @@ static __always_inline void atomic_inc(atomic_t *v)
 }
 ```
 
-`cmpxchg(ptr, old, new)` 是无锁编程和几乎所有锁（qspinlock、mutex、rwsem）的核心：只有当 `*ptr == old` 时才写入 `new` 并返回旧值。
+`cmpxchg(ptr, old, new)` 是无锁编程和几乎所有锁（qspinlock、mutex、rwsem）的核心，只有当 `*ptr == old` 时才写入 `new` 并返回旧值
 
-引用计数场景推荐 `refcount_t`（v4.11 新引入，[include/linux/refcount.h](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/refcount.h)），相比裸 `atomic_t` 增加了溢出/UAF 防护；面向对象生命周期管理则用 `kref`（[include/linux/kref.h](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/kref.h)），典型模式 `kref_get` / `kref_put(&obj->ref, release_fn)`。
+todo：cmpxchg和atomic_inc的关系是什么？
+
+在内核中，引用计数场景常见于 `refcount_t`（v4.11 新引入，[include/linux/refcount.h](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/refcount.h)），相比裸 `atomic_t` 增加了溢出/UAF 防护；面向对象生命周期管理则用 `kref`（[include/linux/kref.h](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/kref.h)），典型模式 `kref_get` / `kref_put(&obj->ref, release_fn)`
+
 
 ##  0x03    抢占与中断控制
 
@@ -537,16 +600,26 @@ static __always_inline void atomic_inc(atomic_t *v)
 | `local_irq_save(flags)` / `local_irq_restore(flags)` | 本 CPU 的**硬中断** | [include/linux/irqflags.h](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/irqflags.h) |
 | `local_bh_disable()` / `local_bh_enable()` | 本 CPU 的**软中断/下半部** | [include/linux/bottom_half.h](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/bottom_half.h) |
 
-`preempt_count`（存于 `thread_info`）用不同 bit 段同时记录抢占计数、软中断计数、硬中断计数，`in_interrupt()`、`in_atomic()` 就是查它。
+`preempt_count`（存于 `thread_info`）用不同 bit 段同时记录抢占计数、软中断计数、硬中断计数等，关联查询函数如`in_interrupt()`、`in_atomic()` 
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/include/asm/thread_info.h#L55
+struct thread_info {
+	unsigned long		flags;		/* low level flags */
+};
+```
+
+todo
+
 
 ### 为什么 spinlock 有那么多变体
 
-考虑一个数据既被进程上下文访问、又被中断处理程序访问：如果进程上下文持有 spinlock 时被同 CPU 的中断打断，而中断里又去抢同一把锁——由于 spinlock 是忙等且当前 CPU 不会释放，就会**自锁死**。因此按「竞争对手来自哪个上下文」选变体：
+考虑一个数据既被进程上下文访问、又被中断处理程序访问的场景：如果进程上下文持有 spinlock 时被同 CPU 的中断打断，而中断里又去抢同一把锁，由于 spinlock 是忙等且当前 CPU 不会释放，就会**自锁死**。因此可以按照「竞争对手来自哪个上下文」挑选spinlock的变体：
 
-| 变体 | 额外动作 | 何时用 |
+| spinlock变体 | 额外动作 | 何时用 |
 | --- | --- | --- |
-| `spin_lock()` | 只关抢占 | 只在进程上下文访问的数据 |
-| `spin_lock_bh()` | 关抢占 + 关软中断 | 数据也被软中断访问（如网络） |
+| `spin_lock()/spin_unlock()` | 只关抢占 | 只在进程上下文访问的数据 |
+| `spin_lock_bh()/spin_unlock_bh()` | 关抢占 + 关软中断 | 数据也被软中断访问（如网络） |
 | `spin_lock_irqsave()` | 关抢占 + 关硬中断（保存 flags） | 数据也被硬中断访问 |
 
 ```mermaid
