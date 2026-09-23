@@ -1,7 +1,7 @@
 ---
 layout:     post
-title:  Linux 内核之旅（二十九）：内核并发与同步机制全解
-subtitle:   基于 v4.11.6 源码：从内存屏障、spinlock、mutex 到 RCU 的实现与用例
+title:  Linux 内核之旅（二十九）：内核并发与同步机制深入分析
+subtitle:   内核从内存屏障、spinlock、mutex 到 RCU 的实现探究
 date:       2026-09-12
 author:     pandaychen
 header-img:
@@ -71,16 +71,16 @@ todo
 
 ### 并发的本质：交错，而不一定是并行
 
-先厘清一个常被混淆的点：**并发（concurrency）不等于并行（parallelism）**。
+先厘清一个常被混淆的点：**并发（concurrency）不等于并行（parallelism）**
 
--   **并行**：两个执行流在两个 CPU 上*同一时刻*真的一起跑——只有 SMP 多核才有。
--   **并发**：两个执行流的操作在时间上*可以交错*（interleave），且它们访问了共享数据——**不要求同一时刻**。
+-   **并行**：两个执行流在两个 CPU 上*同一时刻*真的一起跑。只有 SMP 多核才有
+-   **并发**：两个执行流的操作在时间上*可以交错*（interleave），且它们访问了共享数据。**不要求同一时刻**
 
-数据竞争（race）的成立需要三者同时满足：**1、 多个执行流的操作可交错　2、 访问同一份数据　3、至少一方是写**。注意第一条只要求"可交错"，而"真并行"只是产生交错的*一种*方式而已。
+数据竞争（race）的成立需要三者同时满足：**1、 多个执行流的操作可交错　2、 访问同一份数据　3、至少一方是写**。注意第一条只要求"可交错"，而"真并行"只是产生交错的*一种*方式而已
 
-这就正面回答了一个疑问：**一个进程在内核态执行时被更高优先级进程抢占，为什么和并发有关？**
+这就正面解答了一个疑问：**一个进程在内核态执行时被更高优先级进程抢占，为什么和并发有关？**
 
-设想进程 A 在内核态正往一个全局链表插入节点，做到一半（比如新节点的 `next` 已接好、但前驱的 `next` 还没更新）时，被更高优先级的进程 B 抢占。B 也进内核、也去操作同一条链表——它看到的是一个**处于中间态、自相矛盾的链表**，于是链表被写坏。整个过程发生在**同一个 CPU** 上，全程没有任何"并行"，但因为 A 的操作被 B *交错*了，竞争照样发生。
+设想进程 A 在内核态正往一个全局链表插入节点，执行到一半（比如新节点的 `next` 已接好、但前驱的 `next` 还没更新）时，被更高优先级的进程 B 抢占。B 也陷入内核、也去操作同一条链表。它看到的是一个**处于中间态、自相矛盾的链表**，于是链表被写坏。整个过程发生在**同一个 CPU** 上，全程没有任何"并行"，但因为 A 的操作被 B *交错*了，竞争照样发生
 
 ```mermaid
 sequenceDiagram
@@ -94,11 +94,11 @@ sequenceDiagram
     Note over L: 链表被写坏（即使从未"并行"）
 ```
 
-所以**抢占（以及中断）是"单核也存在的并发来源"**：它们把本来顺序执行的代码变成了*可被交错*的代码。这正是前表中"内核抢占 / 中断在 UP 单核依然存在"的真正含义——把"并发"理解成"交错"而非"并行"，整张表就通了。
+所以**抢占（以及中断）是"单核也存在的并发来源"**：它们把本来顺序执行的代码变成了*可被交错*的代码。这正是前表中"内核抢占 / 中断在 UP 单核依然存在"的真正含义，若把"并发"理解成"交错"而非"并行"，整张表就通了
 
-### 内核如何堵住这个窗口：把插入放进临界区
+### 内核如何堵住此窗口：把插入放进临界区
 
-回到那个"插一半被抢占"的例子。先看内核链表插入的真身 `__list_add`（[include/linux/list.h](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/list.h)），可以清楚看到你说的那个中间态窗口：
+先回到上面"插入执行一半被抢占"的例子。先看内核链表普通方式插入（下文介绍还有RCU方式）的实现 `__list_add`（[include/linux/list.h](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/list.h)），可以清楚看到这个中间态窗口：
 
 ```c
 static inline void __list_add(struct list_head *new,
@@ -112,11 +112,20 @@ static inline void __list_add(struct list_head *new,
 }
 ```
 
-在 STEP1/2/3 与 STEP4 之间，正是你描述的"新节点 `next` 已接好、但前驱 `next` 还没更新"的**不一致中间态**：从 `prev` 往后遍历还看不到 `new`，而 `new->next` 却已指入链表。注意 **`__list_add` 本身不做任何加锁/关抢占**——它假设调用者已经在临界区里。
+在 STEP1/2/3 与 STEP4 之间，正是上文描述的"新节点 `next` 已接好、但前驱 `next` 还没更新"的**不一致中间态**：从 `prev` 往后遍历还看不到 `new`，而 `new->next` 却已指入链表
 
-内核堵住这个窗口的办法是：**任何会被并发访问的链表，其插入都必须在锁的保护下进行，而这把锁会顺带关掉抢占**。以等待队列为例（[kernel/sched/wait.c](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/wait.c)）：
+这里需要注意到 **`__list_add` 本身不做任何加锁/关抢占**，内核假设调用者已经在临界区里（`__xxx`这种写法也是不成文的规定）
+
+因此，内核堵住这个窗口的办法是：**任何会被并发访问的链表，其插入都必须在锁的保护下进行，而这把锁会顺带关掉抢占**。以等待队列为例（[kernel/sched/wait.c](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/wait.c)）：
 
 ```c
+struct __wait_queue_head {
+	spinlock_t		lock;       //q->lock是自旋锁类型
+	struct list_head	task_list;
+};
+typedef struct __wait_queue_head wait_queue_head_t;
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/sched/wait.c#L24
 void add_wait_queue(wait_queue_head_t *q, wait_queue_t *wait)
 {
     unsigned long flags;
@@ -132,12 +141,13 @@ void add_wait_queue(wait_queue_head_t *q, wait_queue_t *wait)
 ```c
 static inline void __raw_spin_lock(raw_spinlock_t *lock)
 {
-    preempt_disable();                    /* ★ 关键:持锁期间本 CPU 不可被抢占 */
+    preempt_disable();                    /* ★ 关键：持锁期间本 CPU 不可被抢占 */
     spin_acquire(&lock->dep_map, 0, 0, _RET_IP_);
     LOCK_CONTENDED(lock, do_raw_spin_trylock, do_raw_spin_lock);
 }
 
-/* irqsave 版还会先关中断,把三个来源一次性堵死 */
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/spinlock_api_smp.h#L104
+/* irqsave 版本还会先关中断，把三个来源一次性堵死 */
 static inline unsigned long __raw_spin_lock_irqsave(raw_spinlock_t *lock)
 {
     unsigned long flags;
@@ -150,17 +160,18 @@ static inline unsigned long __raw_spin_lock_irqsave(raw_spinlock_t *lock)
 
 于是那三个"半更新时被打断"的隐患被逐一封死：
 
--   **被更高优先级进程 B 抢占**：`preempt_disable` 让本 CPU 在持锁期间**不会触发调度**，B 根本无法在 A 的 ①②③④ 之间被切进来——A 一口气做完四步、`spin_unlock` 才重新开抢占。
--   **被本 CPU 硬中断打断**：`irqsave` 关中断，中断处理程序也进不来（否则中断里若也来抢同一把锁，还会自死锁，见 0x03 / 0x0E 案例 5）。
--   **被另一个 CPU 并行访问**：另一个 CPU 上的写者会在 `spin_lock` 处自旋等待，直到 A `spin_unlock`，从而看不到中间态。
+-   **被更高优先级进程 B 抢占**：`preempt_disable` 让本 CPU 在持锁期间**不会触发调度**，B 根本无法在 A 的 STEP1/2/3/4 之间被切进来。A 一口气做完四步之后，`spin_unlock` 才重新开抢占
+-   **被本 CPU 硬中断打断**：`irqsave` 会关闭中断，中断处理程序也进不来（否则中断里若也来抢同一把锁，还会自死锁，见后文 `0x0E`章节的 case5）
+-   **被另一个 CPU 并行访问**：另一个 CPU 上的写者会在 `spin_lock` 处自旋等待，直到 A `spin_unlock`，从而看不到中间态
 
-一句话：**`__list_add` 只管"怎么改指针"，"改的时候不许别人插进来"这件事交给外面的锁；而锁通过 `preempt_disable` / `local_irq_save` 把抢占和中断这两个"单核并发来源"一并关掉。**
+小结下，以内核的链表并发安全为例，**`__list_add` 只管"怎么改指针"，"改的时候不许别人插进来"这件事交给外面的锁；而锁通过 `preempt_disable` / `local_irq_save` 把抢占和中断这两个"单核并发来源"一并关掉**
 
 ### 例外：如果读者是无锁的（RCU）怎么办？
 
-上面的锁只解决了"写者 vs 写者 / 中断"的互斥；但**读者若也想无锁**（不加锁、不关抢占地遍历链表），光靠 `preempt_disable` 就不够了——因为无锁读者可能恰好在写者做 ①②③④ 的中途读到半成品。内核对这类场景改用 `list_add_rcu`（[include/linux/rculist.h](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/rculist.h)）：
+上面的锁只解决了"写者 vs 写者 / 中断"的互斥；但**读者若也想无锁**（不加锁、不关抢占地遍历链表），光靠 `preempt_disable` 就不够了，因为无锁读者可能恰好在写者做 STEP1/2/3/4 的中途读到半成品。内核对这类场景改用 `list_add_rcu`（[include/linux/rculist.h](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/rculist.h)）：
 
 ```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/rculist.h#L48
 static inline void __list_add_rcu(struct list_head *new,
                                   struct list_head *prev, struct list_head *next)
 {
@@ -172,8 +183,13 @@ static inline void __list_add_rcu(struct list_head *new,
 ```
 
 两点关键区别：
--   调整赋值顺序，保证**发布 `prev->next` 是最后一步**，且这一步用 `rcu_assign_pointer`（内含 `smp_wmb`），它保证"`new` 的内部字段先于 '`prev->next` 指向 `new`' 对其他 CPU 可见"；
--   于是无锁读者要么看到"还没接入 `new`"，要么看到"已完全接入且内容就绪的 `new`"，**永远不会看到半成品**。写者之间仍需持锁互斥（`list_add_rcu` 注释明确要求调用者持锁），回收还要等宽限期——这正是 0x0F "链表：RCU 保护的双向链表" 一节的机制来源。
+-   调整赋值顺序，保证**发布 `prev->next` 是最后一步**，且这一步用 `rcu_assign_pointer`（内含 `smp_wmb`），它保证"`new` 的内部字段先于 '`prev->next` 指向 `new`' 对其他 CPU 可见"
+-   于是无锁读者要么看到"还没接入 `new`"，要么看到"已完全接入且内容就绪的 `new`"，**永远不会看到半成品**。写者之间仍需持锁互斥（`list_add_rcu` 注释明确要求调用者持锁），回收还要等宽限期（这正是 `0x0F`章节 "链表：RCU 保护的双向链表" 一节的机制来源）
+
+此外，还需要建立一个认知（内核开发的"生态隔离"原则）。内核开发者在设计数据结构时，会在一开始就给链表定性：
+
+-   普通链表生态：所有操作都必须带锁。配套使用的是 `list_add`、`list_del`、`list_for_each_entry`。删除节点后可以直接 `kfree`
+-    RCU 链表生态：专门为读多写少优化。配套使用的是 `list_add_rcu`、`list_del_rcu`、`list_for_each_entry_rcu`。删除节点后必须用 `synchronize_rcu` 或 `call_rcu` 延迟释放（绝不能直接 kfree）
 
 ### 并发来源 → 防御机制的对应关系
 
@@ -182,13 +198,25 @@ static inline void __list_add_rcu(struct list_head *new,
 | 竞争对手来自 | 要做的防御 | 对应手段 |
 | --- | --- | --- |
 | 另一个 CPU（SMP） | 真正的互斥 + 保证内存可见性/顺序 | spinlock 的自旋、`atomic` 的 `LOCK` 前缀、内存屏障 |
-| 本 CPU 被抢占的另一进程 | 关抢占，堵住"临界区中途被换出" | `preempt_disable()`（spinlock 已内含） |
+| 本 CPU 被抢占的另一进程 | 关抢占，堵住"临界区中途被换出" | `preempt_disable()`（spinlock 已内含，spinlock禁止被抢占）|
 | 本 CPU 的软中断/下半部 | 关下半部 | `local_bh_disable()` / `spin_lock_bh()` |
 | 本 CPU 的硬中断 | 关中断 | `local_irq_save()` / `spin_lock_irqsave()` |
 
-**关键洞察**：一把 `spin_lock_irqsave()` 其实是"三合一"——它同时做了 ① 对其他 CPU 自旋互斥（防 SMP）② `preempt_disable`（防抢占）③ `local_irq_save`（防中断）。所以你选 spinlock 的哪个变体，本质是在回答**"我的竞争对手可能来自上表哪几行"**：只跟别的进程争 → `spin_lock`（已含关抢占）；还会被软中断碰 → `spin_lock_bh`；还会被硬中断碰 → `spin_lock_irqsave`。多关一层是正确但更贵，少关一层就留下竞争窗口。
+**关键洞察**：内核提供的 `spin_lock_irqsave()`函数其实是"三合一"的功能，它同时做了三件事情： 
 
-反过来，这张表也解释了**为什么 `spin_lock` 一定要内含 `preempt_disable`**：若持锁期间不关抢占，就正好落回上一节"进程 A 插链表插一半被 B 抢占"的陷阱——锁本身就失去意义了。
+1.  对其他 CPU 自旋互斥（防 SMP）
+2.  `preempt_disable`（防抢占）
+3.   `local_irq_save`（防中断）
+
+所以选择 spinlock 的哪个变体，本质是在回答**"我的竞争对手可能来自上表哪几行"**。多关一层是正确但更贵，少关一层就留下竞争窗口
+
+-   只跟别的进程争 → `spin_lock`（已含关抢占）
+-   还会被软中断碰 → `spin_lock_bh`
+-   还会被硬中断碰 → `spin_lock_irqsave`
+
+反过来，这张表也解释了**为什么 `spin_lock` 一定要内含 `preempt_disable`**。若持锁期间不关抢占，就正好落回上一节"进程 A 插链表插一半被 B 抢占"的陷阱，如此这样锁本身就失去意义了
+
+多说一句，内核也提供了持锁期间允许抢占/被调度的机制，如读写信号量rw_semaphore等
 
 ### 应用视角 vs 内核视角：为什么内核的并发控制"更难"
 
@@ -203,14 +231,17 @@ static inline void __list_add_rcu(struct list_head *new,
 | 内存序 | 语言/运行时大多隐藏了屏障 | 常需**显式** `READ_ONCE`/`smp_wmb`/`rcu_assign_pointer` |
 | 出错代价 | 通常是单个进程 hang / 崩溃 | 可能整机死锁、panic（内核自己就是运行时） |
 
-把这几条落到实操，内核选锁其实要**连问两个问题**：
+所以，内核选锁其实要**考虑两个问题**：
 
-1.  **"我这段代码运行在什么上下文？"**——决定我*能不能睡*（进程上下文可用 mutex/rwsem；中断上下文或持自旋锁时只能用 spinlock/RCU/atomic）。
-2.  **"我的竞争对手来自哪个来源？"**——决定我*要额外关掉什么*（关抢占 / 关下半部 / 关中断，即上一节的对应表）。
+1.  **"我这段代码运行在什么上下文？"**：决定我*能不能睡*（进程上下文可用 mutex/rwsem；中断上下文或持自旋锁时只能用 spinlock/RCU/atomic）
+2.  **"我的竞争对手来自哪个来源？"**：决定我*要额外关掉什么*（关抢占 / 关下半部 / 关中断，即上一节的对应表）
 
-两个问题的答案叠加，才唯一确定该用哪把锁。这就是为什么应用侧"无脑上 mutex"在内核里行不通——不是不想，而是①当前上下文可能根本不允许睡眠，②竞争对手可能是一个你无法"加锁"的中断处理程序（对中断只能"关"，不能"锁"）。
+两个问题的答案叠加，才唯一确定该用哪把锁。这就是为什么应用侧"无脑上 mutex"在内核里行不通的原因，原因如下：
 
-此外还有一个应用侧很少触及的维度——**存在性（existence）**：应用里对象常有 GC 保证"只要还有人引用就不释放"；内核没有 GC，"我正在读的这个 `task_struct` / `dentry` 会不会在我读的过程中被别人释放"本身就是一个并发问题，需要 RCU、引用计数（`get_task_struct`）、existence lock 等专门手段来解决（详见 0x0C、0x0E）。这是内核并发控制比应用侧多出来的一整类工作。
+-   当前上下文可能根本不允许睡眠
+-   竞争对手可能是一个无法"加锁"的中断处理程序（对中断只能"关"，不能"锁"）
+
+此外还有一个应用侧很少触及的维度，即**存在性（existence）**，应用里对象常有 GC 保证"只要还有人引用就不释放"；内核没有 GC，"我正在读的这个 `task_struct` / `dentry` 会不会在我读的过程中被别人释放"本身就是一个并发问题，需要 RCU、引用计数（`get_task_struct`）、existence lock 等专门手段来解决（参考下文介绍）。这是内核并发控制比应用侧多出来的一整类工作
 
 ### 执行上下文与「能否睡眠」
 
@@ -232,9 +263,12 @@ flowchart TD
     SPIN --> OK2
 ```
 
-判断口诀：**只要处在"原子上下文"（硬/软中断、持自旋锁、显式关抢占），就绝不能调用任何可能睡眠的函数**（`mutex_lock`、`kmalloc(GFP_KERNEL)`、`copy_from_user`、`msleep` 等）。违反会触发 `scheduling while atomic` 或死锁
+**只要处在"原子上下文"（硬/软中断、持自旋锁、显式关抢占），就绝不能调用任何可能睡眠的函数**（`mutex_lock`、`kmalloc(GFP_KERNEL)`、`copy_from_user`、`msleep` 等）。违反会触发 `scheduling while atomic` 或死锁
 
 ###    copy_process中的 list_add_tail 与list_add_tail_rcu
+在全面介绍内核的并发机制之前，先以进程创建的内核函数`copy_process`中涉及到对全局task_struct链表并发操作为例进行一个简要分析
+
+todo
 
 先给结论：**`list_add_tail` 与 `list_add_tail_rcu` 的差别不在"写者要不要加锁"（两者都要、且都不自带锁），而在"这条链表有没有*无锁读者*"**。先看这几个原语的实现（`list_add_tail`/`list_add_tail_rcu` 只是尾插的封装，真正干活的是 `__list_add`/`__list_add_rcu`）：
 
@@ -279,16 +313,18 @@ static inline void __list_add_rcu(struct list_head *new,
 
 	new->next = next;
 	new->prev = prev;
-	rcu_assign_pointer(list_next_rcu(prev), new);   //？
+	rcu_assign_pointer(list_next_rcu(prev), new);   //？todo
 	next->prev = new;
 }
 ```
 
-**问题 1：`__list_add` 与 `__list_add_rcu` 的区别；为何一个用 `WRITE_ONCE`、一个用 `rcu_assign_pointer`？**
+这里先抛出几个问题
+
+**问题 1：`__list_add` 与 `__list_add_rcu` 的区别？为何一个用 `WRITE_ONCE`、一个用 `rcu_assign_pointer`？**
 
 把两者并排看（忽略 `__list_add_valid` 的 debug 校验），差异集中在如下三点：
 
-| 维度 | `__list_add`（普通） | `__list_add_rcu`（RCU） |
+| 维度 | `__list_add`（普通方式） | `__list_add_rcu`（RCU方式） |
 | --- | --- | --- |
 | 发布前初始化 `new` | `next->prev` → `new->next` → `new->prev` | `new->next` → `new->prev` |
 | 发布 `prev->next` 那步 | `WRITE_ONCE`（仅保证单指针原子写） | `rcu_assign_pointer`（= `smp_store_release`，带**写屏障**） |
@@ -308,7 +344,7 @@ todo
 
 **3、对读者的隐含要求（发布-订阅配对）**：
 
--   **非 RCU 链表**：读者与写者持同一把外部锁。读者拿锁的 acquire 语义与写者 `unlock` 的 release 语义配对，读者进临界区自然能看到写者的全部写。**没有无锁读者能观察到中间态**，故每次插入无需额外写屏障，`WRITE_ONCE` 足矣
+-   **非 RCU 链表**：读者与写者持同一把外部锁。读者拿锁的 acquire 语义与写者 `unlock` 的 `release` 语义配对，读者进临界区自然能看到写者的全部写。**没有无锁读者能观察到中间态**，故每次插入无需额外写屏障，`WRITE_ONCE` 足矣
 -   **RCU 链表**：读者只在 `rcu_read_lock()` 下无锁遍历（`rcu_read_lock` 本质是 `preempt_disable`，**不含**与写者配对的内存屏障）。因此写者必须自己在发布点给出屏障，`rcu_assign_pointer`（发布）正是与读者侧 `list_for_each_entry_rcu`/`rcu_dereference`（订阅，依赖序读）配对的另一半。这就是 RCU "publish-subscribe" 的全部要义（详见章节 `0x0C`）
 
 ```mermaid
@@ -327,7 +363,7 @@ sequenceDiagram
 **外部调用方的差异**：
 
 -   `list_add_tail` / `list_del`：用于"从不被无锁遍历"的链表（所有读者与写者持同一把锁）
--   `list_add_tail_rcu` / `list_del_rcu` + `call_rcu`/`synchronize_rcu`：用于"存在 `rcu_read_lock` 下无锁遍历"的链表；删除只摘链，须过宽限期再释放（见 0x0F、0x0E 案例 2）
+-   `list_add_tail_rcu` / `list_del_rcu` + `call_rcu`/`synchronize_rcu`：用于"存在 `rcu_read_lock` 下无锁遍历"的链表；删除只摘链，须过宽限期再释放（见 `0x0E` 章节case2）
 -   **共同点：两者都不自带锁，写者之间的互斥一律由调用方的外部锁负责**（下文）
 
 调用侧`copy_process`的实现如下：
@@ -437,7 +473,7 @@ static __latent_entropy struct task_struct *copy_process(
 -   这几处`list_add_*`插入函数，全部位于 `write_lock_irq(&tasklist_lock) -----> write_unlock_irq(&tasklist_lock)` 之间。`tasklist_lock` 是一把**全局 `rwlock_t`**，写模式独占 → 它负责**所有写者之间的互斥**（另一个 CPU 上并发 `fork`/`exit` 的写者会在 `write_lock` 处等待）。这正印证 `0x01` 章节的结论，即**`list_add*` 系列不自带锁，锁是调用方的事，插入原语只负责"内存序正确的挂链"**
 -   为什么用 `_irq` 变体？：`tasklist_lock` 会在中断相关路径以读模式被访问，且要堵住"改到一半被本 CPU 中断/抢占"的窗口，故写侧必须使用 `write_lock_irq` 关中断 + 关抢占（ `0x01`章节的结论："把插入放进临界区"把三个并发来源一并封死）
 -   读者侧分两类：需要稳定视图的读者用 `read_lock(&tasklist_lock)`；无锁遍历的读者只用 `rcu_read_lock()`，**不需要碰** `tasklist_lock`
--   后文会提到，`tasklist_lock`是`rwlock_t`类型（`0x05`章节：读写自旋锁）
+-   后文会提到，`tasklist_lock`是`rwlock_t`类型（参考`0x05`章节读写自旋锁）
 
 再回答"**为何不统一用一种**"，取决于每条链表各自的**读者纪律**：
 
@@ -448,19 +484,19 @@ static __latent_entropy struct task_struct *copy_process(
 | 线程组链表 | `p->thread_group` | `next_thread`/`while_each_thread` = `list_entry_rcu(...thread_group...)` | `list_add_tail_rcu` | 同上 |
 | 线程链表 | `p->thread_node` / `signal->thread_head` | `for_each_thread` = `list_for_each_entry_rcu(...thread_head, thread_node)` | `list_add_tail_rcu` | 同上 |
 
-结论：**同一个 `copy_process` 把新任务挂进多条链表，而这些链表的"读者纪律"不同**。`children` 只有持锁读者（`do_wait`）→ 普通 `list_add_tail`；`tasks` / `thread_group` / `thread_node` 都有 `rcu_read_lock` 下的无锁遍历者（`for_each_process` / `next_thread` / `for_each_thread`）→ 必须 `list_add_tail_rcu`。反证两个方向：
+小结下，**同一个 `copy_process` 把新任务挂进多条链表，而这些链表的"读者纪律"不同**。`children` 只有持锁读者（`do_wait`）→ 普通 `list_add_tail`；`tasks` / `thread_group` / `thread_node` 都有 `rcu_read_lock` 下的无锁遍历者（`for_each_process` / `next_thread` / `for_each_thread`）→ 必须 `list_add_tail_rcu`。反证两个方向：
 
 -   把 `children` 也换成 `_rcu`：**正确但浪费**：多一次无谓的写屏障（读者根本不走 RCU）
 -   把 `tasks`/`thread_*` 换成非 `_rcu`：**是 bug**：弱序架构上无锁读者可能读到"指针已发布、`new->next` 却还没就绪"的半成品，遍历语义不确定
 
-所以一个明确的结论是，**选普通版还是 `_rcu` 版，看的是「读者要不要无锁」，而不是「写者要不要加锁」**。写者两种情况下都在 `tasklist_lock` 里
+所以一个明确的结论是，**选普通版还是 `_rcu` 版，看的是「读者要不要无锁」，而不是「写者要不要加锁」**。写者两种情况下都在 `tasklist_lock` 里，当确定了读者的方式之后，再选择对应的写者配套函数
 
 **对本文主题的指导意义**
 
-1.  **锁与原语分工**：`list_add*` 只管"怎么正确地改指针（含无锁读者所需的内存序）"，"改的时候不许别的写者插进来"永远交给外层锁（此处 `tasklist_lock`）。呼应 0x01"把插入放进临界区"
-2.  **选 RCU 与否看读者、不看写者**：这是选型最易搞反的点——决定用不用 `_rcu` 的唯一依据是"这条链表有没有 `rcu_read_lock` 下的无锁遍历者"
-3.  **一把锁保护多个异构结构**：`tasklist_lock` 一个临界区里同时维护了"进程树（`children`，锁读）"与"任务/线程链表（`tasks`/`thread_*`，RCU 读）"——同一份写侧互斥，服务于纪律不同的多类读者。这正是内核"一锁多表"的真实形态
-4.  **发布-订阅是 RCU 的地基**：`rcu_assign_pointer`（写发布）↔ `list_for_each_entry_rcu`/`rcu_dereference`（读订阅）的配对贯穿 0x0C、0x0F 与本例；`WRITE_ONCE` 只是其"去掉屏障"的退化版，适用于无无锁读者的场景
+1.  **锁与原语分工**：`list_add*` 只管"怎么正确地改指针（含无锁读者所需的内存序）"，"改的时候不许别的写者插进来"永远交给外层锁（此处 `tasklist_lock`）
+2.  **选 RCU 与否看读者、不看写者**：这是选型最易搞反的点。决定用不用 `_rcu` 的唯一依据是"这条链表有没有 `rcu_read_lock` 下的无锁遍历者"
+3.  **一把锁保护多个异构结构**：`tasklist_lock` 一个临界区里同时维护了"进程树（`children`，锁读）"与"任务/线程链表（`tasks`/`thread_*`，RCU 读）"。同一份写侧互斥，服务于纪律不同的多类读者。这正是内核"一锁多表"的真实形态
+4.  **发布-订阅是 RCU 的地基**：`rcu_assign_pointer`（写发布）↔ `list_for_each_entry_rcu`/`rcu_dereference`（读订阅）的配对机制；`WRITE_ONCE` 只是其"去掉屏障"的退化版，适用于无无锁读者的场景
 
 todo
 
@@ -610,7 +646,6 @@ struct thread_info {
 ```
 
 todo
-
 
 ### 为什么 spinlock 有那么多变体
 
@@ -802,7 +837,7 @@ sequenceDiagram
 
 todo
 
-2.  **VFS — `rename_lock`**：[fs/dcache.c](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c) 中 `__cacheline_aligned_in_smp DEFINE_SEQLOCK(rename_lock);`。目录项 RCU-walk 查找时，并发 `rename` 可能让哈希链遍历"走错链"而漏掉目标（false-negative）；`rename_lock` 提供一个全局序号，读者发现期间发生过 rename 就整体重试。每个 dentry 另有 `d_seq`（seqcount）保护其 name/parent/inode 三元组的原子快照——见下文综合案例
+2.  **VFS — `rename_lock`**：[fs/dcache.c](https://elixir.bootlin.com/linux/v4.11.6/source/fs/dcache.c) 中 `__cacheline_aligned_in_smp DEFINE_SEQLOCK(rename_lock);`。目录项 RCU-walk 查找时，并发 `rename` 可能让哈希链遍历"走错链"而漏掉目标（false-negative）；`rename_lock` 提供一个全局序号，读者发现期间发生过 rename 就整体重试。每个 dentry 另有 `d_seq`（seqcount）保护其 name/parent/inode 三元组的原子快照。参考下文综合案例
 
 todo
 
@@ -897,7 +932,7 @@ flowchart TD
 
 2.  **乐观自旋（optimistic spinning）**：`mutex_optimistic_spin`（[kernel/locking/mutex.c](https://elixir.bootlin.com/linux/v4.11.6/source/kernel/locking/mutex.c)）。核心洞察是：**如果锁的持有者当前正在另一 CPU 上运行，那么它很可能马上就会释放锁**，此时自旋等待比睡眠再唤醒（涉及两次上下文切换）更划算。自旋者通过 `osq_lock`（MCS 队列）排队，保证同一时刻只有一个自旋者竞争，并用 `mutex_spin_on_owner` 持续检查 owner 是否还在运行、是否 `need_resched`
 
-3.  **慢路径 `__mutex_lock_common`**：自旋无望则真正入睡——加入 `wait_list`，设 `MUTEX_FLAG_WAITERS`，循环 `__mutex_trylock` 失败就 `schedule_preempt_disabled()`。为防止乐观自旋者持续插队饿死队首，队首等待者会设置 `MUTEX_FLAG_HANDOFF`，迫使 `unlock` 把锁**直接移交**给它：
+3.  **慢路径 `__mutex_lock_common`**：自旋无望则真正入睡，加入 `wait_list`，设 `MUTEX_FLAG_WAITERS`，循环 `__mutex_trylock` 失败就 `schedule_preempt_disabled()`。为防止乐观自旋者持续插队饿死队首，队首等待者会设置 `MUTEX_FLAG_HANDOFF`，迫使 `unlock` 把锁**直接移交**给它：
 
 ```c
 /* __mutex_lock_common 主循环（简化自 v4.11.6） */
@@ -1055,7 +1090,7 @@ finish_wait(&wq, &wait);    /* 出队，置 TASK_RUNNING */
 
 todo
 
-**为什么要"先置睡眠态、再判条件"**：如果先判条件（为假）再准备睡眠，中间条件可能恰好被满足并发出唤醒，而此时你还没进入队列/睡眠态，唤醒就丢了（lost wakeup），导致永久睡眠。这个顺序是等待队列正确性的核心
+**为什么要"先置睡眠态、再判条件"**：如果先判条件（为假）再准备睡眠，中间条件可能恰好被满足并发出唤醒，而此时还没进入队列/睡眠态，唤醒就丢了（lost wakeup），导致永久睡眠。这个顺序是等待队列正确性的核心
 
 唤醒相关：
 
@@ -1234,7 +1269,7 @@ struct task_struct *get_pid_task(struct pid *pid, enum pid_type type)
 **协作分析**：
 
 -   RCU 保证的只是"读侧临界区内 `result` 不会被回收"（对象的释放要等宽限期，详见 `0x0C`章节）。一旦 `rcu_read_unlock()`，宽限期随时可能结束、对象随时可能被 `free`
--   所以必须在 `rcu_read_unlock()` **之前**做 `get_task_struct()`（本质是 `atomic_inc(&t->usage)`，见 [include/linux/sched/task.h](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/sched/task.h)）。若把顺序颠倒成"先 unlock 再 get"，中间就有一个窗口：对象已被释放而你正要去 `atomic_inc` 它 → **use-after-free**
+-   所以必须在 `rcu_read_unlock()` **之前**做 `get_task_struct()`（本质是 `atomic_inc(&t->usage)`，见 [include/linux/sched/task.h](https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/sched/task.h)）。若把顺序颠倒成"先 unlock 再 get"，中间就有一个窗口：对象已被释放而正要去 `atomic_inc` 它 → **use-after-free**
 -   小结：**RCU 负责"我能安全地读到并触碰它"（瞬时存在性），引用计数负责"我能把它带出临界区长期持有"（长期存在性）**。这是内核最常见的"查找 + 带走"范式
 
 ### case2：RCU 读 + spinlock 写 + call_rcu 回收（existence lock 三段式）
@@ -1543,9 +1578,9 @@ int __pte_alloc(struct mm_struct *mm, pmd_t *pmd, unsigned long address)
 
 **协作分析**：
 
--   **第一次检查**（这里体现为"多个 CPU 都可能进来分配"）在锁外，让绝大多数已装好的情况走无锁快路径。**第二次检查 `pmd_none(*pmd)`** 在锁内，防止两个 CPU 同时判空后**重复安装**——谁先装好，后来者就 `pte_free` 掉自己那份
+-   **第一次检查**（这里体现为"多个 CPU 都可能进来分配"）在锁外，让绝大多数已装好的情况走无锁快路径。**第二次检查 `pmd_none(*pmd)`** 在锁内，防止两个 CPU 同时判空后**重复安装**。谁先装好，后来者就 `pte_free` 掉自己那份
 -   **`smp_wmb()` 缺一不可**：`pmd_populate` 是"发布指针"，若初始化对新页表内容的写没有先于发布可见，另一个**无锁遍历页表**的 CPU 就可能顺着指针读到垃圾。这正是 0x02 的发布范式（等价于 `rcu_assign_pointer` 里的写屏障）
--   通用形态（用 mutex 时）：`if (!READ_ONCE(p)) { mutex_lock(&m); if (!p) { q = init(); smp_store_release(&p, q); } mutex_unlock(&m); }`——快检用 `READ_ONCE`、发布用 `smp_store_release`，是同一套"检查-锁-复检-带屏障发布"的骨架
+-   通用形态（用 mutex 时）：`if (!READ_ONCE(p)) { mutex_lock(&m); if (!p) { q = init(); smp_store_release(&p, q); } mutex_unlock(&m); }`，快检用 `READ_ONCE`、发布用 `smp_store_release`，是同一套"检查-锁-复检-带屏障发布"的骨架
 
 **另一端（无锁读者）**：与 `__pte_alloc` 的"发布"配对的是**无锁遍历页表**的读者（缺页/GUP 快路径）。它顺着 `pgd → pud → pmd → pte` 的指针链读取、**不加页表锁**：
 
