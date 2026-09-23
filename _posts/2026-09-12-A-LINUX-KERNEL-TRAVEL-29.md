@@ -65,9 +65,15 @@ flowchart TD
 
 这里简单小结下，**只要处在"原子上下文"（硬/软中断、持自旋锁、显式关抢占），就绝不能调用任何可能睡眠的函数**（`mutex_lock`、`kmalloc(GFP_KERNEL)`、`copy_from_user`、`msleep` 等）。违反会触发 `scheduling while atomic` 或死锁问题
 
-那么什么叫可能睡眠呢？
+那么什么叫可能睡眠呢？回顾下，在 Linux 内核中，睡眠（Sleep）的本质动作是当前执行流主动或被动地调用了 `schedule()` 函数，将 CPU 的执行权交给了内核调度器，让调度器去运行其他进程。 此时当前进程的状态会被设置为可中断睡眠（TASK_INTERRUPTIBLE）或不可中断睡眠（TASK_UNINTERRUPTIBLE），直到它等待的条件满足后才被唤醒。在原子上下文中（如持自旋锁、中断处理中），由于系统无法或者不该进行进程切换，如果强行发生睡眠，系统就会死锁或直接崩溃。所谓的可能睡眠的函数，是指那些在底层逻辑中，有任何几率调用 `schedule()` 等待资源的函数。在内核开发中通常有如下场景：
 
-todo
+1. 使用 `GFP_KERNEL` 标志的内存分配，代表函数`kmalloc(size, GFP_KERNEL)`、`vmalloc()`、`kmem_cache_alloc(...)` 等。为什么会睡眠？传入 `GFP_KERNEL` 标志等于告诉内核内存管理系统"如果现在物理内存不够，可以把当前进程挂起（睡眠），去执行页面回收、把别人的内存交换（Swap）到磁盘上，甚至触发 OOM 杀手，等腾出空闲内存了再唤醒我"。而原子上下文替代方案必须使用 `GFP_ATOMIC`。它告诉分配器"千万别让我睡眠，有内存就立刻给，没有就立刻返回 NULL 报错"
+2. 阻塞型锁机制，如`mutex_lock()`（互斥锁）、`down()`（信号量）、`rwsem_down_read()`（读写信号量）等，这类锁的设计初衷就是阻塞等待。如果锁已经被别人拿走了，内核会把当前进程放入等待队列并调用 `schedule()` 睡眠，直到锁被释放才唤醒它。对比原子上下文替代方案是，在原子上下文中只能使用自旋锁（Spinlock），该机制在拿不到锁时，会在 CPU 上原地死循环（自旋）等待，绝不会让出 CPU
+3. 用户空间内存访问（比较隐蔽的睡眠），如 `copy_to_user()`、`copy_from_user()`、`get_user()`、`put_user()`等。由于用户空间的内存是按需分配的，并且可能被 Swap 交换到了磁盘上等，当通过这些函数读写用户态地址时，如果发现该内存页不在物理内存中，就会触发缺页异常（Page Fault）。内核的缺页中断处理程序必须去读取磁盘将页面调入内存，而读磁盘是一个极其漫长的 I/O 过程，必定会导致当前进程睡眠等待
+4. 显式的延时与等待，如`msleep()`、`ssleep()`、`wait_event()`、`wait_for_completion()`等，比如`msleep()` 会直接让出 CPU 并在指定的毫秒数后通过定时器唤醒；等待队列（`wait_event`）则会休眠等待某个硬件条件或标志位变为真。相对的原子上下文替代方案是，如果必须在原子上下文中延时，只能使用忙等待（Busy-wait）延时函数，如 `mdelay()` 或 `udelay()`。它们是通过 CPU 空转来消耗时间的，不会触发调度（但极度浪费 CPU，应尽量避免或缩短时间）
+5. 任何底层的同步 I/O 操作，如读写磁盘文件系统、发送同步网络请求等。硬件的速度比 CPU 慢几个数量级。内核向硬件发送指令后，通常会进入睡眠，直到硬件触发中断告知"数据准备好了"，内核才会唤醒对应的进程
+
+一个小tips，判断一个函数在内核里能不能在原子上下文中调用，最简单的办法就是看它的源码里有没有包着一层 `might_sleep()`。如果内核开启了 `CONFIG_DEBUG_ATOMIC_SLEEP` 编译选项，当在持有一把自旋锁、或者处于中断里时，不小心调用了带有 `might_sleep()` 的函数，内核的检查机制会立刻捕获到这个违规行为，并在控制台打印出著名的红字警告，甚至直接触发 `Panic：BUG: sleeping function called from invalid context at ...`
 
 ### 并发的本质：交错，而不一定是并行
 
@@ -265,106 +271,36 @@ flowchart TD
 
 **只要处在"原子上下文"（硬/软中断、持自旋锁、显式关抢占），就绝不能调用任何可能睡眠的函数**（`mutex_lock`、`kmalloc(GFP_KERNEL)`、`copy_from_user`、`msleep` 等）。违反会触发 `scheduling while atomic` 或死锁
 
-###    copy_process中的 list_add_tail 与list_add_tail_rcu
-在全面介绍内核的并发机制之前，先以进程创建的内核函数`copy_process`中涉及到对全局task_struct链表并发操作为例进行一个简要分析
 
-todo
-
-先给结论：**`list_add_tail` 与 `list_add_tail_rcu` 的差别不在"写者要不要加锁"（两者都要、且都不自带锁），而在"这条链表有没有*无锁读者*"**。先看这几个原语的实现（`list_add_tail`/`list_add_tail_rcu` 只是尾插的封装，真正干活的是 `__list_add`/`__list_add_rcu`）：
+### 并发争用的典型场景
+当一份数据（通常是队列、缓冲区或状态机）需要同时跨越多核CPU、进程上下文（Process）、软中断（Softirq/Tasklet） 和 硬中断（Hardirq） 时，必须使用内核 `spin_lock_irqsave()`，关本地CPU中断 + 自旋锁。比如，内核网络子系统中共享的数据结构网卡驱动的发送环形队列（TX Ring Buffer），即网络报文从内存走向物理网卡的中转站
 
 ```c
-static inline void list_add_rcu(struct list_head *new, struct list_head *head)
-{
-	__list_add_rcu(new, head, head->next);
-}
+unsigned long flags;
 
-static inline void list_add_tail_rcu(struct list_head *new,
-					struct list_head *head)
-{
-	__list_add_rcu(new, head->prev, head);
-}
+// 1. 保存当前 CPU 的中断状态标志到 flags
+// 2. 彻底关闭本地 CPU 的硬中断（防止被本地硬中断抢占打断）
+// 3. 尝试获取自旋锁（防止被其他 CPU 并发访问）
+spin_lock_irqsave(&shared_lock, flags);
 
-static inline void list_add_tail(struct list_head *new, struct list_head *head)
-{
-	__list_add(new, head->prev, head);
-}
+// ---------------------------
+// 临界区：安全地修改 队列 / 缓冲区
+// ---------------------------
 
-//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/list.h#L55
-static inline void __list_add(struct list_head *new,
-			      struct list_head *prev,
-			      struct list_head *next)
-{
-	if (!__list_add_valid(new, prev, next))
-		return;
-
-	next->prev = new;
-	new->next = next;
-	new->prev = prev;
-	WRITE_ONCE(prev->next, new);
-}
-
-#define list_next_rcu(list)	(*((struct list_head __rcu **)(&(list)->next)))
-
-static inline void __list_add_rcu(struct list_head *new,
-		struct list_head *prev, struct list_head *next)
-{
-	if (!__list_add_valid(new, prev, next))
-		return;
-
-	new->next = next;
-	new->prev = prev;
-	rcu_assign_pointer(list_next_rcu(prev), new);   //？todo
-	next->prev = new;
-}
+// 1. 释放自旋锁
+// 2. 恢复之前保存在 flags 里的中断状态（重新打开硬中断）
+spin_unlock_irqrestore(&shared_lock, flags);
 ```
 
-这里先抛出几个问题
+并发访问场景：
 
-**问题 1：`__list_add` 与 `__list_add_rcu` 的区别？为何一个用 `WRITE_ONCE`、一个用 `rcu_assign_pointer`？**
+-   进程上下文：用户在 CPU0 上的应用程序调用 `send()` 发送数据，数据包经过 TCP/IP 协议栈，最终调用网卡驱动的 `ndo_start_xmit` 函数，试图将数据包挂载到发送环形队列中
+-   软中断上下文：如果系统网络负载极高导致进程发包受阻，内核会把发包任务推迟。稍后，CPU1 上触发了网络软中断（NET_TX_SOFTIRQ），它也会试图把积压的数据包挂入同一个发送环形队列
+-   硬中断上下文：网卡硬件把之前队列里的数据发送完毕后，向 CPU2 发送一个物理硬中断。CPU2 立即进入硬中断处理函数，它需要访问这个发送环形队列，把刚才发完的数据包从队列里摘除，并释放相关的 `sk_buff` 内存
+-   灾难后果：如果不用 `spin_lock_irqsave` 保护，当 CPU0 正在排队挂载新包时，CPU0 突然被网卡硬中断打断，硬中断也去操作同一个队列，直接导致队列指针错乱、死锁，引发严重灾难
 
-把两者并排看（忽略 `__list_add_valid` 的 debug 校验），差异集中在如下三点：
-
-| 维度 | `__list_add`（普通方式） | `__list_add_rcu`（RCU方式） |
-| --- | --- | --- |
-| 发布前初始化 `new` | `next->prev` → `new->next` → `new->prev` | `new->next` → `new->prev` |
-| 发布 `prev->next` 那步 | `WRITE_ONCE`（仅保证单指针原子写） | `rcu_assign_pointer`（= `smp_store_release`，带**写屏障**） |
-| `next->prev`（后继反向指针） | 在发布**之前**写 | 挪到发布**之后**写 |
-| 跨 CPU 写序保证 | 无 | 有：初始化先于发布可见 |
-| 对读者的假设 | 读者持同一把外部锁 | 读者仅 `rcu_read_lock` 无锁遍历 |
-| 删除配对 | `list_del` | `list_del_rcu` + 宽限期回收 |
-
-todo
-
-**1、赋值顺序**。两者的*共同点*是：都保证"发布 `prev->next = new`"这一步之前，`new` 自身的 `next` 已就绪。因为无锁前向读者一旦经 `prev->next` 到达 `new`，会立刻解引用 `new->next` 继续走，故 `new->next` 必须先备好。*差异点*是：RCU 版把"后继的反向指针 `next->prev = new`"挪到了发布之后，因为 RCU 读者**只走前向 `->next`、从不读 `->prev`**，这个反向指针晚更新对读者无影响
-
-**2、发布那一步的"内存序强度"，这正是 `WRITE_ONCE` VS `rcu_assign_pointer` 的核心**：
-
--   `WRITE_ONCE(prev->next, new)`：只是一条"不可被编译器拆分/优化掉"的原子单指针写。它保证这条指针写本身是一次完整 store（服务于 `list_empty()` 用 `READ_ONCE(head->next)` 的无锁判空），但**不提供任何跨 CPU 的写序保证**：在弱序架构（如ARM等）上，别的 CPU 可能先看到 `prev->next = new`、后看到 `new->next = next`
--   `rcu_assign_pointer(list_next_rcu(prev), new)`：等价于 `smp_store_release()`。它插入**写屏障**，保证"初始化 `new` 各字段（乃至节点承载的数据）"这些先前的写，一定先于"发布 `prev->next = new`"对其他 CPU 可见
-
-**3、对读者的隐含要求（发布-订阅配对）**：
-
--   **非 RCU 链表**：读者与写者持同一把外部锁。读者拿锁的 acquire 语义与写者 `unlock` 的 `release` 语义配对，读者进临界区自然能看到写者的全部写。**没有无锁读者能观察到中间态**，故每次插入无需额外写屏障，`WRITE_ONCE` 足矣
--   **RCU 链表**：读者只在 `rcu_read_lock()` 下无锁遍历（`rcu_read_lock` 本质是 `preempt_disable`，**不含**与写者配对的内存屏障）。因此写者必须自己在发布点给出屏障，`rcu_assign_pointer`（发布）正是与读者侧 `list_for_each_entry_rcu`/`rcu_dereference`（订阅，依赖序读）配对的另一半。这就是 RCU "publish-subscribe" 的全部要义（详见章节 `0x0C`）
-
-```mermaid
-sequenceDiagram
-    participant W as 写者 list_add_tail_rcu
-    participant M as 内存 prev->next 与 new
-    participant R as 无锁读者 list_for_each_entry_rcu
-    W->>M: new->next = next；new->prev = prev（先备好 new 自身）
-    Note over W,M: rcu_assign_pointer = smp_wmb + 发布
-    W->>M: 写屏障 → 发布 prev->next = new
-    R->>M: rcu_dereference 读 prev->next，看到 new
-    Note over R: 依赖序保证：看到 new 指针 → 必看到已初始化的 new->next
-    R->>M: 继续走 new->next（安全，绝不读到半成品）
-```
-
-**外部调用方的差异**：
-
--   `list_add_tail` / `list_del`：用于"从不被无锁遍历"的链表（所有读者与写者持同一把锁）
--   `list_add_tail_rcu` / `list_del_rcu` + `call_rcu`/`synchronize_rcu`：用于"存在 `rcu_read_lock` 下无锁遍历"的链表；删除只摘链，须过宽限期再释放（见 `0x0E` 章节case2）
--   **共同点：两者都不自带锁，写者之间的互斥一律由调用方的外部锁负责**（下文）
+###    copy_process中的 list_add_tail 与list_add_tail_rcu
+在全面介绍内核的并发机制之前，先以进程创建的内核函数`copy_process`中涉及到对全局task_struct链表并发操作为例进行一个简要分析
 
 调用侧`copy_process`的实现如下：
 
@@ -465,6 +401,104 @@ static __latent_entropy struct task_struct *copy_process(
     ......
 }
 ```
+
+
+先给结论：**`list_add_tail` 与 `list_add_tail_rcu` 的差别不在"写者要不要加锁"（两者都要、且都不自带锁），而在"这条链表有没有*无锁读者*"**。先看这几个原语的实现（`list_add_tail`/`list_add_tail_rcu` 只是尾插的封装，真正干活的是 `__list_add`/`__list_add_rcu`）：
+
+```c
+static inline void list_add_rcu(struct list_head *new, struct list_head *head)
+{
+	__list_add_rcu(new, head, head->next);
+}
+
+static inline void list_add_tail_rcu(struct list_head *new,
+					struct list_head *head)
+{
+	__list_add_rcu(new, head->prev, head);
+}
+
+static inline void list_add_tail(struct list_head *new, struct list_head *head)
+{
+	__list_add(new, head->prev, head);
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/list.h#L55
+static inline void __list_add(struct list_head *new,
+			      struct list_head *prev,
+			      struct list_head *next)
+{
+	if (!__list_add_valid(new, prev, next))
+		return;
+
+	next->prev = new;
+	new->next = next;
+	new->prev = prev;
+	WRITE_ONCE(prev->next, new);
+}
+
+#define list_next_rcu(list)	(*((struct list_head __rcu **)(&(list)->next)))
+
+static inline void __list_add_rcu(struct list_head *new,
+		struct list_head *prev, struct list_head *next)
+{
+	if (!__list_add_valid(new, prev, next))
+		return;
+
+	new->next = next;
+	new->prev = prev;
+	rcu_assign_pointer(list_next_rcu(prev), new);   //？todo
+	next->prev = new;
+}
+```
+
+这里先抛出几个问题
+
+**问题 1：`__list_add` 与 `__list_add_rcu` 的区别？为何一个用 `WRITE_ONCE`、一个用 `rcu_assign_pointer`？**
+
+把两者并排看（忽略 `__list_add_valid` 的 debug 校验），差异集中在如下三点：
+
+| 维度 | `__list_add`（普通方式） | `__list_add_rcu`（RCU方式） |
+| --- | --- | --- |
+| 发布前初始化 `new` | `next->prev` → `new->next` → `new->prev` | `new->next` → `new->prev` |
+| 发布 `prev->next` 那步 | `WRITE_ONCE`（仅保证单指针原子写） | `rcu_assign_pointer`（= `smp_store_release`，带**写屏障**） |
+| `next->prev`（后继反向指针） | 在发布**之前**写 | 挪到发布**之后**写 |
+| 跨 CPU 写序保证 | 无 | 有：初始化先于发布可见 |
+| 对读者的假设 | 读者持同一把外部锁 | 读者仅 `rcu_read_lock` 无锁遍历 |
+| 删除配对 | `list_del` | `list_del_rcu` + 宽限期回收 |
+
+todo
+
+**1、赋值顺序**。两者的*共同点*是：都保证"发布 `prev->next = new`"这一步之前，`new` 自身的 `next` 已就绪。因为无锁前向读者一旦经 `prev->next` 到达 `new`，会立刻解引用 `new->next` 继续走，故 `new->next` 必须先备好。*差异点*是：RCU 版把"后继的反向指针 `next->prev = new`"挪到了发布之后，因为 RCU 读者**只走前向 `->next`、从不读 `->prev`**，这个反向指针晚更新对读者无影响
+
+**2、发布那一步的"内存序强度"，这正是 `WRITE_ONCE` VS `rcu_assign_pointer` 的核心**：
+
+-   `WRITE_ONCE(prev->next, new)`：只是一条"不可被编译器拆分/优化掉"的原子单指针写。它保证这条指针写本身是一次完整 store（服务于 `list_empty()` 用 `READ_ONCE(head->next)` 的无锁判空），但**不提供任何跨 CPU 的写序保证**：在弱序架构（如ARM等）上，别的 CPU 可能先看到 `prev->next = new`、后看到 `new->next = next`
+-   `rcu_assign_pointer(list_next_rcu(prev), new)`：等价于 `smp_store_release()`。它插入**写屏障**，保证"初始化 `new` 各字段（乃至节点承载的数据）"这些先前的写，一定先于"发布 `prev->next = new`"对其他 CPU 可见
+
+**3、对读者的隐含要求（发布-订阅配对）**：
+
+-   **非 RCU 链表**：读者与写者持同一把外部锁。读者拿锁的 acquire 语义与写者 `unlock` 的 `release` 语义配对，读者进临界区自然能看到写者的全部写。**没有无锁读者能观察到中间态**，故每次插入无需额外写屏障，`WRITE_ONCE` 足矣
+-   **RCU 链表**：读者只在 `rcu_read_lock()` 下无锁遍历（`rcu_read_lock` 本质是 `preempt_disable`，**不含**与写者配对的内存屏障）。因此写者必须自己在发布点给出屏障，`rcu_assign_pointer`（发布）正是与读者侧 `list_for_each_entry_rcu`/`rcu_dereference`（订阅，依赖序读）配对的另一半。这就是 RCU "publish-subscribe" 的全部要义（详见章节 `0x0C`）
+
+```mermaid
+sequenceDiagram
+    participant W as 写者 list_add_tail_rcu
+    participant M as 内存 prev->next 与 new
+    participant R as 无锁读者 list_for_each_entry_rcu
+    W->>M: new->next = next；new->prev = prev（先备好 new 自身）
+    Note over W,M: rcu_assign_pointer = smp_wmb + 发布
+    W->>M: 写屏障 → 发布 prev->next = new
+    R->>M: rcu_dereference 读 prev->next，看到 new
+    Note over R: 依赖序保证：看到 new 指针 → 必看到已初始化的 new->next
+    R->>M: 继续走 new->next（安全，绝不读到半成品）
+```
+
+**外部调用方的差异**：
+
+-   `list_add_tail` / `list_del`：用于"从不被无锁遍历"的链表（所有读者与写者持同一把锁）
+-   `list_add_tail_rcu` / `list_del_rcu` + `call_rcu`/`synchronize_rcu`：用于"存在 `rcu_read_lock` 下无锁遍历"的链表；删除只摘链，须过宽限期再释放（见 `0x0E` 章节case2）
+-   **共同点：两者都不自带锁，写者之间的互斥一律由调用方的外部锁负责**（下文）
+
 
 **问题 2：`copy_process` 为何两种混用（而非只用一种）**
 
