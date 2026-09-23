@@ -196,6 +196,8 @@ static inline void __list_add_rcu(struct list_head *new,
 
 -   普通链表生态：所有操作都必须带锁。配套使用的是 `list_add`、`list_del`、`list_for_each_entry`。删除节点后可以直接 `kfree`
 -    RCU 链表生态：专门为读多写少优化。配套使用的是 `list_add_rcu`、`list_del_rcu`、`list_for_each_entry_rcu`。删除节点后必须用 `synchronize_rcu` 或 `call_rcu` 延迟释放（绝不能直接 kfree）
+-   混用情况 1：写者用 `__list_add`，读者用 RCU 无锁读（致命错误）
+-   混用情况 2：写者用 `__list_add_rcu`，读者用加锁读（性能浪费）
 
 ### 并发来源 → 防御机制的对应关系
 
@@ -302,7 +304,57 @@ spin_unlock_irqrestore(&shared_lock, flags);
 ###    copy_process中的 list_add_tail 与list_add_tail_rcu
 在全面介绍内核的并发机制之前，先以进程创建的内核函数`copy_process`中涉及到对全局task_struct链表并发操作为例进行一个简要分析
 
-调用侧`copy_process`的实现如下：
+####    全局进程链表
+回顾下前面文章的内容，每一个进程在内核中都有一个 `struct task_struct`。为了能遍历系统中的所有进程，内核将它们通过 `struct list_head tasks` 串联成一个双向循环链表。因此，内核中专门定义了读写自旋锁`tasklist_lock`，用来保护这个全局的进程链表
+
+```c
+struct task_struct {
+    pid_t pid;
+    // ... 其他字段 ...
+    struct list_head tasks; // 用于链接所有进程的链表节点
+};
+```
+
+场景 A：写者（当创建一个新进程时），当用户空间调用 `fork()` 时，内核会执行 `copy_process` 函数来创建新的 task_struct，并将其加入到全局进程链表中
+
+```c
+// 1. 获取写锁：因为要修改链表（写操作），必须独占锁
+write_lock_irq(&tasklist_lock);
+
+// 2. 此时可以安全地把新进程的 tasks 节点加入到全局链表 init_task.tasks 中
+// 内部最终会调用 __list_add_rcu(&p->tasks, &init_task.tasks, ...)
+list_add_tail_rcu(&p->tasks, &init_task.tasks);
+
+// 3. 释放写锁
+write_unlock_irq(&tasklist_lock);
+```
+
+场景 B：读者（当需要遍历所有进程时，如 `ps` 命令等）。如内核需要通过宏 `for_each_process(p)` 来遍历所有进程，通常结合 RCU（Read-Copy Update） 机制来实现无锁或低开销的读保护：
+
+```c
+struct task_struct *p;
+
+// 1. 进入 RCU 读临界区（允许并发读，不需要阻塞写者）
+rcu_read_lock();
+
+// 2. 安全地遍历链表中的每一个 task_struct
+for_each_process(p) {
+    // 打印或检查进程信息
+    .......
+}
+
+// 3. 退出 RCU 读临界区
+rcu_read_unlock();
+```
+
+从上面的示例代码来看，`tasklist_lock`与RCU机制的配合作用：
+
+1.  当写者要往 `task_struct->tasks` 链表里添加/删除新进程时，必须先拿 `write_lock_irq(&tasklist_lock)`，然后再调用 `list_add_xxxx`。这样能确保在改指针的过程中，不会有别的 CPU 同时去改它
+2.  当读者遍历时，通过 `rcu_read_lock()` 或读锁保护，确保在遍历期间不会有节点被突然摘除或释放，防止出现段错误（Page Fault）或野指针
+
+####    copy_process的实现
+
+调用侧`copy_process`的实现如下（保护的地方做了标注）：
 
 ```c
 //https://elixir.bootlin.com/linux/v4.11.6/source/kernel/fork.c#L1491
@@ -317,6 +369,7 @@ static __latent_entropy struct task_struct *copy_process(
 					int node)
 {
     ......
+    // 1. 先拿外层锁：全局任务表写锁
     write_lock_irq(&tasklist_lock);
 
 	/* CLONE_PARENT re-uses the old parent */
@@ -327,7 +380,7 @@ static __latent_entropy struct task_struct *copy_process(
 		p->real_parent = current;
 		p->parent_exec_id = current->self_exec_id;
 	}
-
+    // 2. 再拿内层锁：当前进程的信号自旋锁
 	spin_lock(&current->sighand->siglock);
 
 	/*
@@ -345,7 +398,9 @@ static __latent_entropy struct task_struct *copy_process(
 	 * thread can't slip out of an OOM kill (or normal SIGKILL).
 	*/
 	recalc_sigpending();
+    // 3. 检查有没有收到致命信号 (如 SIGKILL)
 	if (signal_pending(current)) {
+        // 如果父进程快死了，就取消 fork，释放锁并退出
 		retval = -ERESTARTNOINTR;
 		goto bad_fork_cancel_cgroup;
 	}
@@ -376,7 +431,10 @@ static __latent_entropy struct task_struct *copy_process(
 			 */
 			p->signal->has_child_subreaper = p->real_parent->signal->has_child_subreaper ||
 							 p->real_parent->signal->is_child_subreaper;
-			list_add_tail(&p->sibling, &p->real_parent->children);
+            // 【关注点在这里】
+            // 4. 将新进程加入父进程的孩子链表
+            list_add_tail(&p->sibling, &p->real_parent->children);
+            // 5. 将新进程加入全局进程链表
 			list_add_tail_rcu(&p->tasks, &init_task.tasks);
 			attach_pid(p, PIDTYPE_PGID);
 			attach_pid(p, PIDTYPE_SID);
@@ -395,13 +453,90 @@ static __latent_entropy struct task_struct *copy_process(
 	}
 
 	total_forks++;
+    // 6. 释放内层锁
 	spin_unlock(&current->sighand->siglock);
 	syscall_tracepoint_update(p);
+
+    // 7. 释放外层锁
 	write_unlock_irq(&tasklist_lock);
     ......
 }
 ```
 
+`copy_process`函数的这套双层保护机制（**用全局`rwlock_t`保护临界区，临界区同时包含rcu以及普通读写操作**）是非常典型的例子，虽然这两把锁在此时同时被持有，但它们保护的数据是完全不同的。简单分析下：
+
+1、真正的主锁：`tasklist_lock`（全局写锁，类型为`rwlock_t`），职责是保护 Linux 的整个进程家族树（Process Tree）以及全局进程列表，其保护的对象是
+
+-   `p->tasks`（全局进程链表）
+-   `p->sibling`（兄弟链表节点）
+-   `p->real_parent->children`（父进程的孩子链表）
+
+2、顺手拿的锁：`current->sighand->siglock`（信号自旋锁），`spin_lock(&current->sighand->siglock)`主要是为了保护与它处于同一临界区的信号检查动作。职责是保护该进程及线程组的信号投递与状态：
+
+-   信号队列（当前有没有收到 `SIGKILL`）
+-   线程组状态（`nr_threads` 等）
+
+这里第二把锁的功能完全是为了防止并发竞态（Race Condition）。设想一下如果父进程在把孩子挂到树上的前一瞬间，突然收到了 `SIGKILL`（强制结束）信号，父进程马上就要被系统销毁了，此时再去挂载孩子会导致严重的混乱（新进程变成没人管的孤儿，甚至野指针崩溃）。因此，内核必须把"检查致命信号"和"把新进程挂入全局和家族树链表"这两个动作打包成一个绝对的原子操作。因此，内核这里拿 `siglock` 的目的，就是为了拦住并发发过来的信号，保证"只要确认自己没收到死刑通知（signal_pending），在把孩子完全生出来挂好之前，任何人都别想kill掉自己"
+
+额外看下进程退出的代码`release_task--->__exit_signal-->__unhash_process`：
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/kernel/exit.c#L71
+static void __unhash_process(struct task_struct *p, bool group_dead)
+{
+	nr_threads--;
+	detach_pid(p, PIDTYPE_PID);
+	if (group_dead) {
+		detach_pid(p, PIDTYPE_PGID);
+		detach_pid(p, PIDTYPE_SID);
+
+		list_del_rcu(&p->tasks);
+		list_del_init(&p->sibling);
+		__this_cpu_dec(process_counts);
+	}
+	list_del_rcu(&p->thread_group);
+	list_del_rcu(&p->thread_node);
+}
+
+void release_task(struct task_struct *p)
+{
+	struct task_struct *leader;
+	int zap_leader;
+repeat:
+	/* don't need to get the RCU readlock here - the process is dead and
+	 * can't be modifying its own credentials. But shut RCU-lockdep up */
+	rcu_read_lock();
+	atomic_dec(&__task_cred(p)->user->processes);
+	rcu_read_unlock();
+
+	proc_flush_task(p);
+
+	write_lock_irq(&tasklist_lock);
+	......
+	zap_leader = 0;
+	leader = p->group_leader;
+	if (leader != p && thread_group_empty(leader)
+			&& leader->exit_state == EXIT_ZOMBIE) {
+		/*
+		 * If we were the last child thread and the leader has
+		 * exited already, and the leader's parent ignores SIGCHLD,
+		 * then we are the one who should release the leader.
+		 */
+		zap_leader = do_notify_parent(leader, leader->exit_signal);
+		if (zap_leader)
+			leader->exit_state = EXIT_DEAD;
+	}
+
+	write_unlock_irq(&tasklist_lock);
+    ......
+	release_thread(p);
+	call_rcu(&p->rcu, delayed_put_task_struct);
+
+	p = leader;
+	if (unlikely(zap_leader))
+		goto repeat;
+}
+```
 
 先给结论：**`list_add_tail` 与 `list_add_tail_rcu` 的差别不在"写者要不要加锁"（两者都要、且都不自带锁），而在"这条链表有没有*无锁读者*"**。先看这几个原语的实现（`list_add_tail`/`list_add_tail_rcu` 只是尾插的封装，真正干活的是 `__list_add`/`__list_add_rcu`）：
 
@@ -446,7 +581,9 @@ static inline void __list_add_rcu(struct list_head *new,
 
 	new->next = next;
 	new->prev = prev;
-	rcu_assign_pointer(list_next_rcu(prev), new);   //？todo
+
+    //重要：相当于 prev->next = new 的安全版本
+	rcu_assign_pointer(list_next_rcu(prev), new);   
 	next->prev = new;
 }
 ```
@@ -466,7 +603,6 @@ static inline void __list_add_rcu(struct list_head *new,
 | 对读者的假设 | 读者持同一把外部锁 | 读者仅 `rcu_read_lock` 无锁遍历 |
 | 删除配对 | `list_del` | `list_del_rcu` + 宽限期回收 |
 
-todo
 
 **1、赋值顺序**。两者的*共同点*是：都保证"发布 `prev->next = new`"这一步之前，`new` 自身的 `next` 已就绪。因为无锁前向读者一旦经 `prev->next` 到达 `new`，会立刻解引用 `new->next` 继续走，故 `new->next` 必须先备好。*差异点*是：RCU 版把"后继的反向指针 `next->prev = new`"挪到了发布之后，因为 RCU 读者**只走前向 `->next`、从不读 `->prev`**，这个反向指针晚更新对读者无影响
 
@@ -532,7 +668,12 @@ sequenceDiagram
 3.  **一把锁保护多个异构结构**：`tasklist_lock` 一个临界区里同时维护了"进程树（`children`，锁读）"与"任务/线程链表（`tasks`/`thread_*`，RCU 读）"。同一份写侧互斥，服务于纪律不同的多类读者。这正是内核"一锁多表"的真实形态
 4.  **发布-订阅是 RCU 的地基**：`rcu_assign_pointer`（写发布）↔ `list_for_each_entry_rcu`/`rcu_dereference`（读订阅）的配对机制；`WRITE_ONCE` 只是其"去掉屏障"的退化版，适用于无无锁读者的场景
 
-todo
+小结下
+
+-   `__list_add`等实现内部根本没有加锁保护，加锁的责任完全由调用者（Caller）承担
+-   
+
+### 宽限期（Grace Period, GP）的概念
 
 ### 同步原语选型总表
 
