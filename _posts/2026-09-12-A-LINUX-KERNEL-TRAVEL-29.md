@@ -674,6 +674,150 @@ sequenceDiagram
 -   
 
 ### 宽限期（Grace Period, GP）的概念
+这里详细的介绍下宽限期的概念以及RCU（读复制更新）与传统自旋锁是如何协同工作的（暂时不考虑单核场景）
+
+先提出一个问题：当写者调用`write_lock_irq(&tasklist_lock)`，此时有读者正好在`rcu_read_lock`、`rcu_read_unlock`的临界区，那么此时写者线程/读者线程的action是什么样的？以上文讨论到的全局进程链表，这里的写入又包含了两层动作，添加和删除两种场景
+
+**核心答案是它们互不干扰，完全同时（并发）运行在各自的 CPU 上**，即当写者调用 `write_lock_irq(&tasklist_lock)` 时，如果读者正处于 `rcu_read_lock()` 的临界区内，这两个线程在多核 CPU 上是完全并发执行的，互不阻塞、互不感知。对写者而言，`write_lock_irq(&tasklist_lock)` 的作用是禁用本地 CPU 中断，并获取读写锁的"写锁"，它只会阻塞其他的写者和调用传统 `read_lock()` 的读者。而 `rcu_read_lock()` 在底层（非实时内核中）仅是关闭抢占或增加嵌套计数，没有任何自旋锁或硬件级别的锁竞争。因此，两者会在不同的 CPU 上同时推进
+
+-   `rcu_read_lock()` 底层根本没有去碰 `tasklist_lock` 这个物理锁（它只是关闭了抢占或修改了本地 CPU 的 RCU 计数器）
+-   写者用 `tasklist_lock` 是为了防其他写者并发写，而不是防 RCU 机制下的读者
+
+下面详细描述下添加与删除动作发生时，两者的具体 Action 与底层配合机制：
+
+1、动作一：添加进程（Fork 时调用 copy_process），添加动作的核心是隔离与原子发布，写者无需等待读者
+
+1.1、写者的 Action
+
+-   写者在用户态调用 `fork()` 后，进入内核态执行，写者分配一块全新的 `task_struct` 内存，并完成 PID 分配、页表拷贝等所有初始化工作。此时这块内存是私有的，任何读者都看不见
+-   写者获取写锁：执行 `write_lock_irq(&tasklist_lock)`，这一步是为了防止其他 CPU 也在同一时刻创建或销毁进程（解决写-写冲突）
+-   使用RCU方式发布指针：调用 `list_add_tail_rcu(&p->tasks, &init_task.tasks)`，内部执行 `new->next = next; new->prev = prev;`（给新进程填上前驱后继）。然后执行核心指令`rcu_assign_pointer(prev->next, new)`，利用硬件层面的写内存屏障（Release Barrier），将初始化好的新进程挂入全局链表
+-   释放写锁：执行 `write_unlock_irq(&tasklist_lock)`，至此写者任务结束
+
+1.2、 读者的 Action
+
+-   读者（如遍历 `/proc`）此时正在另一个 CPU 上通过 `list_for_each_entry_rcu()` 遍历进程，此时可能有两种情况：
+    -   miss：如果读者遍历到全局进程链表尾部时，写者的 `rcu_assign_pointer` 还没执行，读者获取到的是旧的尾指针，直接结束遍历。它看不到新进程，逻辑上绝对安全
+    -   hit：如果读者遍历时写者刚执行完 `rcu_assign_pointer`，读者通过 `rcu_dereference()`（含读内存屏障/Acquire Barrier）获取到新指针。由于写屏障的保证，读者读到的 task_struct 百分之百是完全初始化好的，不会因为 CPU 乱序而读到野数据
+
+2、动作二：删除进程（Exit 时调用 `release_task`），删除动作的核心是逻辑摘除与延迟释放（宽限期），在RCU机制下写者必须等待读者
+
+2.1、写者的 Action
+
+-   当进程完全退出并释放大部分资源后，内核需要将其从全局进程链表中彻底抹除
+-   获取写锁：此时写者需要先获取写者，执行`write_lock_irq(&tasklist_lock)`
+-   逻辑摘除：调用 `list_del_rcu(&p->tasks)`从全局进程链表删除节点，主要流程如下：
+    -   执行 `__list_del_entry(entry)`，将前驱的 `next` 绕过当前进程 `p`，直接指向后继节点
+    -   执行 `entry->prev = LIST_POISON2`（毒化 `prev` 指针，防止从该节点反向遍历）
+    -   关键点：`list_del_rcu` 绝不会修改 `entry->next`，它故意保留了原有的后继指针
+-   释放写锁：执行 `write_unlock_irq(&tasklist_lock)`。此时，新来的读者已经无法在全局链表中找到进程 `p`
+-   开启宽限期等待（重要）：此时写者绝对不能调用 `kfree()` 释放 `p` 的内存，否则会导致正在读取它的老读者崩溃。内核会通过 RCU 回调（如通过 `call_rcu()` 注册 `delayed_put_task_struct`）将真正的内存释放动作推迟，直到所有在删除动作前进入 `rcu_read_lock()` 的读者全部调用 `rcu_read_unlock()`（即度过宽限期）
+
+2.2、读者的 Action
+
+假设读者在写者调用 `list_del_rcu` 之前的一瞬间，刚好顺着旧指针走进了进程 `p`。此时写者正在执行逻辑摘除操作，那么对于读者而言：
+
+-   无感读取（幽灵节点）：读者正在读取 `p->pid` 等信息。虽然 `p` 已经被写者从链表中摘除，变成了孤立的“幽灵节点”，但因为写者被宽限期拦着没有释放物理内存，读者的内存访问是百分之百安全的
+-   平滑过渡：读者读取完 `p` 后，需要继续遍历。因为写者在 `list_del_rcu` 中特意保留了 `p->next` 未修改，读者执行 `p = rcu_dereference(p->next)` 时，依然能精准地跳回到正确的主链表后继节点上，平滑完成后续遍历
+
+###   list_del_rcu 的实现机制
+
+```c
+/**
+ * list_del_rcu - deletes entry from list without re-initialization
+ * @entry: the element to delete from the list.
+ *
+ * Note: list_empty() on entry does not return true after this,
+ * the entry is in an undefined state. It is useful for RCU based
+ * lockfree traversal.
+ *
+ * In particular, it means that we can not poison the forward
+ * pointers that may still be used for walking the list.
+ *
+ * The caller must take whatever precautions are necessary
+ * (such as holding appropriate locks) to avoid racing
+ * with another list-mutation primitive, such as list_del_rcu()
+ * or list_add_rcu(), running on this same list.
+ * However, it is perfectly legal to run concurrently with
+ * the _rcu list-traversal primitives, such as
+ * list_for_each_entry_rcu().
+ *
+ * Note that the caller is not permitted to immediately free
+ * the newly deleted entry.  Instead, either synchronize_rcu()
+ * or call_rcu() must be used to defer freeing until an RCU
+ * grace period has elapsed.
+ */
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/rculist.h#L103
+static inline void list_del_rcu(struct list_head *entry)
+{
+	__list_del_entry(entry);
+	entry->prev = LIST_POISON2;
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/list.h#L114
+static inline void __list_del_entry(struct list_head *entry)
+{
+	if (!__list_del_entry_valid(entry))
+		return;
+
+	__list_del(entry->prev, entry->next);
+}
+
+static inline void __list_del(struct list_head * prev, struct list_head * next)
+{
+	next->prev = prev;
+	WRITE_ONCE(prev->next, next);
+}
+```
+
+这里先分析下`list_del_rcu`的实现，相关代码如上。`list_del_rcu`的实现代码虽然只有短短两行，但它完美浓缩了 RCU 机制的核心机密。必须把它和普通的非 RCU 链表删除函数 `list_del()` 放在一起对比，从对比代码可以看到，`list_del_rcu` 少写了一行代码，它没有去动 `entry->next`
+
+```c
+// 普通的链表删除
+static inline void list_del(struct list_head *entry)
+{
+    __list_del_entry(entry);
+    entry->next = LIST_POISON1; // RCU 版本没有这一行
+    entry->prev = LIST_POISON2;
+}
+
+// RCU 的链表删除（你提供的代码）
+static inline void list_del_rcu(struct list_head *entry)
+{
+    __list_del_entry(entry);
+    entry->prev = LIST_POISON2; // 只有 prev 被毒化了
+}
+```
+
+1、第一步：`__list_del_entry(entry);`的实现，主要逻辑摘除。该宏的底层作用是将当前节点 `entry` 从链表中"旁路"掉。它的核心逻辑展开相当于：
+
+```c
+entry->next->prev = entry->prev; // 后继节点向后看，跳过entry自己
+entry->prev->next = entry->next; // 前驱节点向前看，跳过entry自己
+```
+
+读者安全保证：这里的指针修改在硬件层面是原子写入（单字对齐写入）。并发的读者读到 `prev->next` 时，要么读到旧的 entry，要么读到新的 next，两者都是合法的内存地址，绝对不会读到一半的乱码
+
+2、第二步：在`list_del_rcu`实现中，为什么故意保留 `entry->next`？普通的 `list_del` 会立刻把 `entry->next` 设置为一个非法地址（`LIST_POISON1`）。但 RCU 方式不可以这样，原因如下。设想这样一个极其苛刻的并发场景（幽灵读者）：
+
+1.  读者在 CPU1 上遍历链表，刚好走到了当前节点 entry，并且卡在这里读数据
+2.  写者在 CPU0 上调用 `list_del_rcu(entry)` 把它摘除
+3.  此时，这个 entry 变成了游离在主链表之外的幽灵节点
+
+当读者在 CPU1 上读完当前节点的数据，准备去下一个节点时，它会执行代码 `p = p->next`（即 `entry->next`）
+-   若像普通 `list_del` 那样把 `entry->next` 填成非法地址，读者的 CPU1 顺着指针访问到非法地址，直接触发 Panic
+-   而 `list_del_rcu` 特意原封不动地保留了 `entry->next` 的原始值。即使极端情况下读者顺着 `entry->next` 往后遍历时，仍然能够跳回到主链表上的合法后继节点，继续完成剩下的遍历
+
+3、第三步：`entry->prev = LIST_POISON2`，主要功能是设置Poisoning地址防止回头遍历。既然 `next` 必须保留，那为什么 `prev` 需要被Poisoning呢？
+
+这里先解读下`LIST_POISON2`的作用，这是内核精心设计过、绝对不会映射物理内存的非法内核地址常量（`64` 位系统上通常是形如 `0xdead000000000200` 的魔数，只要 CPU 试图访问它，必定会触发缺页异常，并在 Oops 日志输出此魔数）
+
+那么，为什么只毒化 `prev` 指针呢？在标准的内核 RCU 链表设计中，RCU 链表只允许单向向前遍历（通过 `list_for_each_entry_rcu`），内核绝不允许在 RCU 临界区内向后（逆向）遍历链表。如此毒化 `prev`指针就是内核为了避免**有傻瓜代码试图在摘除后的幽灵节点上执行向后遍历（访问 prev）**的行为（直接精准崩溃）
+
+小结下`list_del_rcu`的功能
+-   `__list_del_entry`：对新读者关上大门
+-   保留 `entry->next`：给被困在里面的旧读者留下一座逃生桥
+-   写入 `LIST_POISON2`：在后门埋下地雷，炸死所有不按规矩写代码的违规者
 
 ### 同步原语选型总表
 
@@ -819,6 +963,10 @@ struct thread_info {
 	unsigned long		flags;		/* low level flags */
 };
 ```
+
+todo
+
+####    preempt_disable/preempt_enable的实现
 
 todo
 
@@ -1300,7 +1448,34 @@ rcu_read_unlock();
 
 发布用 `rcu_assign_pointer(gp, p)`（内含 `smp_wmb`/release，保证 `p` 指向内容的初始化先于指针可见，正是 `0x02` 提到的发布范式）；订阅用 `rcu_dereference`（保证依赖顺序）
 
+
 todo
+
+### rcu_read_lock/rcu_read_unlock的实现
+
+todo
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/include/linux/rcupdate.h#L790
+//static inline void rcu_read_lock(void)
+{
+	__rcu_read_lock();
+	__acquire(RCU);
+	rcu_lock_acquire(&rcu_lock_map);
+	RCU_LOCKDEP_WARN(!rcu_is_watching(),
+			 "rcu_read_lock() used illegally while idle");
+}
+
+static inline void rcu_read_unlock(void)
+{
+	RCU_LOCKDEP_WARN(!rcu_is_watching(),
+			 "rcu_read_unlock() used illegally while idle");
+	__release(RCU);
+	__rcu_read_unlock();
+	rcu_lock_release(&rcu_lock_map); /* Keep acq info for rls diags. */
+}
+
+```
 
 ### 写侧：宽限期与两种回收
 
@@ -1397,6 +1572,10 @@ flowchart TD
 5.  **RCU 读侧睡眠**：`rcu_read_lock()` 后禁抢占，其中不可睡眠、不可阻塞；需要睡眠请用 SRCU
 
 6.  **seqlock 读侧滥用**：读到的可能是撕裂数据，只能拷贝值、不能据此做不可逆操作或解引用可能失效的指针
+
+### RCU机制下的读写/写者与宽限期汇总
+
+todo
 
 ##  0x0E    综合案例：原语协作（组合）范式
 
@@ -2331,3 +2510,141 @@ mismatch:
 }
 EXPORT_SYMBOL(d_alloc_parallel);
 ```
+
+##  0x11    内核相关配置
+
+####    自愿抢占内核+非抢占式 RCU
+
+下面机器配置的内核属于自愿抢占内核（Voluntary Preemption），并且使用的是非抢占式 RCU（Tree RCU）
+
+```bash
+#3.10.107-1-tlinux2_kvm_guest-0049
+[root@VM_130_14_centos ~]# zgrep "CONFIG_PREEMPT" /proc/config.gz 2>/dev/null || grep "CONFIG_PREEMPT" /boot/config-$(uname -r)
+# CONFIG_PREEMPT_RCU is not set
+# CONFIG_PREEMPT_NONE is not set
+CONFIG_PREEMPT_VOLUNTARY=y
+# CONFIG_PREEMPT is not set
+```
+
+这套组合的核心设计哲学是在保证极高吞吐量（Throughput）的前提下，兼顾合理的系统响应延迟（Latency）
+
+一、 自愿抢占内核（Voluntary Preemption）
+
+要想理解自愿，首先要明白服务器最怕"硬抢占"带来的频繁上下文切换（Context Switch）开销，导致 CPU 缓存频繁失效，吞吐量暴跌。但如果不抢占，一个进程在内核态死循环或处理海量数据，其他进程就会完全卡死。而自愿抢占机制，就是在这两者之间找到的完美平衡点。大概机制如下：
+
+1. 核心机制：铺设检查点（Checkpoints）：在自愿抢占内核中，时钟中断（Timer Interrupt）即使发现有更高优先级的进程醒了，也不能强行剥夺当前正在内核态运行的进程的 CPU；相反，内核开发者在编写"已知会执行很长时间"的代码循环时（如清理海量内存页、遍历巨型文件系统），会人工插入一些检查点。最著名的检查点就是宏 `cond_resched()`
+2. `cond_resched()` 的底层原理：当内核代码执行到 `cond_resched()` 时，它会检查当前线程的标志位（主要是 `thread_info` 中的 `TIF_NEED_RESCHED` 标志）：
+    -   没人排队：如果这个标志没被置位，说明没有更高优先级的进程需要 CPU。`cond_resched()` 就是一条极简的空指令，直接跳过开销几乎为零
+    -   有人排队：如果时钟中断或其他机制把这个标志置位了（说明有紧急进程在等待），当前进程就会主动（自愿地）调用 `schedule()`，把自己挂起，把 CPU 让给高优先级进程
+3. `might_sleep()`机制：在纯非抢占内核（`PREEMPT_NONE`）中，`might_sleep()` 只是一个用来打印警告的调试宏（提醒这里可能会休眠，不要在自旋锁里调用）。由于本机配置了`CONFIG_PREEMPT_VOLUNTARY=y`，所有的 `might_sleep()` 都会在编译时被顺便替换成隐式的抢占检查点（防止 CPU 独占）
+
+二、 非抢占式 RCU 与 Tree RCU
+
+由于这是一台多核（SMP）服务器，内核自动启用了针对多核优化的 Tree RCU
+
+1、非抢占式 RCU是什么？写者需要等待所有的 RCU 读者退出临界区（经历宽限期）。但在非抢占内核下，判断读者是否退出甚至不需要任何计数器，更不需要加锁
+
+-   读者的零开销：`rcu_read_lock()` 展开后，除了充当阻止编译器指令重排的内存屏障（Compiler Barrier）外，几乎什么都不做，性能极致
+-   静息状态（QS）的判定：因为是自愿抢占系统，一个线程只要在执行 RCU 读临界区代码，它就绝对不可能发生进程调度（它不会去调 cond_resched）；反言之如果 CPU 发生了一次任务切换，或者进入了 Idle 空闲循环，或者返回了用户态，就说明这个 CPU 肯定不在 RCU 临界区里，这就叫经历了一次静息状态（Quiescent State）
+
+2、Tree RCU的设计理念（避免单个对象锁竞争，利用分层减少并发）
+
+假设对 `128` 核服务器，写者在等宽限期结束，如果用最原始的 Classic RCU，内核会用一个全局的 `128` 位 Bitmap 来记录哪些 CPU 经过了静息状态。`128` 个 CPU 每次发生调度，都要用底层的 lock 指令去争抢修改这同一个全局 Bitmap。这会造成严重的锁竞争（Lock Contention）问题。而Tree RCU（树形 RCU）的设计可解决此问题：
+
+-   内核把 CPU 分组（如 `16` 个 CPU 一组），即叶子节点（Leaf Node）
+-   每个叶子节点自己维护一个局部的 Bitmap。这 `16` 个 CPU 发生调度时，只更新自己节点的 Bitmap，不会影响其他 CPU
+-   当这 16 个 CPU 都经过了静息状态，叶子节点就会向上级（父节点）汇报，修改父节点里的一个 bit
+-   如此层层上报，直到根节点发现所有孩子节点都通报完毕了，内核判定宽限期结束。并唤醒软中断去执行 `call_rcu` 挂入的那些内存回收回调（如 `delayed_put_task_struct`）
+
+####    动态抢占+可抢占 RCU
+
+内核版本`6.6.47-12.tl4.x86_64`，动态抢占（Dynamic Preemption）和可抢占 RCU（Preemptible RCU）
+
+```bash
+[root@VM-235-81-tencentos ~]# zgrep "CONFIG_PREEMPT" /proc/config.gz 2>/dev/null || grep "CONFIG_PREEMPT" /boot/config-$(uname -r)
+CONFIG_PREEMPT_BUILD=y
+# CONFIG_PREEMPT_NONE is not set
+CONFIG_PREEMPT_VOLUNTARY=y
+# CONFIG_PREEMPT is not set
+CONFIG_PREEMPT_COUNT=y
+CONFIG_PREEMPTION=y
+CONFIG_PREEMPT_DYNAMIC=y
+CONFIG_PREEMPT_RCU=y
+CONFIG_PREEMPT_NOTIFIERS=y
+# CONFIG_PREEMPT_TRACER is not set
+# CONFIG_PREEMPTIRQ_DELAY_TEST is not set
+```
+
+1、`CONFIG_PREEMPT_DYNAMIC=y`（动态抢占）
+
+现代内核引入，允许内核在编译时同时保留多种抢占代码路径，并在系统开机时（甚至运行时）通过内核启动参数动态切换抢占模式（不需要重新编译内核）。比如上述默认配置`CONFIG_PREEMPT_VOLUNTARY=y`
+
+2、`CONFIG_PREEMPT_RCU=y`（可抢占 RCU）
+
+与上例中的最大不同点如下：
+
+-   宏映射变化：在源码里`call_rcu` 不再被强制替换成 `call_rcu_sched`，而是走标准的 `call_rcu`（可抢占 RCU 逻辑）
+-   读者行为变化：`rcu_read_lock()` 不再仅仅是空操作或单纯的内存屏障，它内部会开始维护每个进程的嵌套计数器（`preempt_disable` 或抢占计数）
+-   宽限期（Grace Period）的判定变化：后台 RCU 状态机不能仅仅靠"每个 CPU 发生过一次调度"来判断读者退出了，它必须去检查有没有被抢占的读进程还挂在阻塞链表上。只有等所有被抢占的读者都恢复执行并调用 `rcu_read_unlock()` 之后，宽限期才会结束，之前通过 `call_rcu` 挂进去的 `delayed_put_task_struct` 才会真正执行
+
+##  0x12   补充
+
+####    list_del_rcu的细节
+一个最大的疑问：为何给 RCU 准备的删除函数`list_del_rcu`的实现，没有`rcu_`相关的函数，还调用了原生的`WRITE_ONCE`？ 
+
+```c
+static inline void list_del_rcu(struct list_head *entry)
+{
+    __list_del_entry(entry);    //最终调用__list_del
+    entry->prev = LIST_POISON2;
+}
+
+static inline void __list_del(struct list_head * prev, struct list_head * next)
+{
+    next->prev = prev;
+    WRITE_ONCE(prev->next, next);
+}
+```
+
+为了理解内核为何如此设计，需要彻底搞懂 RCU 的内存屏障语义和编译器优化陷阱。主要有两个核心原因：
+
+1、原因一：为什么不需要 `rcu_assign_pointer`？（无需写屏障）
+
+-   在添加节点（`list_add_rcu`）时，内核必须使用 `rcu_assign_pointer`。因为添加的是一个新节点，内核必须使用"发布/写内存屏障（Release Barrier）"来保证**新节点里面的数据初始化，必须先于指针的连接写入内存。否则并发读者可能会顺着指针读到一个还没初始化完的脏节点**
+-   但是在删除节点时，逻辑完全不同。当执行 `__list_del(prev, next)`，本质上是把 `prev->next` 直接指向 `next`。注意这里的 `next` 节点，原本就已经存在于链表中，且早已被彻底初始化完毕了。既然 `next` 节点是一个旧的安全节点，那么将 `prev` 指向它时，就没有任何新的数据依赖需要被屏障保护。所以这里不需要等待任何初始化动作完成，直接把指针改过去就是绝对安全的。因此这里用不上沉重的 `rcu_assign_pointer`（写屏障），普通的指针修改即可
+
+2、原因二：为什么必须用 `WRITE_ONCE`？（防止编译器未知行为）
+
+既然不需要 RCU 屏障，那直接写 `prev->next = next`是否可行，为什么要套一层 `WRITE_ONCE`呢？这就是为了应对并发无锁读者（Lockless Readers）与现代编译器（如 GCC）之间的矛盾来考虑，`WRITE_ONCE` 的底层实现是强制将其转换为 `volatile` 变量的写操作。它的根本目的是向编译器下达绝对命令**不要对这个写入操作做任何自作聪明的优化，务必一字不差地生成一条单次汇编写指令**
+
+若无 `WRITE_ONCE`，编译器可能会做两件极其危险的事情，直接导致 RCU 读者内核崩溃：
+
+2.1、阻止存储撕裂（Store Tearing）：假设在 `32` 位机器上写入一个 `64` 位的指针，或者编译器的优化策略可能是把 `prev->next = next` 拆分成两次写操作，即先写高 `32` 位，再写低 `32` 位，如此导致如下结果：
+
+-   非 RCU 场景：写者有自旋锁保护，别人看不到这个中间状态
+-   RCU 场景：可能引发Panic，若无锁的 RCU 读者可能刚好在这两次写入的缝隙中，读取了 `prev->next`。此时读者读到的是一个高 `32` 位是新指针、低 `32` 位是旧指针的野指针，一旦解引用会引发内核 Panic
+-   `WRITE_ONCE`保证了强制编译器生成单一的原子写指令（如 x86 的 MOV 指令），确保指针修改在机器码级别是一次性完成的
+
+2.2、阻止编译器重排序或寄存器缓存
+
+编译器可能会认为 `prev->next` 不急着写回内存，先把它放在寄存器里，或者把它的写入顺序挪到代码块的最后。`WRITE_ONCE` 作为一种编译器屏障（Compiler Barrier），强迫编译器立刻将值写入内存，确保其他 CPU 上的 RCU 读者能及时且准确地看到指针的变更
+
+3、一个不对称的细节解读
+
+再回看 `__list_del` 的代码，一个不对称设计：为什么修改 `next->prev` 只是普普通通的赋值，而修改 `prev->next` 却套上了 `WRITE_ONCE`？
+
+```c
+static inline void __list_del(struct list_head * prev, struct list_head * next)
+{
+    next->prev = prev;                // 为什么这句没有 WRITE_ONCE？
+    WRITE_ONCE(prev->next, next);     // 为什么只有这句有？
+}
+```
+
+原因如下：
+
+1.  RCU 读者只允许单向向前遍历，所有的无锁读者，都只通过读取 `->next` 指针来找下一个节点。因此`->next` 是被并发读写的极度高危数据，必须用 `WRITE_ONCE` 严密保护其写入的原子性
+2.  不可能存在读者会无锁读取 `->prev`：在 RCU 体系下，没有任何读者会去读 `->prev`。只有持有写锁的写者才会去操作 `->prev`。既然有锁的互斥保护，所以不需要 `WRITE_ONCE`
+
+##  0x13    参考
+-   [Concurrency vs parellism](https://www.tedinski.com/2018/10/16/concurrency-vs-parallelism.html)
