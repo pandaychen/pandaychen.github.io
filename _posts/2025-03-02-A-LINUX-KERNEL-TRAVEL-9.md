@@ -33,6 +33,8 @@ OverlayFS 是一种典型的虚拟文件系统，属于联合文件系统（Unio
 
 容器内写文件，遵循写时复制（Copy-on-Write）规则：**当用户试图修改 Merged 视图中一个属于 Lowerdir 的文件时，OverlayFS 会先将该文件从底层复制到 Upperdir，然后再在 Upperdir 中进行修改。底层的文件始终保持原样不变**
 
+![overlayfs-1]()
+
 注意，一般在容器中，看到的就是merge层的结果，挂载点也是`xxxx/merged`
 
 ```bash
@@ -421,6 +423,56 @@ VFS 的 `super_block` 结构代表一个文件系统的挂载上下文。Overlay
 1.  将 VFS 的 dentry 扩展成多层路径指针数组
 2.  将 VFS 的 file 扩展成底层 real_file 的句柄
 3.  将 VFS 的 inode 扩展成底层 real_inode 的代理，并利用 VFS 自身的内部 API（`vfs_*`等）完成深层的二次调用
+
+####  基础数据结构
+本小节，介绍Overlay FS的目录相关的关键数据结构
+
+1、目录文件与接口
+
+```c
+//https://elixir.bootlin.com/linux/v5.4.241/source/fs/overlayfs/readdir.c#L52
+struct ovl_dir_file {
+    bool is_real;
+    bool is_upper;
+    struct ovl_dir_cache *cache;
+    struct list_head *cursor;
+    struct file *realfile;
+    struct file *upperfile;
+};
+
+// fs/overlayfs/readdir.c
+const struct file_operations ovl_dir_operations = {
+    .read       = generic_read_dir,
+    .open       = ovl_dir_open,
+    .iterate    = ovl_iterate,
+    .llseek     = ovl_dir_llseek,
+    .fsync      = ovl_dir_fsync,
+    .release    = ovl_dir_release,
+};
+```
+
+2、目录inode操作
+
+```c
+// fs/overlayfs/dir.c
+const struct inode_operations ovl_dir_inode_operations = {
+    .lookup     = ovl_lookup,   // fs/overlayfs/namei.c
+    .mkdir      = ovl_mkdir,    // fs/overlayfs/dir.c
+    .symlink    = ovl_symlink,
+    .unlink     = ovl_unlink,
+    .rmdir      = ovl_rmdir,        //删除目录
+    .rename     = ovl_rename,
+    .link       = ovl_link,
+    .setattr    = ovl_setattr,
+    .create     = ovl_create,
+    .mknod      = ovl_mknod,
+    .permission = ovl_permission,
+    .getattr    = ovl_getattr,
+    .listxattr  = ovl_listxattr,
+    .get_acl    = ovl_get_acl,
+    .update_time    = ovl_update_time,
+};
+```
 
 ####  三层对应的核心数据结构（重要）
 
@@ -1131,6 +1183,682 @@ sb->s_root = root_dentry;
 
 至此，一棵以 `sb->s_root` 为根、`ovl_entry`/`ovl_inode` 分别指向真实 lower/upper 的 overlay dentry 树建立完成，`merged` 视图即由它对外呈现
 
+##  0x0 目录操作详解
+
+###    1、创建目录
+
+####    1.1、创建目录系统调用
+
+系统调用的内核路径如下，最终会调用`ovl_dir_inode_operations`（类型为`inode_operations`）对象的`mkdir`成员：`ovl_mkdir`
+
+```c
+SYSCALL_DEFINE2(mkdir, const char __user *, pathname, umode_t, mode)
+|-> do_mkdirat(AT_FDCWD, pathname, mode);
+    |-> struct dentry *dentry;
+    |-> struct path path;
+    | // (1)创建目录项：创建ovl_dentry，同时将其加入到其父目录的子目录项链表中
+    |-> dentry = user_path_create(dfd, pathname, &path, lookup_flags); // path保存父目录路径；dentry保存新建目录项内存对象
+    |            |-> filename_create(dfd, getname(pathname), path, lookup_flags);
+    |                |-> name = filename_parentat(dfd, name, lookup_flags, path, &last, &type);
+    |                |-> dentry = __lookup_hash(&last, path->dentry, lookup_flags)
+    |                             |-> dentry = d_alloc(base, name);
+    |
+    | // (2)创建ovl inode：调用对应文件系统目录ops中的mkdir创建inode，并关联inode到dentry
+    |-> vfs_mkdir(path.dentry->d_inode, dentry, mode);
+        |-> dir->i_op->mkdir(dir, dentry, mode) // 参数：父目录inode、新目录的目录项、模式
+```
+
+继续跟踪下Overlay FS中`ovl_mkdir`创建目录的过程，`ovl_mkdir`的实现如下。在OverlayFS联合文件系统下，创建目录有2种情况：
+-   case1：upper层和lower层均无同名目录，则直接在upper层创建
+-   case2：lower层有同名目录，但是之后被删除了，则需要在已经存在whiteout文件的情况下创建目录
+
+```c
+ovl_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode) // fs/overlayfs/dir.c
+|-> ovl_create_object(dentry, (mode & 07777) | S_IFDIR, 0, NULL)
+    |   // （1）创建ovl_inode节点
+    |-> inode = ovl_new_inode(dentry->d_sb, mode, rdev);
+    |-> inode->i_state |= I_CREATING;
+    |
+    |   // （2）联合文件系统调用（实际文件系统）创建节点，并连接（link）虚拟文件系统inode和实际文件系统inode
+    |   // 实际文件系统创建新目录，并将实际文件系统的inode赋值给虚拟文件系统的目录项（dentry），同时虚拟文件系统的目录项作为虚拟文件系统目录项的一个别名
+    |-> ovl_create_or_link(dentry, inode, &attr, false) // 参数：虚拟文件系统目录项、虚拟文件系统inode节点、属性、非原始节点
+        | // 父目录进行copyup：将parent的lower目录内容copyup到upper层。若存在upper层，则直接返回。
+        |-> ovl_copy_up(parent);// copyup将会在后续的文章中详细介绍
+        |-> if (!ovl_dentry_is_whiteout(dentry))
+        |       // 不存在whiteout文件，则直接在upper层创建新目录
+        |->     ovl_create_upper(dentry, inode, attr);
+        |-> else
+        |       // 存在whiteout文件，则在upper层创建新目录并..???..
+        |->     ovl_create_over_whiteout(dentry, inode, attr);
+```
+
+
+case1、**直接在upper层创建新目录**，[`ovl_create_upper`](https://elixir.bootlin.com/linux/v5.4.241/source/fs/overlayfs/dir.c#L290)，定义为`static int ovl_create_upper(struct dentry *dentry, struct inode *inode,struct ovl_cattr *attr)`，参数inode为`ovl_inode`，而`dentry`则是与之对应的overlayfs文件系统目录节点的目录项
+
+`ovl_create_upper()`执行完后，新创建的overlayfs目录结构，如下图所示：
+
+```
+vfs: .....
+|
+overlayfs:                                       struct ovl_inode                       
+           struct dentry                         +---------------------------------+    
+           +--------------------------------+    |redirect: char*;                 |    
+           |d_parent: struct dentry *;      |    |mnt_mountpoint: struct dentry*;  |    
+           |d_name: struct qstr;            |    |vfs_inode: struct inode;         |    
+           |d_inode: struct inode*;  -------+--->|+-struct inode -----------------+|    
+           |d_op: struct dentry_operations*;|    ||i_op: struct inode_operations*;||    
+           |d_sb: struct super_block;       |    ||i_sb: struct super_block *;    ||    
+           |d_fsdata: void *;               |    || ...                           ||    
+           | ...                            |    ||i_private: void *  ------------++---+
+           +--------------------------------+    |+-------------------------------+|   |
+                                                 |__upperdentry: struct dentry*; --+-+ |
+                                                 |lower: struct inode*;            | | |
+                                                 |...                              | | |
+                                                 +---------------------------------+ | |
+                                                                                     | |
+upper:     +-------------------------------------------------------------------------+ |
+           |                                     +-------------------------------------+
+           |                                     |                                      
+           V                                     V                                      
+           struct dentry                         struct inode                
+           +--------------------------------+ +->+-------------------------------+      
+           |d_parent: struct dentry *;      | |  |i_op: struct inode_operations*;|      
+           |d_name: struct qstr;            | |  |i_sb: struct super_block *;    |      
+           |d_inode: struct inode*; --------+-+  |i_ino: unsigned long;          |      
+           |d_op: struct dentry_operations*;|    | ...                           |      
+           |d_sb: struct super_block;       |    +-------------------------------+      
+           | ...                            |                                           
+           +--------------------------------+                                
+```
+
+case2：**创建新目录，但lower层存在被删除的同名目录**，关联实现为`static int ovl_create_over_whiteout(struct dentry *dentry, struct inode *inode,struct ovl_cattr *cattr)`，参数`ovl_create_upper()`一样，`inode`为`ovl_inode`，而`dentry`则是与之对应的overlayfs文件系统目录节点的目录项
+
+```c
+//https://elixir.bootlin.com/linux/v5.4.241/source/fs/overlayfs/dir.c#L428
+ovl_create_over_whiteout(struct dentry *dentry, struct inode *inode, struct ovl_cattr *attr)
+|-> struct dentry *workdir = ovl_workdir(dentry);
+|-> struct inode *wdir = workdir->d_inode;
+|-> struct dentry *upperdir = ovl_dentry_upper(dentry->d_parent);   // upper父目录项
+|-> struct inode *udir = upperdir->d_inode;                         // upper父目录inode
+|-> struct dentry *upper;                                           // ovl目录项
+|-> struct dentry *newdentry;                                       // upper目录项
+|
+| // (1)在upper层父目录中查找目录项（whiteout）
+|-> upper = lookup_one_len(dentry->d_, upperdir, dentry->d_name.len);
+| // (2)在workdir目录下创建临时目录
+|-> newdentry = ovl_create_temp(workdir, cattr);
+|               |-> ovl_create_real(d_inode(workdir), ovl_lookup_temp(workdir), attr);
+| // (3)设置worddir下新建临时目录属性为opaque
+|-> ovl_set_opaque(dentry, newdentry);
+| // (4)workdir新建的临时目录与upper的whiteout目录做交互rename
+|-> ovl_do_rename(wdir, newdentry, udir, upper, RENAME_EXCHANGE);
+| // (5)清除rename后workdir下的废弃文件（whiteout）
+|-> ovl_cleanup(wdir, upper);
+|
+| // 实例化overlayfs目录项和ovl_inode：
+| // (1)ovl_inode的i_private和__upperdentry分别指向upper的inode和目录项;(2)ovl目录项的d_inode指向ovl_inode.
+|-> ovl_instantiate(dentry, inode, newdentry, !!attr->hardlink);
+```
+由上面流程可见，与`ovl_create_upper()`相比，`ovl_create_over_whiteout()`先在`work`目录下创建一个临时目录，并设置目录属性为`opaque`，以屏蔽lower层同名目录。然后将`workdir`目录下临时目录与upper层的whiteout文件做重命名互换，并清除互换后的垃圾文件
+
+### 2、删除目录ovl_rmdir()
+
+将要被删除的联合文件系统目录主要有三种途径：
+1.  目录只来自upper层，则直接删除即可
+2.  目录只来自lower层，则需要建立对lower层同名目录的whiteout文件
+3.  目录是由uppwer层和lower层目录合成，则既要删除upper层目录，又要建立lower层同名目录的whiteout文件
+
+但是上面的情况，经过简化合并为两种情况：
+
+-   不存在于lower层，则直接删除即可
+-   存在于lower层，需要生成whiteout文件屏蔽底层目录
+
+下面代码为OverlayFS删除目录的过程，关联`ovl_rmdir`，留意下列过程中根据`lower_positive`是否为`true`，即是否存在lower层，分别调用了函数`ovl_remove_upper()`、`ovl_remove_and_whiteout()`
+
+```c
+ovl_rmdir(struct inode *dir, struct dentry *dentry)
+|-> ovl_do_remove(dentry, true);
+    |-> ovl_check_empty_dir(dentry, &list);
+    |   | // 获取目录下的所有目录和文件列挂到list链表
+    |   |-> ovl_dir_read_merged(dentry, list, &root);
+    |   |   |-> for (idx = 0; idx != -1; idx = next) {
+    |   |   |->     next = ovl_path_next(idx, dentry, &realpath);
+    |   |   |->     ovl_dir_read(&realpath, &rdd);
+    |   |   |        |-> realfile = ovl_path_open(realpath, O_RDONLY | O_LARGEFILE);
+    |   |   |        |-> iterate_dir(realfile, &rdd->ctx);
+    |   |   |-> }
+    |   |-> 
+    |
+    | // copyup父目录：若存在upper层，则ovl_copy_up()直接返回
+    |-> ovl_copy_up(dentry->d_parent);
+    |-> if (!lower_positive)
+    |->     err = ovl_remove_upper(dentry, is_dir, &list);
+    |-> else
+    |->     err = ovl_remove_and_whiteout(dentry, &list);
+    |
+    |-> clear_nlink(dentry->d_inode);
+    |
+    |-> upperdentry = ovl_dentry_upper(dentry);
+    |-> if (upperdentry)
+    |->     ovl_copyattr(d_inode(upperdentry), d_inode(dentry));
+```
+
+case1：**删除不存在lower层的目录**
+
+```c
+ovl_remove_upper(dentry, is_dir, &list)
+|-> struct dentry *upperdir = ovl_dentry_upper(dentry->d_parent)
+|-> struct inode *dir = upperdir->d_inode
+|-> struct dentry *opaquedir = NULL
+|-> opaquedir = ovl_clear_empty(dentry, list) // 返回opaque目录
+|-> upper = ovl_lookup_upper(ofs, dentry->d_, upperdir,dentry->d_name.len)// 找到需要删除的dengtry
+|-> err = ovl_do_rmdir(ofs, dir, upper)
+| |-> vfs_rmdir(ovl_upper_mnt_userns(ofs), dir, dentry) // 直接调用vfs_mkdir进行删除
+| |...
+```
+
+case2：**删除存在lower层的目录**
+
+如果要删除的文件是upper层覆盖lower层的文件，要删除的目录是上下层合并的目录，其实是前两个场景的合并，OverlayFS即需要删除upper层对应文件系统中的文件或目录，也需要在对应位置创建同名whiteout文件，让upper层的文件被删除后不至于lower层的文件被暴露出来
+
+```c
+ovl_remove_and_whiteout(dentry, &list);
+|-> struct ovl_fs *ofs = OVL_FS(dentry->d_sb);
+|-> workdir = ovl_workdir(dentry);
+| // 返回opaque目录：已经完成了目标目录的删除
+|-> opaquedir = ovl_clear_empty(dentry, list);
+|               |-> opaquedir = ovl_create_temp(workdir, OVL_CATTR(stat.mode));
+|               |-> ovl_copy_xattr(dentry->d_sb, upper, opaquedir);
+|               |-> ovl_set_opaque(dentry, opaquedir);
+|               | // rename后opaquedir与upper的inode内容互换
+|               |-> ovl_do_rename(wdir, opaquedir, udir, upper, RENAME_EXCHANGE);
+|               | // 递归删除目标目录下的upper层内容
+|               |-> ovl_cleanup_whiteouts(upper, list);
+|               | // 删除目标目录
+|               |-> ovl_cleanup(wdir, upper);
+|                   |-> ovl_do_rmdir(wdir, wdentry);
+|                       |-> vfs_rmdir(dir, dentry);
+| // 此时，upper即opaquedir
+|-> upper = lookup_one_len(dentry->d_, upperdir, dentry->d_name.len);
+|-> ovl_cleanup_and_whiteout(ofs, d_inode(upperdir), upper);
+    |-> whiteout = ovl_whiteout(ofs);
+    |              |-> whiteout = ovl_lookup_temp(workdir);
+    |              |              |-> snprintf(name, sizeof(name), "#%x", atomic_inc_return(&temp_id));
+    |              |              |-> temp = lookup_one_len(name, workdir, strlen(name));
+    |              |-> ovl_do_whiteout(wdir, whiteout);
+    |-> ovl_do_rename(wdir, whiteout, dir, dentry, flags);
+    |-> ...
+```
+
+### 3、打开目录ovl_dir_open()
+
+假设目录是merged目录
+
+```c
+ovl_dir_open(struct inode *inode, struct file *file) // fs/overlayfs/readdir.c
+|-> struct ovl_dir_file *od;
+|-> od = kzalloc(sizeof(struct ovl_dir_file), GFP_KERNEL);
+| // 获取目录路径：若目录是merged或者upper目录，则获得upper路径；否则，获得lower路径
+|-> type = ovl_path_real(file->f_path.dentry, &realpath);
+|          |-> type = ovl_path_type(dentry);
+|          |          |-> type = __OVL_PATH_UPPER;
+|          |          |-> type  |= __OVL_PATH_MERGE;
+|          |
+|          |-> ovl_path_lower(dentry, path);
+|          | // < or >
+|          |-> ovl_path_upper(dentry, path);
+|              |-> path->mnt = ovl_upper_mnt(ofs);
+|              |-> path->dentry = ovl_dentry_upper(dentry);
+|
+| // 打开upper或者lower目录
+|-> realfile = ovl_dir_open_realfile(file, &realpath);
+|              |-> struct file *res;
+|              |-> res = ovl_path_open(realpath, O_RDONLY | (file->f_flags & O_LARGEFILE));
+|                        |-> dentry_open(path, flags, current_cred());
+|                            |-> struct file *f;
+|                            |-> f = alloc_empty_file(flags, cred);
+|                            |-> vfs_open(path, f);
+|                                |-> open = f->f_op->open(inode, f);
+|
+| // realfile作为ovldir_file的实际文件；ovl_dir_file又作为file的私有数据
+|-> od->realfile = realfile;
+|-> od->is_real = ovl_dir_is_real(file->f_path.dentry);
+|-> od->is_upper = OVL_TYPE_UPPER(type);
+|-> file->private_data = od;
+```
+
+目录打开后的结构如下：
+
+```
+           struct file                      
+           +------------------------------+ 
+           |f_path: struct path;          | 
+           |f_inode: struct inode;        | 
+           |f_op: struct file_operations*;| 
+           |private_data: void *; --------+-+
+           | ...                          | |
+           +------------------------------+ |
+                                    +-------+
+Overlay fs:                          |  struct ovl_dir_file                 
+                                    +->+-----------------------------+
+                                       |is_real: bool                |
+                                       |is_upper: unsigned;          |
+                                       |cache: struct ovl_dir_cache*;|
+                                       |cursor: struct list_head*;   |
+                                       |realfile: struct file*; -----+-+
+                                       |upperfile: struct file*;     | |
+                                       +-----------------------------+ |
+                                                              +--------+
+                                                              |                                 
+                                                              |  struct file                     
+upper:                                                        +->+------------------------------+
+                                                                 |f_path: struct path;          |
+                                                                 |f_inode: struct inode;        |
+                                                                 |f_op: struct file_operations*;|
+                                                                 |private_data: void *;         |
+                                                                 | ...                          |
+                                                                 +------------------------------+
+
+```
+
+####    3.1、OVL目录内查找目标目录或者文件
+
+每当在这样一个合并的目录中请求查找时，就会在每个实际的目录中进行查找，而合并的结果则缓存在属于覆盖文件系统的目录中。结果被缓存在属于叠加文件系统的目录中。如果两个实际的查询都能找到目录，那么这两个查询都会被存储起来，并且创建一个合并的目录。创建一个合并的目录，否则只存储一个：如果上层目录存在，则存储下层目录。只有来自目录的名称列表被合并。其他内容，如元数据和扩展属性，只报告给上层目录，下层目录的这些属性被隐藏
+
+```c
+
+/* 
+  DESCRIPTION: 在特定文件系统中，在目录dir下查找dentry中包含
+  PARAMS:
+    @dir: 父目录，在该目录下查找目标目录或者文件，但是函数内未使用，父目录由dentry的d_parent获得。
+    @dentry: 目标目录或者文件的目录项，包含name，但是缺少inode
+    @flags*/
+ovl_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags) // fs/overlayfs/dir.c
+| // (1)在upper层父目录中查找目标文件或者目录：
+| // (1.1)从ovl目录项的ovl_inode反向索引到实际文件系统的dentry
+|-> upperdir = ovl_dentry_upper(dentry->d_parent);
+| // (1.2)在upper层目录下搜索目标文件或者目录，若存在则使用局部目录项指针upperdentry指向目标目录项
+|-> ovl_lookup_layer(upperdir, &d, &upperdentry, true); // 参数：实际文件系统中的父目录项、...、目标实际文件系统中目录项返回值、...
+|   |-> ovl_lookup_single(base, d, d->, d->name.len,0, "", ret, drop_negative) // ret，即&upperdentry
+|       |-> this = ovl_lookup_positive_unlocked(name, base, namelen, drop_negative);
+|       |          |-> lookup_one_len_unlocked(name, base, len);
+|       |              |-> lookup_slow(&this, base, 0); 
+|       |                   |-> __lookup_slow(name, dir, flags);
+|       |                       |-> dentry = d_alloc_parallel(dir, name, &wq);
+|       |                       |-> old = inode->i_op->lookup(inode, dentry, flags);
+|       |                       |-> dentry = old;
+|       |-> *ret = this;
+|
+| // (2)在所有lower层父目录中查找目标文件或者目录
+|-> for (i = 0; !d.stop && i < poe->numlower; i++) {
+|->     struct ovl_path lower = poe->lowerstack[i];
+|->     d.last = i == poe->numlower - 1;
+|->     ovl_lookup_layer(lower.dentry, &d, &this, false);
+|->     ...
+|->     stack[ctr].dentry = this;
+|->     stack[ctr].layer = lower.layer;
+|->     ctr++;
+|-> ｝
+|
+|   // (3)分配ovl_entry，其中包括根据堆叠层次确定的ovl_path层次数
+|-> oe = ovl_alloc_entry(ctr);
+|-> memcpy(oe->lowerstack, stack, sizeof(struct ovl_path) * ctr);
+|-> dentry->d_fsdata = oe;
+|
+|   // 关联实际文件系统denty和inode到虚拟文件系统inode
+|-> inode = ovl_get_inode(dentry->d_sb, &oip);
+```
+
+根据上面的流程，在overlayFS的一个目录下查询一个目录或者文件的流程为：通过ovl系统中父目录dentry找到实际文件系统的目录项和inode，找到目标目录或者文件对应的dentry和inode
+
+```text
+                                        struct ovl_entry                 
+                                     +==>+-------------------------------+
+                                     H   |lowerstack: struct ovl_path[]; |
+                                     H   |numlower: unsigned;            |
+                                     H   | ...                           |
+                                     H   +-------------------------------+
+                                     H
+                                     H   struct ovl_inode                   
+   struct dentry(d_parent)           H   +---------------------------------+       
+   +--------------------------------+H   |redirect: char*;                 |           
+   |d_parent: struct dentry *;      |H   |mnt_mountpoint: struct dentry*;  |                  
+   |d_name: struct qstr;            |H   |vfs_inode: struct inode;         |               
+   |d_inode: struct inode*;==========H==>|+-struct inode -----------------+|                    
+   |d_op: struct dentry_operations*;|H   ||i_op: struct inode_operations*;||                    
+   |d_sb: struct super_block;       |H   ||i_sb: struct super_block *;    ||                
+   |d_fsdata: void *;  ==========(2)=H   ||i_ino: unsigned long;          ||
+   | ...                            |    || ...                           ||
+   +--------------------------------+    |+-------------------------------+|      struct dentry(base dir in realfs)      
+                                         |__upperdentry: struct dentry*; ==(1)===>+--------------------------------+      
+                                         |lower: struct inode*;            |      |d_parent: struct dentry *;      |     
+                                         |...                              |      |d_name: struct qstr;            |                                    
+                                         +---------------------------------+      |d_inode: struct inode*; ============H                                  
+                                                                                  |d_op: struct dentry_operations*;|   H                                            
+                                                                                  |d_sb: struct super_block;       |   H
+                                                                                  | ...                            |   H
+                                                                                  +--------------------------------+   H
+                                                                                       struct inode(lowerendtry->inode)V
+                                                                                        +-------------------------------+
+                                                                                        |i_op: struct inode_operations*;| ==> 实际文件系统的lookup()
+                                                                                        |i_sb: struct super_block *;    |
+                                                                                        |i_ino: unsigned long;          |
+                                                                                        | ...                           |
+                                                                                        +-------------------------------+
+```
+
+查找到的目录或者文件，在ovl文件系统中表示如下：
+
+```text
+
+                                        struct ovl_entry                 
+                                     +->+------------------------------+
+                                     |  | ...                          |
+                                     |  |numlower: unsigned;           |
+                                     |  |lowerstack: struct ovl_path[];|
+                                     |  +==============================+
+                                     |  |struct ovl_path {             |
+                                     |  |  layer: struct ovl_layer*;   |
+                                     |  |  dentry: struct dentry*;     |
+                                     |  |};                            |
+                                     |  +------------------------------+
+                                     |  |struct ovl_path {             |
+                                     |  |  layer: struct ovl_layer*;   |
+                                     |  |  dentry: struct dentry*;     |
+                                     |  |};                            |
+                                     |  +------------------------------+
+                                     |  |                              |
+                                     |  |                              |
+                                     |
+                                     |  struct ovl_inode                   
+   struct dentry                     |  +---------------------------------+       
+   +--------------------------------+|  |redirect: char*;                 |           
+   |d_parent: struct dentry *;      ||  |mnt_mountpoint: struct dentry*;  |                  
+   |d_name: struct qstr;            ||  |vfs_inode: struct inode;         |               
+   |d_inode: struct inode*;----------+->|+-struct inode -----------------+|                    
+   |d_op: struct dentry_operations*;||  ||i_op: struct inode_operations*;||                    
+   |d_sb: struct super_block;       ||  ||i_sb: struct super_block *;    ||                
+   |d_fsdata: void *;  -(3)----------+  ||i_ino: unsigned long;          ||
+   | ...                            |   || ...                           ||
+   +--------------------------------+   |+-------------------------------+|
+                                        |__upperdentry: struct dentry*;   |
+                                        |lower: struct inode*;            |
+                                        |...                              |                              
+                                        +---------------------------------+               
+```
+
+####    3.2、打开目录
+被打开的目录可能只来自于upper层或lower层，由或者是upper和lower目录merged而成，打开过程如下：    
+
+```c
+ovl_dir_open(struct inode *inode, struct file *file) // fs/overlayfs/readdir.c
+|-> struct ovl_dir_file *od;
+|-> od = kzalloc(sizeof(struct ovl_dir_file), GFP_KERNEL);
+| // （1）获取目录路径：若目录是merged或者upper目录，则获得upper路径；否则，获得lower路径。
+|-> type = ovl_path_real(file->f_path.dentry, &realpath);
+|          |-> type = ovl_path_type(dentry);
+|          |          |-> type = __OVL_PATH_UPPER;
+|          |          |-> type  |= __OVL_PATH_MERGE;
+|          |
+|          |-> ovl_path_lower(dentry, path);
+|          | // < or >
+|          |-> ovl_path_upper(dentry, path);
+|              |-> path->mnt = ovl_upper_mnt(ofs);
+|              |-> path->dentry = ovl_dentry_upper(dentry);
+|
+| // （2）打开实际文件系统目录文件：upper或者lower目录
+|-> realfile = ovl_dir_open_realfile(file, &realpath);
+|              |-> struct file *res;
+|              |-> res = ovl_path_open(realpath, O_RDONLY | (file->f_flags & O_LARGEFILE));
+|                        |-> dentry_open(path, flags, current_cred());
+|                            |-> struct file *f;
+|                            |-> f = alloc_empty_file(flags, cred);
+|                            |-> vfs_open(path, f);
+|                                |-> open = f->f_op->open(inode, f);
+|
+| // （3）将overlayfs目录文件和实际文件系统目录文件关联：realfile作为ovldir_file的实际文件；ovl_dir_file又作为file的私有数据
+|-> od->realfile = realfile;
+|-> od->is_real = ovl_dir_is_real(file->f_path.dentry);
+|-> od->is_upper = OVL_TYPE_UPPER(type);
+|-> file->private_data = od;
+```
+
+由上过程可知，OverlayFS目录文件被打开后，同时存在OverlayFS目录文件和实际文件系统目录文件，中间通过`ovl_dir_file`链接（`ovl_dir_file`作为OverlayFS目录文件的私有数据），直接的关系示意如下：
+
+```
+                              struct ovl_dir_file                 
+                            +->+-----------------------------+
+                            |  |is_real: bool                |
+                            |  |is_upper: unsigned;          |
+                            |  |cache: struct ovl_dir_cache*;|
+                            |  |cursor: struct list_head*;   |
+                            |  |realfile: struct file*; -----+-+
+                            |  |upperfile: struct file*;     | |
+                            |  +-----------------------------+ |
+                            +-------+                  +-------+
+   struct file                      |                  |  struct file                     
+   +------------------------------+ |                  +->+------------------------------+  
+   |f_path: struct path;          | |                     |f_path: struct path;          |         
+   |f_inode: struct inode;        | |                     |f_inode: struct inode;        |     
+   |f_op: struct file_operations*;| |                     |f_op: struct file_operations*;|
+   |private_data: void *; --------+-+                     |private_data: void *;         |
+   | ...                          |                       | ...                          |
+   +------------------------------+                       +------------------------------+
+   overlayfs目录文件                                      实际文件系统目录文件
+```
+
+####    3.3、遍历目录
+
+遍历目录，即是所有各叠层相同目录下的所有文件列表，从系统调用（遍历目录）开始
+
+```c
+SCALL_DEFINE3(getdents, unsigned int, fd,,,,,) // fs/readdir.c
+|-> struct fd f;
+|-> struct getdents_callback buf = {
+|->     .ctx.actor = filldir,
+|->     .count = count,
+|->     .current_dir = dirent
+|-> };
+|
+|-> iterate_dir(f.file, &buf.ctx);
+    |-> file->f_op->iterate(file, ctx);
+```
+
+继续，OVL函数iterate实现。假设目录是merged的目录：
+
+```
+               struct ovl_dir_file                 
+                                    +=>+-----------------------------+
+                                    H  |is_real: bool                |
+                                    H  |is_upper: unsigned;          |
+                                    H  |cache: struct ovl_dir_cache*;|
+                                    H  |cursor: struct list_head*;   |
+                                    H  |realfile: struct file*; -----+-+
+                                    H  +-----------------------------+ |
+                                    H                                  | 
+   struct file                      H    struct file                   V  
+   +------------------------------+ H    +------------------------------+  
+   |f_path: struct path;  ==========+=+  |f_path: struct path;          |         
+   |f_inode: struct inode;        | H H  |f_inode: struct inode;        |     
+   |f_op: struct file_operations*;| H H  |f_op: struct file_operations*;|
+   |private_data: void *; ========+=+ H  |private_data: void *;         |
+   | ...                          |   H  | ...                          |
+   +------------------------------+   H  +------------------------------+
+     +================================+
+     V
+    struct path                     
+    +-----------------------+
+    |mnt: struct vfsmount*; |
+    |dentry: struct dentry*;|==+
+    +-----------------------+  H
+     +=========================+
+     V
+     struct dentry                        struct ovl_inode                   
+     +--------------------------------+   +---------------------------------+
+     |d_parent: struct dentry *;      |   |cache: struct ovl_dir_cache*;    |
+     |d_name: struct qstr;            |   |flags: unsigned long;            |
+     |d_inode: struct inode*;=========+==>|vfs_inode: struct inode;         |
+     |d_op: struct dentry_operations*;|   |+-struct inode -----------------+|
+     |d_sb: struct super_block;       |   ||i_op: struct inode_operations*;||
+     |d_fsdata: void *;  =============++  ||i_sb: struct super_block *;    ||
+     | ...                            |H  ||i_ino: unsigned long;          ||
+     +--------------------------------+H  || ...                           ||
+                                       H  |+-------------------------------+|
+                                       H  |__upperdentry: struct dentry*;   |
+                                       H  |...                              |
+                                       H  +---------------------------------+
+                                       H                  
+                                       H  struct ovl_entry                
+                                       +=>+------------------------------+
+                                          | ...                          |
+                                          |numlower: unsigned;           |
+                                          |lowerstack: struct ovl_path[];|
+                                          +==============================+
+                                          |struct ovl_path {             |
+                                          |  layer: struct ovl_layer*;   |
+                                          |  dentry: struct dentry*;     |
+                                          |};                            |
+                                          +------------------------------+
+                                          |                              |
+                                          |                              |
+```
+
+`ovl_iterate`的实现如下：
+
+```c
+ovl_iterate(struct file *file, struct dir_context *ctx)
+|-> struct ovl_dir_file *od = file->private_data;
+|-> struct ovl_dir_cache *cache;
+|
+|-> cache = ovl_cache_get(dentry);
+|           |-> ovl_set_dir_cache(d_inode(dentry), NULL);
+|           |-> cache = kzalloc(sizeof(struct ovl_dir_cache), GFP_KERNEL);
+|           |-> cache->refcount = 1;
+|           |-> INIT_LIST_HEAD(&cache->entries);
+|           |-> cache->root = RB_ROOT;
+|           |  // 遍历同名目录所在所有层次的文件列表，挂载文件列表到cache的红黑树节点
+|           |-> ovl_dir_read_merged(dentry, &cache->entries, &cache->root);
+|           |   |-> for (idx = 0; idx != -1; idx = next) {
+|           |   |       next = ovl_path_next(idx, dentry, &realpath);
+|           |   |              |-> struct ovl_entry *oe = dentry->d_fsdata;
+|           |   |              |-> if (idx == 0) ovl_path_upper(dentry, path);
+|           |   |              |        <or>
+|           |   |              |-> path->dentry = oe->lowerstack[idx - 1].dentry;
+|           |   |       if (next != -1) {
+|           |   |           // 遍历某一层中目录下文件列表，结果存放在ctx中
+|           |   |           err = ovl_dir_read(&realpath, &rdd);
+|           |   |                 |-> realfile = ovl_path_open(realpath, O_RDONLY | O_LARGEFILE);
+|           |   |                 |-> iterate_dir(realfile, &rdd->ctx);
+|           |   |       } else {
+|           |   |           err = ovl_dir_read(&realpath, &rdd);
+|           |   |       }
+|           |   |-> }
+|           |-> cache->root = RB_ROOT;
+|           |-> ovl_set_dir_cache(d_inode(dentry), cache);
+|
+|-> od->cache = cache;
+|-> ovl_seek_cursor(od, ctx->pos);
+|   |-> od->cursor = p;
+```
+
+由上面的流程可以看出，若是目录是合成的，在遍历目录下文件列表时，是将各叠层目录下的所有文件列表保存在文件所有的红黑树上，结构如下：
+
+```
+                                       struct ovl_dir_file                                
+                                    +=>+-----------------------------+               
+                                    H  |is_real: bool                |               
+                                    H  |is_upper: unsigned;          |               
+                                    H  |cache: struct ovl_dir_cache*;+--------+      
+                                    H  |cursor: struct list_head*;   |        |      
+                                    H  |realfile: struct file*; -----+-+      |        
+                                    H  +-----------------------------+ |      |        
+                                    H                                  |      |         
+   struct file                      H    struct file                   V      |          
+   +------------------------------+ H    +------------------------------+     |           
+   |f_path: struct path;  ==========+=+  |f_path: struct path;          |     |                  
+   |f_inode: struct inode;        | H H  |f_inode: struct inode;        |     |              
+   |f_op: struct file_operations*;| H H  |f_op: struct file_operations*;|     |         
+   |private_data: void *; ========+=+ H  |private_data: void *;         |     |                         保存所有不同层次相同目录下的文件列表（红黑树）
+   | ...                          |   H  | ...                          |     |                        /
+   +------------------------------+   H  +------------------------------+     |                       V
+     +================================+                                       |  struct ovl_dir_cache                                    
+     V                                                                        +->+------------------------+               
+    struct path                                                               |  |refcount: long;         |               
+    +-----------------------+                                                 |  |version: u64;           |               
+    |mnt: struct vfsmount*; |                                                 |  |entries: struct entries;|               
+    |dentry: struct dentry*;|==+                                              |  |root: struct rb_root;   |               
+    +-----------------------+  H                                              |  +------------------------+               
+     +=========================+                                              |                
+     V                                                                        |                
+     struct dentry                        struct ovl_inode                    |                
+     +--------------------------------+   +---------------------------------+ |             
+     |d_parent: struct dentry *;      |   |cache: struct ovl_dir_cache*; ---+-+              
+     |d_name: struct qstr;            |   |flags: unsigned long;            |
+     |d_inode: struct inode*;=========+==>|vfs_inode: struct inode;         |
+     |d_op: struct dentry_operations*;|   |+-struct inode -----------------+|
+     |d_sb: struct super_block;       |   ||i_op: struct inode_operations*;||
+     |d_fsdata: void *;               |   ||i_sb: struct super_block *;    ||
+     | ...                            |   ||i_ino: unsigned long;          ||
+     +--------------------------------+   || ...                           ||
+                                          |+-------------------------------+|
+                                          |__upperdentry: struct dentry*;   |
+                                          |...                              |
+                                          +---------------------------------+
+```
+
+
+相关代码如下：
+```c
+static int ovl_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
+{
+	return ovl_create_object(dentry, (mode & 07777) | S_IFDIR, 0, NULL);
+}
+
+//https://elixir.bootlin.com/linux/v5.4.241/source/fs/overlayfs/dir.c#L601
+static int ovl_create_object(struct dentry *dentry, int mode, dev_t rdev,
+			     const char *link)
+{
+	int err;
+	struct inode *inode;
+	struct ovl_cattr attr = {
+		.rdev = rdev,
+		.link = link,
+	};
+
+	err = ovl_want_write(dentry);
+	if (err)
+		goto out;
+
+	/* Preallocate inode to be used by ovl_get_inode() */
+	err = -ENOMEM;
+    //https://elixir.bootlin.com/linux/v5.4.241/source/fs/overlayfs/inode.c#L708
+	inode = ovl_new_inode(dentry->d_sb, mode, rdev);
+	if (!inode)
+		goto out_drop_write;
+
+	spin_lock(&inode->i_lock);
+	inode->i_state |= I_CREATING;
+	spin_unlock(&inode->i_lock);
+
+	inode_init_owner(inode, dentry->d_parent->d_inode, mode);
+	attr.mode = inode->i_mode;
+
+    //https://elixir.bootlin.com/linux/v5.4.241/source/fs/overlayfs/dir.c#L536
+    //todo
+	err = ovl_create_or_link(dentry, inode, &attr, false);
+	/* Did we end up using the preallocated inode? */
+	if (inode != d_inode(dentry))
+		iput(inode);
+
+out_drop_write:
+	ovl_drop_write(dentry);
+out:
+	return err;
+}
+```
+
+
+
 ##  0x0 具体case的追踪解读
 
 本章节详细追踪下overlayFS的文件打开过程
@@ -1798,6 +2526,7 @@ static inline struct cgroup *task_cgroup(struct task_struct *task, int subsys_id
 | perf_event | 性能事件访问控制 | — |
 
 ##  0x06  参考
+-   [Docker教程(九)---Docker 魔法解密：探索 UnionFS 与 OverlayFS](https://www.lixueduan.com/posts/docker/09-ufs-overlayfs/)
 -   [Overlay 文件系统介绍](https://flyflypeng.tech/%E4%BA%91%E5%8E%9F%E7%94%9F/2023/03/29/Overlay-%E6%96%87%E4%BB%B6%E7%B3%BB%E7%BB%9F.html)
 -   [docker容器技术基础之联合文件系统OverlayFS](https://zhuanlan.zhihu.com/p/392508816)
 -   [理解docker [三] - git与overlayfs](https://zhuanlan.zhihu.com/p/144616121)
