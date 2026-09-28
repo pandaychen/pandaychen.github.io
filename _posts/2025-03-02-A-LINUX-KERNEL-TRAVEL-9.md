@@ -2114,6 +2114,150 @@ flowchart TD
 
 一句话概括：**OverlayFS 是"站在 VFS 抽象之上、又把工作转包给下层真实文件系统"的中间层，它的"hook"就是标准 VFS 回调接口（v5.4 已含完整的 stacked `file_operations`）+ `d_real` 转发契约，属于合法的框架内扩展，而非运行时劫持**。
 
+####    OverlayFS 核心数据结构全景关系图
+
+前面各模块分散讲解了 OverlayFS 的每个核心结构体，本小节用两幅关系图把它们**串成一张全景图**：宿主机底层文件系统统一取 `ext4`，重点体现 `file`、`dentry`、`inode`、`super_block`（VFS 四大对象）与 `ovl_inode`、`ovl_entry`、`ovl_fs`、`ovl_dir_file`、`ovl_path`（overlay 私有对象）之间的**成员指向**与 **`container_of`** 关系。相关定义分别位于 [`ovl_entry.h`](https://elixir.bootlin.com/linux/v5.4.241/source/fs/overlayfs/ovl_entry.h)、[`readdir.c`](https://elixir.bootlin.com/linux/v5.4.241/source/fs/overlayfs/readdir.c)（`ovl_dir_file`）与 [`file.c`](https://elixir.bootlin.com/linux/v5.4.241/source/fs/overlayfs/file.c)（`ovl_open_realfile`）
+
+#####  图一：数据结构全景关系图
+
+几个必须记住的关键关系：
+
+-   **`container_of` 内嵌**：overlay 的 VFS `struct inode` 并非独立分配，而是内嵌在 `struct ovl_inode` 的 `vfs_inode` 字段里，`OVL_I(inode) = container_of(inode, struct ovl_inode, vfs_inode)` 双向换算
+-   **三类私有指针**：`super_block->s_fs_info → ovl_fs`、`dentry->d_fsdata → ovl_entry`、`OVL_I(inode) → ovl_inode`
+-   **穿透到真实层**：`ovl_inode->__upperdentry`/`->lower` 指向真实 upper/lower 对象；`ovl_entry->lowerstack[]`（`ovl_path` 数组）经 `ovl_path->layer`(`ovl_layer`)/`->dentry` 指向真实 lower
+-   **数据 I/O 的落点**：常规文件 overlay `file->private_data` 指向 `ovl_open_realfile()` 打开的**底层 ext4 `struct file`**；目录 overlay `file->private_data` 指向 `ovl_dir_file`，再由其 `realfile`/`upperfile` 指向真实目录 file
+
+```mermaid
+flowchart TB
+    subgraph overlay [OverlayFS 层对象]
+        F_REG["struct file（常规文件）"]
+        F_DIR["struct file（目录）"]
+        ODF["struct ovl_dir_file"]
+        DEN["struct dentry（overlay）"]
+        OI["struct ovl_inode"]
+        VI["struct inode vfs_inode（内嵌）"]
+        OE["struct ovl_entry"]
+        OP["struct ovl_path"]
+        SBO["struct super_block（overlay）"]
+        OFS["struct ovl_fs"]
+        OL["struct ovl_layer"]
+        OSB["struct ovl_sb"]
+        OVLFOP["ovl_file_operations"]
+    end
+    subgraph ext4 [底层 ext4 真实对象]
+        RUPD["struct dentry（upper）"]
+        RUPI["struct inode（upper）"]
+        RLOD["struct dentry（lower）"]
+        RLOI["struct inode（lower）"]
+        RF["struct file（ext4 realfile）"]
+        ESB["struct super_block（ext4）"]
+        EXTFOP["ext4_file_operations"]
+    end
+
+    F_REG -->|f_inode| VI
+    F_REG -->|f_path.dentry| DEN
+    F_REG -->|f_op| OVLFOP
+    F_REG -->|"private_data"| RF
+    F_DIR -->|"private_data"| ODF
+    ODF -->|realfile| RF
+
+    DEN -->|d_sb| SBO
+    DEN -->|d_fsdata| OE
+    DEN -->|d_inode| VI
+    OI ==>|"内嵌 vfs_inode"| VI
+    VI -.->|"OVL_I()=container_of"| OI
+    OI -->|__upperdentry| RUPD
+    OI -->|lower| RLOI
+
+    OE -->|"lowerstack[i]"| OP
+    OP -->|layer| OL
+    OP -->|dentry| RLOD
+
+    SBO -->|s_fs_info| OFS
+    OFS -->|"upper_mnt→mnt_sb"| ESB
+    OFS -->|"lower_layers[i]"| OL
+    OL -->|fs| OSB
+    OSB -->|sb| ESB
+
+    RUPD -->|d_inode| RUPI
+    RLOD -->|d_inode| RLOI
+    RUPI -->|i_sb| ESB
+    RF -->|f_op| EXTFOP
+    RF -->|f_inode| RUPI
+```
+
+#####  图二：实战示例（merged 视图下两个文件的写打开）
+
+设容器 `merged` 视图下有两个文件，均以**写方式打开并写入数据**：
+
+-   `/etc/passwd`：来自 **lower**（镜像层）。以写方式 `open()` 时，`ovl_open() → ovl_maybe_copy_up()` 判定 `FMODE_WRITE` 需要 copy-up，于是把该文件从 lower **复制到 upper（`diff/etc/passwd`）**。copy-up 完成后的稳态：`OVL_I(inode)->__upperdentry` 已指向新建的 upper dentry，`->lower` 仍保留 lower origin（只读引用/合并语义追踪），`file->private_data` 指向 **upper** 的 ext4 realfile，写入落在 upper 副本
+-   `/root/a.file`：**upper 原生**文件（容器运行后新建）。`ovl_entry.numlower == 0`、`OVL_I(inode)->lower == NULL`，无需 copy-up，写入直接落在 upper
+
+由于宿主机底层统一是 ext4，且 Docker `overlay2` 的 `diff/`（upper）与 `l/`（lower）通常位于**同一个 ext4 文件系统**，故两文件的真实 inode 共享同一 ext4 `super_block`；两文件的 overlay 对象也共享同一 overlay `super_block → ovl_fs`。
+
+```mermaid
+flowchart TB
+    subgraph passwd [/etc/passwd：写打开触发 copy-up 后]
+        FP["struct file（overlay, O_WRONLY）"]
+        DP["dentry（overlay）"]
+        OIP["ovl_inode(passwd)"]
+        VIP["vfs_inode"]
+        OEP["ovl_entry（numlower=1）"]
+        OPP["ovl_path"]
+        RUP_P["upper dentry: diff/etc/passwd（copy-up 新建）"]
+        RUI_P["ext4 inode（upper 副本）"]
+        RLD_P["lower dentry: l/.../etc/passwd"]
+        RLI_P["ext4 inode（lower origin, 只读）"]
+        RFP["ext4 realfile（upper）"]
+    end
+    subgraph afile [/root/a.file：upper 原生]
+        FA["struct file（overlay, O_WRONLY）"]
+        DA["dentry（overlay）"]
+        OIA["ovl_inode(a.file)"]
+        VIA["vfs_inode"]
+        OEA["ovl_entry（numlower=0）"]
+        RUP_A["upper dentry: diff/root/a.file"]
+        RUI_A["ext4 inode（upper）"]
+        RFA["ext4 realfile（upper）"]
+    end
+    SBO["super_block（overlay）"]
+    OFS["ovl_fs"]
+    ESB["super_block（ext4 宿主机）"]
+
+    FP -->|"private_data（写落 upper）"| RFP
+    FP -->|f_inode| VIP
+    FP -->|f_path.dentry| DP
+    DP -->|d_fsdata| OEP
+    DP -->|d_sb| SBO
+    VIP -.->|OVL_I| OIP
+    OIP -->|"__upperdentry（copy-up 后）"| RUP_P
+    OIP -->|lower| RLI_P
+    OEP -->|"lowerstack[0]"| OPP
+    OPP -->|dentry| RLD_P
+    RUP_P -->|d_inode| RUI_P
+    RLD_P -->|d_inode| RLI_P
+    RFP -->|f_inode| RUI_P
+
+    FA -->|private_data| RFA
+    FA -->|f_inode| VIA
+    FA -->|f_path.dentry| DA
+    DA -->|d_fsdata| OEA
+    DA -->|d_sb| SBO
+    VIA -.->|OVL_I| OIA
+    OIA -->|__upperdentry| RUP_A
+    OIA -->|"lower = NULL"| NIL["（无 lower）"]
+    RUP_A -->|d_inode| RUI_A
+    RFA -->|f_inode| RUI_A
+
+    SBO -->|s_fs_info| OFS
+    OFS -->|"upper_mnt / lower_layers"| ESB
+    RUI_P -->|i_sb| ESB
+    RUI_A -->|i_sb| ESB
+    RLI_P -->|i_sb| ESB
+```
+
+对照两文件可以看出：**无论文件原本在 lower 还是 upper，写操作最终都落到 upper 的 ext4 realfile**——区别只在于 lower 文件需要先经 copy-up 在 upper 建立副本（`__upperdentry` 从 `NULL` 变为指向新 upper dentry），而 upper 原生文件（`lower == NULL`）直接写。两文件共享同一 overlay `super_block → ovl_fs`，真实数据/元数据则由同一宿主机 ext4 `super_block` 承载与落盘
+
 ##  0x0     overlayFS 操作分析：以ls -al为例
 
 本章节，以在容器的某个目录执行`ls -al`命令为例，介绍下完整的内核调用链路
