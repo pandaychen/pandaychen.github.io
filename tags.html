@@ -26,7 +26,10 @@ header-img: "img/tag-bg.jpg"
             <!-- 标签云 -->
 			<div id='tag_cloud' class="tags">
 				{% for tag in site.tags %}
-				<a href="#{{ tag[0] }}" title="{{ tag[0] }}" rel="{{ tag[1].size }}">{{ tag[0] }}</a>
+				<a href="#{{ tag[0] }}" title="{{ tag[0] }}" rel="{{ tag[1].size }}">
+					{{ tag[0] }}
+					<sup>{{ tag[1].size }}</sup>
+				</a>
 				{% endfor %}
 			</div>
 
@@ -41,6 +44,7 @@ header-img: "img/tag-bg.jpg"
 			<div class="one-tag-list">
 			  	<span class="fa fa-tag listing-seperator" id="{{ tag[0] }}">
                     <span class="tag-text">{{ tag[0] }}</span>
+                    <sup>{{ tag[1].size }}</sup>
                 </span>
 				{% for post in tag[1] %}
 				  <!-- <li class="listing-item">
