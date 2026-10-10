@@ -81,7 +81,7 @@ POSIX共享内存是基于tmpfs来实现的，System V shared memory在内核也
 ####	mmap文件共享（映射）的原理（回顾）
 先回顾下，mmap实现文件共享映射的过程
 
-调用 mmap 进行内存文件映射的时候，内核首先会在进程的虚拟内存空间中创建一个新的虚拟内存区域 VMA 用于映射文件，通过 `vm_area_struct->vm_file` 将映射文件的 `struct flle` 结构与虚拟内存映射关联起来
+调用 mmap 进行内存文件映射的时候，内核首先会在进程的虚拟内存空间中创建一个新的虚拟内存区域 VMA 用于映射文件，通过 `vm_area_struct->vm_file` 将映射文件的 `struct file` 结构与虚拟内存映射关联起来
 
 ```cpp
 struct vm_area_struct {
@@ -145,7 +145,105 @@ static inline struct page *find_get_page(struct address_space *mapping,
 
 [前文](https://pandaychen.github.io/2024/11/05/A-LINUX-KERNEL-TRAVEL-2/#0x02----%E8%BF%9B%E7%A8%8B%E8%99%9A%E6%8B%9F%E5%86%85%E5%AD%98%E7%AE%A1%E7%90%86elf%E5%8A%A0%E8%BD%BD)描述过新进程的创建过程：进程虚拟内存空间的创建以及初始化是由 `load_elf_binary` 函数负责的，当进程通过 `fork()` 系统调用创建出子进程之后，子进程可以通过前面介绍的 `execve` 系统调用加载并执行一个指定的二进制执行文件，进程的虚拟内存空间的初始化过程由此开始
 
-TODO
+文件映射与匿名映射区的布局，本质上就是确定 `mm_struct->mmap_base`（映射区起始地址）以及 `mm->get_unmapped_area`（在映射区中查找空闲 vma 的方法）这两个字段。这个决策发生在 `execve` 加载 ELF 的过程，即`load_elf_binary`->`setup_new_exec`->`arch_pick_mmap_layout`，调用链如下：
+
+```text
+execve
+  -> load_elf_binary          //fs/binfmt_elf.c
+    -> setup_new_exec         //fs/exec.c
+      -> arch_pick_mmap_layout  //arch/x86/mm/mmap.c，按体系结构决定映射区布局
+```
+
+比如，x86体系下的`arch_pick_mmap_layout`的实现[位于](https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/mm/mmap.c#L101)
+
+`arch_pick_mmap_layout` 是布局决策的核心，它决定采用经典布局（legacy）还是新式布局（topdown），并据此设置 `mm->mmap_base` 与 `mm->get_unmapped_area`：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/mm/mmap.c#L60
+// 判断是否采用经典（legacy）布局
+static int mmap_is_legacy(void)
+{
+	// 1. 进程设置了 ADDR_COMPAT_LAYOUT 兼容标志
+	if (current->personality & ADDR_COMPAT_LAYOUT)
+		return 1;
+
+	// 2. 栈大小无限制（RLIM_INFINITY）时，栈可能无限增长，无法为新式布局预留有界的栈空间
+	//    因此只能采用经典（从低到高增长）布局
+	if (rlimit(RLIMIT_STACK) == RLIM_INFINITY)
+		return 1;
+
+	// 3. 由 /proc/sys/vm/legacy_va_layout 控制
+	return sysctl_legacy_va_layout;
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/mm/mmap.c#L90
+// 经典布局：映射区起点 = TASK_UNMAPPED_BASE(约 TASK_SIZE/3) + 随机偏移（ASLR）
+static unsigned long mmap_legacy_base(unsigned long rnd,
+				      unsigned long task_size)
+{
+	return __TASK_UNMAPPED_BASE(task_size) + rnd;
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/mm/mmap.c#L96
+// 新式布局：映射区从栈的下方开始向下增长，需要根据栈大小 gap 计算起点
+static unsigned long mmap_base(unsigned long rnd, unsigned long task_size)
+{
+	// gap 即为栈预留空间，取自 RLIMIT_STACK
+	unsigned long gap = rlimit(RLIMIT_STACK);
+	unsigned long pad = stack_maxrandom_size(task_size) + stack_guard_gap;
+	unsigned long gap_min, gap_max;
+
+	/* Values close to RLIM_INFINITY can overflow. */
+	if (gap + pad > gap)
+		gap += pad;
+
+	// 为栈预留的 gap 需要落在 [128M, 5/6*task_size] 之间
+	gap_min = SIZE_128M;
+	gap_max = (task_size / 6) * 5;
+
+	if (gap < gap_min)
+		gap = gap_min;
+	else if (gap > gap_max)
+		gap = gap_max;
+
+	// 映射区起点 = task_size - gap - 随机偏移，即位于栈的下方
+	return PAGE_ALIGN(task_size - gap - rnd);
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/mm/mmap.c#L130
+void arch_pick_mmap_layout(struct mm_struct *mm)
+{
+	if (mmap_is_legacy())
+		// 经典布局：映射区自下而上增长，使用 arch_get_unmapped_area 正向查找
+		mm->get_unmapped_area = arch_get_unmapped_area;
+	else
+		// 新式布局：映射区自上而下增长，使用 arch_get_unmapped_area_topdown 逆向查找
+		mm->get_unmapped_area = arch_get_unmapped_area_topdown;
+
+	// 计算并设置 mm->mmap_base（映射区起始地址），arch_rnd 提供 ASLR 随机偏移
+	arch_pick_mmap_base(&mm->mmap_base, &mm->mmap_legacy_base,
+			arch_rnd(mmap64_rnd_bits), task_size_64bit(0));
+}
+```
+
+小结下，布局决策的几个关键点：
+
+-	`mmap_base` 与 `get_unmapped_area` 是成对设置的：经典布局用 `arch_get_unmapped_area`（正向、从 `mmap_base` 向高地址查找），新式布局用 `arch_get_unmapped_area_topdown`（逆向、从栈下方向低地址查找），本文后续 `get_unmapped_area` 小节主要分析经典布局
+-	经典布局起点固定在 `TASK_UNMAPPED_BASE = PAGE_ALIGN(task_size/3)`；新式布局起点依赖 `RLIMIT_STACK`（栈越大，映射区起点越低），并预留至少 `128MB` 的安全 gap（含 `stack_guard_gap`）
+-	`arch_rnd(mmap64_rnd_bits)` 为 `mmap_base` 引入随机偏移，即 ASLR（地址空间布局随机化），可通过 `/proc/sys/kernel/randomize_va_space` 控制
+-	布局的选择由 `mmap_is_legacy()` 决定：`ADDR_COMPAT_LAYOUT`、`RLIMIT_STACK == RLIM_INFINITY`、`/proc/sys/vm/legacy_va_layout` 任一满足即用经典布局
+
+```mermaid
+flowchart TD
+    exec["execve -> load_elf_binary -> setup_new_exec"] --> pick["arch_pick_mmap_layout(mm)"]
+    pick --> isLegacy{"mmap_is_legacy()?"}
+    isLegacy -->|"是 (兼容标志 / 栈无限 / sysctl)"| legacy["经典布局"]
+    isLegacy -->|否| topdown["新式布局"]
+    legacy --> lbase["mmap_base = TASK_UNMAPPED_BASE(~task_size/3) + rnd"]
+    legacy --> lfn["get_unmapped_area = arch_get_unmapped_area (正向)"]
+    topdown --> tbase["mmap_base = task_size - gap(RLIMIT_STACK) - rnd"]
+    topdown --> tfn["get_unmapped_area = arch_get_unmapped_area_topdown (逆向)"]
+```
 
 ####    mmap内存映射
 核心分为三个步骤：
@@ -161,7 +259,7 @@ TODO
 -   为映射分配了新的虚拟地址区域后，通过待映射的文件指针，在文件描述符表中找到对应的文件描述符，通过文件描述符，链接到内核**已打开文件集**中该文件的文件结构体（`struct file`），每个文件结构体维护着和这个已打开文件的相关各项信息
 -   通过该文件的文件结构体，链接到 `file_operations` ，调用内核函数 `mmap`（`int mmap(struct file *filp, struct vm_area_struct *vma`），不同于用户空间库函数
 -   内核 mmap 函数通过虚拟文件系统 inode 模块定位到文件磁盘物理地址
--   通过 `remap_pfn_range` 函数建立页表，即实现了文件地址和虚拟地址区域的映射关系。此时，这片虚拟地址并没有任何数据关联到主存中
+-   建立文件地址和虚拟地址区域的映射关系（此时，这片虚拟地址并没有任何数据关联到主存中）。注意：这是经典教材式的概括描述，实际上普通文件系统（如 ext4）在这一步并不建立页表，仅设置 `vma->vm_ops`，页表在缺页时才逐页建立；`remap_pfn_range` 一次性建表主要用于驱动/设备内存映射，详见下文 `四级页表的建立过程` 小节的说明
 
 3、进程发起对这片映射空间的访问，引发缺页异常，实现文件内容到物理内存（主存）的拷贝
 
@@ -219,8 +317,8 @@ out:
 	return error;
 }
 
-//https://elixir.bootlin.com/linux/v4.11.6/source/arch/x86/kernel/sys_x86_64.c#L87
-// 注意：参数pgoff就是按照PAGE_SHIFT对齐之后的（原始用户传入的）offset
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/mmap.c#L1490
+// 注意：参数pgoff就是按照PAGE_SHIFT对齐之后的（原始用户传入的）offset，即以页为单位的偏移
 SYSCALL_DEFINE6(mmap_pgoff, unsigned long, addr, unsigned long, len,
 		unsigned long, prot, unsigned long, flags,
 		unsigned long, fd, unsigned long, pgoff)
@@ -602,7 +700,10 @@ get_unmapped_area(struct file *file, unsigned long addr, unsigned long len,
 
 ![arch_get_unmapped_area-BUJU](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/arch_get_unmapped_area-BUJU.png)
 
-如上图，在经典布局下，mmap 可以映射的虚拟内存范围必须在进程虚拟内存空间 `mmap_min_addr` 到 `mmap_end` 这段地址范围内，`mmap_min_addr` 为 `TASK_SIZE` 的`1/3`，`mmap_end` 为 `TASK_SIZE`
+如上图，在经典布局下，mmap 可以映射的虚拟内存范围必须在进程虚拟内存空间 `mmap_base` 到 `mmap_end` 这段地址范围内，`mmap_base`（即经典布局的 `TASK_UNMAPPED_BASE`）约为 `TASK_SIZE` 的`1/3`，`mmap_end` 为 `TASK_SIZE`
+
+注意：这里的 `mmap_base` 是文件映射与匿名映射区的起始地址（保存在 `mm_struct->mmap_base`），不要与内核安全下限 `mmap_min_addr`（`/proc/sys/vm/mmap_min_addr`，用于禁止用户态映射过低地址、默认 `4KB` 或 `64KB`）混淆，二者是完全不同的两个概念
+
 内核需要检查本次 mmap 映射的虚拟内存长度 `len` 是否超过了规定的映射范围，如果超过了则返回 `ENOMEM` 错误，并停止映射流程。如果映射长度 `len` 在规定的映射地址范围内，内核则会根据指定的映射起始地址 `addr`，以及映射长度 `len`，开始在文件映射与匿名映射区，为本次 mmap 映射寻找一段空闲的虚拟内存区域 vma 出来
 
 内核实际找到的可用vma区域，受mmap参数控制，一般有下面几种情况：
@@ -1452,7 +1553,7 @@ static void vma_link(struct mm_struct *mm, struct vm_area_struct *vma,
 
 	// 将 vma 插入到地址空间中的 vma 链表 mm_struct->mmap 以及红黑树 mm_struct->mm_rb 中
 	__vma_link(mm, vma, prev, rb_link, rb_parent);
-	// 建立文件与 vma 的反向映射（TODO）
+	// 建立文件与 vma 的反向映射（详见下文 __vma_link_file 分析）
 	__vma_link_file(vma);
 
 	if (mapping)
@@ -1542,7 +1643,9 @@ static const struct vm_operations_struct ext4_file_vm_ops = {
 ![ext4_mmap](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/3/ext4_mmap.png)
 
 ####	四级页表的建立过程
-内核在执行文件映射时，此文件所属的文件系统会注册虚拟内存区域的虚拟内存操作集合，其中也包括内核驱动函数mmap，在不同的文件系统中内核驱动函数mmap的实现方式有所不同，但其内部都是通过 `remap_pfn_range` 函数来建立页表，即实现文件地址和虚拟地址区域的映射关系
+这里需要先澄清一个**常见的误区**：对于普通文件系统（如 ext4）的 mmap 文件映射而言，`call_mmap`（`ext4_file_mmap`[函数](https://elixir.bootlin.com/linux/v4.11.6/source/fs/ext4/file.c#L341)）阶段**并不会**建立任何页表，它只是把 `vma->vm_ops` 挂成 `ext4_file_vm_ops`（见上一小节分析）。真正的页表（PTE）是在进程首次访问该虚拟地址、触发缺页中断时，由 `filemap_fault->finish_fault->alloc_set_pte` **按需逐页建立**的（见下文 `0x05 缺页中断的主要处理`分析）。也就是说，普通文件映射走的是**惰性建表（demand paging）**路径，`ext4_file_mmap` 内部并不会调用 `remap_pfn_range`
+
+那么 `remap_pfn_range` 用在哪里？它是**驱动/设备内存映射**（`VM_PFNMAP | VM_IO`，如 `/dev/mem`、framebuffer、外设寄存器 MMIO 等）在 `->mmap` 回调中**一次性提前**建立整段虚拟地址到物理页帧（`pfn`）映射的接口，映射的物理内存往往没有对应的 `struct page`（因此不参与 LRU/缺页/回收），也就不适合走缺页惰性建表。本小节以 `remap_pfn_range` 为例，是为了完整展示**「四级页表如何被逐级填充」这一通用机制**（缺页处理中 `handle_mm_fault` 里的 `p4d_alloc/pud_alloc/pmd_alloc/pte_alloc` 逐级建表思想与此一致），而非说明 ext4 文件映射的实现路径
 
 先回想下linux的四级页表模型，以及进程的`mm_struct`仅保存了CR3寄存器的基地址：
 
@@ -1759,13 +1862,13 @@ static int remap_pte_range(struct mm_struct *mm, pmd_t *pmd,
 }
 ```
 
-至此，完成 mmap 内存映射过程的第二阶段，实现文件物理地址和进程虚拟地址的一一映射关系，同时更新的虚拟内存地址-->物理内存地址（pfn）的映射关系也已经保存在TLB缓存中，用于加速地址翻译过程
+至此，`remap_pfn_range` 展示了「四级页表逐级填充」的通用机制（`pgd->p4d->pud->pmd->pte`）。再次强调，这条一次性建表的路径**主要服务于驱动/设备内存映射**，普通 ext4 文件映射并不经由此路径
 
-`do_mmap`的实现到此完成，调用 mmap 进行内存映射时，内核只是会在进程的虚拟内存空间中为该次映射分配一段虚拟内存，然后建立好这段虚拟内存与相关文件之间的映射关系，至此流程就结束，完成mmap内存映射的实现过程的第一和第二阶段
+回到 mmap 文件映射的主线：`do_mmap`（第一、二阶段）执行完之后，内核只是在进程虚拟内存空间中为该次映射分配了一段虚拟内存 vma，并把 `vma->vm_ops` 与映射文件关联好，**此时既没有分配物理内存，也没有建立任何 PTE**
 
-重要的一点是，此时内核并不会为映射分配物理内存，物理内存的分配工作需要延后到这段虚拟内存被CPU访问的时候，通过缺页中断来进入内核，分配物理内存，即mmap内存映射的实现过程的第三阶段，下文继续介绍
+再次注意：物理内存的分配（此时内核并不会为映射分配物理内存）与页表的建立都被延后到这段虚拟内存首次被 CPU 访问时，通过缺页中断进入内核完成，即 mmap 内存映射实现过程的第三阶段，下文继续介绍
 
-##  0x0 mmap文件映射实现
+##  0x02    mmap文件映射实现
 以ext4文件系统继续分析，对应的回调函数如下：
 
 ```cpp
@@ -1802,7 +1905,7 @@ static int ext4_file_mmap(struct file *file, struct vm_area_struct *vma)
 }
 ```
 
-##  0x02 mmap匿名共享映射实现
+##  0x03    mmap匿名共享映射实现
 若使用mmap进行共享匿名映射，父子进程之间需要依赖 tmpfs 文件系统中的匿名文件对共享内存进行访问，当进行共享匿名映射时，内核会在 `shmem_zero_setup` 函数中，使用 tmpfs 文件系统里为映射创建一个匿名文件（`shmem_kernel_file_setup`），随后将 tmpfs 文件系统中的这个匿名文件与虚拟映射区 vma 中的 `vm_file` 关联映射起来，当父进程调用 fork 创建子进程的时候，内核会将父进程的虚拟内存空间全部拷贝给子进程，包括这里创建的共享匿名映射区域 vma，这样一来，父子进程就可以通过共同的 vma->vm_file 来实现共享内存的通信了（mmap 的共享匿名映射其实本质上还是共享文件映射）
 
 ```cpp
@@ -1839,7 +1942,149 @@ static const struct vm_operations_struct shmem_vm_ops = {
 };
 ```
 
-##	0x03	缺页中断的主要处理
+##	0x04	缺页中断的应用场景与直观认识
+在深入源码介绍之前，先建立对缺页中断（Page Fault）的直观认识：缺页中断并不是「错误」，而是内核实现按需分页（demand paging）、写时复制（COW）、内存回收（swap）等惰性机制的**核心手段**。理解「哪些操作会触发缺页、触发的是哪一类缺页」，对分析性能问题（如首次访问抖动、大页/预读优化）非常关键
+
+####	major fault VS minor fault
+内核把缺页分为两类，二者的本质区别是**是否需要磁盘 I/O**：
+
+-	**次要缺页（minor fault）**：不需要发起磁盘 I/O 就能解决。比如所需页面已经在 page cache 里（只需建立 PTE 映射）、匿名页首次写（直接从 buddy 分配清零页）、COW 复制页等。开销较小（微秒级）
+-	**主要缺页（major fault）**：需要发起磁盘 I/O 才能解决。比如 mmap 文件页首次访问且不在 page cache、被换出（swap out）的页需要换入（swap in）。开销较大（可达毫秒级），内核会统计 `PGMAJFAULT`（对照下文 `filemap_fault` 中 `count_vm_event(PGMAJFAULT)` 与 `ret = VM_FAULT_MAJOR`）
+
+####	典型场景分类
+先汇总一下，常见操作是否触发缺页、以及触发哪一类缺页（内核版本 v4.11.6）：
+
+| 场景 | 是否触发（用户地址空间）缺页 | 类型 | 内核路径 / 说明 |
+| :---- | :---- | :---- | :---- |
+| 普通 `read()/write()` 系统调用 | **一般不触发**（对被读写的文件而言） | - | 走 VFS -> page cache -> `copy_to/from_user`，用户拿到的是内核缓冲区拷贝，不涉及把文件页映射进用户地址空间。若 page cache 未命中则触发磁盘 I/O（属 I/O，不是「用户态缺页」） |
+| `read()` 的目标用户 buffer 首次写入 | 触发 | minor | buffer 若是刚 `malloc`/匿名映射且未落物理页，`copy_to_user` 写入时对该 buffer 触发匿名页缺页（`do_anonymous_page`） |
+| `mmap` 文件映射，首次**读** | 触发 | 未命中 major / 命中 minor | `do_read_fault->__do_fault->filemap_fault`，page cache 未命中要读盘（major），已被其他进程加载则命中（minor） |
+| `mmap` 共享文件映射，首次**写** | 触发 | 视 cache 命中而定 | `do_shared_fault`（含 `page_mkwrite`，写脏后由回写线程刷盘） |
+| `mmap` 私有文件映射（`MAP_PRIVATE`），**写** | 触发 | minor | `do_cow_fault`，写时复制出独立匿名页，写入不回写原文件 |
+| `mmap` 匿名映射 / `malloc` 大块（走 `mmap`），首次**读** | 触发 | minor | `do_anonymous_page`，映射到全局零页，不真正分配物理页 |
+| `mmap` 匿名映射 / `malloc` 大块，首次**写** | 触发 | minor | `do_anonymous_page`，`alloc_zeroed_user_highpage_movable` 分配清零匿名页 |
+| `malloc` 小块（走 `brk`）首次写 | 触发 | minor | 同匿名页缺页 |
+| `fork` 后父子任一方写共享的私有页 | 触发 | minor | 写保护缺页 -> COW，复制出独立物理页 |
+| 栈向下增长访问到未映射页 | 触发 | minor | `do_page_fault` 中 `expand_stack` 扩栈后按匿名页处理 |
+| 访问被换出（swap out）的页 | 触发 | major | `do_swap_page`，从 swap 设备换入 |
+| 程序首次执行某段代码/访问 `.data`（demand paging of executable） | 触发 | 首次 major | 可执行文件按需调页，本质是文件映射缺页 |
+| System V shm / tmpfs 共享内存首次访问 | 触发 | minor / major | `shmem_fault`，page cache -> swap cache -> swap in -> 分配（见后文 shmem 分析） |
+
+这里**先总结几个笔者的高频问题**：
+
+-	**普通文件 `read()/write()` 不会导致（用户地址空间的）缺页中断**：因为访问的是内核 page cache 并拷贝到用户缓冲区，没有把文件页映射进用户虚拟地址；只有「用户缓冲区自身未落物理页」时才会对缓冲区触发匿名页缺页
+-	**`mmap` 场景一定会依赖缺页中断**，这正是 mmap「零拷贝/按需加载」的实现基础：`mmap` 只建立 vma，首次访问必然触发缺页来分配物理页 / 建立 PTE
+
+todo：那么对mmap映射到一个已经存在的普通文件，然后再进行`read/write`的场景呢？
+
+####	缺页场景分类决策图
+
+```mermaid
+flowchart TD
+    fault["Page Fault (PTE 缺失 / 写保护)"] --> anon{"vma_is_anonymous?"}
+    anon -->|"是: 匿名映射"| doAnon["do_anonymous_page"]
+    doAnon --> aRead{"读 or 写?"}
+    aRead -->|读| zero["映射全局零页 (minor)"]
+    aRead -->|写| allocAnon["分配清零匿名页 (minor)"]
+    anon -->|"否: 文件映射"| swapChk{"PTE 是 swap entry?"}
+    swapChk -->|是| swapin["do_swap_page: swap in (major)"]
+    swapChk -->|否| doFault["do_fault"]
+    doFault --> fWrite{"FAULT_FLAG_WRITE?"}
+    fWrite -->|"否: 读"| doRead["do_read_fault: cache 命中=minor / 未命中=major"]
+    fWrite -->|"是 且 !VM_SHARED"| doCow["do_cow_fault (COW, minor)"]
+    fWrite -->|"是 且 VM_SHARED"| doShared["do_shared_fault (page_mkwrite)"]
+```
+
+####	观测缺页（工具&&方法）
+在Linux上，可以用下列方法在真实系统上观测缺页（区分 major / minor）
+
+1、`/proc/<pid>/stat`：第 `10` 个字段为累计 minor fault（`minflt`），第 `12` 个字段为累计 major fault（`majflt`）
+
+```bash
+# 第10列 minflt，第12列 majflt
+awk '{print "minflt="$10"  majflt="$12}' /proc/self/stat
+```
+
+2、`getrusage(RUSAGE_SELF, &ru)`：`ru.ru_minflt` / `ru.ru_majflt` 为进程累计的次/主缺页次数
+
+3、`/usr/bin/time -v`：直接给出 `Minor (reclaiming a frame) page faults` 与 `Major (requiring I/O) page faults`
+
+```bash
+/usr/bin/time -v ./a.out
+```
+
+4、`perf stat`：统计缺页事件
+
+```bash
+perf stat -e minor-faults,major-faults,page-faults ./a.out
+```
+
+5、ftrace / bpftrace：跟踪缺页处理函数或 tracepoint
+
+```bash
+# tracepoint 方式：统计用户态缺页
+perf trace -e 'exceptions:page_fault_user' ./a.out
+
+# bpftrace 方式：按进程聚合 handle_mm_fault 次数
+bpftrace -e 'kprobe:handle_mm_fault { @[comm] = count(); }'
+```
+
+####	一个例子：观测 major/minor 缺页
+下面这段程序分别演示「mmap 文件映射首次读（触发 major fault）」与「匿名内存首次写（触发 minor fault）」，并用 `getrusage` 打印前后缺页计数差值：
+
+```c
+//gcc -O0 fault_demo.c -o fault_demo，运行前建议先 echo 3 > /proc/sys/vm/drop_caches 清 cache 以观察 major fault
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/resource.h>
+
+static void dump(const char *tag, struct rusage *a, struct rusage *b) {
+    printf("[%s] minflt=%ld  majflt=%ld\n", tag,
+           b->ru_minflt - a->ru_minflt, b->ru_majflt - a->ru_majflt);
+}
+
+int main(int argc, char **argv) {
+    struct rusage r0, r1;
+
+    /* 场景1：匿名内存首次写 -> minor fault */
+    getrusage(RUSAGE_SELF, &r0);
+    size_t len = 64 * 1024 * 1024;                 // 64MB
+    char *anon = mmap(NULL, len, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    for (size_t i = 0; i < len; i += 4096) anon[i] = 1;   // 逐页触碰，触发匿名缺页
+    getrusage(RUSAGE_SELF, &r1);
+    dump("anon-write", &r0, &r1);                  // 预期 minflt 约 16384，majflt 约 0
+
+    /* 场景2：mmap 文件映射首次读 -> 未命中时 major fault */
+    if (argc > 1) {
+        int fd = open(argv[1], O_RDONLY);
+        struct stat st; fstat(fd, &st);
+        getrusage(RUSAGE_SELF, &r0);
+        char *fp = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+        volatile char c = 0;
+        for (off_t i = 0; i < st.st_size; i += 4096) c ^= fp[i];  // 逐页读，触发文件缺页
+        getrusage(RUSAGE_SELF, &r1);
+        dump("file-read", &r0, &r1);               // cache 冷时 majflt 明显 > 0
+        munmap(fp, st.st_size); close(fd);
+    }
+    munmap(anon, len);
+    return 0;
+}
+```
+
+预期现象：
+
+-	`anon-write`：`minflt` 约等于触碰的页数（`64MB/4KB = 16384`），`majflt` 接近 `0`，说明匿名页缺页是次要缺页，无需磁盘 I/O
+-	`file-read`：若事先 `drop_caches` 清空了 page cache，`majflt` 会明显大于 `0`（需要读盘）；若文件已在 cache 中，则表现为 `minflt`（命中）。这直观印证了上表中「mmap 文件映射首次读：未命中 major / 命中 minor」的结论
+
+有了上述直观认识后，下面正式进入缺页中断的内核源码处理流程
+
+##	0x05	缺页中断的主要处理
 上面完成了mmap文件映射到vma创建（文件inode关联vma）的基本过程，对应于应用层系统调用`mmap(....)`的过程，然后用户拿到了`mmap`返回的虚拟内存地址进行读写操作时`char c = ptr[0]`时，若为首次对该虚拟内存地址的访问，那么会触发缺页中断。本小节以ext4文件系统的mmap文件映射过程为例，分析缺页中断的处理过程。缺页中断的核心逻辑中，涉及到的主要内核结构及成员如下：
 
 ```cpp
@@ -2177,7 +2422,7 @@ int ext4_filemap_fault(struct vm_fault *vmf)
 
 最终`ext4_filemap_fault`还是会调用`filemap_fault`完成缺页中断最后的部分，`filemap_fault`是通用文件系统缺页处理函数，主要任务是在page cache中查找或加载文件页，以满足文件内存映射的缺页需求
 
-注意在`filemap_fault`中会调用`find_get_page`函数对文件页进行查找操作，本质上是调用page cache IDR的查找[方法](https://elixir.bootlin.com/linux/v4.11.6/source/mm/filemap.c#L1190)`radix_tree_lookup_slot`
+注意在`filemap_fault`中会调用`find_get_page`函数对文件页进行查找操作，本质上是调用page cache（radix tree，基数树）的查找[方法](https://elixir.bootlin.com/linux/v4.11.6/source/mm/filemap.c#L1190)`radix_tree_lookup_slot`（在 v4.11.6 中 page cache 的底层数据结构为 `radix_tree_root`，`address_space->page_tree`；`XArray` 是 v4.20+ 才引入替换 radix tree 的，这里不涉及）
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/mm/filemap.c#L2174
@@ -2471,6 +2716,183 @@ int alloc_set_pte(struct vm_fault *vmf, struct mem_cgroup *memcg,
 }
 ```
 
+####	补充：do_cow_fault 与 do_shared_fault
+上文详细分析了只读文件缺页 `do_read_fault` 的路径，这里补齐 `do_fault` 的另外两个分支：私有文件映射写缺页 `do_cow_fault` 与共享文件映射写缺页 `do_shared_fault`（回顾 `do_fault` 的分派逻辑）
+
+相关前置知识可以参考：[Linux 内核之旅（三）：虚拟内存管理（上）](https://pandaychen.github.io/2024/11/05/A-LINUX-KERNEL-TRAVEL-2/#0x04----mmap%E5%BA%94%E7%94%A8%E5%9C%BA%E6%99%AF)
+
+```cpp
+static int do_fault(struct vm_fault *vmf)
+{
+	......
+	if (!vma->vm_ops->fault)
+		ret = VM_FAULT_SIGBUS;
+	else if (!(vmf->flags & FAULT_FLAG_WRITE))
+		ret = do_read_fault(vmf);		// 只读：直接映射 page cache 中的文件页
+	else if (!(vma->vm_flags & VM_SHARED))
+		ret = do_cow_fault(vmf);		// 私有写：写时复制（COW）
+	else
+		ret = do_shared_fault(vmf);		// 共享写：可写映射 + 脏页回写
+	......
+}
+```
+
+1、`do_cow_fault`（私有文件映射写，`MAP_PRIVATE`）：核心是**写时复制**。内核先分配一个新的匿名页 `cow_page`，通过 `__do_fault` 读出原始文件页，再把文件页内容拷贝到 `cow_page`，最后 `finish_fault` 时把 PTE 指向这个私有的匿名页。此后进程对该页的写入只作用于自己的副本，**不会回写到原文件**，其他进程也看不到，这正是 `MAP_PRIVATE` 选项的语义
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/memory.c#L3435
+static int do_cow_fault(struct vm_fault *vmf)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	int ret;
+	......
+	// 1. 先分配一个新的匿名页，作为 COW 的目标副本页
+	vmf->cow_page = alloc_page_vma(GFP_HIGHUSER_MOVABLE, vma, vmf->address);
+	......
+	// 2. 读出原始文件页（vmf->page）
+	ret = __do_fault(vmf);
+	......
+	// 3. 将原始文件页内容拷贝到新分配的 cow_page
+	copy_user_highpage(vmf->cow_page, vmf->page, vmf->address, vma);
+	__SetPageUptodate(vmf->cow_page);
+
+	// 4. finish_fault 中会把 PTE 指向 cow_page（此时按匿名页处理）
+	ret |= finish_fault(vmf);
+	......
+	return ret;
+}
+```
+
+2、`do_shared_fault`（共享文件映射写，`MAP_SHARED`）：内核直接使用 page cache 中的文件页并建立**可写** PTE，写入会真实反映到 page cache（进而回写到磁盘文件）。关键点是调用 `->page_mkwrite`（如 `ext4_page_mkwrite`）做写前处理（如为延迟分配的块分配磁盘空间、标记 buffer），并在最后把页标记为脏（`set_page_dirty`），由回写线程异步刷盘
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/memory.c#L3475
+static int do_shared_fault(struct vm_fault *vmf)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	int ret;
+
+	// 1. 读出/定位 page cache 中的文件页
+	ret = __do_fault(vmf);
+	......
+
+	// 2. 若文件系统提供 page_mkwrite 回调，则在真正写入前调用（写前处理）
+	if (vma->vm_ops->page_mkwrite) {
+		unlock_page(vmf->page);
+		tmp = do_page_mkwrite(vmf);
+		......
+	}
+
+	// 3. finish_fault 建立可写 PTE（按文件页处理）
+	ret |= finish_fault(vmf);
+	......
+	// 4. 标记页为脏，交由回写机制刷盘
+	fault_dirty_shared_page(vma, vmf->page);
+	return ret;
+}
+```
+
+`do_fault`函数中，三条路径的对照如下：
+
+| 分支 | 触发条件 | 目标物理页 | 是否回写文件 | 计数 |
+| :---- | :---- | :---- | :---- | :---- |
+| `do_read_fault` | 只读缺页 | page cache 文件页 | 否 | `MM_FILEPAGES` |
+| `do_cow_fault` | 私有映射写（`!VM_SHARED`） | 新分配的匿名副本页 | 否（写副本） | `MM_ANONPAGES` |
+| `do_shared_fault` | 共享映射写（`VM_SHARED`） | page cache 文件页 | 是（脏页回写） | `MM_FILEPAGES` |
+
+####	fault-around：批量预映射优化（细节）
+在 `do_read_fault` 中还隐藏了一个重要的性能优化，即 **fault-around**机制。当发生只读文件缺页时，内核不仅会映射当前缺页的那一页，还会「顺手」把它周围（默认 `16` 个页，由 `fault_around_bytes` 控制）**已经在 page cache 中的**邻近文件页一次性建立好 PTE 映射，从而减少后续访问这些邻近页时的缺页次数（把多次 minor fault 合并为一次缺页处理）：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/memory.c#L3397
+static int do_read_fault(struct vm_fault *vmf)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	int ret = 0;
+
+	/*
+	 * Let's call ->map_pages() first and use ->fault() as fallback
+	 * if page by the offset is not ready to be mapped (cold cache or
+	 * something).
+	 */
+	// 若文件系统提供了 map_pages（ext4 为 filemap_map_pages），且 fault_around 开启，
+	// 则先尝试批量预映射当前缺页周围的若干已在 page cache 的文件页
+	if (vma->vm_ops->map_pages && fault_around_bytes >> PAGE_SHIFT > 1) {
+		ret = do_fault_around(vmf);
+		if (ret)
+			return ret;
+	}
+
+	// 单页兜底路径：预映射未命中时，走 __do_fault 处理当前这一页
+	ret = __do_fault(vmf);
+	......
+	ret |= finish_fault(vmf);
+	unlock_page(vmf->page);
+	......
+	return ret;
+}
+```
+
+`do_fault_around` 会以当前缺页地址为中心，按 `fault_around_bytes`（`/sys/kernel/...` 可调）计算出一个对齐的地址窗口 `[start, end]`，然后调用 `vma->vm_ops->map_pages`（ext4 即 `filemap_map_pages`）批量建立这些页的 PTE。注意 fault-around 只映射**已经在 page cache 中**的页，不会主动发起磁盘 I/O（真正的预读由 `filemap_fault` 里的 readahead 负责），因此它加速的是 minor fault 而非 major fault
+
+```c
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/memory.c#L3342
+static int do_fault_around(struct vm_fault *vmf)
+{
+	unsigned long address = vmf->address, nr_pages, mask;
+	pgoff_t start_pgoff = vmf->pgoff;
+	pgoff_t end_pgoff;
+	int off, ret = 0;
+
+	nr_pages = READ_ONCE(fault_around_bytes) >> PAGE_SHIFT;
+	mask = ~(nr_pages * PAGE_SIZE - 1) & PAGE_MASK;
+
+	vmf->address = max(address & mask, vmf->vma->vm_start);
+	off = ((address - vmf->address) >> PAGE_SHIFT) & (PTRS_PER_PTE - 1);
+	start_pgoff -= off;
+
+	/*
+	 *  end_pgoff is either end of page table or end of vma
+	 *  or fault_around_pages() from start_pgoff, depending what is nearest.
+	 */
+	end_pgoff = start_pgoff -
+		((vmf->address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1)) +
+		PTRS_PER_PTE - 1;
+	end_pgoff = min3(end_pgoff, vma_pages(vmf->vma) + vmf->vma->vm_pgoff - 1,
+			start_pgoff + nr_pages - 1);
+
+	if (pmd_none(*vmf->pmd)) {
+		vmf->prealloc_pte = pte_alloc_one(vmf->vma->vm_mm,
+						  vmf->address);
+		if (!vmf->prealloc_pte)
+			goto out;
+		smp_wmb(); /* See comment in __pte_alloc() */
+	}
+
+	vmf->vma->vm_ops->map_pages(vmf, start_pgoff, end_pgoff);
+
+	/* Huge page is mapped? Page fault is solved */
+	if (pmd_trans_huge(*vmf->pmd)) {
+		ret = VM_FAULT_NOPAGE;
+		goto out;
+	}
+
+	/* ->map_pages() haven't done anything useful. Cold page cache? */
+	if (!vmf->pte)
+		goto out;
+
+	/* check if the page fault is solved */
+	vmf->pte -= (vmf->address >> PAGE_SHIFT) - (address >> PAGE_SHIFT);
+	if (!pte_none(*vmf->pte))
+		ret = VM_FAULT_NOPAGE;
+	pte_unmap_unlock(vmf->pte, vmf->ptl);
+out:
+	vmf->address = address;
+	vmf->pte = NULL;
+	return ret;
+}
+```
+
 ####	vm_mmap_pgoff->mm_populate：立即为映射分配物理内存
 上面讨论了通常调用 mmap 进行内存映射的时，内核只是会在进程的虚拟内存空间中为这次映射分配一段虚拟内存，然后建立好这段虚拟内存与相关文件之间的映射关系就结束了，内核并不会为映射分配物理内存。而物理内存的分配工作需要延后到这段虚拟内存被 CPU 访问的时候，通过缺页中断来进入内核，分配物理内存，并在页表中建立好映射关系。但如果在 `flags` 参数中设置了 `MAP_POPULATE`、`MAP_LOCKED` 标志位之后，物理内存的分配动作会提前发生。首先会通过 `do_mmap_pgoff` 函数在进程虚拟内存空间中分配出一段未映射的虚拟内存区域，返回值 `ret` 表示映射的这段虚拟内存区域的起始地址，紧接着就会调用 `mm_populate`，**内核会在 mmap 刚刚映射出来的这段虚拟内存区域上，依次扫描这段 vma 中的每一个虚拟页，并对每一个虚拟页触发缺页异常，从而为其立即分配物理内存**
 
@@ -2654,7 +3076,7 @@ next_page:
 }
 ```
 
-##  0x0   shmem基础知识
+##  0x06    shmem基础知识
 
 ####	页面类型
 对shmem类型的页面而言，其既有匿名页的特点（如`page->flags`设置`PG_swapbacked`，具有swap功能），也有文件页的特点（如`inode->i_mapping->a_ops = &shmem_aops`关联文件inode，有page cache）
@@ -2671,7 +3093,7 @@ shmem的整体框架如下：
 
 ![shm-lru-type](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/20/shm-lru-type.png)
 
-##	0x0	共享内存原理（shmem）及操作梳理
+##	0x07	共享内存原理（shmem）及操作梳理
 
 ####  共享内存原理
 基于shmem的内存共享原理如下，可以看到和上文描述的mmap共享机制非常类似：
@@ -2704,6 +3126,84 @@ shmem共享内存页面的缺页处理步骤如下，当缺页发生时
 	-	否则分配新的folio：上面都尝试了查找但是没有找到，那么有可能是第一次访问这个页面，这个时候需要分配新的物理页面，既是folio
 2.	新的page加入全局lru，shmem会被加入匿名的lru中，以便内存回收都场景回收到swap device
 3.	页表映射，将相关的物理页面通过页表映射到进程的虚拟地址空间，这样后面进程就可以正常访问页面数据了
+
+上述步骤对应的源码入口是 `shmem_fault`（`shmem_vm_ops.fault`），其核心工作委托给 `shmem_getpage_gfp` 完成。相比 ext4 文件映射的 `filemap_fault` 只在 page cache（radix tree）中查找，shmem 由于同时具备匿名页特性（可 swap），因此多了 swap cache / swap in 的查找路径：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/shmem.c#L1965
+static int shmem_fault(struct vm_fault *vmf)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	struct inode *inode = file_inode(vma->vm_file);
+	gfp_t gfp = mapping_gfp_mask(inode->i_mapping);
+	int error;
+	int ret = VM_FAULT_LOCKED;
+	......
+	// 核心：按 index（页偏移）获取/分配 shmem 页面
+	// SGP_CACHE 表示：若不存在则分配新页并加入 page cache
+	error = shmem_getpage_gfp(inode, vmf->pgoff, &vmf->page, SGP_CACHE,
+				  gfp, vma, vmf, &ret);
+	if (error)
+		return ((error == -ENOMEM) ? VM_FAULT_OOM : VM_FAULT_SIGBUS);
+	......
+	return ret;
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/shmem.c#L1550
+// shmem_getpage_gfp：shmem 缺页的核心，按 page cache -> swap cache -> swap in -> 新分配 的顺序获取页面
+static int shmem_getpage_gfp(struct inode *inode, pgoff_t index,
+	struct page **pagep, enum sgp_type sgp, gfp_t gfp,
+	struct vm_area_struct *vma, struct vm_fault *vmf, int *fault_type)
+{
+	struct address_space *mapping = inode->i_mapping;
+	struct shmem_inode_info *info = SHMEM_I(inode);
+	struct page *page;
+	swp_entry_t swap;
+	......
+repeat:
+	swap.val = 0;
+	// 1. 首先在 page cache 中查找该 index 对应的页
+	page = find_lock_entry(mapping, index);
+	if (radix_tree_exceptional_entry(page)) {
+		// 若查到的是「异常项」（exceptional entry），说明该页已被换出，取出其中的 swap entry
+		swap = radix_to_swp_entry(page);
+		page = NULL;
+	}
+	......
+	if (page) {
+		// page cache 命中，直接使用
+		goto out;
+	}
+
+	if (swap.val) {
+		/* Look it up and read it in.. */
+		// 2. 先查 swap cache（可能页面正在被回收/换入过程中）
+		page = lookup_swap_cache(swap);
+		if (!page) {
+			// 3. swap cache 未命中，从 swap 设备换入（swap in），产生 major fault
+			......
+			page = shmem_swapin(swap, gfp, info, index);
+			......
+		}
+		// 换入后把页从 swap 迁回 page cache（swap entry -> page）
+		......
+	} else {
+		// 4. 既不在 page cache 也没有 swap entry，说明是第一次访问，分配新页
+		......
+		page = shmem_alloc_and_acct_page(gfp, info, sbinfo,
+					index, false);
+		......
+		// 新分配的页加入 page cache（radix tree）与 LRU（匿名 LRU，可被换出）
+		......
+	}
+out:
+	*pagep = page;
+	return 0;
+	......
+}
+```
+
+可以看到 shmem 缺页的查找顺序为 **page cache -> swap cache -> swap in -> 新分配**，这正是「shmem 页面兼具文件页（page cache）与匿名页（可 swap）双重特性」在缺页路径上的体现，也解释了为何 shmem 页被挂在匿名 LRU 上（以便回收时换出到 swap）
 
 ####	回收shmem页
 
@@ -2749,7 +3249,7 @@ shmem页面回收逻辑如下：
 
 这里需要注意一点的是：shmem页面回收时保存swap entry的方式跟匿名页完全不一样，匿名页在回收时，会将相应的swap entry替换为原来的页表项，而shmem页面会直接清掉原来的页表项，会将swap entry替换为对应的swap cache的位置
 
-##	0x0	tmpfs的读写实现跟踪
+##	0x08	tmpfs的读写实现跟踪
 
 ####	基于tmpfs的读过程
 主要涉及的内核调用链如下：
@@ -2776,7 +3276,7 @@ shmem页面回收逻辑如下：
 2.	从用户空间缓冲区拷贝数据到文件页面
 3.	标记页面为脏
 
-##	0x0	System V共享内存实现分析
+##	0x09	System V共享内存实现分析
 
 ####	shmget：创建共享内存
 
@@ -2829,7 +3329,7 @@ SYSCALL_DEFINE3(shmget, key_t, key, size_t, size, int, shmflg)
 }
 
 //https://elixir.bootlin.com/linux/v4.11.6/source/ipc/shm.c#L522
-static int newseg(struct ip c_namespace *ns, struct ipc_params *params)
+static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 {
 	key_t key = params->key;
 	int shmflg = params->flg;
@@ -3044,7 +3544,59 @@ static struct inode *shmem_get_inode(struct super_block *sb, const struct inode 
 }
 ```
 
-##	0x0	总结
+####	shmat/shmdt：挂载与解除共享内存
+`shmget` 只是创建了共享内存段（对应一个 tmpfs 匿名文件 `struct file`），要真正使用还需要 `shmat` 把它**映射进进程的虚拟地址空间**，本质上就是对该 `shm_file` 执行一次 `do_mmap`（`MAP_SHARED`）：
+
+```text
+shmat() 系统调用
+  -> do_shmat()                 //ipc/shm.c
+    -> do_mmap_pgoff(file=shp->shm_file, ..., MAP_SHARED, ...)
+      -> mmap_region -> call_mmap -> shmem_mmap  //挂 vma->vm_ops = &shmem_vm_ops
+```
+
+关键点在于 `do_shmat` 直接复用了 shm 段创建时的 `shp->shm_file`（其 `f_op->mmap` 为 `shmem_mmap`），因此挂载后 `vma->vm_ops` 被设置为 `shmem_vm_ops`（`fault = shmem_fault`），后续缺页即走上文分析的 `shmem_fault->shmem_getpage_gfp` 路径，**多个进程 attach 同一个 shm 段时，它们的 vma 都指向同一个 `shm_file`/inode，从而共享同一份 page cache**：
+
+这就是posix 共享内存的本质
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/ipc/shm.c#L1233
+long do_shmat(int shmid, char __user *shmaddr, int shmflg,
+	      ulong *raddr, unsigned long shmlba)
+{
+	struct shmid_kernel *shp;
+	......
+	struct file *file;
+	......
+	// 1. 根据 shmid 找到共享内存段 shp
+	shp = shm_obtain_object_check(ns, shmid);
+	......
+	// 2. 取出创建时的 shm_file（tmpfs 匿名文件），构造一个包装 file
+	file = shp->shm_file;
+	......
+	// 3. 对该 file 执行 do_mmap（MAP_SHARED），映射进当前进程地址空间（本质）
+	addr = do_mmap_pgoff(file, addr, size, prot, flags, 0, &populate, NULL);
+	......
+	*raddr = addr;	// 返回映射到的用户态虚拟地址
+	......
+}
+```
+
+`shmdt` 则相对简单：根据用户传入的地址找到对应的 vma，调用 `do_munmap` 解除该段映射（并不销毁 shm 段本身，段的销毁由 `shmctl(IPC_RMID)` 且引用计数归零后完成）：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/ipc/shm.c#L1382
+SYSCALL_DEFINE1(shmdt, char __user *, shmaddr)
+{
+	struct mm_struct *mm = current->mm;
+	......
+	// 遍历进程 vma，找到起始地址等于 shmaddr 且属于 shm 映射的 vma，do_munmap 解除
+	......
+	do_munmap(mm, vma->vm_start, vma->vm_end - vma->vm_start, NULL);
+	......
+}
+```
+
+##	0x0A	总结
 最后，整理下本文介绍的若干关键知识点
 
 ####	linear_page_index 的细节
@@ -3055,6 +3607,25 @@ static struct inode *shmem_get_inode(struct super_block *sb, const struct inode 
 3.	当缺页异常发生时，内核需要知道当前访问的这个虚拟内存地址`address`，对应文件里的第几个 Page？
 
 ![offset]()
+
+下图给出 `linear_page_index` 的计算关系，几个地址/偏移量之间的换算是 mmap 文件映射实现共享的关键：
+
+```mermaid
+flowchart LR
+    subgraph vmaBox ["进程虚拟地址空间 (vma)"]
+        vmStart["vma->vm_start"]
+        addrHit["address (用户访问的虚拟地址)"]
+    end
+    subgraph fileBox ["文件视角 (address_space / radix tree)"]
+        vmPgoff["vma->vm_pgoff (mmap 的 offset, 页为单位)"]
+        pgoffOut["pgoff (radix tree 的 key)"]
+    end
+    addrHit -->|"address - vm_start"| delta["区域内偏移(字节)"]
+    delta -->|">> PAGE_SHIFT"| deltaPg["区域内页序号"]
+    deltaPg -->|"+ vm_pgoff"| pgoffOut
+    vmStart -.基准.-> delta
+    vmPgoff -.加上.-> pgoffOut
+```
 
 步骤1，调用 `mmap(addr, length, ......, fd, offset)` 时，内核并不会立即把文件内容读入内存，而是创建了一个 `vm_area_struct`（此时页表项PTE是空的。vma记录如下关键信息：
 -	虚拟内存的起始地址`vm_start`
@@ -3109,6 +3680,14 @@ mmap 系统调用分配虚拟内存的本质其实就是在进程的虚拟内存
 
 ![mmap-essence]()
 
+```mermaid
+flowchart TD
+    call["mmap(addr, len, prot, flags, fd, offset)"] --> getArea["get_unmapped_area: 在文件映射与匿名映射区找空闲 gap"]
+    getArea --> region["mmap_region: 分配并初始化 vma"]
+    region --> vmaOut["返回 vma 起始地址 (仅虚拟内存, 无物理页/无 PTE)"]
+    vmaOut --> lazy["物理内存与页表延迟到缺页时才分配 (除非 MAP_POPULATE)"]
+```
+
 ####	缺页中断 vs address_space（radix树）查不到指定的`struct page`
 在mmap文件映射的场景下，缺页中断（Page Fault）、在page cache（radix树）查找指定的`struct page`结构（当发现对应的page不存在时，新建page）、页表转换及查找（填充）、page对象关联物理内存页，这几个名词的关系是什么？
 
@@ -3150,7 +3729,7 @@ mmap 系统调用分配虚拟内存的本质其实就是在进程的虚拟内存
 
 1.	填表（Walk Tables）：如果 PGD/PUD/PMD 缺失，内核会先申请内存把这些页表项填满
 2.	定位到 `do_fault`：内核发现这个虚拟地址属于一个文件（`struct file`）映射的 VMA，于是调用 `vma->vm_ops->fault`
-3.	核心是查找 `address_space`（在 `handle_mm_fault` 里，如果是文件映射，会看到它处理的是 `struct page`物理页描述，而对于`address_space` 来说，它管理的是这个物理页与文件内容的对应关系），即**通过 VMA 找到文件的 `address_space`，根据偏移量（`offset`）在 Page Cache（基数树或者XArray）里**，参考[]()，一般有两种结果：
+3.	核心是查找 `address_space`（在 `handle_mm_fault` 里，如果是文件映射，会看到它处理的是 `struct page`物理页描述，而对于`address_space` 来说，它管理的是这个物理页与文件内容的对应关系），即**通过 VMA 找到文件的 `address_space`，根据偏移量（`offset`）在 Page Cache（v4.11.6 为 radix tree 基数树）里查找**，一般有两种结果：
 	-	Case A (命中)：如果之前有进程读过这个文件，页已经在内存里了，直接获取该页地址
 	-	Case B (未命中)：如果不在（radix树查找失败），内核新建一个 Page，发起磁盘 I/O（通过 readpage），把文件内容读进来
 4.	关联映射，将找回来的（或新读入的）物理页地址填入最底层的 PTE 页表项
@@ -3178,9 +3757,40 @@ CPU 硬件（缺页）异常 -> do_page_fault (架构相关入口)
                         └── find_get_page (去 address_space 里查，找不到就新建 Page 并读磁盘)
 ```
 
-`do_anonymous_page`的实现如下，其机制是典型的懒加载机制
+`do_anonymous_page`的实现如下，其机制是典型的懒加载（lazy allocation）机制。匿名映射背后没有关联任何磁盘文件，因此内核无需像文件映射那样去 `address_space`（page cache）中查找，而是直接与 buddy 系统交互按需分配物理页。这里最核心的设计是**区分「读缺页」与「写缺页」**：
 
-TODO
+1、**读缺页（首次访问是读操作）**：内核不会真正分配物理页，而是把 PTE 指向一个全局共享的**零页**（`my_zero_pfn`，全内容为 `0` 的只读页），并以只读权限（`pte_mkspecial`，不建立匿名页反向映射）建立映射。对应代码分支：
+
+```cpp
+	/* Use the zero-page for reads */
+	if (!(vmf->flags & FAULT_FLAG_WRITE) &&
+			!mm_forbids_zeropage(vma->vm_mm)) {
+		// 构造一个指向全局零页 my_zero_pfn 的只读 PTE
+		entry = pte_mkspecial(pfn_pte(my_zero_pfn(vmf->address),
+						vma->vm_page_prot));
+		......
+		goto setpte;	// 直接设置 PTE，不分配新物理页
+	}
+```
+
+这样做的收益是大量「只读未初始化内存」（比如 `calloc` 出来后先读的区域、`.bss`、`MAP_ANONYMOUS` 后仅读取的区域）都会共享同一个零页，极大节省物理内存；只有真正发生写入时，才通过写时复制（COW）为其分配独立的物理页
+
+2、**写缺页（首次访问是写操作，或读零页后再写）**：内核才会真正调用 `alloc_zeroed_user_highpage_movable` 从 buddy 系统分配一个清零的物理页，通过 `mk_pte`/`pte_mkwrite` 构造可写 PTE，`page_add_new_anon_rmap` 为其建立匿名页反向映射，`inc_mm_counter_fast(MM_ANONPAGES)` 计数，并加入 LRU（`lru_cache_add_active_or_unevictable`），最后 `set_pte_at` 落盘到页表
+
+因此，匿名映射的物理内存开销完全由「实际写入」触发，这正是懒加载的精髓，其读/写分支如下图：
+
+```mermaid
+flowchart TD
+    fault["do_anonymous_page (匿名缺页)"] --> shared{"VM_SHARED?"}
+    shared -->|是| sigbus["返回 VM_FAULT_SIGBUS (匿名映射不应共享)"]
+    shared -->|否| rw{"FAULT_FLAG_WRITE?"}
+    rw -->|"否: 读缺页"| zero["PTE 指向全局零页 my_zero_pfn (只读, 不分配物理页)"]
+    rw -->|"是: 写缺页"| alloc["alloc_zeroed_user_highpage_movable 分配清零匿名页"]
+    alloc --> rmap["page_add_new_anon_rmap + 计入 MM_ANONPAGES + 加入 LRU"]
+    rmap --> setpte["set_pte_at 建立可写 PTE"]
+    zero --> setpte2["set_pte_at 建立只读 PTE"]
+    setpte2 -.后续写入.-> cow["触发写保护缺页 -> COW 分配独立物理页"]
+```
 
 ```cpp
 //https://elixir.bootlin.com/linux/v4.11.6/source/mm/memory.c#L2896
@@ -3283,12 +3893,137 @@ oom:
 ```
 
 ####	overcommit_memory策略
+前文多次提到，`mmap` 申请的只是虚拟内存，物理内存要等到缺页时才真正分配。那么内核在 `mmap`（申请虚拟内存）阶段，是否需要、以及如何判断「将来是否有足够物理内存兑现这些虚拟内存」？这就是内核的 **overcommit（内存过量分配）** 策略，由 `/proc/sys/vm/overcommit_memory` 控制，共三种取值：
 
-TODO
+| 取值 | 宏 | 含义 |
+| :---- | :---- | :---- |
+| `0` | `OVERCOMMIT_GUESS`（默认） | 启发式判断。内核用简单的经验公式估算，允许一定程度的过量申请，但会拒绝「明显离谱」的大额申请 |
+| `1` | `OVERCOMMIT_ALWAYS` | 总是允许过量申请。任何 `mmap`/`brk` 申请都不做物理内存检查，直接成功，代价是缺页时可能触发 OOM |
+| `2` | `OVERCOMMIT_NEVER` | 严格不过量。内核精确核算，允许的虚拟内存总量 = swap + 物理内存 * `overcommit_ratio`（`/proc/sys/vm/overcommit_ratio`，默认 `50`），超出即申请失败 |
 
-##  0x0  参考
+相关的两个可调参数：
+
+-	`overcommit_ratio`（`/proc/sys/vm/overcommit_ratio`）：`OVERCOMMIT_NEVER` 模式下，物理内存可被承诺的百分比，`CommitLimit = swap + RAM * overcommit_ratio/100`
+-	`overcommit_kbytes`（`/proc/sys/vm/overcommit_kbytes`）：与 `overcommit_ratio` 二选一，直接以绝对值（KB）指定物理内存可承诺量
+
+内核判断「是否允许本次虚拟内存申请」的核心函数是 `__vm_enough_memory`（`mmap_region` 中经 `security_vm_enough_memory_mm` 调用，参考前文 `accountable_mapping` 分支）：
+
+```cpp
+//https://elixir.bootlin.com/linux/v4.11.6/source/security/security.c#L255
+int security_vm_enough_memory_mm(struct mm_struct *mm, long pages)
+{
+	struct security_hook_list *hp;
+	int cap_sys_admin = 1;
+	int rc;
+
+	/*
+	 * The module will respond with a positive value if
+	 * it thinks the __vm_enough_memory() call should be
+	 * made with the cap_sys_admin set. If all of the modules
+	 * agree that it should be set it will. If any module
+	 * thinks it should not be set it won't.
+	 */
+	list_for_each_entry(hp, &security_hook_heads.vm_enough_memory, list) {
+		rc = hp->hook.vm_enough_memory(mm, pages);
+		if (rc <= 0) {
+			cap_sys_admin = 0;
+			break;
+		}
+	}
+	return __vm_enough_memory(mm, pages, cap_sys_admin);
+}
+
+//https://elixir.bootlin.com/linux/v4.11.6/source/mm/util.c#L599
+int __vm_enough_memory(struct mm_struct *mm, long pages, int cap_sys_admin)
+{
+	long free, allowed, reserve;
+	......
+	// 模式 1：OVERCOMMIT_ALWAYS，总是允许，直接返回成功
+	if (sysctl_overcommit_memory == OVERCOMMIT_ALWAYS)
+		return 0;
+
+	// 模式 0：OVERCOMMIT_GUESS，启发式估算当前可用内存（空闲页 + 可回收的 page cache + 可回收 slab 等）
+	if (sysctl_overcommit_memory == OVERCOMMIT_GUESS) {
+		free = global_page_state(NR_FREE_PAGES);
+		free += global_node_page_state(NR_FILE_PAGES);
+		free -= global_node_page_state(NR_SHMEM);
+		free += get_nr_swap_pages();
+		free += global_page_state(NR_SLAB_RECLAIMABLE);
+		......
+		if (free > pages)	// 估算的可用内存能覆盖本次申请，则允许
+			return 0;
+		......
+		goto error;
+	}
+
+	// 模式 2：OVERCOMMIT_NEVER，精确核算 CommitLimit
+	// allowed = swap 总量 + 物理内存 * overcommit_ratio / 100 （或 overcommit_kbytes）
+	allowed = vm_commit_limit();
+	......
+	// 已承诺量 vm_committed_as 加上本次申请 pages 若不超过 allowed，则允许
+	if (percpu_counter_read_positive(&vm_committed_as) < allowed)
+		return 0;
+error:
+	return -ENOMEM;	// 内存不足，mmap 申请失败
+}
+```
+
+几个关键点串联起前文：
+
+-	**`Committed_AS`**：`/proc/meminfo` 中的 `Committed_AS` 字段（对应内核 `vm_committed_as` 计数器）统计的正是「所有已被承诺、将来可能落到物理内存」的虚拟内存总量。前文 `mmap_region` 中 `accountable_mapping` 为真时会置 `VM_ACCOUNT` 并把该 vma 的用量累加进 `Committed_AS`
+-	**`VM_ACCOUNT` 与 `VM_NORESERVE`**：设置了 `VM_ACCOUNT` 的 vma 表示其虚拟内存已经过 `vm_enough_memory` 核算，缺页时内核保证有物理内存兑现、不会 OOM；而 `MAP_NORESERVE`（置 `VM_NORESERVE`）则表示「不预留、不核算」，允许应用申请过量虚拟内存（仅在 overcommit 非 `NEVER` 时有意义，参考前文 `do_mmap` 中对 `MAP_NORESERVE` 的处理）
+-	**与 OOM 的关系**：`OVERCOMMIT_ALWAYS`/`GUESS` 下 `mmap` 容易成功，但如果所有进程真的把承诺的虚拟内存都写实（触发缺页要物理页），而物理内存 + swap 不够，就会触发 OOM Killer 杀进程；`OVERCOMMIT_NEVER` 则把风险前移到 `mmap` 阶段（申请就失败），以避免运行期 OOM
+
+```mermaid
+flowchart TD
+    req["mmap/brk 申请虚拟内存 -> __vm_enough_memory(pages)"] --> mode{"sysctl_overcommit_memory"}
+    mode -->|"1 ALWAYS"| ok["直接允许"]
+    mode -->|"0 GUESS"| guess{"估算可用内存 > pages?"}
+    guess -->|是| ok
+    guess -->|否| fail["返回 -ENOMEM (申请失败)"]
+    mode -->|"2 NEVER"| never{"vm_committed_as + pages <= CommitLimit?"}
+    never -->|是| ok
+    never -->|否| fail
+    ok -.运行期缺页写实.-> oomRisk["物理内存不足时 -> OOM Killer (仅 ALWAYS/GUESS 有此风险)"]
+```
+
+####	VM_FAULT_* 返回值语义小结
+缺页处理链路（`handle_mm_fault`/`do_fault`/`filemap_fault` 等）统一以位标志 `VM_FAULT_*` 作为返回值，`do_page_fault` 据此决定后续动作（重试、返回用户态、发信号或 OOM），常见取值语义如下：
+
+| 返回值 | 含义 | 后续动作 |
+| :---- | :---- | :---- |
+| `0`（无标志） | 缺页处理成功，PTE 已建立 | CPU 重新执行触发缺页的指令 |
+| `VM_FAULT_MINOR`（隐式，即成功且无 I/O） | 次要缺页 | 统计 minflt |
+| `VM_FAULT_MAJOR` | 主要缺页，发生了磁盘 I/O | 统计 majflt（`PGMAJFAULT`） |
+| `VM_FAULT_OOM` | 内存不足，无法分配物理页/页表 | 触发 `pagefault_out_of_memory`，可能唤起 OOM Killer |
+| `VM_FAULT_SIGBUS` | 访问越界/文件洞/坏扇区等 | 向进程发送 `SIGBUS` |
+| `VM_FAULT_SIGSEGV` | 非法地址（如栈 guard page） | 向进程发送 `SIGSEGV` |
+| `VM_FAULT_RETRY` | 需要释放 `mmap_sem` 后重试（如等待页锁/换入） | 重新走一遍缺页流程 |
+| `VM_FAULT_NOPAGE` | 处理程序已自行安装 PTE，无需上层再映射 | 直接返回 |
+| `VM_FAULT_LOCKED` | 返回的 `vmf->page` 处于加锁状态 | 上层负责 `unlock_page` |
+
+补充「present 位 / TLB 与缺页触发」的关系：CPU MMU 在做地址翻译时，若目标 PTE 的 present 位（`_PAGE_PRESENT`）为 `0`，即触发缺页异常进入内核；若 present 位为 `1` 但权限不符（如对只读页写入），则触发写保护缺页（用于 COW、脏页跟踪）。翻译成功的映射会被缓存进 TLB 以加速后续访问，因此 `set_pte_at` 之后往往需要 `update_mmu_cache`/必要时刷新 TLB，才能保证硬件看到最新的页表项
+
+####	小结：mmap 与 shm 的区别
+本文分析了 `mmap` 与 System V `shm` 在内核中的实现，二者最终都落到 tmpfs/shmem 与缺页机制之上，但在语义与使用上有明显区别，汇总如下：
+
+| 维度 | mmap 文件共享映射（`MAP_SHARED` + fd） | mmap 匿名共享映射（`MAP_SHARED\|MAP_ANONYMOUS`） | System V shm（`shmget/shmat`） |
+| :---- | :---- | :---- | :---- |
+| 后备存储 | 真实磁盘文件（如 ext4） | tmpfs 匿名文件（`/dev/zero`，内核内部） | tmpfs 匿名文件（`SYSV<key>`，内核内部） |
+| 是否持久化 | 是（脏页回写到磁盘） | 否（掉电/进程退出即失） | 否（随 IPC 段生命周期，非文件持久） |
+| 跨进程共享方式 | 多进程映射同一文件 | 仅有亲缘关系进程（fork 继承 vma） | 任意进程凭 key/shmid 挂载 |
+| 生命周期 | 跟随文件 | 跟随最后一个映射进程 | 独立于进程，需显式 `shmctl(IPC_RMID)` 删除 |
+| 是否可 swap | 文件页回写磁盘，不占 swap | 占 swap（匿名 LRU） | 占 swap（匿名 LRU） |
+| 用户接口 | `mmap/munmap/msync` | `mmap/munmap` | `shmget/shmat/shmdt/shmctl` |
+| 内核建立链 | `do_mmap->call_mmap(ext4_file_mmap)` | `do_mmap->shmem_zero_setup` | `shmget->newseg->shmem_kernel_file_setup`，`shmat->do_mmap` |
+| 缺页处理 | `ext4_filemap_fault->filemap_fault` | `shmem_fault->shmem_getpage_gfp` | `shmem_fault->shmem_getpage_gfp` |
+
+小结下，**`mmap` 匿名共享映射与 System V shm 在内核底层都是基于 shmem/tmpfs 实现的「同源」机制，区别主要在于用户接口、生命周期管理与跨进程共享的组织方式；而 `mmap` 文件共享映射则以真实磁盘文件为后备，具备持久化能力**
+
+##  0x0B  参考
 -   [深入理解Linux内核共享内存机制- shmem&tmpfs](https://aijishu.com/a/1060000000451498)
 -   [浅析Linux的共享内存与tmpfs文件系统](http://hustcat.github.io/shared-memory-tmpfs/)
 -   [从内核世界透视 mmap 内存映射的本质（源码实现篇）](https://www.cnblogs.com/binlovetech/p/17754173.html)
 -   [Linux 内核之 mmap 内存映射的原理及源码解析](https://zhuanlan.zhihu.com/p/709372792)
 -	[从内核世界透视 mmap 内存映射的本质（原理篇）](https://www.cnblogs.com/binlovetech/p/17712761.html)
+-	[你写的代码是如何跑起来的？](https://mp.weixin.qq.com/s/1bdktqYF7VyAMadRlcRrSg)
