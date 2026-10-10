@@ -666,7 +666,7 @@ dns:
 
 典型的实现如 [Clash.Meta](https://clash.wiki/premium/tun-device.html)、[tun2socks](https://github.com/xjasonlyu/tun2socks)。在 Windows 上的配置方式（参考 [tun2socks Wiki](https://github.com/xjasonlyu/tun2socks/wiki/Examples#windows)）：
 
-```powershell
+```bash
 # 启动 tun2socks（会自动创建 wintun 虚拟网卡）
 tun2socks -device wintun -proxy socks5://host:port -interface "WIFI"
 
