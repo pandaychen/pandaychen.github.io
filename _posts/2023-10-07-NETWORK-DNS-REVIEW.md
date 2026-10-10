@@ -707,7 +707,140 @@ flowchart LR
 
 整个流程中，本地网络上**只有 Fake-IP 地址和加密隧道流量**，没有任何明文域名信息泄漏，ISP 或中间人无法获知用户的 DNS 查询内容
 
-##  0x0B 参考
+##  0x0B 扩展实例：mail.google.com 代理全链路实战
+
+上一章节分析了 DomainTree 与 Fake-IP 分配逻辑，但对其中一个关键细节一笔带过：劫持 `PROXY` 域名时为什么要同时写入 **PTR + A 两条记录**？本章节就来回答这个问题，并且以 `mail.google.com` 为例给出一条完整的全链路数据流
+
+####    DNS PTR 记录与反向解析基础
+
+常见的 DNS 记录（`A`/`AAAA`/`CNAME`）都是**正向解析**：由域名查 IP。而 PTR（Pointer Record）记录提供的是**反向解析（rDNS）**：由 IP 反查域名，方向与 `A`/`AAAA` 恰好相反
+
+PTR 记录并不是直接以 IP 为 key 存储，而是把 IP 改写为一个特殊的伪域名后，再按普通域名的方式查询：
+
+- **IPv4**：使用 `in-addr.arpa` 域，将四段 IP **逆序**拼接。例如 `1.2.3.4` 的反查域名为 `4.3.2.1.in-addr.arpa.`
+- **IPv6**：使用 `ip6.arpa` 域，将 `32` 个 nibble（半字节）逐个**逆序**展开。例如 `2001:db8::1` 展开为 `1.0.0.0.....8.b.d.0.1.0.0.2.ip6.arpa.`
+
+逆序的原因：DNS 域名的层级是**从右向左**收敛（右侧是 TLD/根），而 IP 地址是**从左向右**收敛（左侧是网络号）。把 IP 逆序后，其网络号就落到了 `in-addr.arpa` 域名的右侧（靠近根），从而复用 DNS 既有的树状委派与查找体系
+
+PTR 的常规用途包括：反向 DNS 查询（如`dig -x 1.2.3.4`）、邮件服务器的 PTR 校验（反垃圾邮件，校验发信 IP 是否有匹配的 PTR 记录）、服务器日志中把访问 IP 还原为主机名等
+
+**PTR 在上网代理（Fake-IP）中的作用**：这是本文关注的重点。在 Fake-IP 透明代理方案中，客户端拿到的是一个虚假 IP（如 `198.18.x.y`），当它用这个 Fake-IP 发起连接时，代理必须能够**从 Fake-IP 反查回原始域名**，才能把域名（而非 IP）送入加密隧道完成真正的解析与连接。代理实现中没有另造一张反查表，而是**复用 DNS 的 PTR 语义**：把 `Fake-IP -> 原始域名` 这条映射编码成一条标准 PTR 记录，存进同一棵 DomainTree。因此 PTR 记录在这里扮演的角色是 **「Fake-IP 到域名」反查映射的天然载体**，是 Fake-IP 防泄漏闭环中不可或缺的一环
+
+####    为什么劫持时要同时存储 PTR + A 两条记录？
+
+回到上一节 `HandleMessage` 的 `PROXY` 分支的实现，在一次 DNS 劫持中连续向 DomainTree 写入了两条记录（`in-addr.arpa` 反向 PTR 记录与域名正向 A 记录）：
+
+```go
+case "PROXY":
+    s.counter++
+
+    // 记录 1：反向 PTR 记录，key = Fake-IP 对应的 in-addr.arpa 反查域名
+    //         Ptr   = 客户端原始请求的域名（如 mail.google.com.）
+    entry := &suffixtree.DomainEntry{
+        PTR: dns.PTR{
+            Hdr: dns.RR_Header{
+                Name:   fmt.Sprintf("%d.%d.18.198.in-addr.arpa.", uint8(s.counter), uint8(s.counter>>8)),
+                Rrtype: dns.TypePTR, Class: dns.ClassINET, Ttl: 1,
+            },
+            Ptr: m.Question[0].Name, // 原始域名
+        },
+    }
+    s.tree.Store(entry.PTR.Hdr.Name, entry) // key 为反查域名
+
+    // 记录 2：正向 A 记录，key = 原始域名，A = Fake-IP（198.18.x.y），Rule 标记为 PROXY
+    entry = &suffixtree.DomainEntry{
+        Rule: "PROXY",
+        A: dns.A{
+            Hdr: dns.RR_Header{
+                Name:   m.Question[0].Name, // 原始域名
+                Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 1,
+            },
+            A: net.IP([]byte{198, 18, byte(s.counter >> 8), byte(s.counter)}),
+        },
+    }
+    s.tree.Store(entry.A.Hdr.Name, entry) // key 为原始域名
+
+    m.MsgHdr.Rcode = dns.RcodeSuccess
+    m.Answer = append(m.Answer[:0], &entry.A) // 返回给客户端的是 A 记录（Fake-IP）
+```
+
+关键在于：**一次完整的代理访问被拆成了两个在时间与上下文上都相互独立的事件，两条记录分别服务于其中一个方向的查找**：
+
+- **A 记录（域名 -> Fake-IP）：服务于 DNS 查询应答阶段。** `HandleMessage` 需要给客户端回一个可路由、可被 TUN 继续捕获的地址。这里不做真实解析，而是分配一个 Fake-IP（`198.18.x.y`）作为 A 记录应答。客户端拿到后，后续所有对该域名的连接都会打到这个 Fake-IP 上
+- **PTR 记录（Fake-IP -> 域名）：服务于后续的 TCP/UDP 连接阶段。** 当客户端用 `198.18.x.y` 发起连接时，流量再次被 TUN 捕获，`Stack.Handle` -> `LookupIP` 必须把这个 Fake-IP 还原成 `mail.google.com`。此时手里只有 IP，没有域名，必须靠反向映射来恢复
+
+**为什么不能只存一条？** 因为两个阶段需要的是**方向相反**的映射：DNS 应答阶段需要「域名 -> IP」正向映射，连接阶段需要「IP -> 域名」反向映射。而且这两件事发生在不同的时间点、不同的调用栈（`HandleMessage` vs `LookupIP`），彼此之间只能通过持久化在 DomainTree 中的记录传递信息。单独一条记录无法同时支撑两个方向的 `O(L)` 查找，因此必须正向、反向各存一条
+
+**两条记录的 key 设计（互不冲突地共用一棵树）**：原项目巧妙地让这两条记录共用同一棵 DomainTree，但使用了不同命名空间的 key：
+
+- A 记录以原始域名为 key，如 `mail.google.com.`，落在 `com -> google -> mail` 这条路径上
+- PTR 记录以反查域名为 key，如 `y.x.18.198.in-addr.arpa.`，落在 `arpa -> in-addr -> 198 -> 18 -> x -> y` 这条路径上
+
+两者前缀完全不同（天然隔离），查找时各走各的路径，复杂度均为 `O(L)`
+
+**counter 与 Fake-IP / PTR 域名的编码一致性**：Fake-IP 的后两段与 PTR 反查域名的前两段由同一个 `uint16` 计数器 `s.counter` 派生，二者必须严格对应，否则连接阶段会反查失败：
+
+- Fake-IP = `198.18.(counter>>8).(counter&0xff)`，即第三段取高字节、第四段取低字节
+- PTR name = `(counter&0xff).(counter>>8).18.198.in-addr.arpa.`，即 `in-addr.arpa` 要求 IP 四段逆序，于是低字节在前、高字节在后、再接 `18.198`
+- 二者是严格的逆序映射：对任一 Fake-IP `198.18.A.B`，其反查域名必为 `B.A.18.198.in-addr.arpa.`，这正是 `LookupIP` 中 `fmt.Sprintf("%d.%d.18.198.in-addr.arpa.", ipv4[3], ipv4[2])` 的由来（`ipv4[3]` 是 B、`ipv4[2]` 是 A）
+
+此外，`PROXY` 域名的 `AAAA` 查询被直接返回 `RcodeRefused`：因为 Fake-IP 池只分配 IPv4（`198.18.0.0/15`），若放行 AAAA 让客户端拿到真实 IPv6 并直连，就会绕过代理造成 IPv6 旁路泄漏
+
+####    mail.google.com 代理全链路数据流
+
+下面以客户端访问 `mail.google.com`（且该域名命中 `*.google.com` 的 `PROXY` 规则）为例，串联 DNS 劫持与连接代理两个阶段的完整数据流。整个过程本地网络上只出现 Fake-IP 与加密隧道流量，真实 DNS 解析发生在远端
+
+```mermaid
+sequenceDiagram
+    participant App as 应用程序
+    participant TUN as TUN 设备
+    participant Stack as Stack_netstack
+    participant Tree as DomainTree
+    participant Tunnel as 加密隧道_SOCKS
+    participant Remote as 远端代理
+    participant GSvr as Google 真实服务器
+
+    Note over App,Tree: 阶段一：DNS 劫持与 Fake-IP 分配
+    App->>TUN: DNS A 查询 mail.google.com
+    TUN->>Stack: HandlePacket UDP dst 53
+    Stack->>Stack: LookupAddr 返回 ErrNotFake 且 port==53 且 Hijack
+    Stack->>Stack: HandleQuery → HandleMessage
+    Stack->>Tree: Load mail.google.com.
+    Tree-->>Stack: 命中 *.google.com 规则 PROXY
+    Stack->>Stack: 首次 Ttl!=1, counter++
+    Stack->>Tree: Store PTR 记录 y.x.18.198.in-addr.arpa. 指向 mail.google.com.
+    Stack->>Tree: Store A 记录 mail.google.com. 指向 198.18.x.y, Rule=PROXY
+    Stack-->>App: A 应答 mail.google.com → 198.18.x.y
+
+    Note over App,Stack: AAAA 旁路防护
+    App->>TUN: DNS AAAA 查询 mail.google.com
+    TUN->>Stack: HandlePacket → HandleMessage
+    Stack-->>App: RcodeRefused 拒绝 AAAA, 防 IPv6 泄漏
+
+    Note over App,GSvr: 阶段二：连接代理与域名恢复
+    App->>TUN: TCP SYN 连接 198.18.x.y:443
+    TUN->>Stack: Handle TCPConn, target=198.18.x.y:443
+    Stack->>Stack: LookupAddr → LookupIP 校验 198.18 前缀
+    Stack->>Tree: Load y.x.18.198.in-addr.arpa.
+    Tree-->>Stack: 命中 PTR → mail.google.com.
+    Stack->>Stack: 构造 socks.Addr domain=mail.google.com:443
+    Stack->>Tunnel: Handler.Handle conn, socks.Addr
+    Tunnel->>Remote: 经加密隧道发送域名 mail.google.com:443
+    Remote->>Remote: 真实 DNS 解析 mail.google.com 远端完成
+    Remote->>GSvr: 连接 Google 真实 IP:443
+    GSvr-->>Remote: 连接建立
+    Remote-->>Tunnel: 隧道就绪
+    Tunnel-->>App: 数据双向透传
+```
+
+数据流中的几个要点回顾：
+
+1. 两次经过 TUN：第一次是 DNS 查询（UDP 53，被劫持），第二次是业务连接（TCP 443，被 Fake-IP 触发反查）
+2. 真实 DNS 解析只发生在 `Remote` 远端，本地从未对 `mail.google.com` 做过真实解析，`A`/`AAAA` 应答都不包含真实 IP
+3. 隧道里传输的是**域名** `mail.google.com`，而非 Fake-IP。Fake-IP 仅是本地「DNS 应答」与「连接触发」之间的一次性桥梁，远端并不认识它
+4. 若 `DIRECT` 或未命中规则，则 `HandleMessage` 不置 `Response`，`HandleQuery` 会把原始报文转发给上游加密 Resolver（DoT/DoH）走真实解析，不分配 Fake-IP
+
+##  0x0C 参考
 -   [Examples made with Go DNS](https://github.com/miekg/exdns)
 -   [CoreDNS 篇 10 - 分流与重定向](https://tinychen.com/20221120-dns-13-coredns-10-dnsredir-and-alternate/)
 -   [CoreDNS 篇 9-kubernetes 插件](https://tinychen.com/20221107-dns-12-coredns-09-kubernetes/)
