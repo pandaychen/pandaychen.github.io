@@ -156,15 +156,195 @@ var (
 )
 ```
 
-####	JSON 编码为 bytes.Buffer
+####	JSON 编码优化
 
+在高并发的 HTTP 服务中，JSON 编码/解码是非常频繁的操作，每次 `json.Marshal` 内部都会创建 `bytes.Buffer`、encoder 等临时对象。通过 `sync.Pool` 复用 `json.Encoder` 和底层 buffer，可以显著减少内存分配：
+
+```golang
+var jsonBufPool = sync.Pool{
+    New: func() interface{} {
+        return new(bytes.Buffer)
+    },
+}
+
+func MarshalJSON(v interface{}) ([]byte, error) {
+    buf := jsonBufPool.Get().(*bytes.Buffer)
+    defer func() {
+        buf.Reset()
+        jsonBufPool.Put(buf)
+    }()
+
+    enc := json.NewEncoder(buf)
+    if err := enc.Encode(v); err != nil {
+        return nil, err
+    }
+    // Encode 会在末尾追加 '\n'，需要去掉
+    result := make([]byte, buf.Len()-1)
+    copy(result, buf.Bytes())
+    return result, nil
+}
+```
+
+Go 标准库 `encoding/json` 内部也使用了 `sync.Pool` 来复用 `encodeState` 对象（[源码链接](https://github.com/golang/go/blob/go1.16/src/encoding/json/encode.go#L300)）：
+
+```golang
+// encoding/json/encode.go
+var encodeStatePool sync.Pool
+
+func newEncodeState() *encodeState {
+    if v := encodeStatePool.Get(); v != nil {
+        e := v.(*encodeState)
+        e.Reset()
+        if len(e.ptrLevel) > 0 {
+            panic("ptrEncoder.encode should have emptied ptrLevel via
+            defer")
+        }
+        e.ptrSeen = nil
+        return e
+    }
+    return &encodeState{ptrLevel: make([]reflect.Value, 0, startDetectingCyclesAfter)}
+}
+
+// Marshal 内部调用
+func Marshal(v interface{}) ([]byte, error) {
+    e := newEncodeState()
+    err := e.marshal(v, encOpts{escapeHTML: true})
+    if err != nil {
+        return nil, err
+    }
+    buf := append([]byte(nil), e.Bytes()...)
+    encodeStatePool.Put(e)
+    return buf, err
+}
+```
+
+####	Protocol Buffers 序列化优化
+
+在 gRPC 等场景中，protobuf 的序列化/反序列化频率极高。可以使用 `sync.Pool` 复用序列化的 buffer：
+
+```golang
+var protoBufPool = sync.Pool{
+    New: func() interface{} {
+        return make([]byte, 0, 1024)
+    },
+}
+
+func MarshalProto(msg proto.Message) ([]byte, error) {
+    size := proto.Size(msg)
+    buf := protoBufPool.Get().([]byte)
+    if cap(buf) < size {
+        buf = make([]byte, 0, size)
+    }
+    buf = buf[:size]
+
+    _, err := proto.MarshalOptions{}.MarshalAppend(buf[:0], msg)
+    if err != nil {
+        protoBufPool.Put(buf[:0])
+        return nil, err
+    }
+
+    result := make([]byte, size)
+    copy(result, buf)
+    protoBufPool.Put(buf[:0])
+    return result, nil
+}
+```
+
+实际上 gRPC-Go 框架内部也大量使用了 `sync.Pool` 来复用编解码 buffer，参考 [grpc-go 中的 bufferPool](https://github.com/grpc/grpc-go/blob/master/mem/buffers.go)
+
+####	gzip 压缩/解压优化
+
+`gzip.Writer` 和 `gzip.Reader` 的创建开销较大（内部需要初始化压缩状态机），在需要频繁压缩/解压的场景下适合使用 `sync.Pool`：
+
+```golang
+var gzipWriterPool = sync.Pool{
+    New: func() interface{} {
+        w, _ := gzip.NewWriterLevel(nil, gzip.BestSpeed)
+        return w
+    },
+}
+
+func CompressData(data []byte) ([]byte, error) {
+    var buf bytes.Buffer
+    w := gzipWriterPool.Get().(*gzip.Writer)
+    w.Reset(&buf)
+
+    _, err := w.Write(data)
+    if err != nil {
+        w.Close()
+        gzipWriterPool.Put(w)
+        return nil, err
+    }
+    err = w.Close()
+    gzipWriterPool.Put(w)
+    if err != nil {
+        return nil, err
+    }
+    return buf.Bytes(), nil
+}
+
+var gzipReaderPool sync.Pool
+
+func DecompressData(data []byte) ([]byte, error) {
+    br := bytes.NewReader(data)
+    var r *gzip.Reader
+    if v := gzipReaderPool.Get(); v != nil {
+        r = v.(*gzip.Reader)
+        r.Reset(br)
+    } else {
+        var err error
+        r, err = gzip.NewReader(br)
+        if err != nil {
+            return nil, err
+        }
+    }
+    defer func() {
+        r.Close()
+        gzipReaderPool.Put(r)
+    }()
+
+    return ioutil.ReadAll(r)
+}
+```
+
+Go 标准库 `net/http` 内部也使用了类似的 gzip pool 来优化 HTTP 压缩响应的性能
+
+####	zap 日志库中的应用
+
+高性能日志库 [uber-go/zap](https://github.com/uber-go/zap) 内部使用了 `sync.Pool` 来复用 `Buffer` 对象，避免每条日志都分配新的 buffer：
+
+```golang
+// zap/buffer/pool.go
+type Pool struct {
+    p *sync.Pool
+}
+
+func NewPool() Pool {
+    return Pool{p: &sync.Pool{
+        New: func() interface{} {
+            return &Buffer{bs: make([]byte, 0, _size)}
+        },
+    }}
+}
+
+func (p Pool) Get() *Buffer {
+    buf := p.p.Get().(*Buffer)
+    buf.Reset()
+    buf.pool = p
+    return buf
+}
+
+func (p Pool) put(buf *Buffer) {
+    p.p.Put(buf)
+}
+```
+
+zap 之所以能做到比标准库 `log` 快 `4-10x`，`sync.Pool` 的使用是关键优化手段之一
 
 ####	标准库 fmt 中的应用
-Go 标准库也大量使用了 `sync.Pool`，例如 `fmt` 和 `encoding/json` 等；下面是 `fmt.Printf` 的实现。从代码分析可知，`fmt.Printf` 的调用是非常频繁的，利用 `sync.Pool` 复用 `pp` 对象能够极大地提升性能，减少内存占用，同时降低 GC 压力。注意下面 `Put` 放回前，对 `buf` 清空的技巧 `p.buf = p.buf[:0]`
+Go 标准库也大量使用了 `sync.Pool`，例如 `fmt` 和 `encoding/json` 等；下面是 `fmt.Printf` 的实现（[源码链接](https://github.com/golang/go/blob/go1.16/src/fmt/print.go)）。从代码分析可知，`fmt.Printf` 的调用是非常频繁的，利用 `sync.Pool` 复用 `pp` 对象能够极大地提升性能，减少内存占用，同时降低 GC 压力。注意下面 `Put` 放回前，对 `buf` 清空的技巧 `p.buf = p.buf[:0]`
 
 ```GOLANG
-// go 1.13.6
-
 // Use simple []byte instead of bytes.Buffer to avoid large dependency.
 type buffer []byte
 
@@ -181,7 +361,17 @@ func (b *buffer) writeByte(c byte) {
 }
 
 func (bp *buffer) writeRune(r rune) {
-	*bp = utf8.AppendRune(*bp, r)
+	if r < utf8.RuneSelf {
+		*bp = append(*bp, byte(r))
+		return
+	}
+	b := *bp
+	n := len(b)
+	for n+utf8.UTFMax > cap(b) {
+		b = append(b, 0)
+	}
+	w := utf8.EncodeRune(b[n:n+utf8.UTFMax], r)
+	*bp = b[:n+w]
 }
 
 // pp is used to store a printer's state and is reused with sync.Pool to avoid allocations.
@@ -301,21 +491,108 @@ func init() {
 }
 ```
 
-####	优化？
-`sync.Pool` 到底能在什么程度上提高内存调度的性能？首先根据之前的信息了解到，`sync.Pool` 不会帮助保存对象，最多延后一个 GC 的时间，所以指望它来减少 GC 耗时可能效果并没有想象中强大（除非大部分对象能够 · 在一次 GC 的时间内反复利用）
+####	优化效果评估
+`sync.Pool` 到底能在什么程度上提高内存调度的性能？Go 1.13+ 引入 victim 机制后，Pool 中的对象可以存活**两轮 GC**（而非之前的一轮），这大幅提高了对象的复用率。`sync.Pool` 的优化效果主要体现在以下方面：
+
+-  **减少内存分配次数**：对象复用避免了频繁的 `malloc`/`free`
+-  **降低 GC 压力**：减少了堆上的临时对象数量，GC 扫描和回收的工作量减少
+-  **减少 GC 停顿时间**：对象复用减少了 heap 的增长速度，GC 触发频率降低
+
+适合 `sync.Pool` 优化的场景特征：对象创建/销毁频繁、生命周期短、无状态或可重置。典型场景包括：buffer 复用、编解码器复用、HTTP 请求上下文复用等。详细的源码分析请参考 [Sync.Pool 应用与分析（续）](https://pandaychen.github.io/2023/05/01/A-GOLANG-SYNC-POOL-ANALYSIS/)
 
 
-##	0x02	问题
-TODO
+##	0x02	常见问题与陷阱
+
+####	问题 1：使用后忘记 Reset，导致数据泄漏
+
+这是最常见的错误，如果 `Put` 回池前不清空对象状态，下一个使用者可能读到上一次的残留数据：
+
+```golang
+buf := pool.Get().(*bytes.Buffer)
+buf.WriteString("sensitive data")
+// 错误：直接 Put 回去，没有 Reset
+pool.Put(buf)
+
+// 其他 goroutine 取出后可能看到 "sensitive data"
+buf2 := pool.Get().(*bytes.Buffer)
+fmt.Println(buf2.String()) // 可能输出 "sensitive data"
+```
+
+正确做法是在 `Put` 前或 `Get` 后调用 `Reset`。推荐在 `Put` 前清理，因为这样调用方对自己放回的对象负责
+
+####	问题 2：Pool 中存放引用类型导致的内存泄漏
+
+当 Pool 中缓存的对象内部包含大的 slice 或 map 时，即使对象被 `Reset`，底层数组的内存可能不会释放。标准库 `fmt` 的做法值得借鉴，当 buffer cap 超过阈值时直接丢弃不放回：
+
+```golang
+func (p *pp) free() {
+    if cap(p.buf) > 64<<10 {  // 超过 64KB 直接丢弃
+        return
+    }
+    p.buf = p.buf[:0]
+    ppFree.Put(p)
+}
+```
+
+####	问题 3：sync.Pool 与 []byte 结合使用时的 grpc 解包异常
+
+一个经典坑是：从 Pool 获取 `[]byte` 后传给 grpc/protobuf 反序列化，反序列化内部可能持有 slice 的引用（零拷贝优化），此时如果把 `[]byte` 放回 Pool 并被其他 goroutine 复用，会导致数据被覆盖。**必须确保 Pool 中的对象在 Put 时没有其他地方持有引用**
+
+```golang
+// 错误示例
+buf := bytePool.Get().([]byte)
+proto.Unmarshal(buf[:n], &msg) // protobuf 可能零拷贝引用 buf 内部的数据
+bytePool.Put(buf)               // 危险：msg 内部可能还在引用 buf
+
+// 正确做法：确保 msg 完全拥有自己的数据拷贝后再放回
+```
+
+####	问题 4：Pool 不适合做连接池
+
+`sync.Pool` 的对象会被 GC 回收，不适合缓存有状态的长连接（TCP、DB 连接等）。连接池应使用带有最大连接数、空闲超时等策略的专用连接池实现（如 `database/sql` 内置的连接池）
+
+####	问题 5：过度使用 sync.Pool
+
+不是所有场景都适合 `sync.Pool`。如果对象的创建成本很低（如小的 struct），使用 Pool 反而会因为 `pin`/`unpin`、原子操作等增加额外开销。建议通过 benchmark 验证 Pool 是否真的带来了性能提升：
+
+```golang
+func BenchmarkWithPool(b *testing.B) {
+    pool := sync.Pool{New: func() interface{} { return new(MyStruct) }}
+    b.RunParallel(func(pb *testing.PB) {
+        for pb.Next() {
+            obj := pool.Get().(*MyStruct)
+            // 使用 obj
+            pool.Put(obj)
+        }
+    })
+}
+
+func BenchmarkWithoutPool(b *testing.B) {
+    b.RunParallel(func(pb *testing.PB) {
+        for pb.Next() {
+            obj := new(MyStruct)
+            // 使用 obj
+            _ = obj
+        }
+    })
+}
+```
 
 ##	0x03	总结
-golang 中 `sync.Pool` 的目的是缓存已分配但未使用的对象，以便后续取出使用，这样可以减少 GC 压力。但是需要注意的是，`sync.Pool` 在 GC 触发时，会对对象池中的数据进行清理。最后再总结下：
+golang 中 `sync.Pool` 的目的是缓存已分配但未使用的对象，以便后续取出使用，这样可以减少 GC 压力。但是需要注意的是，`sync.Pool` 在 GC 触发时，会对对象池中的数据进行清理（Go 1.13+ 通过 victim 机制延长到两轮 GC）。最后再总结下：
 
-`sync.Pool` 的特点
+**`sync.Pool` 的特点**：
 -	`sync.Pool` 主要是为了对象的复用，避免重复创建、销毁。将暂时不用的对象缓存起来，待下次需要的时候直接使用，不用再次经过内存分配，复用对象的内存，减轻 GC 的压力
--	是协程安全的，`Get` 和 `Put` 操作无需加锁
--	只适合暂时缓存，不适合长期存储数据；因为 GC 时会清除 `sync.Pool` 的数据，存储在 pool 中的对象在不被通知的情况下随时可能被清理掉，所以 `sync.Pool` 并不适应用于线程池、DB 连接池之类的存储
--	当对象被`Put`放回`sync.Pool`时，不应当还有其他异步操作对放回的对象进行操作，防止放生竞争
+-	是协程安全的，Go 1.13+ 中 `Get` 和 `Put` 操作基于 lock-free 的 `poolChain` 实现，无需互斥锁
+-	只适合暂时缓存，不适合长期存储数据；因为 GC 时会清除 `sync.Pool` 的数据，存储在 pool 中的对象在不被通知的情况下随时可能被清理掉，所以 `sync.Pool` 并不适用于连接池、DB 连接池之类的有状态存储
+-	当对象被 `Put` 放回 `sync.Pool` 时，不应当还有其他异步操作对放回的对象进行操作，防止发生竞争
+
+**使用最佳实践**：
+-	始终设置 `New` 函数，避免 `Get` 返回 `nil` 时需要额外处理
+-	`Put` 前或 `Get` 后清空对象状态（推荐 `Put` 前清理）
+-	对内含大容量 slice/buffer 的对象，考虑在 `Put` 前检查 cap 大小，超过阈值则丢弃不放回
+-	通过 benchmark 验证 `sync.Pool` 确实带来了性能提升，避免过度优化
+-	确保 `Put` 回 Pool 的对象不再被任何其他地方引用
 
 ##  0x04	参考
 -   [Go 1.13 中 sync.Pool 是如何优化的?](https://colobu.com/2019/10/08/how-is-sync-Pool-improved-in-Go-1-13/)
