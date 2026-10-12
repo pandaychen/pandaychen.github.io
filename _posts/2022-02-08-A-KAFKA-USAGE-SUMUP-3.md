@@ -34,6 +34,22 @@ Future<RecordMetadata> metadataFuture = producer.send(new ProducerRecord<String,
 
 ####    Consumer 最佳实践
 
+[Consumer 最佳实践](https://help.aliyun.com/zh/apsaramq-for-kafka/best-practices-for-consumers)，以下是消费端需要关注的核心要点：
+
+1、**消费者负载均衡**：确保 Consumer 实例数不超过 Topic 的 Partition 数，超出的 Consumer 会处于空闲状态。理想情况下 Consumer 数 = Partition 数，实现一对一消费。当需要提升消费并行度时，应先增加 Partition 数
+
+2、**消费堆积处理**：监控消费 Lag 是消费端运维的核心指标。当 Lag 持续增长时，可以从以下几个方面优化：
+- 增加 Consumer 实例数（同时需要增加 Partition 数）
+- 优化消费逻辑，减少单条消息处理时间
+- 将耗时操作（如 RPC、DB 写入）异步化
+- 使用批量处理替代逐条处理
+
+3、**消费幂等性**：在 At Least Once 语义下，消费端必须实现幂等处理。常用手段包括：基于唯一 ID 的 Redis 去重、MySQL UNIQUE KEY 约束、本地消息表等（详见后文重复消费解决方案章节）
+
+4、**消费者优雅退出**：Consumer 退出时应先完成当前正在处理的消息，再提交 offset，最后关闭连接。避免中途强杀导致消息处理到一半且 offset 未提交的情况
+
+5、**一个 Consumer Group 尽量只订阅一个 Topic**：避免多 Topic 订阅带来的 Rebalance 复杂度和 sarama 已知的多 Topic 消费 bug
+
 ##  0x02    客户端的选型
 前文 [关于 Kafka 应用开发知识点的整理（二）](https://pandaychen.github.io/2022/01/01/A-KAFKA-USAGE-SUMUP-2/) 介绍了 Shopify/sarama 的配置及使用情况，在现网中，主要的客户端有下面几个：
 
@@ -237,7 +253,7 @@ a）自动提交模式下的丢消息问题：默认情况下 sarama 是自动�
 // NewConfig returns a new configuration instance with sane defaults.
 func NewConfig() *Config {
    // …
-   c.Consumer.Offsets.AutoCommit.Enable = true. // 自动提交
+   c.Consumer.Offsets.AutoCommit.Enable = true // 自动提交
    c.Consumer.Offsets.AutoCommit.Interval = 1 * time.Second // 间隔
    c.Consumer.Offsets.Initial = OffsetNewest
    c.Consumer.Offsets.Retry.Max = 3
@@ -336,7 +352,7 @@ Consumer 在重启后会继续消费，这是因为 Kafka 使用 offset（偏移
 
 上图中的几个字段含义：
 - `CURRENT-OFFSET`：表示 Consumer 消费了数据之后提交的 offset，即消费者消费了的数据的偏移量。如果为 `unknown`，则表示消费者未提交过 offset，是 Kafka 中消费者在每个分区上当前处理的消息的偏移量。它表示消费者已经成功处理了分区中的哪些消息。`CURRENT-OFFSET` 是消费者组在 Kafka 内部的 `__consumer_offsets` Topic 中维护的状态信息
-- `LOG-END-OFFSET`：表示的是该分区的 `HW`，即 `LEO` 值，对于 Kafka 中的每个分区，`LOG-END-OFFSET` 是指该分区中最新消息的下一个偏移量。它表示了分区中下一条将被写入的消息的偏移量，`LOG-END-OFFSET` 可以用来衡量分区中消息的总量
+- `LOG-END-OFFSET`：在 `kafka-consumer-groups.sh` 的输出中，该值表示的是分区的 LEO（Log End Offset），即该分区中下一条待写入消息的 offset。注意 LEO 与 HW（High Watermark）是不同的概念：LEO 是副本维度的日志末端偏移，HW 是所有 ISR 副本已同步到的最大 offset（Consumer 只能消费到 HW 之前的消息，HW <= LEO）。在 ISR 完全同步的正常情况下，Leader 的 LEO 与 HW 近似相等。`LOG-END-OFFSET` 可以用来衡量分区中消息的总量
 - `LAG`：表示延迟滞后，也就是生产者已经写到 kafka 集群了，然后有还没有被消费的数量；对于 Kafka 中的每个消费者，`LAG` 是指消费者在每个分区中落后于 `LOG-END-OFFSET` 的消息数量。它表示了消费者尚未处理的消息数量，`LAG` 可以用来衡量消费者处理消息的速度和效率。计算公式为：`LAG = LOG-END-OFFSET - CURRENT-OFFSET`，其中 `CURRENT-OFFSET` 是消费者在分区中当前处理的消息偏移量
 
 `LOG-END-OFFSET` 和 `LAG` 是 Kafka 监控和调优的重要指标（Consumer 进度）。通过观察这两个指标，可以了解 Consumer 的处理速度，以及是否能够及时处理生产者生成的消息。如果 `LAG` 持续增加，这可能意味着消费者无法跟上生产者的速度，需要对消费者进行优化或增加消费者实例以提高吞吐量。Consumer 重启时，从何处开始消费和 `CURRENT-OFFSET` 有关系，结论如下：
@@ -390,19 +406,153 @@ enable.auto.commit = false
 
 特别关注下 sarama 库的几个参数的配置：
 
-```bash
-#intitial = oldest 代表消费者可以访问到的 topic 里的最早的消息，大于 commit 的位置，但是小于 HW。同时也受到 broker 上消息保留时间的影响和位移保留时间的影响。不能保证一定能消费到 topic 起始位置的消息
-#如果设置为 newest 则代表访问 commit 位置的下一条消息。如果发生 consumer 重启且 autocommit 没有设置为 false, 则之前的消息会发生丢失，再也消费不到了。在业务环境特别不稳定或非持久化 consumer 实例的场景下，应特别注意
-sarama.offset.initial  （oldest, newest）
-#offsets.retention.minutes 为 1440s
-offsets.retention.minutes
+```golang
+// config.Consumer.Offsets.Initial = sarama.OffsetOldest 或 sarama.OffsetNewest
+// OffsetOldest：代表消费者可以访问到的 topic 里的最早的消息，大于 commit 的位置，但是小于 HW。
+//   同时也受到 broker 上消息保留时间的影响和位移保留时间的影响，不能保证一定能消费到 topic 起始位置的消息
+// OffsetNewest：代表访问 commit 位置的下一条消息。如果发生 consumer 重启且 autocommit 没有设置为 false,
+//   则之前的消息会发生丢失，再也消费不到了。在业务环境特别不稳定或非持久化 consumer 实例的场景下，应特别注意
+config.Consumer.Offsets.Initial = sarama.OffsetNewest
+
+// Broker 端配置：offsets.retention.minutes = 1440（单位为分钟，默认 24 小时）
 ```
 
 3、Exactly once, 较难实现，需要 msg 持久化和 commit 是原子的
 
 消息投递且仅投递一次的语义是很难实现的。首先要消费消息并且提交保证不会重复投递，其次提交前要完成整体的业务逻辑关于消息的处理。在 kafka 本身没有提供此场景语义接口的情况下，这几乎是不可能有效实现的。一般的解决方案，也是进行原子性的消息存储，业务逻辑异步慢慢的从存储中取出消息进行处理
 
-##  0x04  关于 consumer 的一些再认知
+## 0x04 Kafka 的 CAP 定位与 sarama 配置
+
+#### CAP 理论回顾
+
+CAP 定理指出，分布式系统不可能同时满足以下三个特性：
+- **C（Consistency）**：一致性，所有节点在同一时刻看到相同的数据
+- **A（Availability）**：可用性，每个请求都能收到一个（非错误）响应
+- **P（Partition Tolerance）**：分区容错性，系统在网络分区时仍能继续运行
+
+由于网络分区在分布式系统中不可避免（P 必须满足），实际上系统只能在 C 和 A 之间做取舍。
+
+#### Kafka 的 CAP 定位
+
+**Kafka 不是严格的 CP 或 AP 系统，而是通过配置参数在 CP 和 AP 之间灵活调整**。核心影响因素包括：
+
+- Producer 的 `acks` 配置
+- Broker 的 `min.insync.replicas` 配置
+- Broker 的 `unclean.leader.election.enable` 配置
+- 副本因子（`replication.factor`）
+
+#### CP 倾向配置（强一致，牺牲部分可用性）
+
+当业务对数据一致性要求极高（如金融交易、订单系统）时，应采用 CP 倾向配置：
+
+```golang
+func NewCPProducer(brokers []string) (sarama.SyncProducer, error) {
+    config := sarama.NewConfig()
+    config.Version = sarama.V2_8_0_0
+
+    // CP 核心配置：等待所有 ISR 副本确认
+    config.Producer.RequiredAcks = sarama.WaitForAll  // acks=-1
+    config.Producer.Return.Successes = true
+    config.Producer.Return.Errors = true
+
+    // 幂等性 Producer，防止因重试导致消息重复
+    config.Producer.Idempotent = true
+    config.Net.MaxOpenRequests = 1  // 幂等性要求
+
+    // 重试策略
+    config.Producer.Retry.Max = 5
+    config.Producer.Retry.Backoff = 100 * time.Millisecond
+
+    return sarama.NewSyncProducer(brokers, config)
+}
+```
+
+对应的 Broker 端配置（需要运维在 Kafka 集群侧设置）：
+
+```bash
+# 副本因子至少为 3
+default.replication.factor=3
+
+# ISR 中最少需要 2 个副本确认写入成功
+# 配合 acks=-1，确保至少 2 个副本持久化了消息
+min.insync.replicas=2
+
+# 禁止非 ISR 副本被选举为 Leader
+# 防止数据不完整的副本成为 Leader 导致数据丢失
+unclean.leader.election.enable=false
+```
+
+CP 配置的代价：当 ISR 中的副本数不足 `min.insync.replicas` 时（如 3 副本挂了 2 个），Producer 写入会失败（`NotEnoughReplicas` 错误），此时系统选择了一致性而牺牲了可用性。
+
+#### AP 倾向配置（高可用，容忍数据丢失）
+
+当业务对吞吐量和可用性要求更高，可以容忍少量数据丢失时（如日志收集、监控指标上报），应采用 AP 倾向配置：
+
+```golang
+func NewAPProducer(brokers []string) (sarama.AsyncProducer, error) {
+    config := sarama.NewConfig()
+    config.Version = sarama.V2_8_0_0
+
+    // AP 核心配置：仅等待 Leader 确认（或不等待）
+    config.Producer.RequiredAcks = sarama.WaitForLocal  // acks=1，仅 Leader 确认
+    // config.Producer.RequiredAcks = sarama.NoResponse  // acks=0，不等待确认（最高吞吐）
+    config.Producer.Return.Successes = true
+    config.Producer.Return.Errors = true
+
+    // 高吞吐批量配置
+    config.Producer.Flush.Frequency = 500 * time.Millisecond
+    config.Producer.Flush.Messages = 500
+
+    // 启用压缩减少网络开销
+    config.Producer.Compression = sarama.CompressionSnappy
+
+    return sarama.NewAsyncProducer(brokers, config)
+}
+```
+
+对应的 Broker 端配置：
+
+```bash
+min.insync.replicas=1
+# 允许非 ISR 副本被选举为 Leader，保证可用性
+unclean.leader.election.enable=true
+```
+
+AP 配置的代价：`acks=1` 时，Leader 写入成功但尚未同步到 Follower 就返回，如果此时 Leader 宕机，未同步的消息会丢失；`acks=0` 时，Producer 发完就不管了，网络丢包也无感知。
+
+#### 生产环境推荐：CP 与 AP 的折中方案
+
+大多数生产环境采用折中方案，在可靠性和性能之间取得平衡：
+
+| 配置项 | 推荐值 | 说明 |
+| :--- | :---: | :--- |
+| `acks` | `-1`（WaitForAll） | 等待 ISR 全部确认 |
+| `min.insync.replicas` | `2` | 至少 2 个副本确认 |
+| `replication.factor` | `3` | 3 副本 |
+| `unclean.leader.election.enable` | `false` | 禁止脏选举 |
+| `Producer.Retry.Max` | `3~5` | 适度重试 |
+| `Producer.Compression` | `snappy/lz4` | 压缩提升吞吐 |
+
+```golang
+func NewProductionProducer(brokers []string) (sarama.SyncProducer, error) {
+    config := sarama.NewConfig()
+    config.Version = sarama.V2_8_0_0
+    config.Producer.RequiredAcks = sarama.WaitForAll
+    config.Producer.Return.Successes = true
+    config.Producer.Return.Errors = true
+    config.Producer.Retry.Max = 3
+    config.Producer.Retry.Backoff = 100 * time.Millisecond
+    config.Producer.Compression = sarama.CompressionSnappy
+    config.Producer.Idempotent = true
+    config.Net.MaxOpenRequests = 1
+
+    return sarama.NewSyncProducer(brokers, config)
+}
+```
+
+这套配置确保了：在正常情况下消息不丢失（CP 特性）；在极端场景下（如同时宕机 2 个副本），写入会失败而不是丢数据（选择一致性）；`Idempotent=true` 保证 Producer 端不会因重试产生重复消息。
+
+##  0x05  关于 consumer 的一些再认知
 收集下笔者遇到的一些问题
 
 1、如何监控分区消费堆积（消费过慢）？
@@ -430,8 +580,320 @@ offsets.retention.minutes
 5. `v0.10.2` 可以进行升级到最新版本
 
 ####  重复消费的解决方案
-TODO
 
+重复消费是 Kafka 在 At Least Once 语义下不可完全避免的问题。在展开解决方案之前，先分析重复消费的根因
+
+**根因一：Rebalance 导致的重复消费**
+
+当 Consumer Group 发生 Rebalance 时，某个 Consumer 正在处理的消息可能已经完成业务逻辑但尚未提交 offset。Rebalance 完成后，该 Partition 被分配给另一个 Consumer，新 Consumer 从上次已提交的 offset 处开始消费，导致部分消息被重复处理。
+
+**根因二：自动提交窗口期的重复消费**
+
+自动提交模式下，假设提交间隔为 `1s`，在两次提交之间如果 Consumer 崩溃，已消费但未提交的消息在重启后会被重新消费。
+
+**根因三：手动提交失败的重复消费**
+
+手动提交模式下，业务逻辑处理成功但 `Commit()` 调用失败（如网络超时），消息也会在重启后被重复消费。
+
+以下提供 `4` 种解决方案，按推荐优先级排列：
+
+#### 方案一：消费端幂等 + At Least Once（推荐）
+
+这是最常用的方案，核心思想是：**允许消息重复投递，但保证消费端处理结果的幂等性**。
+
+**1）基于 Redis SETNX 的去重（适合非持久化或有 TTL 的数据）**
+
+利用 Redis 的原子性操作，对每条消息生成唯一标识，消费前先检查是否已处理过：
+
+```golang
+type IdempotentConsumerHandler struct {
+    redisClient *redis.Client
+    ttl         time.Duration
+}
+
+func (h *IdempotentConsumerHandler) Setup(sarama.ConsumerGroupSession) error   { return nil }
+func (h *IdempotentConsumerHandler) Cleanup(sarama.ConsumerGroupSession) error { return nil }
+
+func (h *IdempotentConsumerHandler) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+    for msg := range claim.Messages() {
+        // 使用 topic+partition+offset 作为消息唯一标识
+        // 也可以使用业务层面的唯一 ID（如订单号、请求 ID 等）
+        deduplicationKey := fmt.Sprintf("kafka:dedup:%s:%d:%d", msg.Topic, msg.Partition, msg.Offset)
+
+        // SETNX: 仅当 key 不存在时设置成功
+        ok, err := h.redisClient.SetNX(context.Background(), deduplicationKey, "1", h.ttl).Result()
+        if err != nil {
+            log.Printf("redis setnx error: %v, will retry", err)
+            continue
+        }
+
+        if !ok {
+            // key 已存在，说明该消息已被处理过，跳过
+            log.Printf("duplicate message detected, skip: topic=%s partition=%d offset=%d", msg.Topic, msg.Partition, msg.Offset)
+            sess.MarkMessage(msg, "")
+            continue
+        }
+
+        // 首次消费，执行业务逻辑
+        if err := doBusinessLogic(msg); err != nil {
+            // 业务处理失败，删除去重 key，允许下次重试
+            h.redisClient.Del(context.Background(), deduplicationKey)
+            log.Printf("business logic failed: %v", err)
+            continue
+        }
+
+        sess.MarkMessage(msg, "")
+    }
+    return nil
+}
+```
+
+**2）基于 MySQL UNIQUE KEY 的去重（适合需要持久化的数据）**
+
+利用数据库唯一约束保证幂等，适合消息需要落库的场景：
+
+```golang
+type DBIdempotentHandler struct {
+    db *sql.DB
+}
+
+func (h *DBIdempotentHandler) Setup(sarama.ConsumerGroupSession) error   { return nil }
+func (h *DBIdempotentHandler) Cleanup(sarama.ConsumerGroupSession) error { return nil }
+
+func (h *DBIdempotentHandler) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+    for msg := range claim.Messages() {
+        var bizMsg BizMessage
+        if err := json.Unmarshal(msg.Value, &bizMsg); err != nil {
+            log.Printf("unmarshal error: %v", err)
+            sess.MarkMessage(msg, "")
+            continue
+        }
+
+        // 利用 MySQL 的 UNIQUE KEY 约束实现幂等写入
+        // 表结构中 msg_id 字段设置为 UNIQUE KEY
+        _, err := h.db.Exec(
+            `INSERT INTO biz_table (msg_id, data, created_at)
+             VALUES (?, ?, NOW())
+             ON DUPLICATE KEY UPDATE updated_at = NOW()`,
+            bizMsg.MsgID, bizMsg.Data,
+        )
+        if err != nil {
+            log.Printf("db insert error: %v", err)
+            continue
+        }
+
+        sess.MarkMessage(msg, "")
+    }
+    return nil
+}
+```
+
+#### 方案二：基于本地消息表的事务性消费
+
+核心思想是将「消费消息」和「写入业务数据」放在同一个数据库事务中，同时在本地消息表中记录已消费的 offset，保证原子性：
+
+```golang
+type TransactionalHandler struct {
+    db *sql.DB
+}
+
+func (h *TransactionalHandler) Setup(sarama.ConsumerGroupSession) error   { return nil }
+func (h *TransactionalHandler) Cleanup(sarama.ConsumerGroupSession) error { return nil }
+
+func (h *TransactionalHandler) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+    for msg := range claim.Messages() {
+        if err := h.processInTransaction(msg); err != nil {
+            log.Printf("transaction failed: %v", err)
+            continue
+        }
+        sess.MarkMessage(msg, "")
+    }
+    return nil
+}
+
+func (h *TransactionalHandler) processInTransaction(msg *sarama.ConsumerMessage) error {
+    tx, err := h.db.Begin()
+    if err != nil {
+        return fmt.Errorf("begin tx: %w", err)
+    }
+    defer tx.Rollback()
+
+    // 1. 检查本地消息表中是否已经处理过该消息
+    var count int
+    err = tx.QueryRow(
+        `SELECT COUNT(*) FROM kafka_consume_log
+         WHERE topic=? AND partition_id=? AND offset_id=?`,
+        msg.Topic, msg.Partition, msg.Offset,
+    ).Scan(&count)
+    if err != nil {
+        return fmt.Errorf("query consume log: %w", err)
+    }
+    if count > 0 {
+        return nil
+    }
+
+    // 2. 执行业务逻辑（写入业务表）
+    var bizMsg BizMessage
+    if err := json.Unmarshal(msg.Value, &bizMsg); err != nil {
+        return fmt.Errorf("unmarshal: %w", err)
+    }
+    if _, err := tx.Exec(`INSERT INTO biz_table (msg_id, data) VALUES (?, ?)`,
+        bizMsg.MsgID, bizMsg.Data); err != nil {
+        return fmt.Errorf("insert biz: %w", err)
+    }
+
+    // 3. 记录消费日志（同一事务中）
+    if _, err := tx.Exec(
+        `INSERT INTO kafka_consume_log (topic, partition_id, offset_id, consumed_at)
+         VALUES (?, ?, ?, NOW())`,
+        msg.Topic, msg.Partition, msg.Offset); err != nil {
+        return fmt.Errorf("insert consume log: %w", err)
+    }
+
+    // 4. 提交事务，保证业务数据和消费记录的原子性
+    return tx.Commit()
+}
+```
+
+本地消息表的建表 SQL：
+
+```sql
+CREATE TABLE kafka_consume_log (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    topic VARCHAR(255) NOT NULL,
+    partition_id INT NOT NULL,
+    offset_id BIGINT NOT NULL,
+    consumed_at DATETIME NOT NULL,
+    UNIQUE KEY uk_topic_partition_offset (topic, partition_id, offset_id)
+) ENGINE=InnoDB;
+```
+
+该方案的优势是利用数据库事务保证了业务数据写入和消费记录的原子性，即使 Kafka offset 提交失败导致重复消费，本地消息表也能拦截。
+
+#### 方案三：基于 Kafka 事务（Exactly Once Semantics）
+
+Kafka `0.11+` 引入了事务机制和幂等 Producer，sarama 也提供了支持。该方案适用于 **consume-transform-produce** 的场景（从一个 Topic 消费 -> 处理 -> 写入另一个 Topic）：
+
+```golang
+func NewTransactionalProducer(brokers []string, txnID string) (sarama.AsyncProducer, error) {
+    config := sarama.NewConfig()
+    config.Version = sarama.V2_8_0_0
+    config.Producer.Idempotent = true
+    config.Producer.Return.Successes = true
+    config.Producer.Return.Errors = true
+    config.Producer.RequiredAcks = sarama.WaitForAll
+    config.Net.MaxOpenRequests = 1
+
+    // 事务性 Producer 配置
+    config.Producer.Transaction.ID = txnID
+    config.Producer.Transaction.Retry.Max = 3
+    config.Producer.Transaction.Retry.Backoff = 100 * time.Millisecond
+
+    return sarama.NewAsyncProducer(brokers, config)
+}
+```
+
+Kafka 事务的 Exactly Once 保证范围有限：仅在 Kafka 生态内部（从 Topic A 读 -> 处理 -> 写 Topic B + 提交 offset 作为一个原子操作）有效。如果涉及外部系统（如写 MySQL），仍需结合方案一或方案二实现端到端的 Exactly Once。
+
+可参考 sarama 官方示例：[Exactly-Once example](https://github.com/IBM/sarama/tree/main/examples/exactly_once)
+
+#### 方案四：自定义 Offset 管理
+
+将 offset 与业务数据存储在同一个外部存储中（如 MySQL），不使用 Kafka 的 `__consumer_offsets`，实现 offset 与业务数据的原子提交：
+
+```golang
+type CustomOffsetHandler struct {
+    db *sql.DB
+}
+
+func (h *CustomOffsetHandler) Setup(sess sarama.ConsumerGroupSession) error {
+    // 从 MySQL 中读取上次消费的 offset，重置消费位置
+    rows, err := h.db.Query(
+        `SELECT topic, partition_id, max_offset FROM consumer_offsets WHERE group_id=?`,
+        "my-consumer-group",
+    )
+    if err != nil {
+        return err
+    }
+    defer rows.Close()
+
+    for rows.Next() {
+        var topic string
+        var partition int32
+        var offset int64
+        if err := rows.Scan(&topic, &partition, &offset); err != nil {
+            continue
+        }
+        // 重置到自管理的 offset 位置
+        sess.ResetOffset(topic, partition, offset, "")
+    }
+    return nil
+}
+
+func (h *CustomOffsetHandler) Cleanup(sarama.ConsumerGroupSession) error { return nil }
+
+func (h *CustomOffsetHandler) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+    for msg := range claim.Messages() {
+        tx, err := h.db.Begin()
+        if err != nil {
+            log.Printf("begin tx error: %v", err)
+            continue
+        }
+
+        // 业务逻辑 + offset 更新在同一个事务中
+        if err := doBusinessInTx(tx, msg); err != nil {
+            tx.Rollback()
+            log.Printf("business error: %v", err)
+            continue
+        }
+
+        // 更新自管理的 offset
+        if _, err := tx.Exec(
+            `INSERT INTO consumer_offsets (group_id, topic, partition_id, max_offset)
+             VALUES (?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE max_offset = ?`,
+            "my-consumer-group", msg.Topic, msg.Partition, msg.Offset+1, msg.Offset+1,
+        ); err != nil {
+            tx.Rollback()
+            log.Printf("update offset error: %v", err)
+            continue
+        }
+
+        if err := tx.Commit(); err != nil {
+            log.Printf("commit error: %v", err)
+            continue
+        }
+
+        sess.MarkMessage(msg, "")
+    }
+    return nil
+}
+```
+
+自管理 offset 表：
+
+```sql
+CREATE TABLE consumer_offsets (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    group_id VARCHAR(255) NOT NULL,
+    topic VARCHAR(255) NOT NULL,
+    partition_id INT NOT NULL,
+    max_offset BIGINT NOT NULL,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_group_topic_partition (group_id, topic, partition_id)
+) ENGINE=InnoDB;
+```
+
+#### 四种方案对比
+
+| 方案 | 适用场景 | 复杂度 | 可靠性 | 性能影响 |
+| :--- | :--- | :---: | :---: | :---: |
+| 方案一：消费端幂等 | 通用场景，最常用 | 低 | 高 | 低（Redis）/ 中（MySQL） |
+| 方案二：本地消息表 | 消息需要落库的场景 | 中 | 高 | 中 |
+| 方案三：Kafka 事务 | consume-transform-produce | 中 | 最高 | 高（事务开销） |
+| 方案四：自定义 Offset | 需要精确控制 offset 的场景 | 高 | 高 | 中 |
+
+**实际生产环境中的建议**：优先选择方案一（消费端幂等），它对业务侵入最小，性能影响最低。如果消息消费涉及数据库写入，可以结合方案二（本地消息表）进一步保证可靠性。方案三和方案四适用于特定场景，按需选择
 
 ##      0x06    一个关于 consumer 的问题排查经过
 在工作中遇到过这样的问题，测试环境消费者进程重启后，不消费重启前一段时间（间隔不久）的数据，大致描述如下：
@@ -461,6 +923,9 @@ TODO
 - [订阅者最佳实践](https://help.aliyun.com/zh/apsaramq-for-kafka/best-practices-for-consumers?spm=a2c4g.11186623.0.i0)
 - [CKafka 数据可靠性说明](https://cloud.tencent.com/document/product/597/36186)
 - [Kafka(Go) 教程 (六)---sarama 客户端 producer 源码分析](https://www.lixueduan.com/posts/kafka/06-sarama-producer/)
-- [sarama的消费者组分析、使用](https://www.cnblogs.com/payapa/p/15401357.html)
+- [sarama 的消费者组分析、使用](https://www.cnblogs.com/payapa/p/15401357.html)
+- [sarama Exactly-Once example](https://github.com/IBM/sarama/tree/main/examples/exactly_once)
+- [sarama ConsumerGroup example](https://github.com/IBM/sarama/blob/main/examples/consumergroup/main.go)
+- [Kafka Idempotent Producer](https://cwiki.apache.org/confluence/display/KAFKA/Idempotent+Producer)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权

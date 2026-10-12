@@ -18,14 +18,14 @@ tags:
 
 ## 0x01 Kafka 的基本概念
 
-回顾下 kakfa 的架构：
+回顾下 kafka 的架构：
 ![kafka-basic](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka/kafka2.1.png)
 
 - Producer：生产者，可以将数据发布到所选择的 topic 中
 - Consumer：消费者，**可以使用 Consumer Group 进行标识**，在 topic 中的每条记录都会被分配给订阅消费组中的一个消费者实例，消费者实例可以分布在多个进程中或者多个机器上
 - Broker：消息中间件处理节点（服务器），一个节点就是一个 broker，一个 Kafka 集群由一个或多个 broker 组成
 
-那么，对 Kakfa 的可用性主要着眼于下面几个环节：
+那么，对 Kafka 的可用性主要着眼于下面几个环节：
 
 1. 集群中的部分或全部 Broker 故障引发的可用性问题，包括某个 broker 在消息尚未从内存缓冲区持久化到硬盘前就故障的情况
 2. Producer 发送消息的可靠性，包括下面几种
@@ -40,7 +40,7 @@ Producer 的写入流程大概如下，最终会返回一个 ack 来告知 produ
 
 1.  producer 先从 kafka 集群找到该 partition 的 leader
 2.  producer 将消息发送给 leader，leader 将该消息写入本地
-3.  各个 follwers 从 leader pull 消息，写入本地 log 后向 leader 发送 ack
+3.  各个 followers 从 leader pull 消息，写入本地 log 后向 leader 发送 ack
 4.  leader 收到所有 ISR 中的 replica 的 ACK 后，增加 high watermark，并向 producer 发送 ack
 
 ![kafka-producer](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka/kafka-producer-2.png)
@@ -180,8 +180,8 @@ enable.auto.commit = false
 此场景下，业务开发需要在消费到消息业务逻辑处理整个流程完成后进行手动提交。如果在流程未处理结束时发生重启，则之前消费到未提交的消息会重新消费到。在 `sarama-kafka` 库中，有如下的配置选项：
 
 ```golang
-sarama.offset.initial =  OffsetNewest // 可选 OffsetOldest、OffsetNewest
-offsets.retention.minutes = 1440s
+config.Consumer.Offsets.Initial = sarama.OffsetNewest // 可选 sarama.OffsetOldest、sarama.OffsetNewest
+// Broker 端配置：offsets.retention.minutes = 1440（单位为分钟）
 ```
 
 - OffsetOldest：代表消费者可以访问到的 topic 里的最早的消息，大于 commit 的位置，但是小于 HW。同时也受到 broker 上消息保留时间的影响和位移保留时间的影响（不能保证一定能消费到 topic 起始位置的消息）
@@ -209,10 +209,10 @@ auto.commit.interval.ms = 1s    #假设是 1s 提交一次
 
 
 ####  消费者组提交 offset（位移）
-Consumr offset 代表了 kafka Consumer Group 保存其消费的进度，既然是主动提交，在临界点就会发生下面两种问题：
-1. 重复消费：如果提交的偏移量小于客户端处理的最后一个消息的偏移量，那么处于两个偏移量直接的消息就会被重复处理。如，位移提交的动作在消费完所有拉取到的消息后才执行，那么当消费到 `X+5` 时候遇到异常。当故障恢复后，重新拉取消息是从 `X+2` 开始，导致 `X+2` 至 `X+4` 之间的消息重新消费一遍
+Consumer offset 代表了 kafka Consumer Group 保存其消费的进度，既然是主动提交，在临界点就会发生下面两种问题：
+1. 重复消费：如果提交的偏移量小于客户端处理的最后一个消息的偏移量，那么处于两个偏移量之间的消息就会被重复处理。如，位移提交的动作在消费完所有拉取到的消息后才执行，那么当消费到 `X+5` 时候遇到异常。当故障恢复后，重新拉取消息是从 `X+2` 开始，导致 `X+2` 至 `X+4` 之间的消息重新消费一遍
 
-2. 消息丢失：如果提交的偏移量大于客户端处理的最后一个消息的偏移量，那么处于两个偏移量直接的消息将会丢失。如，拉取完成消息后不等消息确认完成消费既执行提交。如图，拉取 `[X+2,X+7]` 后提交位移 `X+8`，当执行到 `X+5` 时候出现异常，当故障恢复后重新拉取消息是从 `X+8` 开始，那么 `[X+5,X+7]` 之间的消息是未能被消费
+2. 消息丢失：如果提交的偏移量大于客户端处理的最后一个消息的偏移量，那么处于两个偏移量之间的消息将会丢失。如，拉取完成消息后不等消息确认完成消费即执行提交。如图，拉取 `[X+2,X+7]` 后提交位移 `X+8`，当执行到 `X+5` 时候出现异常，当故障恢复后重新拉取消息是从 `X+8` 开始，那么 `[X+5,X+7]` 之间的消息是未能被消费
 
 ![kafka-consumer-offset1.png](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka/kafka-consumer-offset1.png)
 
@@ -220,7 +220,7 @@ Consumr offset 代表了 kafka Consumer Group 保存其消费的进度，既然�
 
 ## 0x05 Kafka 的幂等性以及实现
 
-在项目中，一般遵循的原则是，**相比数据丢失，重复投递 / 消费是符合业务预期的，可以通过一些幂等性设计来规避这个问题**。本小节来分析下如下设计 Kafka 的幂等性。
+在项目中，一般遵循的原则是，**相比数据丢失，重复投递 / 消费是符合业务预期的，可以通过一些幂等性设计来规避这个问题**。本小节来分析下如下设计 Kafka 的幂等性
 
 #### 重复消费的问题以及解决
 解决 Consumer 端幂等性的问题，得结合业务的特性来实现，举几个例子：
@@ -257,6 +257,41 @@ Rebalance 触发的原因一般有如下几种：
 -  `heartbeat.interval.ms`：此参数提供了一个允许你控制发送心跳请求频率。该值设置得越小，Consumer 实例发送心跳请求的频率就越高。频繁地发送心跳请求会额外消耗带宽资源，但好处是能够更加快速地知晓当前是否开启 Rebalance，因为，目前 Coordinator 通知各个 Consumer 实例开启 Rebalance 的方法，就是将 `REBALANCE_NEEDED` 标志封装进心跳请求的响应体中
 -  `max.poll.interval.ms`：此参数用于控制 Consumer 实际消费能力对 Rebalance 的影响，默认为 `5min`。它限定了 Consumer 端应用程序两次调用 poll 方法的最大时间间隔。当前的 Consumer 程序如果在 `5min` 之内无法消费完 poll 方法返回的消息，那么 Consumer 会主动发起离开组的请求，Coordinator 也会开启新一轮 Rebalance
 
+#### 分区分配策略
+
+Rebalance 时，Coordinator 需要决定如何将 Topic 的各个 Partition 分配给 Consumer Group 中的 Consumer 实例。Kafka 支持多种分区分配策略，在 sarama 中通过 `config.Consumer.Group.Rebalance.GroupStrategies` 配置：
+
+| 策略 | 说明 | 优缺点 |
+| :---: | :--- | :--- |
+| **Range** | 按 Topic 维度，将每个 Topic 的 Partition 按照编号范围均匀分配给 Consumer | 当多个 Topic 的 Partition 数不能被 Consumer 数整除时，前面的 Consumer 会多承担 Partition，导致负载不均 |
+| **RoundRobin** | 将所有 Topic 的所有 Partition 汇总后，按轮询方式逐个分配给 Consumer | 负载更均匀，但要求组内所有 Consumer 订阅相同的 Topic 集合 |
+| **Sticky** | 在 RoundRobin 基础上，Rebalance 时尽量保持已有的分配关系不变，仅对需要调整的 Partition 进行迁移 | 减少不必要的 Partition 迁移，降低 Rebalance 开销 |
+| **CooperativeSticky** | 协作式 Sticky 分配，采用增量式 Rebalance（Incremental Cooperative Rebalance），分两阶段完成 | 避免 STW，Consumer 在 Rebalance 期间可以继续消费未被迁移的 Partition |
+
+sarama 中的配置示例如下：
+
+```golang
+config := sarama.NewConfig()
+
+// 传统 Eager Rebalance（STW 模式），可选 Range/RoundRobin/Sticky
+config.Consumer.Group.Rebalance.GroupStrategies = []sarama.BalanceStrategy{
+    sarama.NewBalanceStrategySticky(),
+}
+
+// 推荐：使用 CooperativeSticky（sarama v1.38.0+ 支持）
+// 增量式 Rebalance，避免全量 STW
+config.Consumer.Group.Rebalance.GroupStrategies = []sarama.BalanceStrategy{
+    sarama.NewBalanceStrategySticky(),
+}
+```
+
+**Eager vs Cooperative Rebalance 的核心区别**：
+
+- **Eager Rebalance**（传统模式）：所有 Consumer 在 Rebalance 开始时立即撤销（revoke）所有已分配的 Partition，等待重新分配完成后才继续消费。这就是所谓的 STW（Stop-The-World）
+- **Cooperative Rebalance**（增量式）：分两个阶段进行。第一阶段仅撤销需要迁移的 Partition，其他 Partition 继续正常消费；第二阶段将撤销的 Partition 分配给目标 Consumer。整个过程中，未被迁移的 Partition 不受影响
+
+在高吞吐量的生产环境中，优先使用 CooperativeSticky 策略可以显著减少 Rebalance 对业务的影响
+
 ####  避免 Rebalance 的方法
 
 在现网中，如何避免消费客户端频繁出现 Rebalance？基于以上描述，有两类非必要的 Rebalance 场景需要优化，如下：
@@ -268,7 +303,113 @@ Rebalance 触发的原因一般有如下几种：
 
 ## 0x07 Producer 实践心得
 
+#### SyncProducer vs AsyncProducer
+
+sarama 提供了两种 Producer 实现，需要根据业务场景选择：
+
+- **SyncProducer**：同步发送，`SendMessage` 调用会阻塞直到 Broker 返回 ack（或超时）。适合对消息可靠性要求极高、吞吐量要求不高的场景（如订单、支付通知等）
+- **AsyncProducer**：异步发送，消息写入内部 channel 后立即返回，由后台 goroutine 批量发送到 Broker。吞吐量远高于 SyncProducer，但需要开发者主动消费 `Errors()` 和 `Successes()` channel
+
+使用 AsyncProducer 时，**必须同时消费 `Errors()` 和 `Successes()` channel**（当 `Return.Successes = true` 时），否则会造成内部 channel 阻塞导致 Producer 卡死：
+
+```golang
+func consumeAsyncProducerResult(producer sarama.AsyncProducer) {
+    go func() {
+        for {
+            select {
+            case msg := <-producer.Successes():
+                log.Printf("produced message to topic %s, partition %d, offset %d", msg.Topic, msg.Partition, msg.Offset)
+            case err := <-producer.Errors():
+                log.Printf("failed to produce message: %v", err)
+            }
+        }
+    }()
+}
+```
+
+#### 批量发送与 Flush 策略
+
+sarama 的 AsyncProducer 内部有消息缓冲机制，通过以下参数控制何时将消息批量发送到 Broker：
+
+```golang
+cfg.Producer.Flush.Bytes = 1024 * 1024       // 缓冲区累积达到 1MB 时发送
+cfg.Producer.Flush.Messages = 100             // 缓冲区累积达到 100 条时发送
+cfg.Producer.Flush.Frequency = 500 * time.Millisecond // 每 500ms 强制发送一次
+cfg.Producer.Flush.MaxMessages = 200          // 单次发送最大消息数
+```
+
+上述参数满足任一条件即触发 flush。合理配置可以在吞吐量和延迟之间取得平衡。
+
+#### 消息序列化注意事项
+
+sarama 通过 `Encoder` 接口实现消息序列化。常用方式：
+
+- `sarama.StringEncoder`：字符串消息
+- `sarama.ByteEncoder`：字节数组
+- 自定义实现 `sarama.Encoder` 接口（如 JSON、Protobuf 等）
+
+注意：Key 的序列化方式会影响分区计算结果，不同语言客户端的默认 Hash 算法可能不同（参见前文分区细节章节）
+
 ## 0x08 Consumer 实践心得
+
+#### Consumer 启动时的 Offset 策略
+
+`config.Consumer.Offsets.Initial` 仅在 Consumer Group **首次消费**（即 `__consumer_offsets` 中没有该 Group 的记录）时生效：
+
+- `sarama.OffsetNewest`：从最新消息开始消费，适合生产环境（避免大量历史数据重放）
+- `sarama.OffsetOldest`：从最早的可用消息开始消费，适合测试环境或需要消费全量数据的场景
+
+如果 Consumer Group 之前已经提交过 offset，重启后会从上次提交的 offset 继续消费，`Initial` 配置不会生效。
+
+#### 消费超时与慢消费处理
+
+当消费逻辑较重（如涉及数据库写入、RPC 调用等）时，需要注意：
+
+1. 确保单次消费耗时不超过 `max.poll.interval.ms`（sarama 中对应 `config.Consumer.Group.Session.Timeout`），否则会触发 Rebalance
+2. 对于耗时操作，可以先将消息写入本地队列（如 channel），然后异步处理，在处理完成后再 MarkMessage
+3. 合理设置 `config.Consumer.MaxProcessingTime`，该值表示消费者期望处理一条消息的最长时间
+
+#### 优雅退出（Graceful Shutdown）
+
+sarama ConsumerGroup 的优雅退出需要正确处理 `context` 和 `WaitGroup`：
+
+```golang
+func startConsumerGroup(ctx context.Context, client sarama.ConsumerGroup, topics []string, handler sarama.ConsumerGroupHandler) {
+    wg := &sync.WaitGroup{}
+    wg.Add(1)
+    go func() {
+        defer wg.Done()
+        for {
+            if err := client.Consume(ctx, topics, handler); err != nil {
+                log.Printf("consumer group error: %v", err)
+            }
+            if ctx.Err() != nil {
+                return
+            }
+        }
+    }()
+
+    // 等待中断信号
+    sigterm := make(chan os.Signal, 1)
+    signal.Notify(sigterm, syscall.SIGINT, syscall.SIGTERM)
+
+    select {
+    case <-ctx.Done():
+        log.Println("context cancelled")
+    case <-sigterm:
+        log.Println("received termination signal")
+    }
+
+    // 取消 context 触发 ConsumerGroup 退出
+    // 等待消费者完成当前正在处理的消息
+    wg.Wait()
+    if err := client.Close(); err != nil {
+        log.Printf("error closing consumer group: %v", err)
+    }
+}
+```
+
+关键点：收到退出信号后，应等待当前正在处理的消息完成（`wg.Wait()`），再关闭 ConsumerGroup，避免消息处理到一半被中断。
 
 ## 消费者 VS 消费者组？
 
@@ -321,7 +462,7 @@ sarama 库的 consumer 语义和上述介绍的有略微不同，默认情况下
 // NewConfig returns a new configuration instance with sane defaults.
 func NewConfig() *Config {
    // ...
-   c.Consumer.Offsets.AutoCommit.Enable = true. // 自动提交
+   c.Consumer.Offsets.AutoCommit.Enable = true // 自动提交
    c.Consumer.Offsets.AutoCommit.Interval = 1 * time.Second // 间隔
    c.Consumer.Offsets.Initial = OffsetNewest
    c.Consumer.Offsets.Retry.Max = 3
@@ -419,7 +560,7 @@ func (consumer *groupConsumer) ConsumeClaim(session sarama.ConsumerGroupSession,
     for message := range claim.Messages() {
         log.Info("consume msg. Topic=%s, partition=%d, offset=%d", message.Topic, message.Partition, message.Offset)
         // 提交偏移量！（完成任务的时候给服务器发送一个 offset 的 ACK）
-        session.MarkMessage(msg, "")
+        session.MarkMessage(message, "")
     }
 
     return nil
@@ -459,7 +600,7 @@ func (consumer *groupConsumer) ConsumeClaim(session sarama.ConsumerGroupSession,
     for message := range claim.Messages() {
         maxLimit <- 1
         go doBusiness()
-        session.MarkMessage(msg, "")
+        session.MarkMessage(message, "")
     }
 
     return nil
@@ -488,6 +629,36 @@ func (s *consumerGroupSession) MarkMessage(msg *ConsumerMessage, metadata string
 
 #### 注意！sess.Commit 的细节
 
+`sess.Commit()` 是 sarama 手动提交模式下的核心方法，理解其内部机制对于保证消费可靠性至关重要：
+
+1. **Commit 提交的是已 MarkMessage 的 offset**：`Commit()` 并不是提交当前消费到的最新 offset，而是提交所有已经通过 `MarkMessage` 标记过的 offset。如果某条消息没有被 `MarkMessage`，即使调用了 `Commit()`，该消息的 offset 也不会被提交
+
+2. **MarkMessage 的本质**：`MarkMessage(msg, "")` 底层调用的是 `MarkOffset(topic, partition, msg.Offset+1, metadata)`，注意是 `msg.Offset+1`，表示 "下一条待消费的位置"。这意味着一旦 Mark 了 offset=N 的消息，则 offset<=N 的消息都被视为已消费
+
+3. **Commit 的性能开销**：`Commit()` 会触发一次到 Broker 的网络请求（提交 offset 到 `__consumer_offsets` topic），是一个相对耗时的操作（通常几毫秒到几十毫秒）。不应该每消费一条消息就调用一次 `Commit()`，建议按批次提交（如每 N 条或每隔 T 时间提交一次）
+
+4. **自动提交 vs 手动 Commit 的选择**：
+   - 大多数场景下，sarama 的自动提交模式（`MarkMessage` + 自动提交）已经足够可靠，只要确保在业务逻辑处理完成后再调用 `MarkMessage` 即可
+   - 手动 `Commit()` 适用于需要精确控制提交时机的场景，如批量处理后统一提交、事务性消费等
+   - sarama 官方也更推荐使用自动提交 + `MarkMessage` 的方式
+
+```golang
+// 手动提交的最佳实践：批量提交
+func (h msgConsumerGroup) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+    count := 0
+    for msg := range claim.Messages() {
+        doOurBusinessLogic(msg)
+        sess.MarkMessage(msg, "")
+
+        count++
+        if count%100 == 0 {
+            sess.Commit()
+        }
+    }
+    return nil
+}
+```
+
 ## 0x0A sarama 库的问题：阿里云的建议
 
 阿里云官方文档不推荐使用 sarama 库，见此文：[为什么不推荐使用 Sarama Go 客户端收发消息](https://help.aliyun.com/document_detail/266782.html)，这里简单列举下原文，其中解决方案对项目实践还是有些指导意义。
@@ -508,7 +679,7 @@ Sarama Go 客户端存在以下已知问题：
    - **针对生产环境，请将位点重置策略设置为 Newest（latest）；针对测试环境，或者其他明确可以接收大量重复消息的场景，设置为 Oldest（earliest）**，这点很重要
    - 如果发生了位点重置，产生大量堆积，可以使用消息队列 Kafka 版控制台提供的重置消费位点功能，手动重置消费位点到某一时间点，无需改代码或换 Consumer Group（如果不重置的话会产生大量的重复数据）
 
-## 0x0A 参考
+## 0x0B 参考
 
 - [Solving My Weird Kafka Rebalancing Problems & Explaining What Is Happening and Why?](https://medium.com/bakdata/solving-my-weird-kafka-rebalancing-problems-c05e99535435)
 - [kafka 什么时候会丢消息](https://blog.csdn.net/qrne06/article/details/94225070)

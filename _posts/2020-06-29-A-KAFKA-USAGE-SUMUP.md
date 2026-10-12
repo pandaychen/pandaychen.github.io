@@ -1,7 +1,7 @@
 ---
 layout: post
 title: 关于 Kafka 应用开发知识点的整理（一）
-subtitle: 在项目中使用 Python 的 kafka 进行开发
+subtitle: Kafka 在项目中的使用经验总结（Python/Go）
 date: 2020-06-29
 author: pandaychen
 header-img:
@@ -10,6 +10,7 @@ category: false
 tags:
   - Kafka
   - Python
+  - sarama
 ---
 
 ## 0x00 前言
@@ -17,7 +18,7 @@ tags:
 项目中使用 Kafka 作为消息队列，本篇文章就个人使用 Kafka 的一些经验做一些总结。大概从下面几个方面：
 
 1.  Kafka 的基础知识总结
-2.  Kakfa 的生产者分区选择
+2.  Kafka 的生产者分区选择
 3.  Kafka 的消费者组机制
 4.  Kafka 的 offset 机制？
 5.  Kafka 的消费延迟问题如何监控和优化？
@@ -29,7 +30,7 @@ Kafka 的基础知识可以参见 [这篇文章](https://stackoverflow.com/quest
 Kafka 中，Topic 是逻辑上的概念，而 Partition 是物理上的概念，简而言之：
 
 - topic：理解为一个消息的集合（或者表），topic 存储在 broker 中，一个 topic 可以有多个 partition 分区，一个 topic 可以有多个 Producer 来 push 消息，一个 topic 可以有多个消费者向其 pull 消息，一个 topic 可以存在一个或多个 broker 中。写入不同的 topic 即写入不同的表
-- partition：是 topic 的子集（topic 下的物理分组），每个 partition 是一个有序的队列（大文件）。不同 partition 分配在不同的 broker 上进行水平扩展从而增加 kafka 并行处理能力，同 topic 下的不同分区信息是不同的，同一分区信息是有序的；每一个分区都有一个或者多个副本，其中会选举一个 leader，fowller 从 leader 拉取数据更新自己的 log（每个分区逻辑上对应一个 log 文件夹），消费者向 leader 中 pull 信息；partition 中每一条消息都有一个有序的 offset
+- partition：是 topic 的子集（topic 下的物理分组），每个 partition 是一个有序的队列（大文件）。不同 partition 分配在不同的 broker 上进行水平扩展从而增加 kafka 并行处理能力，同 topic 下的不同分区信息是不同的，同一分区信息是有序的；每一个分区都有一个或者多个副本，其中会选举一个 leader，follower 从 leader 拉取数据更新自己的 log（每个分区逻辑上对应一个 log 文件夹），消费者向 leader 中 pull 信息；partition 中每一条消息都有一个有序的 offset
 
 #### Offset 机制
 Partition 中的每条消息都会按照时间顺序分配到一个单调递增的顺序编号（Offset），该编号可以唯一的定位当前分区的每一条消息，一般有两种 Offset：
@@ -56,7 +57,7 @@ Partition 中的每条消息都会按照时间顺序分配到一个单调递增�
 
 ## 0x02 Kafka 生产者 Producer
 
-Kakfa 的生产者流程如下：
+Kafka 的生产者流程如下：
 ![image](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/2022/kafka/kafka-producer-flow1.png)
 
 Producer 采用 push 的方式将消息发到 broker 上进行存储，然后由 consumer 采用 pull 模式订阅并消费消息。
@@ -68,7 +69,7 @@ Producer 采用 push 的方式将消息发到 broker 上进行存储，然后由
 - Msg: 消息，每个 msg 在 topic 下的不同 partiton 仅有一份，在 partition 中有一个唯一的 offset 用于定位
 - Offset：一个逻辑意义上的偏移，用于区分每一条消息，producer 可认为 partition 是一个大的串行文件，msg 存储时被分配了唯一的 offset
 - Replica: 副本，partition 的数据冗余备份，用于实现分布式的数据可靠性，但引入了不同副本间的数据一致性问题，带来了一定的复杂度
-- Leader/Follower: replica 的角色，leader replica 用来提供该 partition 的读写服务。Follower 不停的从 leader 侧同步写入的消息。它们之间的消息状态采用一致性策略来解决
+- Leader/Follower: replica 的角色，leader replica 用来提供该 partition 的读写服务。Follower 不停的从 leader 侧同步写入的消息。它们之间的消息状态采用 ISR（In-Sync Replicas）机制来保证一致性：ISR 是与 leader 保持同步的 follower 副本集合，只有 ISR 中的副本才有资格被选举为新的 leader；当 follower 落后于 leader 超过一定阈值（`replica.lag.time.max.ms`）时会被移出 ISR
 
 当 Producer 发送一条消息（某个 topic 下的）到 broker 中, 会根据分配 partition 规则选择被存储到哪一个 partition（基于 partition 分区的选择），消息会均匀的分布到不同的 partition 里，这样就实现了水平扩展。另外，partition 本身作为文件，可以有多个分布于不同 broker 上的副本 replica（leader/follower），这样就实现了 Msg 的多副本。
 
@@ -78,12 +79,20 @@ Producer 采用 push 的方式将消息发到 broker 上进行存储，然后由
 
 #### 消费者组
 
-消费者组（Consumer Group）是由一个或多个消费者实例组成的 Group，具有可扩展性和可容错性的一种机制。消费者组内的 consumer 共享一个消费者组 Id（Group Id），组内的 consumer 共同对一个 topic 进行订阅和消费，同一个 group 中的 consumer 只能消费一个 partition 的消息，多余的 consumer 会空闲。
+消费者组（Consumer Group）是由一个或多个消费者实例组成的 Group，具有可扩展性和可容错性的一种机制。消费者组内的 consumer 共享一个消费者组 Id（Group Id），组内的 consumer 共同对一个 topic 进行订阅和消费，同一个 partition 在同一个 group 中只能被一个 consumer 消费（但一个 consumer 可以消费多个 partition），当 consumer 数量超过 partition 数量时，多余的 consumer 会空闲
 
 1.  一个消费者群组消费一个主题中的消息，这种消费模式又称为点对点的消费方式，点对点的消费方式又被称为消息队列
 2.  一个主题中的消息被多个消费者群组共同消费，这种消费模式又称为发布 - 订阅模式
 
 #### 分区 Rebalance
+
+Rebalance（重平衡）是 Kafka 消费者组的核心机制，指的是当 Consumer Group 中的成员或订阅 Topic 的分区发生变化时，Coordinator 重新为每个 Consumer 分配其消费的分区。触发 Rebalance 的主要原因有：
+
+1. Consumer Group 成员数量变化（新 Consumer 加入或旧 Consumer 离开/崩溃）
+2. 订阅 Topic 的 Partition 数量发生变化
+3. Consumer 被 Coordinator 判定为超时（心跳超时或消费时间超过 `max.poll.interval.ms`）
+
+Rebalance 的弊端在于：在整个 Rebalance 过程中，**所有 Consumer 实例都会停止消费**，等待重新分配完成后才能继续。这会导致消费端出现短暂的不可用。因此在生产环境中需要合理配置 `session.timeout.ms`、`heartbeat.interval.ms`、`max.poll.interval.ms` 等参数来避免不必要的 Rebalance。关于 Rebalance 的详细讨论，参见 [关于 Kafka 应用开发知识点的整理（二）](https://pandaychen.github.io/2022/01/01/A-KAFKA-USAGE-SUMUP-2/) 中的相关章节
 
 ## 0x04 Kafka 的生产者分区选择
 
@@ -110,8 +119,10 @@ msg := &sarama.ProducerMessage{
 
 ## 0x05 Kafka 的消费者组的意义
 
-1.  消费者组机制提供了 Kafka 消费端的高可用，实际项目中强烈推荐以此方式来部署消费端。
-2.  消费者组实现了一种发布 - 订阅模式的概念
+1.  消费者组机制提供了 Kafka 消费端的高可用，实际项目中强烈推荐以此方式来部署消费端。当组内某个 Consumer 实例挂掉后，通过 Rebalance 机制将其负责的分区自动分配给组内其他存活的 Consumer，保证消息不中断消费
+2.  消费者组实现了一种发布 - 订阅模式的概念：同一条消息可以被不同的 Consumer Group 各自独立消费一次，不同 Group 之间互不影响
+3.  消费者组的协调依赖 **GroupCoordinator**（运行在 Broker 端的组件），它负责管理组成员的加入 / 退出、触发 Rebalance、管理 offset 提交等。每个 Consumer Group 由一个特定的 Coordinator 负责，该 Coordinator 所在的 Broker 由 `hash(group.id) % __consumer_offsets 分区数` 决定
+4.  消费者组的消费能力与 partition 数量直接相关：组内 Consumer 数量不应超过 partition 数量，超出的 Consumer 会处于空闲状态。因此，如需提升消费并行度，应先增加 partition 数量
 
 ## 0x06 消费 Lag 计算及意义
 
@@ -123,9 +134,11 @@ msg := &sarama.ProducerMessage{
 
 在计算 Lag 之前先普及几个基本概念：
 
-- LEO（LOG-END-OFFSET）: 这里主要是指堆 Consumer 可见的 Offset. 即 HW（High Watermark）
-- CURRENT-OFFSET: Consumer 消费到的具体位移
-  从此二者意义可知 $$Lag=LEO-CURRENT-OFFSET$$，计算出来的值即为消费延迟的差值。
+- LEO（Log End Offset）：日志末端偏移，表示 partition 中下一条待写入消息的 offset（即最新消息 offset + 1），每个副本都有自己的 LEO
+- HW（High Watermark）：高水位，表示所有 ISR 副本都已同步到的最大 offset，**Consumer 只能消费到 HW 之前的消息**。HW <= LEO，两者是不同的概念
+- CURRENT-OFFSET: Consumer 消费到的具体位移（已提交的 offset）
+
+在 `kafka-consumer-groups.sh` 工具的输出中，`LOG-END-OFFSET` 列实际显示的是对 Consumer 可见的最大 offset（即 HW），计算公式为 $$Lag = LOG\text{-}END\text{-}OFFSET - CURRENT\text{-}OFFSET$$，计算出来的值即为消费延迟的差值。
 
 这里首先要记得，消费 Lag 是针对于某个消费者组 Id 的 Lag，通过官方方包里提供的 `kafka-consumer-groups.sh` 工具即可获取此值：
 
@@ -147,7 +160,7 @@ topidc1             1          1118889         1118889         0               k
 Broker 消费方式 offset 获取的实现思路为：
 
 1.  根据 Topic 获取消费该 Topic 的 Group 信息
-2.  通过 Consumer-API 读取 Broker 上指定 Group 和 Topic 的消费情况，可以获取到 `clientId`,`CURRENT-OFFSET`,`patition`，`host` 等数据
+2.  通过 Consumer-API 读取 Broker 上指定 Group 和 Topic 的消费情况，可以获取到 `clientId`,`CURRENT-OFFSET`,`partition`，`host` 等数据
 3.  通过 Consumer-API 获取 LogEndOffset（可见 offset）
 4.  将上面 2 处信息合并，计算 Lag
 
@@ -156,7 +169,7 @@ Broker 消费方式 offset 获取的实现思路为：
 Zookeeper 消费方式 offset 获取的 实现思路为：
 
 1.  根据 topic 获取消费该 topic 的 group
-2.  读取 Zookeeper 上指定 group 和 topic 的消费情况，可以获取到 `clientId`,`CURRENT-OFFSET`,`patition` 等
+2.  读取 Zookeeper 上指定 group 和 topic 的消费情况，可以获取到 `clientId`,`CURRENT-OFFSET`,`partition` 等
 3.  通过 Consumer-API 获取 LogEndOffset（可见 offset）
 4.  将上面 2 处信息合并，计算 Lag
 
@@ -193,12 +206,12 @@ if __name__ == '__main__':
     topic_offset = get_topic_offset("kafka-cluster-addrlist", "topic_name")
     group_offset = get_group_offset("kafka-cluster-addrlist", "group_name", "topic_name")
     lag = topic_offset - group_offset
-    print topic_offset,group_offset,lag
+    print(topic_offset, group_offset, lag)
 ```
 
-## 0x07 重复消费
+## 0x07 Offset 回溯与指定区间消费
 
-由于数据存储在 Kafka 中，我们可以根据某个 Offset 来实现固定 Offset 区间的消费：这里注意，`consumer_start_offset` 一定要大于等于 `consumer.beginning_offsets(consumer.assignment())` 计算出来的分区的起始 offset
+由于数据存储在 Kafka 中，可以根据某个 Offset 来实现固定 Offset 区间的消费（即 Offset 回溯）：这里注意，`consumer_start_offset` 一定要大于等于 `consumer.beginning_offsets(consumer.assignment())` 计算出来的分区的起始 offset
 
 ```python
 #coding=utf-8
@@ -214,12 +227,12 @@ partition_id = 0
 consumer_start_offset = 0
 consumer_end_offset = 200000
 
-print consumer.partitions_for_topic("topic_name") #获取 test 主题的分区信息
-print consumer.topics() #获取主题列表
-print consumer.subscription() #获取当前消费者订阅的主题
-print consumer.assignment() #获取当前消费者 topic、分区信息
-print "************************"
-print consumer.beginning_offsets(consumer.assignment()) #获取当前消费者可消费的偏移量
+print(consumer.partitions_for_topic("topic_name"))  # 获取 test 主题的分区信息
+print(consumer.topics())  # 获取主题列表
+print(consumer.subscription())  # 获取当前消费者订阅的主题
+print(consumer.assignment())  # 获取当前消费者 topic、分区信息
+print("************************")
+print(consumer.beginning_offsets(consumer.assignment()))  # 获取当前消费者可消费的偏移量
 #consumer.seek(TopicPartition(topic=u'test', partition=0), 5) #重置偏移量，从第 5 个偏移量消费
 consumer.seek(TopicPartition(topic=u'topic_name', partition=partition_id), consumer_start_offset) #重置偏移量，从第 5 个偏移量消费
 count = 0
@@ -227,9 +240,9 @@ for message in consumer:
 	if  message.offset> consumer_end_offset:
 		break
 	count+=1
-	print ("%s:%d:%d: key=%s value=%s" % (message.topic, message.partition, message.offset, message.key, message.value))
+	print("%s:%d:%d: key=%s value=%s" % (message.topic, message.partition, message.offset, message.key, message.value))
 
-print count
+print(count)
 ```
 
 ## 0x08 Python-kafka 库的基础用法
@@ -244,20 +257,20 @@ from kafka import KafkaProducer
 from kafka.errors import KafkaError
 import json
 
-class KafkaProducer():
+class KafkaProducerWrapper():
     def __init__(self, kafka_serverlist, kafkatopic):
         self.kafkatopic = kafkatopic
-		self.serverslist = kafka_serverlist
-        self.producer = KafkaProducer(bootstrap_servers = kafka_serverlist)
+        self.serverslist = kafka_serverlist
+        self.producer = KafkaProducer(bootstrap_servers=kafka_serverlist)
 
     def sendjsondata(self, params, key):
         try:
-            parmas_message = json.dumps(params)
+            params_message = json.dumps(params)
             producer = self.producer
-            producer.send(self.kafkatopic, key=key, parmas_message.encode('utf-8'))
+            producer.send(self.kafkatopic, key=key, value=params_message.encode('utf-8'))
             producer.flush()
         except KafkaError as e:
-            print e
+            print(e)
 ```
 
 #### 消费者
@@ -289,33 +302,31 @@ class Kafka_consumer():
             for message in self.consumer:
                 # print json.loads(message.value)
                 yield message
-        except KeyboardInterrupt, e:
-            print e
+        except KeyboardInterrupt as e:
+            print(e)
 ```
 
 #### 测试
 
-（TO BE CONTINUED）
-
 ```python
-def main():
-    '''
-    测试 consumer 和 producer
-    :return:
-    '''
-    ## 测试生产模块
-    #producer = Kafka_producer("127.0.0.1", 9092, "ranktest")
-    #for id in range(10):
-    #    params = '{abetst}:{null}---'+str(i)
-    #    producer.sendjsondata(params)
-    ## 测试消费模块
-    #消费模块的返回格式为 ConsumerRecord(topic=u'ranktest', partition=0, offset=202, timestamp=None,
-    #\timestamp_type=None, key=None, value='"{abetst}:{null}---0"', checksum=-1868164195,
-    #\serialized_key_size=-1, serialized_value_size=21)
+def test_producer():
+    """测试生产者"""
+    producer = KafkaProducerWrapper("127.0.0.1:9092", "ranktest")
+    for id in range(10):
+        params = {"test": "data", "index": id}
+        producer.sendjsondata(params, key=str(id).encode('utf-8'))
+    print("Producer test done, sent 10 messages")
+
+def test_consumer():
+    """测试消费者"""
     consumer = Kafka_consumer('127.0.0.1', 9092, "ranktest", 'test-python-ranktest')
     message = consumer.consume_data()
-    for i in message:
-        print i.value
+    for msg in message:
+        print(f"topic={msg.topic}, partition={msg.partition}, offset={msg.offset}, value={msg.value}")
+
+if __name__ == '__main__':
+    # test_producer()
+    test_consumer()
 ```
 
 ## 0x09 Kafka 的应用场景
