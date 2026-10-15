@@ -14,6 +14,8 @@ tags:
 ##  0x00    前言
 本文汇总下开发过程中收集的一些 Linux 系统调用及用法
 
+完整的索引目录，可参考[Searchable Linux Syscall Table](https://filippo.io/linux-syscall-table/)
+
 ##  0x01    常用系统调用分类
 
 ####    进程控制
@@ -740,3 +742,4 @@ write(1, "abcdefg\n", 9)           = 9
 -   [linux系统编程之进程（四）：进程退出exit，_exit区别即atexit函数](https://www.cnblogs.com/mickole/p/3186606.html)
 -   [enhancedrecording](https://github.com/gravitational/teleport/tree/master/bpf/enhancedrecording)
 -   [揭开 strace 命令捕获系统调用的神秘面纱](https://mp.weixin.qq.com/s/Iz4YPPmyjGrXVnZ8eSap2Q)
+-   [Searchable Linux Syscall Table](https://filippo.io/linux-syscall-table/)
