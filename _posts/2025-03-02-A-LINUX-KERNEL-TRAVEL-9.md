@@ -23,7 +23,7 @@ tags:
 -   Cgroups 下资源限制
 
 ####    OverlayFS 基础
-OverlayFS 是一种典型的虚拟文件系统，属于联合文件系统（Union File System）。之所以被称为虚拟，是因为它本身不直接管理底层的物理磁盘数据块。相反，它是建立在其他已经存在的本地文件系统（如 ext4、xfs等）之上的一个抽象层。它通过将多个不同的目录叠加在一起，向用户呈现一个统一的文件系统视图，工作机制如下：
+OverlayFS 是一种典型的虚拟文件系统，属于联合文件系统（Union File System）。之所以被称为虚拟，**是因为它本身不直接管理底层的物理磁盘数据块。相反，它是建立在其他已经存在的本地文件系统（如 ext4、xfs等）之上的一个抽象层。它通过将多个不同的目录叠加在一起，向用户呈现一个统一的文件系统视图**，工作机制如下：
 
 | 目录层级 | 属性 | 作用说明 |
 | :-----| :---- | :---- |
@@ -33,7 +33,16 @@ OverlayFS 是一种典型的虚拟文件系统，属于联合文件系统（Unio
 
 容器内写文件，遵循写时复制（Copy-on-Write）规则：**当用户试图修改 Merged 视图中一个属于 Lowerdir 的文件时，OverlayFS 会先将该文件从底层复制到 Upperdir，然后再在 Upperdir 中进行修改。底层的文件始终保持原样不变**
 
-![overlayfs-1]()
+![overlayfs-1](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/kernel/9/overlayfs-2.png)
+
+如上图对应的挂载命令如下：`mount -t overlay overlay -o lowerdir=lower1:lower2:lower3,upperdir=upper,workdir=work merged`
+
+其中`lower1:lower2:lower3`表示不同的lower层目录，不同的目录使用`:`分隔，层次关系依次为`lower1 > lower2 > lower3`
+
+-   upper层是目录和文件系统挂载后用于存放临时和间接文件的工作基目录（work base dir）
+-   merged目录就是最终的挂载点目录
+
+正常执行以上命令后，overlayfs就成功挂载到merged目录下了
 
 注意，一般在容器中，看到的就是merge层的结果，挂载点也是`xxxx/merged`
 
