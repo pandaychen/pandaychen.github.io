@@ -19,6 +19,7 @@ tags:
 
 -	内核[v5.4.241](https://elixir.bootlin.com/linux/v5.4.241/source/)
 -	内核[v6.6.47](https://elixir.bootlin.com/linux/v6.6.47/source/)
+-	内核 stable 稳定树 `gregkh/linux` 的 [v6.6.47/include/linux/fs.h](https://github.com/gregkh/linux/blob/v6.6.47/include/linux/fs.h) 与 [v5.4.241/include/linux/fs.h](https://github.com/gregkh/linux/blob/v5.4.241/include/linux/fs.h)
 
 阅读导引：两套内核在 VFS 层的**调用链骨架基本一致**，但对 eBPF 开发者影响最大的是**函数签名的参数漂移**，集中在三处：
 
@@ -71,7 +72,7 @@ struct user_namespace {
 } __randomize_layout;
 ```
 
-> 说明：下文代码片段均**只保留核心/关键路径**（省略错误处理、retry、加锁细节等），完整实现请对照 bootlin 源码链接。凡涉及具体行号或细节以内核源码为准
+> 说明：下文代码片段均**只保留核心/关键路径**（省略错误处理、加锁细节等），完整实现请对照 bootlin 源码链接。凡涉及具体行号或细节以内核源码为准
 
 ##	0x01	背景：VFS 分层与 eBPF 挂载点选型
 
@@ -588,8 +589,8 @@ int vfs_symlink(struct mnt_idmap *idmap, struct inode *dir,
 
 ###	eBPF 挂载点建议
 
--	推荐 `security_inode_link`/`security_inode_symlink`。
--	硬链接审计尤为重要（常被用于绕过基于路径的策略）：可提取 `old_dentry`（源）、`new_dentry`（新链接名）。
+-	推荐 `security_inode_link`/`security_inode_symlink`
+-	硬链接审计尤为重要（常被用于绕过基于路径的策略）：可提取 `old_dentry`（源）、`new_dentry`（新链接名）
 
 ##	0x08	属性修改 `chmod`/`chown`/`setattr`/`utimes`
 
@@ -845,68 +846,300 @@ int path_mount(const char *dev_name, struct path *path, const char *type_page,
 }
 ```
 
-卸载：v5.4 走 `ksys_umount(name, flags)`；v6.6 走 `SYSCALL_DEFINE2(umount, ...) -> path_umount(&path, flags)`（`path_umount` 为 5.9+ 重构产物）。
+卸载：v5.4 走 `ksys_umount(name, flags)`；v6.6 走 `SYSCALL_DEFINE2(umount, ...) -> path_umount(&path, flags)`（`path_umount` 为 5.9+ 重构产物）
 
 ###	版本差异
 
--	5.9 前后挂载路径重构：v5.4 分派逻辑在 `do_mount`；v6.6 挂载点解析后交给 `path_mount`，卸载有独立 `path_umount`。
--	新旧两套挂载 API 并存；`move_mount` 有独立 `security_move_mount`。
+-	5.9 前后挂载路径重构：v5.4 分派逻辑在 `do_mount`；v6.6 挂载点解析后交给 `path_mount`，卸载有独立 `path_umount`
+-	新旧两套挂载 API 并存；`move_mount` 有独立 `security_move_mount`
 
 ###	eBPF 挂载点建议
 
--	推荐 `security_sb_mount`（两版参数稳定、可拦截）；`path_mount`（6.x）/`do_mount`（5.4）作为通用点需分版本。
--	可提取：`dev_name`（设备/源）、`path`（挂载点，`bpf_d_path`）、`flags`（`MS_*`）。
+-	推荐 `security_sb_mount`（两版参数稳定、可拦截）；`path_mount`（6.x）/`do_mount`（5.4）作为通用点需分版本
+-	可提取：`dev_name`（设备/源）、`path`（挂载点，`bpf_d_path`）、`flags`（`MS_*`）
 
-##	0x0C	inode 操作函数
+##	0x0C	VFS 四大操作表（operation）详解
 
+VFS 通过四张操作表（函数指针集合）把通用逻辑与具体文件系统解耦。所以需要理解每个成员被哪个系统调用触发、触发的action，是判断该在哪一层 hook、以及跨版本参数的调整的基础
+
+####	四张表的位置&&赋值时机
+
+```mermaid
+flowchart TD
+    mountfn["mount / fill_super"] -->|"设 sb->s_op"| SB["super_block"]
+    SB --> SOPS["super_operations"]
+    iget["inode 实例化 (ext4_iget)"] -->|"按类型设 i_op / i_fop"| IN["inode"]
+    IN -->|"i_op"| IOPS["inode_operations"]
+    IN -->|"i_fop 默认模板"| DEF["file_operations 模板"]
+    openfn["do_dentry_open"] -->|"f_op = inode->i_fop"| FI["file"]
+    FI --> FOPS["file_operations"]
+    dalloc["d_alloc / d_set_d_op"] -->|"设 d_op (常经 s_d_op)"| DE["dentry"]
+    DE --> DOPS["dentry_operations"]
+```
+
+按照对象归属/赋值时机/生命周期粒度梳理如下：
+
+| 操作表 | 挂在哪个对象 | 何时赋值 | 语义粒度 |
+| --- | --- | --- | --- |
+| `super_operations` | `super_block->s_op` | mount 的 `fill_super` | 整卷 + inode 生命周期 |
+| `inode_operations` | `inode->i_op` | inode 实例化时按类型选择 | 命名空间/元数据（改名、权限、属性） |
+| `file_operations` | `inode->i_fop`（模板）→ `file->f_op`（`open` 时拷贝） | inode 实例化设模板，`do_dentry_open` 拷贝到 `file` | 已打开文件的数据面（读写、ioctl、mmap） |
+| `dentry_operations` | `dentry->d_op` | `d_alloc`/`d_set_d_op`（常经 `sb->s_d_op`） | 路径缓存项行为（校验、比较、回收） |
+
+注意，`file->f_op` 是在打开时从 `inode->i_fop` **拷贝**一份，因此审计打开动作既可读 `inode->i_fop` 也可以读 `file->f_op`；而目录读、普通文件读写用的是不同的 `file_operations` 实例（如 ext4 的 `ext4_dir_operations` 与 `ext4_file_operations`）
+
+下面分别对这几类operation进行说明
+
+####	`super_operations`（超级块 + inode 生命周期）
+
+```c
+// v6.6.47 include/linux/fs.h
+struct super_operations {
+	struct inode *(*alloc_inode)(struct super_block *sb);
+	void (*destroy_inode)(struct inode *);
+	void (*free_inode)(struct inode *);
+	void (*dirty_inode)(struct inode *, int flags);
+	int  (*write_inode)(struct inode *, struct writeback_control *wbc);
+	int  (*drop_inode)(struct inode *);
+	void (*evict_inode)(struct inode *);
+	void (*put_super)(struct super_block *);
+	int  (*sync_fs)(struct super_block *sb, int wait);
+	int  (*freeze_super)(struct super_block *, enum freeze_holder who);
+	int  (*freeze_fs)(struct super_block *);
+	int  (*thaw_super)(struct super_block *, enum freeze_holder who);
+	int  (*unfreeze_fs)(struct super_block *);
+	int  (*statfs)(struct dentry *, struct kstatfs *);
+	int  (*remount_fs)(struct super_block *, int *, char *);
+	void (*umount_begin)(struct super_block *);
+	int  (*show_options)(struct seq_file *, struct dentry *);
+	int  (*show_devname)(struct seq_file *, struct dentry *);
+	int  (*show_path)(struct seq_file *, struct dentry *);
+	int  (*show_stats)(struct seq_file *, struct dentry *);
+	ssize_t (*quota_read)(struct super_block *, int, char *, size_t, loff_t);
+	ssize_t (*quota_write)(struct super_block *, int, const char *, size_t, loff_t);
+	struct dquot __rcu **(*get_dquots)(struct inode *);
+	long (*nr_cached_objects)(struct super_block *, struct shrink_control *);
+	long (*free_cached_objects)(struct super_block *, struct shrink_control *);
+	void (*shutdown)(struct super_block *sb);
+};
+```
+
+相关成员函数的说明如下：
+
+| 成员 | 触发的系统调用 / 场景 | 作用 |
+| --- | --- | --- |
+| `alloc_inode` | 任何需要新 inode 时（`open O_CREAT`/`lookup`/`mkdir`等） | 分配文件系统私有 inode（内嵌 `struct inode`） |
+| `destroy_inode` | inode 引用归零回收 | 释放 `alloc_inode` 的内存（常挂 RCU） |
+| `free_inode` | `destroy_inode` 的 RCU 回调阶段 | 真正 `kmem_cache_free`（5.2+ 拆分出来） |
+| `dirty_inode` | 元数据变脏（`write`/`chmod`/时间戳） | 标记 inode 需回写、记日志 |
+| `write_inode` | `sync`/`fsync`/回写线程 | 把 inode 元数据写回介质 |
+| `drop_inode` | 最后一次 `iput` | 决定是否立即丢弃（`generic_delete_inode` 即不缓存） |
+| `evict_inode` | inode 被驱逐 / 链接数归零删除 | 释放磁盘块、清 page cache |
+| `put_super` | `umount` | 释放超级块私有资源 |
+| `sync_fs` | `sync`/`syncfs` | 下刷本卷脏数据 |
+| `freeze_super`/`freeze_fs` | `FIFREEZE`(ioctl)、`fsfreeze` | VFS 层冻结入口 / 文件系统级冻结（停写、flush journal） |
+| `thaw_super`/`unfreeze_fs` | `FITHAW` | 解冻 |
+| `statfs` | `statfs`/`fstatfs`/`statvfs` | 返回容量、inode 用量 |
+| `remount_fs` | `mount -o remount`（旧 API） | 就地修改挂载选项 |
+| `umount_begin` | 强制 `umount`（`MNT_FORCE`） | 打断正在进行的请求（NFS 常用） |
+| `show_options` | 读 `/proc/mounts`、`/proc/self/mountinfo` | 显示挂载选项 |
+| `show_devname`/`show_path`/`show_stats` | 同上 | 自定义设备名/路径/统计显示 |
+| `quota_read`/`quota_write`/`get_dquots` | `quotactl` 及配额记账 | 配额数据 IO / 取 inode 配额 |
+| `nr_cached_objects`/`free_cached_objects` | 内存回收 shrinker | 汇报/释放可回收对象（如 dcache 私有） |
+| `shutdown` | 文件系统出错关停（`X_IOC_SHUTDOWN`/介质丢失） | 使卷失效、后续操作返回 EIO（6.6 内核新增） |
+
+####	`inode_operations`（命名空间与元数据）
 `struct inode_operations`（`inode->i_op`）是**具体文件系统实现命名空间语义的回调表**，前面各 `vfs_*` 在完成通用校验与 LSM 后，最终都调用它：
 
 ```cpp
+// v6.6.47 include/linux/fs.h
 struct inode_operations {
 	struct dentry *(*lookup)(struct inode *, struct dentry *, unsigned int);
-	int (*permission)(struct mnt_idmap *, struct inode *, int);   // 6.x 带 idmap
+	const char *(*get_link)(struct dentry *, struct inode *, struct delayed_call *);
+	int (*permission)(struct mnt_idmap *, struct inode *, int);
+	struct posix_acl *(*get_inode_acl)(struct inode *, int, bool);
+	int (*readlink)(struct dentry *, char __user *, int);
 	int (*create)(struct mnt_idmap *, struct inode *, struct dentry *, umode_t, bool);
 	int (*link)(struct dentry *, struct inode *, struct dentry *);
 	int (*unlink)(struct inode *, struct dentry *);
 	int (*symlink)(struct mnt_idmap *, struct inode *, struct dentry *, const char *);
 	int (*mkdir)(struct mnt_idmap *, struct inode *, struct dentry *, umode_t);
 	int (*rmdir)(struct inode *, struct dentry *);
+	int (*mknod)(struct mnt_idmap *, struct inode *, struct dentry *, umode_t, dev_t);
 	int (*rename)(struct mnt_idmap *, struct inode *, struct dentry *,
 		      struct inode *, struct dentry *, unsigned int);
 	int (*setattr)(struct mnt_idmap *, struct dentry *, struct iattr *);
 	int (*getattr)(struct mnt_idmap *, const struct path *, struct kstat *, u32, unsigned int);
-	...
+	ssize_t (*listxattr)(struct dentry *, char *, size_t);
+	int (*fiemap)(struct inode *, struct fiemap_extent_info *, u64 start, u64 len);
+	int (*update_time)(struct inode *, int);
+	int (*atomic_open)(struct inode *, struct dentry *, struct file *,
+			   unsigned open_flag, umode_t create_mode);
+	int (*tmpfile)(struct mnt_idmap *, struct inode *, struct file *, umode_t);
+	struct posix_acl *(*get_acl)(struct mnt_idmap *, struct dentry *, int);
+	int (*set_acl)(struct mnt_idmap *, struct dentry *, struct posix_acl *, int);
+	int (*fileattr_set)(struct mnt_idmap *, struct dentry *, struct fileattr *fa);
+	int (*fileattr_get)(struct dentry *, struct fileattr *fa);
+	struct offset_ctx *(*get_offset_ctx)(struct inode *inode);
 };
 ```
 
-审计视角要点：
+| 成员 | 触发的系统调用 / 场景 | 作用 |
+| --- | --- | --- |
+| `lookup` | 任何按名查找（`open`/`stat`/`execve` 的路径解析） | 在父目录 inode 中按名找子项，返回（可负）dentry |
+| `get_link` | 路径穿越软链接、`readlink` | 返回符号链接的目标字符串 |
+| `permission` | 路径每一分量、`open`、`access` | 权限检查（`MAY_READ/WRITE/EXEC`） |
+| `get_inode_acl` | 权限检查读 ACL（RCU 路径） | 取 POSIX ACL（inode 版，6.2 拆出） |
+| `readlink` | `readlink`/`readlinkat` | 读符号链接内容 |
+| `create` | `open(O_CREAT)`/`creat` | 创建普通文件 |
+| `link` | `link`/`linkat` | 创建硬链接 |
+| `unlink` | `unlink`/`unlinkat` | 删除名字（减链接数） |
+| `symlink` | `symlink`/`symlinkat` | 创建软链接 |
+| `mkdir` | `mkdir`/`mkdirat` | 创建目录 |
+| `rmdir` | `rmdir` | 删除空目录 |
+| `mknod` | `mknod`/`mknodat` | 创建设备/FIFO/socket 节点 |
+| `rename` | `rename`/`renameat2` | 改名 / 移动 |
+| `setattr` | `chmod`/`chown`/`truncate`/`utimensat` | 改元数据（经 `notify_change`） |
+| `getattr` | `stat`/`statx`/`fstatat` | 取元数据 |
+| `listxattr` | `listxattr`/`llistxattr` | 列出扩展属性名 |
+| `fiemap` | `FS_IOC_FIEMAP`(ioctl) | 返回文件 extent 物理映射 |
+| `update_time` | 访问/修改导致时间戳更新 | 更新 a/m/c time（含 lazytime） |
+| `atomic_open` | `open` 路径的原子 lookup+create | 一次下探完成打开/创建，降开销 |
+| `tmpfile` | `open(O_TMPFILE)` | 创建无名临时文件 |
+| `get_acl` | 取/设 ACL（非 RCU）、`getfacl` | 取 POSIX ACL（dentry 版） |
+| `set_acl` | `setfacl`→`setxattr(system.posix_acl_access)` | 设置 ACL |
+| `fileattr_set` | `chattr`：`FS_IOC_SETFLAGS`/`FS_IOC_FSSETXATTR` | 设置 inode 标志/项目属性（5.13 起统一） |
+| `fileattr_get` | `lsattr`：`FS_IOC_GETFLAGS`/`FS_IOC_FSGETXATTR` | 读取上述标志 |
+| `get_offset_ctx` | 目录项稳定偏移管理（tmpfs 等，6.6） | 提供可靠的 `getdents` 偏移 |
 
--	`i_op` 的具体实现**随文件系统而异**（`ext4_dir_inode_operations`、`xfs_dir_inode_operations`、overlayfs 等），直接 hook 某个 `ext4_create` 会**漏掉其他文件系统**；因此通用审计应挂上层 `vfs_*`/`security_inode_*`，而非 `i_op` 回调。
--	仅在需要**针对特定文件系统**做深度分析（如 overlayfs 的 copy-up 行为）时，才 hook 具体 `i_op` 实现。
--	版本差异：6.x 中 `create/mkdir/symlink/rename/setattr/getattr/permission` 等回调普遍新增 `mnt_idmap` 首参；`lookup/unlink/rmdir/link` 不带 idmap。
+版本差异（v5.4.241）：`permission/create/symlink/mkdir/mknod/rename/setattr/getattr` **均无 `mnt_idmap`**；ACL 只有 `get_acl(struct inode *, int)`（无 `get_inode_acl`）、`set_acl(struct inode *, ...)`；`update_time(struct inode *, struct timespec64 *, int)`（比 6.6 多 `timespec64*` 参数）；`tmpfile(struct inode *, struct dentry *, umode_t)`；**没有** `fileattr_get/set`（彼时经 `unlocked_ioctl` 的 `FS_IOC_*FLAGS` 分支处理）与 `get_offset_ctx`
 
-##	0x0D	dentry 操作函数
+从eBPF审计视角来看：
+
+-	`i_op` 的具体实现**随文件系统而异**（`ext4_dir_inode_operations`、`xfs_dir_inode_operations`、overlayfs 等），直接 hook 某个 `ext4_create` 会**漏掉其他文件系统**；因此通用审计应挂上层 `vfs_*`/`security_inode_*`，而非 `i_op` 回调
+-	仅在需要**针对特定文件系统**做深度分析（如 overlayfs 的 copy-up 行为）时，才 hook 具体 `i_op` 实现
+-	版本差异：6.x 中 `create/mkdir/symlink/rename/setattr/getattr/permission` 等回调普遍新增 `mnt_idmap`（首部参数）；`lookup/unlink/rmdir/link` 不带 idmap
+
+####	`file_operations`（已打开文件的数据文件）
+
+```cpp
+// v6.6.47 include/linux/fs.h
+struct file_operations {
+	struct module *owner;
+	loff_t (*llseek)(struct file *, loff_t, int);
+	ssize_t (*read)(struct file *, char __user *, size_t, loff_t *);
+	ssize_t (*write)(struct file *, const char __user *, size_t, loff_t *);
+	ssize_t (*read_iter)(struct kiocb *, struct iov_iter *);
+	ssize_t (*write_iter)(struct kiocb *, struct iov_iter *);
+	int (*iopoll)(struct kiocb *, struct io_comp_batch *, unsigned int flags);
+	int (*iterate_shared)(struct file *, struct dir_context *);
+	__poll_t (*poll)(struct file *, struct poll_table_struct *);
+	long (*unlocked_ioctl)(struct file *, unsigned int, unsigned long);
+	long (*compat_ioctl)(struct file *, unsigned int, unsigned long);
+	int (*mmap)(struct file *, struct vm_area_struct *);
+	unsigned long mmap_supported_flags;
+	int (*open)(struct inode *, struct file *);
+	int (*flush)(struct file *, fl_owner_t id);
+	int (*release)(struct inode *, struct file *);
+	int (*fsync)(struct file *, loff_t, loff_t, int datasync);
+	int (*fasync)(int, struct file *, int);
+	int (*lock)(struct file *, int, struct file_lock *);
+	unsigned long (*get_unmapped_area)(struct file *, unsigned long, unsigned long, unsigned long, unsigned long);
+	int (*check_flags)(int);
+	int (*flock)(struct file *, int, struct file_lock *);
+	ssize_t (*splice_write)(struct pipe_inode_info *, struct file *, loff_t *, size_t, unsigned int);
+	ssize_t (*splice_read)(struct file *, loff_t *, struct pipe_inode_info *, size_t, unsigned int);
+	void (*splice_eof)(struct file *file);
+	int (*setlease)(struct file *, int, struct file_lock **, void **);
+	long (*fallocate)(struct file *, int mode, loff_t offset, loff_t len);
+	void (*show_fdinfo)(struct seq_file *m, struct file *f);
+	ssize_t (*copy_file_range)(struct file *, loff_t, struct file *, loff_t, size_t, unsigned int);
+	loff_t (*remap_file_range)(struct file *, loff_t, struct file *, loff_t, loff_t, unsigned int);
+	int (*fadvise)(struct file *, loff_t, loff_t, int);
+	int (*uring_cmd)(struct io_uring_cmd *, unsigned int issue_flags);
+	int (*uring_cmd_iopoll)(struct io_uring_cmd *, struct io_comp_batch *, unsigned int);
+};
+```
+
+| 成员 | 触发的系统调用 / 场景 | 作用 |
+| --- | --- | --- |
+| `owner` | 模块加载/卸载 | 持模块引用，防使用中被卸载 |
+| `llseek` | `lseek`/`llseek` | 移动文件读写位置 |
+| `read` / `write` | `read`/`write`（无 iter 版时） | 简单同步读写 |
+| `read_iter` / `write_iter` | `read`/`readv`/`pread`/`aio`、`write` 系列 | 向量化/异步读写（现代主路径） |
+| `iopoll` | io_uring / 直接 IO 忙轮询 | 轮询完成队列 |
+| `iterate_shared` | `getdents64`/`readdir` | 读目录项（共享锁） |
+| `poll` | `poll`/`select`/`epoll` | 就绪状态查询 |
+| `unlocked_ioctl` / `compat_ioctl` | `ioctl`（及 32 位兼容） | 设备/文件系统控制命令 |
+| `mmap` / `mmap_supported_flags` | `mmap` | 建立文件内存映射 / 支持的 `MAP_*`（如 `MAP_SYNC`） |
+| `open` | `open`/`openat` | 打开时初始化（拿 `file`） |
+| `flush` | 每次 `close` | 关闭前刷写（如 NFS 回写） |
+| `release` | 最后一个 fd `close` | 释放 `file` 私有资源 |
+| `fsync` | `fsync`/`fdatasync` | 数据落盘 |
+| `fasync` | `fcntl(F_SETFL, O_ASYNC)` | 开关异步 IO 信号 |
+| `lock` | `fcntl(F_SETLK/F_SETLKW)` | POSIX 记录锁 |
+| `get_unmapped_area` | `mmap` | 选择映射虚拟地址 |
+| `check_flags` | `fcntl(F_SETFL)` | 校验可改的 flag |
+| `flock` | `flock(2)` | BSD 建议性文件锁 |
+| `splice_read` / `splice_write` | `splice`/`sendfile`/`tee` | 零拷贝管道读写 |
+| `splice_eof` | splice 写入收尾 | 通知“源已结束” |
+| `setlease` | `fcntl(F_SETLEASE)` | 文件租约（lease） |
+| `fallocate` | `fallocate` | 预分配 / 打洞（`FALLOC_FL_*`） |
+| `show_fdinfo` | 读 `/proc/<pid>/fdinfo/<fd>` | 显示 fd 私有信息（如 eventfd 计数） |
+| `copy_file_range` | `copy_file_range` | 服务端/文件系统内拷贝 |
+| `remap_file_range` | `FICLONE`/`FICLONERANGE`/`FIDEDUPERANGE`(ioctl) | 反射链接（reflink）/去重 |
+| `fadvise` | `posix_fadvise` | 访问模式提示（预读/丢弃缓存） |
+| `uring_cmd` / `uring_cmd_iopoll` | io_uring 透传命令 | 文件/设备的 uring 命令通道 |
+
+版本差异（v5.4.241）：额外有 `iterate`（**独占锁**目录读，与 `iterate_shared` 并存）与 `sendpage`（旧 `sendfile` 后端）；`iopoll(struct kiocb *, bool spin)` 签名不同；末尾是 `bool may_pollfree`；`setlease` 第二参为 `long`；**没有** `splice_eof`/`uring_cmd`/`uring_cmd_iopoll`。`iterate` 与 `sendpage` 均在 6.5 被移除，故 6.6 仅剩 `iterate_shared`、无 `sendpage`
+
+####	`dentry_operations`（路径缓存项）
 
 `struct dentry`（目录项）是 VFS 的路径缓存节点，`struct dentry_operations`（`dentry->d_op`）定义其行为：
 
 ```cpp
+// v5.4.241 与 v6.6.47 完全一致  include/linux/dcache.h
 struct dentry_operations {
-	int (*d_revalidate)(struct dentry *, unsigned int);   // 缓存有效性校验
+	int (*d_revalidate)(struct dentry *, unsigned int);
+	int (*d_weak_revalidate)(struct dentry *, unsigned int);
 	int (*d_hash)(const struct dentry *, struct qstr *);
 	int (*d_compare)(const struct dentry *, unsigned int, const char *, const struct qstr *);
-	int (*d_delete)(const struct dentry *);               // 最后一个引用释放时是否立即销毁
+	int (*d_delete)(const struct dentry *);
+	int (*d_init)(struct dentry *);
 	void (*d_release)(struct dentry *);
+	void (*d_prune)(struct dentry *);
 	void (*d_iput)(struct dentry *, struct inode *);
-	char *(*d_dname)(struct dentry *, char *, int);       // 特殊文件系统自定义 d_path 显示
-	...
+	char *(*d_dname)(struct dentry *, char *, int);
+	struct vfsmount *(*d_automount)(struct path *);
+	int (*d_manage)(const struct path *, bool);
+	struct dentry *(*d_real)(struct dentry *, const struct inode *);
 };
 ```
 
-对审计最有价值的是**从 dentry 还原绝对路径**，这也是 eBPF 文件审计的核心难点：
+| 成员 | 触发的系统调用 / 场景 | 作用 |
+| --- | --- | --- |
+| `d_revalidate` | 路径查找命中缓存 dentry 时（`open`/`stat`等） | 校验缓存是否仍有效（网络 fs、procfs 常返回失效） |
+| `d_weak_revalidate` | 非查找路径复用 dentry（如以 `.` 起步） | 弱校验 |
+| `d_hash` | 查找时计算名字哈希（大小写不敏感/加密名） | 自定义哈希 |
+| `d_compare` | 名字比较 | 自定义比较（casefold、fscrypt） |
+| `d_delete` | 引用归零 `dput` 时 | 返回非 0 则不缓存、立即删（procfs/pipefs 用） |
+| `d_init` | dentry 分配 | 初始化 fs 私有（`d_fsdata`） |
+| `d_release` | dentry 销毁 | 释放 `d_fsdata` |
+| `d_prune` | 从缓存剪除前 | 剪枝回调 |
+| `d_iput` | dentry 与 inode 解绑 | 自定义 `iput` |
+| `d_dname` | 生成路径显示（伪文件系统的 `d_path`） | 动态名，如 `pipe:[inode]`、`anon_inode:...` |
+| `d_automount` | 触碰 automount 点（路径穿越） | 返回 `vfsmount` 触发按需挂载（autofs） |
+| `d_manage` | 挂载穿越管理 | 过渡控制（阻塞等待 automount） |
+| `d_real` | overlayfs 取真实 dentry（读写/ioctl/mmap） | 联合/叠加挂载的核心：返回下层真实 dentry（如OverlayFS） |
 
--	`dentry->d_name`（`struct qstr`：`{ hash_len; const unsigned char *name; }`）取当前组件名。
--	`dentry->d_parent` 指向父目录 dentry，循环向上直到 `d_parent == d_self`（挂载点根），再借 `vfsmount`/`mnt->mnt_mountpoint` 跨挂载点拼接。
--	内核态有 `d_path()`/`dentry_path_raw()`；eBPF 侧优先 `bpf_d_path`（allowlist 限制），否则手写回溯（见 0x01）。
+对eBPF审计场景而言，最有价值的是**从 dentry 还原绝对路径**：
+
+-	`dentry->d_name`（`struct qstr`：`{ hash_len; const unsigned char *name; }`）取当前组件名
+-	`dentry->d_parent` 指向父目录 dentry，循环向上直到 `d_parent == d_self`（挂载点根），再借 `vfsmount`/`mnt->mnt_mountpoint` 跨挂载点拼接
+-	内核态有 `d_path()`/`·	()`；eBPF 侧优先 `bpf_d_path`（allowlist 限制），否则需要手动实现基于dentry树以及mount树的回溯（见 0x01 章节的思路）
+-	dentry 可能因 rename 而 `d_parent`/`d_name` 变化，采集时要在**事件发生的同步上下文**读取，避免异步读到已变更的缓存
+
+todo
 
 ```cpp
 // 内核 d_path 思路（简化）：从 dentry 向上回溯拼路径
@@ -914,11 +1147,169 @@ char *d_path(const struct path *path, char *buf, int buflen)
 {
 	// prepend_path -> 循环: prepend d_name; dentry = d_parent;
 	// 跨挂载点时切换到父 mount 的 mountpoint
-	...
+	......
 }
 ```
 
-审计注意：dentry 可能因 rename 而 `d_parent`/`d_name` 变化，采集时要在**事件发生的同步上下文**读取，避免异步读到已变更的缓存。
+
+这里小结一下，`i_op`/`f_op`/`d_op` 的具体实现**随文件系统而异**（`ext4_*`、`xfs_*`、overlayfs、procfs等文件系统），直接 hook 某个 `ext4_create` 会**漏掉其他文件系统**；因此通用审计应挂上层 `vfs_*`/`security_inode_*`，仅在针对特定文件系统深入分析场景时（如 overlayfs 的 copy-up）时才 hook 具体回调
+
+##	0x0D	文件系统实例：ext4 / overlayfs / procfs
+
+本章节基于三个典型的文件系统实例，了解下相关的VFS operation定义差异：
+
+-	**块设备日志文件系统（ext4）**
+-	**联合叠加文件系统（overlayfs，容器 rootfs 基石）**
+-	**内存伪文件系统（procfs）**
+
+####	ext4文件系统：按 inode 类型分派多张 `i_op`
+
+-	[fs/ext4/namei.c](https://github.com/gregkh/linux/blob/v6.6.47/fs/ext4/namei.c)
+-	[fs/ext4/file.c](https://github.com/gregkh/linux/blob/v6.6.47/fs/ext4/file.c)
+
+ext4 文件系统根据 inode 类型（目录/普通文件/符号链接/特殊文件）挂不同的 `inode_operations`，`file_operations` 也区分目录与普通文件：
+
+```cpp
+// fs/ext4/namei.c
+const struct inode_operations ext4_dir_inode_operations = {
+	.create = ext4_create,   .lookup = ext4_lookup,   .link = ext4_link,
+	.unlink = ext4_unlink,   .symlink = ext4_symlink, .mkdir = ext4_mkdir,
+	.rmdir  = ext4_rmdir,    .mknod  = ext4_mknod,    .tmpfile = ext4_tmpfile,
+	.rename = ext4_rename2,  .setattr = ext4_setattr, .getattr = ext4_getattr,
+	.listxattr = ext4_listxattr, .get_inode_acl = ext4_get_acl, .set_acl = ext4_set_acl,
+	.fiemap = ext4_fiemap,   .fileattr_get = ext4_fileattr_get,
+	.fileattr_set = ext4_fileattr_set,
+};
+const struct inode_operations ext4_special_inode_operations = {   // 设备/FIFO/socket 节点
+	.setattr = ext4_setattr, .getattr = ext4_getattr, .listxattr = ext4_listxattr,
+	.get_inode_acl = ext4_get_acl, .set_acl = ext4_set_acl,
+};
+
+// fs/ext4/file.c
+const struct file_operations ext4_file_operations = {
+	.llseek = ext4_llseek, .read_iter = ext4_file_read_iter, .write_iter = ext4_file_write_iter,
+	.iopoll = iocb_bio_iopoll, .unlocked_ioctl = ext4_ioctl, .mmap = ext4_file_mmap,
+	.mmap_supported_flags = MAP_SYNC, .open = ext4_file_open, .release = ext4_release_file,
+	.fsync = ext4_sync_file, .get_unmapped_area = thp_get_unmapped_area,
+	.splice_read = ext4_file_splice_read, .splice_write = iter_file_splice_write,
+	.fallocate = ext4_fallocate,
+};
+
+const struct inode_operations ext4_file_inode_operations = {
+	.setattr = ext4_setattr, .getattr = ext4_file_getattr, .listxattr = ext4_listxattr,
+	.get_inode_acl = ext4_get_acl, .set_acl = ext4_set_acl, .fiemap = ext4_fiemap,
+	.fileattr_get = ext4_fileattr_get, .fileattr_set = ext4_fileattr_set,
+};
+```
+
+关键点：
+
+-	**目录读**用另一张表 `ext4_dir_operations`（`fs/ext4/dir.c`，`.iterate_shared = ext4_readdir`、`.read = generic_read_dir`）；即 `getdents` 与文件 `read` 走完全不同的 `file_operations` 实例
+-	`ext4_special_inode_operations` 只保留元数据/ACL 回调——因为设备节点等**没有自己的命名空间语义**（不能在其内部再 `create`/`lookup`）
+-	`super_operations` 见 [fs/ext4/super.c](https://github.com/gregkh/linux/blob/v6.6.47/fs/ext4/super.c) 的 `ext4_sops`：实现 `alloc_inode/destroy_inode/write_inode/evict_inode/put_super/sync_fs/freeze_fs/statfs/show_options/nr_cached_objects` 等；6.x 挂载/重挂载已迁移到 **`fs_context` 新 API**（`ext4_reconfigure`），因此 `ext4_sops` 不再设置 `remount_fs`
+-	`dentry_operations`：普通 ext4 目录项**不设 `d_op`**；仅在开启 **casefold（大小写不敏感）/fscrypt（文件名加密）** 时挂 `generic_ci_dentry_ops`（提供 `d_hash`/`d_compare`/`d_revalidate`）
+
+####	overlayfs文件系统：`d_real` 转发与写时 copy-up
+
+-	[fs/overlayfs/super.c](https://github.com/gregkh/linux/blob/v6.6.47/fs/overlayfs/super.c)
+-	[file.c](https://github.com/gregkh/linux/blob/v6.6.47/fs/overlayfs/file.c)
+-	[dir.c](https://github.com/gregkh/linux/blob/v6.6.47/fs/overlayfs/dir.c)
+
+overlayfs 的设计思路是把上层可写目录 + 若干只读下层叠加成一个视图，对其 `file_operations` 而言，几乎所有成员都是拿到真实文件后转发，核心是 `d_real`函数
+
+```cpp
+// fs/overlayfs/super.c
+static const struct dentry_operations ovl_dentry_operations = {
+	.d_real            = ovl_d_real,              // 返回上/下层真实 dentry
+	.d_revalidate      = ovl_dentry_revalidate,
+	.d_weak_revalidate = ovl_dentry_weak_revalidate,
+};
+static const struct super_operations ovl_super_operations = {
+	.alloc_inode = ovl_alloc_inode, .free_inode = ovl_free_inode,
+	.destroy_inode = ovl_destroy_inode, .drop_inode = generic_delete_inode,
+	.put_super = ovl_put_super, .sync_fs = ovl_sync_fs,
+	.statfs = ovl_statfs, .show_options = ovl_show_options,
+};
+
+// fs/overlayfs/file.c
+const struct file_operations ovl_file_operations = {
+	.open = ovl_open, .release = ovl_release, .llseek = ovl_llseek,
+	.read_iter = ovl_read_iter, .write_iter = ovl_write_iter, .fsync = ovl_fsync,
+	.mmap = ovl_mmap, .fallocate = ovl_fallocate, .fadvise = ovl_fadvise,
+	.flush = ovl_flush, .splice_read = ovl_splice_read, .splice_write = ovl_splice_write,
+	.copy_file_range = ovl_copy_file_range, .remap_file_range = ovl_remap_file_range,
+};
+
+// fs/overlayfs/dir.c
+const struct inode_operations ovl_dir_inode_operations = {
+	.lookup = ovl_lookup, .mkdir = ovl_mkdir, .symlink = ovl_symlink,
+	.unlink = ovl_unlink, .rmdir = ovl_rmdir, .rename = ovl_rename, .link = ovl_link,
+	.setattr = ovl_setattr, .create = ovl_create, .mknod = ovl_mknod,
+	.permission = ovl_permission, .getattr = ovl_getattr, .listxattr = ovl_listxattr,
+	.get_inode_acl = ovl_get_inode_acl, .get_acl = ovl_get_acl, .set_acl = ovl_set_acl,
+	.update_time = ovl_update_time, .fileattr_get = ovl_fileattr_get,
+	.fileattr_set = ovl_fileattr_set,
+};
+```
+
+关键点：
+
+-	`d_real`：VFS 通用辅助 `d_real(dentry, inode)` 在 dentry 带 `DCACHE_OP_REAL` 标志时调用 `d_op->d_real`，overlayfs 借此返回真正承载数据的**上层或下层** dentry。读写/mmap/ioctl 因此能落到底层真实文件系统上
+-	**copy-up**：`ovl_open`→`ovl_maybe_copy_up`，**首次以写打开时把下层文件复制到上层，之后所有写都作用于上层副本（下层只读不变）**。`ovl_write_iter`/`ovl_copy_file_range` 等通过 `ovl_real_fdget` 取真实 `struct file` 再转发
+-	审计含义：在 overlayfs 上做审计若只 hook 底层 ext4 的 `ext4_file_write_iter`，会看到「上层副本」的真实路径而非容器内路径；需要结合 overlay 层的 `d_path` 或 mount namespace 还原容器视角路径
+
+####	procfs文件系统：`proc_ops` 分离
+
+-	[include/linux/proc_fs.h](https://github.com/gregkh/linux/blob/v6.6.47/include/linux/proc_fs.h)
+-	[fs/proc/inode.c](https://github.com/gregkh/linux/blob/v6.6.47/fs/proc/inode.c)
+-	[fs/proc/generic.c](https://github.com/gregkh/linux/blob/v6.6.47/fs/proc/generic.c)
+
+procfs 是内存伪文件系统，其动态条目（`/proc/sys` 之外）通过 `struct proc_dir_entry` 描述，VFS 用一层 `proc_reg_*` 包装把调用转发给 `pde->proc_ops`：
+
+```cpp
+// include/linux/proc_fs.h —— 5.6+ 从 file_operations 独立出来
+struct proc_ops {
+	unsigned int proc_flags;
+	int    (*proc_open)(struct inode *, struct file *);
+	ssize_t (*proc_read)(struct file *, char __user *, size_t, loff_t *);
+	ssize_t (*proc_read_iter)(struct kiocb *, struct iov_iter *);
+	ssize_t (*proc_write)(struct file *, const char __user *, size_t, loff_t *);
+	loff_t (*proc_lseek)(struct file *, loff_t, int);
+	int    (*proc_release)(struct inode *, struct file *);
+	__poll_t (*proc_poll)(struct file *, struct poll_table_struct *);
+	long   (*proc_ioctl)(struct file *, unsigned int, unsigned long);
+	long   (*proc_compat_ioctl)(struct file *, unsigned int, unsigned long);
+	int    (*proc_mmap)(struct file *, struct vm_area_struct *);
+	unsigned long (*proc_get_unmapped_area)(struct file *, unsigned long, unsigned long,
+						unsigned long, unsigned long);
+};
+
+// fs/proc/inode.c —— VFS 侧真正挂到 inode->i_fop 的包装表（转发到 pde->proc_ops）
+// proc_reg_open/proc_reg_read_iter/proc_reg_write/proc_reg_llseek/proc_reg_release ...
+const struct super_operations proc_sops = {
+	.alloc_inode = proc_alloc_inode, .free_inode = proc_free_inode,
+	.drop_inode = generic_delete_inode, .evict_inode = proc_evict_inode,
+	.statfs = simple_statfs, .show_options = proc_show_options,
+};
+
+// fs/proc/generic.c
+static const struct inode_operations proc_dir_inode_operations = {
+	.lookup = proc_lookup, .getattr = proc_getattr, .setattr = proc_notify_change,
+};
+static const struct file_operations proc_dir_operations = {
+	.llseek = generic_file_llseek, .read = generic_read_dir,
+	.iterate_shared = proc_readdir,
+};
+static const struct dentry_operations proc_misc_dentry_ops = {
+	.d_revalidate = proc_misc_d_revalidate,
+	.d_delete     = proc_misc_d_delete,     // 条目已失效则不缓存 dentry
+};
+```
+
+关键点：
+
+-	**`proc_ops` vs `file_operations`**：这是本文涉及两个内核版本，最显著的差异之一。**5.6 版本之前（v5.4.241）procfs 动态条目直接用 `struct file_operations`**（`proc_create()` 形参是 `const struct file_operations *`，`proc_dir_entry->proc_fops`）；**5.6 起（v6.6.47）拆出精简的 `struct proc_ops`**（`proc_create()` 形参变为 `const struct proc_ops *`），减小体积并去掉伪文件系统用不到的成员
+-	`/proc/<pid>` 下的 `pid_dentry_operations`（[fs/proc/base.c](https://github.com/gregkh/linux/blob/v6.6.47/fs/proc/base.c)）同样用 `d_revalidate`(`pid_revalidate`)+`d_delete`，进程退出后目录项即失效
 
 ##	0x0E	security 系列 LSM 钩子汇总
 
@@ -984,3 +1375,8 @@ int BPF_PROG(audit_unlink, struct inode *dir, struct dentry *dentry, int ret)
 -	[BPF LSM 文档](https://docs.kernel.org/bpf/prog_lsm.html)
 -	[idmapped mounts 文档](https://docs.kernel.org/filesystems/idmappings.html)
 -	[cilium/ebpf](https://github.com/cilium/ebpf)
+-	`super/inode/file_operations` 定义：[v6.6.47/include/linux/fs.h](https://github.com/gregkh/linux/blob/v6.6.47/include/linux/fs.h)、[v5.4.241/include/linux/fs.h](https://github.com/gregkh/linux/blob/v5.4.241/include/linux/fs.h)
+-	`dentry_operations` 定义：[v6.6.47/include/linux/dcache.h](https://github.com/gregkh/linux/blob/v6.6.47/include/linux/dcache.h)、[v5.4.241/include/linux/dcache.h](https://github.com/gregkh/linux/blob/v5.4.241/include/linux/dcache.h)
+-	ext4文件系统：[fs/ext4/namei.c](https://github.com/gregkh/linux/blob/v6.6.47/fs/ext4/namei.c)、[fs/ext4/file.c](https://github.com/gregkh/linux/blob/v6.6.47/fs/ext4/file.c)、[fs/ext4/super.c](https://github.com/gregkh/linux/blob/v6.6.47/fs/ext4/super.c)
+-	overlayfs文件系统：[fs/overlayfs/super.c](https://github.com/gregkh/linux/blob/v6.6.47/fs/overlayfs/super.c)、[file.c](https://github.com/gregkh/linux/blob/v6.6.47/fs/overlayfs/file.c)、[dir.c](https://github.com/gregkh/linux/blob/v6.6.47/fs/overlayfs/dir.c)
+-	procfs文件系统：[include/linux/proc_fs.h](https://github.com/gregkh/linux/blob/v6.6.47/include/linux/proc_fs.h)、[fs/proc/inode.c](https://github.com/gregkh/linux/blob/v6.6.47/fs/proc/inode.c)、[fs/proc/generic.c](https://github.com/gregkh/linux/blob/v6.6.47/fs/proc/generic.c)、[fs/proc/base.c](https://github.com/gregkh/linux/blob/v6.6.47/fs/proc/base.c)
