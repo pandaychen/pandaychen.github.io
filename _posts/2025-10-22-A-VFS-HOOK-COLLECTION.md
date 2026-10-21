@@ -117,7 +117,7 @@ flowchart TD
 | `raw_tracepoint`/`btf raw_tp` | 内核静态 tracepoint | 稳定 | 否 | 比 tracepoint 开销更低 |
 | `LSM-BPF` | `bpf_lsm_inode_unlink` 等 | 语义最稳定 | **是** | 需 `CONFIG_BPF_LSM`，5.7+ |
 
-一句话选型建议：**审计优先挂 `vfs_*`/`security_*` 层，而非易变的 syscall 参数结构；需要“阻断”能力时用 LSM-BPF。**
+一句话选型建议：**审计优先挂 `vfs_*`/`security_*` 层，而非易变的 syscall 参数结构；需要"阻断"能力时用 LSM-BPF。**
 
 ###	路径/文件名提取
 
@@ -290,7 +290,7 @@ open(pathname, O_CREAT | O_WRONLY | O_TRUNC, mode);
 
 ###	内核核心调用链
 
-普通文件创建走 open 路径的“最后一步”：`path_openat -> do_last/open_last_lookups -> lookup_open -> vfs_create`；`mknod` 走 `do_mknodat -> vfs_mknod`。
+普通文件创建走 open 路径的"最后一步"：`path_openat -> do_last/open_last_lookups -> lookup_open -> vfs_create`；`mknod` 走 `do_mknodat -> vfs_mknod`。
 
 ```cpp
 // v5.4
@@ -338,7 +338,7 @@ int vfs_create(struct mnt_idmap *idmap, struct inode *dir,
 ###	eBPF 挂载点建议
 
 -	推荐 `security_inode_create`：参数稳定，可从 `dentry->d_name` 取新建文件名，从 `dir->i_ino` 取父目录 inode。
--	`vfs_create`：注意 6.x 需按“idmap 在前”的顺序读参。
+-	`vfs_create`：注意 6.x 需按"idmap 在前"的顺序读参。
 
 ##	0x04	删除 `unlink`
 
@@ -386,7 +386,7 @@ int vfs_unlink(struct mnt_idmap *idmap, struct inode *dir,
 | `dentry` | `struct dentry *` | **被删的子节点**（目标已存在，`d_inode` 有效）；名 = `dentry->d_name`，目标 inode = `dentry->d_inode`，删除前链接数 = `dentry->d_inode->i_nlink` |
 | `delegated_inode` | `struct inode **` | NFS 委托回收用，审计一般忽略 |
 
-`security_inode_unlink(dir, dentry)` 两版一致；判定“真正删除文件”可看 `i_nlink == 1`（删除后归零）
+`security_inode_unlink(dir, dentry)` 两版一致；判定"真正删除文件"可看 `i_nlink == 1`（删除后归零）
 
 ###	版本差异
 
@@ -796,7 +796,7 @@ int do_truncate(struct mnt_idmap *idmap, struct dentry *dentry, loff_t length,
 
 ###	版本差异
 
--	`vfs_read`/`vfs_write` 两版签名稳定（不带 idmap），是少数“跨版本友好”的点。
+-	`vfs_read`/`vfs_write` 两版签名稳定（不带 idmap），是少数"跨版本友好"的点。
 -	`do_truncate` 6.x 首参新增 `idmap`；但截断最终仍收敛到 `notify_change(... ATTR_SIZE ...)`。
 
 ###	eBPF 挂载点建议
@@ -804,7 +804,7 @@ int do_truncate(struct mnt_idmap *idmap, struct dentry *dentry, loff_t length,
 -	**读写路径频率极高**，全量 hook `vfs_read`/`vfs_write` 会带来显著开销与事件洪泛。审计场景建议：
 	-	只对**敏感文件/目录**（按 inode 或路径前缀过滤）上报；
 	-	或采样、或聚合计数后周期上报；
-	-	或用 LSM `security_file_permission`（在打开后首次读写权限校验时触发，语义更“动作级”）。
+	-	或用 LSM `security_file_permission`（在打开后首次读写权限校验时触发，语义更"动作级"）。
 -	截断推荐 `do_truncate` 或统一的 `notify_change`（`ATTR_SIZE`）。
 
 ##	0x0B	挂载 `mount`/`umount`
@@ -1082,7 +1082,7 @@ struct file_operations {
 | `check_flags` | `fcntl(F_SETFL)` | 校验可改的 flag |
 | `flock` | `flock(2)` | BSD 建议性文件锁 |
 | `splice_read` / `splice_write` | `splice`/`sendfile`/`tee` | 零拷贝管道读写 |
-| `splice_eof` | splice 写入收尾 | 通知“源已结束” |
+| `splice_eof` | splice 写入收尾 | 通知"源已结束" |
 | `setlease` | `fcntl(F_SETLEASE)` | 文件租约（lease） |
 | `fallocate` | `fallocate` | 预分配 / 打洞（`FALLOC_FL_*`） |
 | `show_fdinfo` | 读 `/proc/<pid>/fdinfo/<fd>` | 显示 fd 私有信息（如 eventfd 计数） |
