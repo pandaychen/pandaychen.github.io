@@ -10,6 +10,8 @@ tags:
     - Kubernetes
 ---
 
+{% raw %}
+
 ##  0x00    前言
 Helm 是 Kubernetes 的包管理工具，类似于 Linux 下的包管理工具如 yum/apt 等。通过 Helm 可以将打包好的 yaml 文件部署到 Kubernetes 集群
 
@@ -672,7 +674,7 @@ data:
 
 在 Helm 模板中生成 YAML 数组是一个常见需求，但也是最容易出问题的地方（主要是缩进问题）。以下是几种常见场景：
 
-**方式一：使用 `toYaml` + `nindent`（推荐）**
+**方案一：使用 `toYaml` + `nindent`（推荐）**
 
 当 `values.yaml` 中已经定义了数组结构时，直接使用 `toYaml` 转换：
 
@@ -706,7 +708,7 @@ spec:
 
 关键点：`nindent` 的缩进值必须与 YAML 结构的层级一致，这里 `containers` 下的列表项需要 `8` 个空格缩进
 
-**方式二：使用 `range` 手动生成数组项**
+**方案二：使用 `range` 手动生成数组项**
 
 当需要对每个元素做额外处理时，使用 `range` 遍历：
 
@@ -748,7 +750,7 @@ spec:
 
 注意：嵌套 `range` 内访问外层对象需要用 `$`（根对象）
 
-**方式三：条件化的数组元素**
+**方案三：条件化的数组元素**
 
 ```text
 # 根据条件动态添加 env 变量
@@ -824,10 +826,11 @@ dnsConfig:
 
 本章节通过一个完整的实战用例，介绍如何使用 Helm 管理一个基于 Gin 框架的 HTTP 网关服务。该服务的路由规则和限流策略通过 Kubernetes CRD（Custom Resource Definition）进行声明式管理，支持配置热加载
 
-使用两种典型的机制实现：
+使用三种典型的机制实现：
 
-- 方式一：基于client-go + informer 机制实现
-- 方式二：基于kubebuilder脚手架实现
+- 方案一：基于client-go + informer 机制实现（单二进制，Gin 服务内嵌 informer）
+- 方案二：基于kubebuilder脚手架实现（单二进制，Gin 服务与 controller-manager 运行在同一进程）
+- 方案三：基于kubebuilder脚手架实现，Operator 与 gin-gateway 拆分为两个独立二进制（Operator 负责调和，gateway 只负责转发）
 
 ### 场景描述
 
@@ -1030,9 +1033,9 @@ Helm 管理 CRD 有两种方式：
 # 4. helm uninstall 时自动清理 CR 实例
 ```
 
-##  0x07    方式一：client-go + informer 实现
+##  0x07    方案一：client-go + informer 实现
 
-本节使用 client-go 的 dynamic informer 监听 `GatewayConfig` CR 变化，实现 Gin 服务的配置热加载。这种方式更轻量，适合理解底层原理
+本节使用 client-go 的 dynamic informer 监听 `GatewayConfig` CR 变化，实现 Gin 服务的配置热加载。这种方案更轻量，适合理解底层原理
 
 ### 完整代码
 
@@ -1422,29 +1425,136 @@ require (
 )
 ```
 
-##  0x08    方式二：kubebuilder / controller-runtime 实现
+##  0x08    方案二：kubebuilder / controller-runtime 实现
 
-本节使用 controller-runtime 的 Reconciler 模式来管理 `GatewayConfig` CR。这种方式更贴近生产实践，适合需要完整 Operator 能力的场景
+本节使用 controller-runtime 的 Reconciler 模式来管理 `GatewayConfig` CR。这种方案更贴近生产实践，适合需要完整 Operator 能力的场景
+
+### kubebuilder 脚手架：自动生成 vs 开发者实现
+
+kubebuilder（本文以 v4 版本、`go/v4` 插件为准）本质上是一个代码/配置生成器：它负责生成项目骨架、样板代码和部署清单，开发者只需要专注于 **API 定义** 和 **调和逻辑**。区分清楚哪些文件是生成的、哪些需要手写，是避免"改了生成文件被覆盖"这类问题的关键
+
+**1、脚手架命令及其生成的内容**
+
+| 命令 | 自动生成/修改的内容 | 说明 |
+|------|------|------|
+| `kubebuilder init --domain example.com --repo gin-gateway-operator` | `go.mod`、`Makefile`、`PROJECT`、`Dockerfile`、`cmd/main.go`、`config/default`、`config/manager`、`config/rbac`（leader election、metrics 等基础 RBAC）、`config/prometheus`、`hack/boilerplate.go.txt`、`test/e2e`、`.golangci.yml` 等 | 初始化项目骨架，`cmd/main.go` 中已包含 Manager 创建、健康检查、metrics、leader election 等完整代码 |
+| `kubebuilder create api --group gateway --version v1alpha1 --kind GatewayConfig` | `api/v1alpha1/gatewayconfig_types.go`（骨架）、`api/v1alpha1/groupversion_info.go`、`internal/controller/gatewayconfig_controller.go`（空的 Reconcile）、`internal/controller/suite_test.go`、`config/crd/`、`config/samples/`、`config/rbac/gatewayconfig_*_role.yaml`；同时更新 `PROJECT` 与 `cmd/main.go`（注册 Scheme 和 Reconciler） | 交互式询问是否生成 Resource 和 Controller，最终 API Group 为 `<group>.<domain>`，即 `gateway.example.com` |
+| `kubebuilder create webhook --group gateway --version v1alpha1 --kind GatewayConfig --defaulting --programmatic-validation` | `internal/webhook/v1alpha1/gatewayconfig_webhook.go`（较新的 v4 版本位于此目录，早期版本位于 `api/` 下）、`config/webhook/`、`config/certmanager/` | 可选，用于实现默认值填充与复杂校验 |
+| `make generate` | `api/v1alpha1/zz_generated.deepcopy.go` | 调用 `controller-gen object`，根据 types 生成 `DeepCopy`/`DeepCopyObject` 方法，**禁止手改** |
+| `make manifests` | `config/crd/bases/gateway.example.com_gatewayconfigs.yaml`、`config/rbac/role.yaml`、`config/webhook/manifests.yaml` | 调用 `controller-gen`，从 `+kubebuilder:` marker 生成 CRD schema、ClusterRole、Webhook 配置，**禁止手改** |
+| `make install` / `make uninstall` | 无文件生成 | 通过 kustomize 将 `config/crd` 应用到当前 kubeconfig 指向的集群 |
+| `make run` | 无文件生成 | 本地运行 `cmd/main.go`，连接当前 kubeconfig 的集群（调试最常用） |
+| `make docker-build docker-push IMG=xxx` | 镜像 | 使用脚手架生成的 `Dockerfile` 构建 manager 镜像 |
+| `make deploy IMG=xxx` / `make build-installer IMG=xxx` | `dist/install.yaml`（build-installer） | 用 kustomize 渲染 `config/default` 并部署，或者输出单文件安装清单 |
+| `kubebuilder edit --plugins=helm/v1-alpha` | `dist/chart/` | 较新的 v4 版本提供的实验性插件，将 kustomize 清单转换为 Helm Chart，具体以所用版本的 `kubebuilder edit --help` 为准 |
+
+**2、开发者需要实现的逻辑**
+
+| 位置 | 开发者需要做的事情 |
+|------|------|
+| `api/v1alpha1/*_types.go` | 定义 `Spec`/`Status` 的字段，并通过 marker 声明校验规则（`+kubebuilder:validation:*`）、默认值（`+kubebuilder:default`）、打印列（`+kubebuilder:printcolumn`）、status 子资源（`+kubebuilder:subresource:status`）等 |
+| `internal/controller/*_controller.go` 的 `Reconcile()` | 核心业务：读取 CR -> 计算期望状态 -> 创建/更新子资源 -> 回写 Status；处理删除（OwnerReference 或 finalizer）、错误重试与 requeue |
+| `internal/controller/*_controller.go` 的 RBAC marker | 用 `+kubebuilder:rbac:` 声明 Reconciler 实际访问的资源与动词，`make manifests` 才能生成正确的 ClusterRole |
+| `SetupWithManager()` | 声明 watch 关系：`For()` 主资源、`Owns()` 子资源、`Watches()` 外部资源，以及 predicate 过滤 |
+| `cmd/main.go` | 通常只需少量修改：增加自定义 flag、向 Reconciler 注入额外依赖（如方案二中的 `Store`）、限定 watch 的 namespace（`Cache.DefaultNamespaces`）、启动额外的 Runnable（如 Gin 服务） |
+| Webhook（可选） | 实现 `Default()`、`ValidateCreate()`、`ValidateUpdate()`、`ValidateDelete()` |
+| `config/samples/*.yaml` | 填写 CR 示例内容 |
+| 测试 | 基于 envtest（`suite_test.go` 已生成）编写 controller 测试；e2e 测试 |
+| 其他业务代码 | 如本例的 Gin 网关、配置存储等，与 kubebuilder 无关，自行组织在 `internal/` 或 `pkg/` 下 |
+
+注意：kubebuilder v4 的 `config/` 目录专用于存放 kustomize 清单，业务 Go 代码不要放在 `config/` 下，否则容易与脚手架生成的 YAML 混淆（这也是下面的方案二将 0x07 中的 `config` 包改名为 `internal/gwconfig` 的原因）
+
+### 基于 kubebuilder 开发的基本流程
+
+```mermaid
+flowchart TD
+    S1["1.环境准备<br/>go/docker/kubectl/kind + 安装 kubebuilder"] --> S2["2.kubebuilder init<br/>初始化项目骨架"]
+    S2 --> S3["3.kubebuilder create api<br/>生成 API 与 Controller 骨架"]
+    S3 --> S4["4.编辑 *_types.go<br/>定义 Spec/Status + marker"]
+    S4 --> S5["5.make generate && make manifests<br/>生成 DeepCopy/CRD/RBAC"]
+    S5 --> S6["6.实现 Reconcile<br/>RBAC marker + SetupWithManager"]
+    S6 --> S7["7.可选：create webhook<br/>实现默认值与校验"]
+    S7 --> S8["8.make install && make run<br/>本地联调 + kubectl apply 样例 CR"]
+    S8 --> S9["9.make test<br/>envtest 单元测试 / e2e"]
+    S9 --> S10["10.make docker-build docker-push<br/>make deploy 或 Helm 发布"]
+    S10 -->|"修改 API 字段"| S4
+```
+
+具体步骤：
+
+1.  **环境准备**：安装 Go、Docker、kubectl，并准备一个测试集群（如 `kind create cluster`），安装 kubebuilder：
+
+```bash
+curl -L -o kubebuilder "https://go.kubebuilder.io/dl/latest/$(go env GOOS)/$(go env GOARCH)"
+chmod +x kubebuilder && sudo mv kubebuilder /usr/local/bin/
+kubebuilder version
+```
+
+2.  **初始化项目**（自动生成）：
+
+```bash
+mkdir gin-gateway-operator && cd gin-gateway-operator
+kubebuilder init --domain example.com --repo gin-gateway-operator
+```
+
+3.  **创建 API 与 Controller**（自动生成）：
+
+```bash
+kubebuilder create api --group gateway --version v1alpha1 --kind GatewayConfig --resource --controller
+```
+
+4.  **定义 API**（开发者实现）：编辑 `api/v1alpha1/gatewayconfig_types.go`，填写 `GatewayConfigSpec`/`GatewayConfigStatus` 字段与 marker
+5.  **生成代码和清单**（自动生成）：每次修改 types 或 marker 之后都必须执行
+
+```bash
+make generate   # 生成 zz_generated.deepcopy.go
+make manifests  # 生成 CRD / RBAC / Webhook 清单
+```
+
+6.  **实现调和逻辑**（开发者实现）：编写 `Reconcile()`、RBAC marker、`SetupWithManager()`；如有额外依赖，在 `cmd/main.go` 中注入
+7.  **可选：Webhook**：`kubebuilder create webhook ...` 后实现 `Default`/`Validate*` 逻辑
+8.  **本地联调**：
+
+```bash
+make install                              # 安装 CRD 到集群
+make run                                  # 本地启动 controller（使用本机 kubeconfig）
+kubectl apply -k config/samples/          # 另起终端，创建样例 CR
+kubectl get gatewayconfig -A              # 观察 status 变化
+```
+
+9.  **测试**：`make test`（envtest，会自动下载 etcd/kube-apiserver 二进制）、`make test-e2e`
+10. **构建与发布**：
+
+```bash
+make docker-build docker-push IMG=registry.example.com/gin-gateway-operator:v0.1.0
+make deploy IMG=registry.example.com/gin-gateway-operator:v0.1.0   # kustomize 方式
+# 或者：将 config/crd/bases 下的 CRD 拷贝到 Helm Chart 的 crds/ 目录，用 Helm 发布（见 0x0A）
+```
 
 ### 完整代码
 
-项目结构（遵循 kubebuilder 脚手架规范）：
+项目结构（遵循 kubebuilder v4 脚手架规范，仅列出与业务相关的文件）：
 
 ```text
 gin-gateway-operator/
+├── PROJECT                           # [生成] kubebuilder 项目元数据
+├── Makefile                          # [生成]
+├── Dockerfile                        # [生成] 构建 cmd/main.go
 ├── api/
 │   └── v1alpha1/
-│       ├── gatewayconfig_types.go    # CRD Go 类型定义
-│       ├── groupversion_info.go      # GVK 注册
-│       └── zz_generated.deepcopy.go  # DeepCopy 方法（code-gen 自动生成）
+│       ├── gatewayconfig_types.go    # [生成骨架 + 手写字段] CRD Go 类型定义
+│       ├── groupversion_info.go      # [生成] GVK 注册
+│       └── zz_generated.deepcopy.go  # [生成] DeepCopy 方法（make generate）
+├── cmd/
+│   └── main.go                       # [生成 + 少量修改] 启动 controller-manager + Gin
+├── config/                           # [生成] kustomize 清单（CRD/RBAC/Manager 等，make manifests）
 ├── internal/
-│   └── controller/
-│       └── gatewayconfig_controller.go  # Reconciler 核心逻辑
-├── gateway/
-│   └── handler.go                    # Gin 路由处理（同 0x07）
-├── config/
-│   └── config.go                     # 配置管理（同 0x07）
-├── main.go                           # 入口：启动 controller-manager + Gin
+│   ├── controller/
+│   │   └── gatewayconfig_controller.go  # [生成骨架 + 手写] Reconciler 核心逻辑
+│   ├── gateway/
+│   │   └── handler.go                # [手写] Gin 路由处理（同 0x07，import 路径改为 internal/gwconfig）
+│   └── gwconfig/
+│       └── config.go                 # [手写] 配置管理（同 0x07 的 config 包，包名改为 gwconfig）
 ├── go.mod
 └── go.sum
 ```
@@ -1502,11 +1612,18 @@ type GatewayConfigList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []GatewayConfig `json:"items"`
 }
+
+func init() {
+	SchemeBuilder.Register(&GatewayConfig{}, &GatewayConfigList{})
+}
 ```
 
-**api/v1alpha1/groupversion_info.go** - GVK 注册：
+**api/v1alpha1/groupversion_info.go** - GVK 注册（`create api` 自动生成，无需修改）：
 
 ```go
+// Package v1alpha1 contains API Schema definitions for the gateway v1alpha1 API group.
+// +kubebuilder:object:generate=true
+// +groupName=gateway.example.com
 package v1alpha1
 
 import (
@@ -1524,10 +1641,6 @@ var (
 
 	AddToScheme = SchemeBuilder.AddToScheme
 )
-
-func init() {
-	SchemeBuilder.Register(&GatewayConfig{}, &GatewayConfigList{})
-}
 ```
 
 **internal/controller/gatewayconfig_controller.go** - Reconciler 核心逻辑：
@@ -1542,17 +1655,19 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	gatewayv1alpha1 "gin-gateway-operator/api/v1alpha1"
-	"gin-gateway-operator/config"
+	"gin-gateway-operator/internal/gwconfig"
 )
 
 type GatewayConfigReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
-	Store  *config.Store
+	Store  *gwconfig.Store
 }
 
 // +kubebuilder:rbac:groups=gateway.example.com,resources=gatewayconfigs,verbs=get;list;watch
@@ -1566,7 +1681,7 @@ func (r *GatewayConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if client.IgnoreNotFound(err) == nil {
 			// CR 被删除，清空配置
 			logger.Info("GatewayConfig deleted, clearing config")
-			r.Store.UpdateSpec(&config.GatewaySpec{})
+			r.Store.UpdateSpec(&gwconfig.GatewaySpec{})
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("failed to get GatewayConfig: %w", err)
@@ -1591,8 +1706,8 @@ func (r *GatewayConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	return ctrl.Result{}, nil
 }
 
-func convertSpec(crSpec *gatewayv1alpha1.GatewayConfigSpec) *config.GatewaySpec {
-	spec := &config.GatewaySpec{}
+func convertSpec(crSpec *gatewayv1alpha1.GatewayConfigSpec) *gwconfig.GatewaySpec {
+	spec := &gwconfig.GatewaySpec{}
 
 	if crSpec.GlobalRateLimit != nil {
 		spec.GlobalRateLimit.QPS = crSpec.GlobalRateLimit.QPS
@@ -1600,7 +1715,7 @@ func convertSpec(crSpec *gatewayv1alpha1.GatewayConfigSpec) *config.GatewaySpec 
 	}
 
 	for _, r := range crSpec.Routes {
-		route := config.RouteRule{
+		route := gwconfig.RouteRule{
 			Path:    r.Path,
 			Methods: r.Methods,
 			Backend: r.Backend,
@@ -1616,13 +1731,15 @@ func convertSpec(crSpec *gatewayv1alpha1.GatewayConfigSpec) *config.GatewaySpec 
 }
 
 func (r *GatewayConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Reconcile 每次都会写入 lastReloadTime，若不过滤 status 变更会导致无限调和
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&gatewayv1alpha1.GatewayConfig{}).
+		For(&gatewayv1alpha1.GatewayConfig{},
+			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Complete(r)
 }
 ```
 
-**main.go** - 入口文件（controller-manager + Gin 服务并行运行）：
+**cmd/main.go** - 入口文件（controller-manager + Gin 服务并行运行）。实际项目中是在脚手架生成的 `cmd/main.go` 基础上修改（注入 `Store`、启动 Gin），这里为了便于阅读给出精简后的版本：
 
 ```go
 package main
@@ -1646,9 +1763,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	gatewayv1alpha1 "gin-gateway-operator/api/v1alpha1"
-	"gin-gateway-operator/config"
-	"gin-gateway-operator/gateway"
 	controller "gin-gateway-operator/internal/controller"
+	"gin-gateway-operator/internal/gateway"
+	"gin-gateway-operator/internal/gwconfig"
 )
 
 var sch = runtime.NewScheme()
@@ -1663,7 +1780,7 @@ func main() {
 
 	namespace := os.Getenv("WATCH_NAMESPACE")
 
-	store := config.NewStore()
+	store := gwconfig.NewStore()
 
 	// 创建 controller-manager
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
@@ -1762,9 +1879,1044 @@ require (
 | 代码生成 | 无 | kubebuilder 自动生成 DeepCopy、RBAC 等 |
 | 适用场景 | 简单的配置监听、sidecar | 完整的 Operator、复杂的调和逻辑 |
 
-##  0x09    Helm Chart 完整实现
+##  0x09    方案三：Operator 与 gin-gateway 拆分为两个二进制
 
-本节给出管理上述 Gin 网关服务的完整 Helm Chart
+### 为什么要拆分
+
+方案一和方案二都是"网关进程自己 watch CR"，即控制面与数据面在同一个进程内，存在以下问题：
+
+-   **权限过大**：每个网关 Pod 都持有访问 API Server 的 ServiceAccount 权限，数据面一旦被攻破即可读写 CR
+-   **API Server 压力**：网关扩容到 N 个副本，就有 N 个 watch 连接
+-   **与 leader election 冲突**：方案二如果开启 `LeaderElection`，只有 leader 副本会运行 Reconciler，其他副本的 `Store` 永远拿不到配置；关闭则多个副本同时写 status
+-   **发布耦合**：调和逻辑的迭代需要滚动重启网关，影响流量
+
+方案三将职责拆分：
+
+| 组件 | 二进制 | 职责 | K8s 权限 |
+|------|------|------|------|
+| gin-gateway-operator | `cmd/main.go`（kubebuilder 生成） | watch `GatewayConfig` CR，校验并渲染配置，创建/调和 ConfigMap、gin-gateway Deployment 和 Service，回写 stVatus | 需要（CR、ConfigMap、Service、Deployment） |
+| gin-gateway | `cmd/gateway/main.go`（需开发者手写）| 读取挂载的 ConfigMap 文件，fsnotify 监听变更后热加载，按路由规则限流和转发 | **不需要**（`automountServiceAccountToken: false`） |
+
+**Helm Chart 只负责安装 CRD、Operator 及其 RBAC，以及一个默认的 `GatewayConfig` CR；gin-gateway 的 Deployment 由 Operator 根据 CR 动态创建，这是标准的 Operator 模式**
+
+### 架构设计
+
+![gin-gateway-split-arch](gin-gateway-split-arch.drawio.png)
+
+核心数据流如下：
+
+```mermaid
+flowchart TB
+    subgraph helmChart ["Helm Chart: gin-gateway-operator"]
+        CRDs["crds/<br/>GatewayConfig CRD"]
+        OpTpl["templates/<br/>Operator Deployment + RBAC"]
+        CRTpl["templates/<br/>默认 GatewayConfig CR"]
+    end
+
+    subgraph k8sCluster ["Kubernetes Cluster"]
+        APIServer["API Server"]
+        subgraph nsOp ["Namespace: gateway"]
+            Operator["gin-gateway-operator<br/>controller-manager"]
+            CR["GatewayConfig CR"]
+            CM["ConfigMap<br/>NAME-routes<br/>routes.json"]
+            GWDeploy["Deployment NAME-gateway"]
+            GWPod1["gin-gateway Pod"]
+            GWPod2["gin-gateway Pod"]
+            GWSvc["Service NAME-gateway"]
+        end
+        Kubelet["kubelet"]
+    end
+
+    Client["客户端流量"] --> GWSvc
+    GWSvc --> GWPod1
+    GWSvc --> GWPod2
+
+    helmChart -->|"helm install/upgrade"| APIServer
+    Operator -->|"watch CR / Owns 子资源"| APIServer
+    APIServer --- CR
+    Operator -->|"CreateOrUpdate<br/>OwnerReference"| CM
+    Operator -->|"CreateOrUpdate"| GWDeploy
+    Operator -->|"CreateOrUpdate"| GWSvc
+    Operator -->|"Status().Update"| CR
+    GWDeploy --> GWPod1
+    GWDeploy --> GWPod2
+    Kubelet -->|"同步 ConfigMap 卷<br/>原子替换 ..data"| GWPod1
+    Kubelet -->|"同步 ConfigMap 卷"| GWPod2
+    CM -.-> Kubelet
+```
+
+配置变更的完整时序：
+
+```mermaid
+sequenceDiagram
+    participant User as 运维/CI
+    participant API as API Server
+    participant Op as gin-gateway-operator
+    participant Kubelet as kubelet
+    participant GW as gin-gateway Pod
+
+    User->>API: kubectl apply GatewayConfig（修改 routes）
+    API-->>Op: watch 事件（generation 变化）
+    Op->>Op: renderConfig：校验 backend、去重、按最长前缀排序
+    alt 配置非法
+        Op->>API: Status Ready=False, Reason=InvalidSpec
+    else 配置合法
+        Op->>API: CreateOrUpdate ConfigMap（routes.json）
+        Op->>API: CreateOrUpdate Deployment / Service
+        Op->>API: Status 更新 activeRoutes/configHash/Ready
+        API-->>Kubelet: ConfigMap 变更
+        Kubelet->>GW: 原子替换挂载目录下的 ..data 符号链接
+        GW->>GW: fsnotify 事件 -> 读取文件 -> 比较 hash -> 更新 Store + 重置限流器
+    end
+```
+
+方案三的几个关键设计点如下：
+
+1.  **ConfigMap 作为控制面与数据面之间的契约**：Operator 输出的 `routes.json` 格式就是 0x07 中的 `GatewaySpec` JSON，网关不依赖任何 Kubernetes 类型
+2.  **热加载而非滚动重启**：Pod 模板中**不**写入配置 hash 注解，否则每次改路由都会触发滚动更新；ConfigMap 卷由 kubelet 定期同步，延迟一般为数十秒到 1~2 分钟（取决于 kubelet 的 `syncFrequency` 与 `configMapAndSecretChangeDetectionStrategy`）。如果更希望"改配置即重启"的能力，可以在 Pod 模板上加 `checksum/config` 注解
+3.  **ConfigMap 卷不能用 `subPath` 挂载**：`subPath` 挂载的文件不会随 ConfigMap 更新
+4.  **必须 watch 目录**：kubelet 通过原子替换 `..data` 符号链接来更新 ConfigMap 卷，watch 文件本身会在第一次更新后失效
+5.  **OwnerReference 级联删除**：子资源都通过 `SetControllerReference` 关联到 CR，删除 CR 后由 GC 自动清理，无需 finalizer
+6.  **配置校验前移**：非法配置在 Operator 侧拦截并写入 status condition，网关只会加载合法配置；网关侧解析失败时保留上一份配置
+7.  ConfigMap 有 `1MiB` 的大小上限，路由规则规模很大时需要拆分或改用其他分发方式
+
+### 项目结构
+
+在 kubebuilder v4 脚手架基础上，新增一个 `cmd/gateway` 入口即可在同一个 Go module 中产出两个二进制：
+
+```text
+gin-gateway-split/
+├── PROJECT                                # [生成]
+├── Makefile                               # [生成 + 新增 gateway 相关 target]
+├── Dockerfile                             # [生成] 构建 Operator（cmd/main.go -> /manager）
+├── Dockerfile.gateway                     # [手写] 构建 gin-gateway（cmd/gateway -> /gateway）
+├── api/
+│   └── v1alpha1/
+│       ├── gatewayconfig_types.go         # [生成骨架 + 手写字段]
+│       ├── groupversion_info.go           # [生成]
+│       └── zz_generated.deepcopy.go       # [生成] make generate
+├── cmd/
+│   ├── main.go                            # [生成] Operator 入口，本方式下无需修改
+│   └── gateway/
+│       └── main.go                        # [手写] gin-gateway 入口
+├── config/                                # [生成] kustomize 清单（make manifests）
+├── internal/
+│   ├── controller/
+│   │   ├── gatewayconfig_controller.go    # [生成骨架 + 手写] 调和 ConfigMap/Deployment/Service
+│   │   └── render.go                      # [手写] CR -> routes.json
+│   ├── gwconfig/
+│   │   └── config.go                      # [手写] 共享配置类型 + Store（同 0x07 的 config 包）
+│   ├── gateway/
+│   │   └── handler.go                     # [手写] Gin 处理逻辑（同 0x07，新增 ResetLimiters）
+│   └── reloader/
+│       └── reloader.go                    # [手写] fsnotify 热加载
+├── charts/
+│   └── gin-gateway-operator/              # [手写] Helm Chart
+├── go.mod
+└── go.sum
+```
+
+初始化命令：
+
+```bash
+mkdir gin-gateway-split && cd gin-gateway-split
+kubebuilder init --domain example.com --repo gin-gateway-split
+kubebuilder create api --group gateway --version v1alpha1 --kind GatewayConfig --resource --controller
+mkdir -p cmd/gateway internal/gwconfig internal/gateway internal/reloader
+go get github.com/gin-gonic/gin github.com/fsnotify/fsnotify golang.org/x/time/rate
+```
+
+### api/v1alpha1/gatewayconfig_types.go
+
+与方案二相比，Spec 中新增了 `gateway` 字段，用于描述 Operator 需要创建的 gin-gateway 工作负载；Status 中增加了 `conditions`、`observedGeneration` 等标准字段：
+
+```go
+package v1alpha1
+
+import (
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+type RateLimitConfig struct {
+	// +kubebuilder:validation:Minimum=1
+	QPS int32 `json:"qps"`
+	// +optional
+	Burst int32 `json:"burst,omitempty"`
+}
+
+type RouteRule struct {
+	// +kubebuilder:validation:Pattern=`^/`
+	Path string `json:"path"`
+	// +optional
+	Methods []string `json:"methods,omitempty"`
+	// +kubebuilder:validation:MinLength=1
+	Backend string `json:"backend"`
+	// +optional
+	RateLimit *RateLimitConfig `json:"rateLimit,omitempty"`
+}
+
+// GatewayWorkload 描述由 Operator 创建的 gin-gateway Deployment/Service
+type GatewayWorkload struct {
+	// +kubebuilder:validation:MinLength=1
+	Image string `json:"image"`
+	// +kubebuilder:default=2
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	Replicas *int32 `json:"replicas,omitempty"`
+	// +kubebuilder:default=8080
+	// +optional
+	Port int32 `json:"port,omitempty"`
+	// +kubebuilder:default=ClusterIP
+	// +kubebuilder:validation:Enum=ClusterIP;NodePort;LoadBalancer
+	// +optional
+	ServiceType corev1.ServiceType `json:"serviceType,omitempty"`
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+}
+
+type GatewayConfigSpec struct {
+	Gateway GatewayWorkload `json:"gateway"`
+	// +optional
+	GlobalRateLimit *RateLimitConfig `json:"globalRateLimit,omitempty"`
+	// +kubebuilder:validation:MinItems=1
+	Routes []RouteRule `json:"routes"`
+}
+
+type GatewayConfigStatus struct {
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// +optional
+	ActiveRoutes int32 `json:"activeRoutes,omitempty"`
+	// +optional
+	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
+	// +optional
+	ConfigHash string `json:"configHash,omitempty"`
+	// +optional
+	LastRenderTime string `json:"lastRenderTime,omitempty"`
+	// +listType=map
+	// +listMapKey=type
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:resource:shortName=gwc
+// +kubebuilder:printcolumn:name="Routes",type=integer,JSONPath=`.status.activeRoutes`
+// +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyReplicas`
+// +kubebuilder:printcolumn:name="Hash",type=string,JSONPath=`.status.configHash`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+
+type GatewayConfig struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   GatewayConfigSpec   `json:"spec,omitempty"`
+	Status GatewayConfigStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+
+type GatewayConfigList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []GatewayConfig `json:"items"`	//slice
+}
+
+func init() {
+	SchemeBuilder.Register(&GatewayConfig{}, &GatewayConfigList{})
+}
+```
+
+修改完成后执行 `make generate && make manifests`，CRD 会生成到 `config/crd/bases/gateway.example.com_gatewayconfigs.yaml`，RBAC 会生成到 `config/rbac/role.yaml`
+
+### internal/controller/render.go
+
+将 CR 渲染为网关使用的 `routes.json`，同时做业务级别的校验（OpenAPI schema 无法表达的部分）：
+
+```go
+package controller
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"sort"
+
+	gatewayv1alpha1 "gin-gateway-split/api/v1alpha1"
+	"gin-gateway-split/internal/gwconfig"
+)
+
+// renderConfig 返回 routes.json 内容及其短 hash
+func renderConfig(spec *gatewayv1alpha1.GatewayConfigSpec) (string, string, error) {
+	out := gwconfig.GatewaySpec{}
+	if spec.GlobalRateLimit != nil {
+		out.GlobalRateLimit.QPS = int(spec.GlobalRateLimit.QPS)
+		out.GlobalRateLimit.Burst = int(spec.GlobalRateLimit.Burst)
+	}
+
+	seen := make(map[string]struct{}, len(spec.Routes))
+	for _, rt := range spec.Routes {
+		if _, dup := seen[rt.Path]; dup {
+			return "", "", fmt.Errorf("duplicate route path %q", rt.Path)
+		}
+		seen[rt.Path] = struct{}{}
+
+		u, err := url.Parse(rt.Backend)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return "", "", fmt.Errorf("route %q: invalid backend %q", rt.Path, rt.Backend)
+		}
+
+		rule := gwconfig.RouteRule{Path: rt.Path, Methods: rt.Methods, Backend: rt.Backend}
+		if rt.RateLimit != nil {
+			rule.RateLimit.QPS = int(rt.RateLimit.QPS)
+			rule.RateLimit.Burst = int(rt.RateLimit.Burst)
+		}
+		out.Routes = append(out.Routes, rule)
+	}
+
+	// gateway 按顺序做前缀匹配，按路径长度降序排列以保证最长前缀优先
+	sort.SliceStable(out.Routes, func(i, j int) bool {
+		return len(out.Routes[i].Path) > len(out.Routes[j].Path)
+	})
+
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return "", "", err
+	}
+	sum := sha256.Sum256(data)
+	return string(data), hex.EncodeToString(sum[:8]), nil
+}
+```
+
+### internal/controller/gatewayconfig_controller.go
+
+Reconciler 不再持有 `Store`，所以脚手架生成的 `cmd/main.go` 中的注册代码无需任何改动：
+
+```go
+package controller
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+
+	gatewayv1alpha1 "gin-gateway-split/api/v1alpha1"
+)
+
+const (
+	configFileName = "routes.json"
+	configMountDir = "/etc/gin-gateway"
+	conditionReady = "Ready"
+)
+
+type GatewayConfigReconciler struct {
+	client.Client
+	Scheme *runtime.Scheme
+}
+
+// +kubebuilder:rbac:groups=gateway.example.com,resources=gatewayconfigs,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=gateway.example.com,resources=gatewayconfigs/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=gateway.example.com,resources=gatewayconfigs/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core,resources=configmaps;services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+
+func (r *GatewayConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	logger := logf.FromContext(ctx)
+
+	var gwc gatewayv1alpha1.GatewayConfig
+	if err := r.Get(ctx, req.NamespacedName, &gwc); err != nil {
+		// 子资源都带有 OwnerReference，CR 删除后由 GC 级联清理
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	data, hash, err := renderConfig(&gwc.Spec)
+	if err != nil {
+		logger.Info("invalid GatewayConfig spec", "error", err.Error())
+		meta.SetStatusCondition(&gwc.Status.Conditions, metav1.Condition{
+			Type:               conditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             "InvalidSpec",
+			Message:            err.Error(),
+			ObservedGeneration: gwc.Generation,
+		})
+		gwc.Status.ObservedGeneration = gwc.Generation
+		// 配置错误重试没有意义，等待用户修改 CR 后再次触发
+		return ctrl.Result{}, r.updateStatus(ctx, &gwc)
+	}
+
+	if err := r.reconcileConfigMap(ctx, &gwc, data); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile configmap: %w", err)
+	}
+	deploy, err := r.reconcileDeployment(ctx, &gwc)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile deployment: %w", err)
+	}
+	if err := r.reconcileService(ctx, &gwc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile service: %w", err)
+	}
+
+	desired := int32(1)
+	if gwc.Spec.Gateway.Replicas != nil {
+		desired = *gwc.Spec.Gateway.Replicas
+	}
+	gwc.Status.ObservedGeneration = gwc.Generation
+	gwc.Status.ActiveRoutes = int32(len(gwc.Spec.Routes))
+	gwc.Status.ReadyReplicas = deploy.Status.ReadyReplicas
+	if gwc.Status.ConfigHash != hash {
+		gwc.Status.ConfigHash = hash
+		gwc.Status.LastRenderTime = time.Now().Format(time.RFC3339)
+	}
+	cond := metav1.Condition{
+		Type:               conditionReady,
+		Status:             metav1.ConditionTrue,
+		Reason:             "Available",
+		Message:            fmt.Sprintf("%d/%d replicas ready", deploy.Status.ReadyReplicas, desired),
+		ObservedGeneration: gwc.Generation,
+	}
+	if deploy.Status.ReadyReplicas < desired {
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = "Progressing"
+	}
+	meta.SetStatusCondition(&gwc.Status.Conditions, cond)
+
+	return ctrl.Result{}, r.updateStatus(ctx, &gwc)
+}
+
+func (r *GatewayConfigReconciler) updateStatus(ctx context.Context, gwc *gatewayv1alpha1.GatewayConfig) error {
+	err := r.Status().Update(ctx, gwc)
+	if apierrors.IsConflict(err) {
+		// 返回错误让 controller-runtime 按退避策略重新入队，下次会读取到最新版本
+		return fmt.Errorf("status conflict, requeue: %w", err)
+	}
+	return err
+}
+
+func labelsFor(gwc *gatewayv1alpha1.GatewayConfig) map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/name":       "gin-gateway",
+		"app.kubernetes.io/instance":   gwc.Name,
+		"app.kubernetes.io/managed-by": "gin-gateway-operator",
+	}
+}
+
+func configMapName(gwc *gatewayv1alpha1.GatewayConfig) string { return gwc.Name + "-routes" }
+func workloadName(gwc *gatewayv1alpha1.GatewayConfig) string  { return gwc.Name + "-gateway" }
+
+func (r *GatewayConfigReconciler) reconcileConfigMap(ctx context.Context, gwc *gatewayv1alpha1.GatewayConfig, data string) error {
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: configMapName(gwc), Namespace: gwc.Namespace}}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
+		cm.Labels = labelsFor(gwc)
+		cm.Data = map[string]string{configFileName: data}
+		return controllerutil.SetControllerReference(gwc, cm, r.Scheme)
+	})
+	return err
+}
+
+func (r *GatewayConfigReconciler) reconcileDeployment(ctx context.Context, gwc *gatewayv1alpha1.GatewayConfig) (*appsv1.Deployment, error) {
+	gw := gwc.Spec.Gateway
+	labels := labelsFor(gwc)
+	automountToken := false
+
+	deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: workloadName(gwc), Namespace: gwc.Namespace}}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
+		deploy.Labels = labels
+		// selector 创建后不可变更
+		if deploy.CreationTimestamp.IsZero() {
+			deploy.Spec.Selector = &metav1.LabelSelector{MatchLabels: labels}
+		}
+		deploy.Spec.Replicas = gw.Replicas
+
+		tpl := &deploy.Spec.Template
+		tpl.Labels = labels
+		tpl.Spec.AutomountServiceAccountToken = &automountToken
+		tpl.Spec.Volumes = []corev1.Volume{{
+			Name: "routes",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: configMapName(gwc)},
+				},
+			},
+		}}
+		probe := func(delay int32) *corev1.Probe {
+			return &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromString("http")},
+				},
+				InitialDelaySeconds: delay,
+				PeriodSeconds:       10,
+			}
+		}
+		tpl.Spec.Containers = []corev1.Container{{
+			Name:  "gateway",
+			Image: gw.Image,
+			Env: []corev1.EnvVar{
+				{Name: "PORT", Value: fmt.Sprint(gw.Port)},
+				{Name: "CONFIG_FILE", Value: configMountDir + "/" + configFileName},
+			},
+			Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: gw.Port, Protocol: corev1.ProtocolTCP}},
+			// 不能使用 subPath，否则 ConfigMap 更新不会同步到容器内
+			VolumeMounts:   []corev1.VolumeMount{{Name: "routes", MountPath: configMountDir, ReadOnly: true}},
+			ReadinessProbe: probe(3),
+			LivenessProbe:  probe(5),
+			Resources:      gw.Resources,
+		}}
+		return controllerutil.SetControllerReference(gwc, deploy, r.Scheme)
+	})
+	return deploy, err
+}
+
+func (r *GatewayConfigReconciler) reconcileService(ctx context.Context, gwc *gatewayv1alpha1.GatewayConfig) error {
+	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: workloadName(gwc), Namespace: gwc.Namespace}}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+		svc.Labels = labelsFor(gwc)
+		svc.Spec.Type = gwc.Spec.Gateway.ServiceType
+		svc.Spec.Selector = labelsFor(gwc)
+		svc.Spec.Ports = []corev1.ServicePort{{
+			Name:       "http",
+			Port:       80,
+			TargetPort: intstr.FromString("http"),
+			Protocol:   corev1.ProtocolTCP,
+		}}
+		return controllerutil.SetControllerReference(gwc, svc, r.Scheme)
+	})
+	return err
+}
+
+func (r *GatewayConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		// 只在 spec 变化时触发，避免自身写 status 引发的循环调和
+		For(&gatewayv1alpha1.GatewayConfig{},
+			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		// 子资源被修改/删除或 Deployment 就绪副本变化时，重新调和
+		Owns(&corev1.ConfigMap{}).
+		Owns(&appsv1.Deployment{}).
+		Owns(&corev1.Service{}).
+		Named("gatewayconfig").
+		Complete(r)
+}
+```
+
+调和逻辑要点：
+-   `CreateOrUpdate` 先 Get 再执行 mutate 函数，只有对象发生变化时才发起 Update，天然幂等
+-   `Owns()` 让 Operator 能感知子资源被手动修改或删除（会被自动纠正回期望状态），以及 Deployment `readyReplicas` 的变化
+-   如需将 Operator 限定在某些 namespace，可在 `cmd/main.go` 的 `ctrl.Options` 中设置 `Cache.DefaultNamespaces`，同时将 ClusterRole 收敛为 Role
+
+### internal/gateway/handler.go 的改动
+
+复用 0x07 的 handler（import 路径改为 `gin-gateway-split/internal/gwconfig`），并新增一个重置限流器的方法。0x07 中限流器按 path 缓存，配置热加载后 QPS 变化不会生效，因此每次 reload 都需要清空：
+
+```go
+func (h *Handler) ResetLimiters() {
+	h.limiters.Range(func(key, _ any) bool {
+		h.limiters.Delete(key)
+		return true
+	})
+}
+```
+
+### internal/reloader/reloader.go
+
+```go
+package reloader
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+
+	"github.com/fsnotify/fsnotify"
+
+	"gin-gateway-split/internal/gwconfig"
+)
+
+type Reloader struct {
+	path     string
+	onReload func(*gwconfig.GatewaySpec)
+	lastHash [sha256.Size]byte
+}
+
+func New(path string, onReload func(*gwconfig.GatewaySpec)) *Reloader {
+	return &Reloader{path: path, onReload: onReload}
+}
+
+// Load 读取并解析配置文件，内容未变化时直接返回
+func (r *Reloader) Load() error {
+	data, err := os.ReadFile(r.path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", r.path, err)
+	}
+	sum := sha256.Sum256(data)
+	if sum == r.lastHash {
+		return nil
+	}
+
+	var spec gwconfig.GatewaySpec
+	if err := json.Unmarshal(data, &spec); err != nil {
+		return fmt.Errorf("parse %s: %w", r.path, err)
+	}
+	r.lastHash = sum
+	r.onReload(&spec)
+	log.Printf("[Reloader] loaded %d routes from %s", len(spec.Routes), r.path)
+	return nil
+}
+
+// Watch 阻塞监听配置目录，直到 ctx 结束
+func (r *Reloader) Watch(ctx context.Context) error {
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		return err
+	}
+	defer w.Close()
+
+	// kubelet 通过原子替换 ..data 符号链接更新 ConfigMap 卷，只能 watch 目录
+	if err := w.Add(filepath.Dir(r.path)); err != nil {
+		return err
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case _, ok := <-w.Events:
+			if !ok {
+				return nil
+			}
+			if err := r.Load(); err != nil {
+				log.Printf("[Reloader] reload failed, keep last config: %v", err)
+			}
+		case err, ok := <-w.Errors:
+			if !ok {
+				return nil
+			}
+			log.Printf("[Reloader] watch error: %v", err)
+		}
+	}
+}
+```
+
+一次 ConfigMap 更新会产生多个 fsnotify 事件（创建临时目录、替换 `..data`、删除旧目录），通过比较文件内容的 hash 去重，只有内容真正变化时才会回调
+
+### cmd/gateway/main.go
+
+gin-gateway 入口，完全不依赖 client-go / controller-runtime：
+
+```go
+package main
+
+import (
+	"context"
+	"errors"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/gin-gonic/gin"
+
+	"gin-gateway-split/internal/gateway"
+	"gin-gateway-split/internal/gwconfig"
+	"gin-gateway-split/internal/reloader"
+)
+
+func getenv(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func main() {
+	configFile := getenv("CONFIG_FILE", "/etc/gin-gateway/routes.json")
+	port := getenv("PORT", "8080")
+
+	store := gwconfig.NewStore()
+	handler := gateway.NewHandler(store)
+
+	rl := reloader.New(configFile, func(spec *gwconfig.GatewaySpec) {
+		store.UpdateSpec(spec)
+		handler.ResetLimiters()
+	})
+	// ConfigMap 由 Operator 先于 Deployment 创建，首次加载失败说明配置异常，直接退出
+	if err := rl.Load(); err != nil {
+		log.Fatalf("initial config load failed: %v", err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		if err := rl.Watch(ctx); err != nil {
+			log.Printf("config watcher exited: %v", err)
+		}
+	}()
+
+	r := gin.Default()
+	handler.RegisterRoutes(r)
+	srv := &http.Server{Addr: ":" + port, Handler: r}
+
+	go func() {
+		<-ctx.Done()
+		log.Println("Shutting down...")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+
+	log.Printf("Starting gin-gateway on :%s, config=%s", port, configFile)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatalf("Gin server failed: %v", err)
+	}
+}
+```
+
+Operator 侧的 `cmd/main.go` 直接使用 kubebuilder 生成的版本即可，不需要修改
+
+### 构建：Dockerfile.gateway 与 Makefile
+
+脚手架生成的 `Dockerfile` 负责构建 Operator（`/manager`），新增 `Dockerfile.gateway` 构建网关：
+
+```dockerfile
+FROM golang:1.23 AS builder
+ARG TARGETOS
+ARG TARGETARCH
+WORKDIR /workspace
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/gateway/ cmd/gateway/
+COPY internal/ internal/
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o gateway ./cmd/gateway
+
+FROM gcr.io/distroless/static:nonroot
+WORKDIR /
+COPY --from=builder /workspace/gateway .
+USER 65532:65532
+ENTRYPOINT ["/gateway"]
+```
+
+在生成的 `Makefile` 中追加 gateway 相关 target（`CONTAINER_TOOL` 变量由脚手架定义）：
+
+```makefile
+GATEWAY_IMG ?= registry.example.com/gin-gateway:latest
+
+.PHONY: build-gateway
+build-gateway: fmt vet ## Build gin-gateway binary.
+	go build -o bin/gateway ./cmd/gateway
+
+.PHONY: docker-build-gateway
+docker-build-gateway: ## Build gin-gateway image.
+	$(CONTAINER_TOOL) build -f Dockerfile.gateway -t ${GATEWAY_IMG} .
+
+.PHONY: docker-push-gateway
+docker-push-gateway: ## Push gin-gateway image.
+	$(CONTAINER_TOOL) push ${GATEWAY_IMG}
+```
+
+```bash
+make generate manifests
+make docker-build docker-push IMG=registry.example.com/gin-gateway-operator:v0.1.0
+make docker-build-gateway docker-push-gateway GATEWAY_IMG=registry.example.com/gin-gateway:v1.0.0
+```
+
+### Helm Chart：gin-gateway-operator
+
+与 0x0A 的 Chart 不同，这里的 Chart 只部署 Operator，gin-gateway 的工作负载由 Operator 根据 CR 创建：
+
+```text
+charts/gin-gateway-operator/
+├── Chart.yaml
+├── values.yaml
+├── crds/
+│   └── gateway.example.com_gatewayconfigs.yaml   # 拷贝自 config/crd/bases（make manifests 生成）
+└── templates/
+    ├── _helpers.tpl          # 同 0x0A，将前缀 gin-gateway 替换为 gin-gateway-operator
+    ├── serviceaccount.yaml   # 同 0x0A
+    ├── rbac.yaml             # 与 config/rbac/role.yaml 保持一致 + leader election
+    ├── deployment.yaml       # Operator Deployment
+    └── gatewayconfig-cr.yaml # 默认 GatewayConfig CR
+```
+
+**values.yaml**：
+
+```yaml
+operator:
+  replicaCount: 1
+  leaderElect: true
+  image:
+    repository: registry.example.com/gin-gateway-operator
+    tag: ""            # 默认使用 Chart.appVersion
+    pullPolicy: IfNotPresent
+  resources:
+    limits:
+      cpu: 500m
+      memory: 128Mi
+    requests:
+      cpu: 10m
+      memory: 64Mi
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+nameOverride: ""
+fullnameOverride: ""
+
+gatewayConfig:
+  create: true
+  name: default
+  gateway:
+    image: registry.example.com/gin-gateway:v1.0.0
+    replicas: 2
+    port: 8080
+    serviceType: ClusterIP
+    resources:
+      limits:
+        cpu: 500m
+        memory: 256Mi
+      requests:
+        cpu: 100m
+        memory: 128Mi
+  globalRateLimit:
+    qps: 10000
+    burst: 15000
+  routes:
+    - path: /api/v1/users
+      methods: ["GET", "POST"]
+      backend: "http://user-service:8080"
+      rateLimit:
+        qps: 1000
+        burst: 1500
+    - path: /api/v1/orders
+      methods: ["GET", "POST", "PUT"]
+      backend: "http://order-service:8080"
+      rateLimit:
+        qps: 500
+        burst: 800
+```
+
+**templates/deployment.yaml**（参数与 kubebuilder 生成的 `cmd/main.go` 中的 flag 对应）：
+
+```text
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "gin-gateway-operator.fullname" . }}
+  labels:
+    {{- include "gin-gateway-operator.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.operator.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "gin-gateway-operator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "gin-gateway-operator.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "gin-gateway-operator.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: manager
+          image: "{{ .Values.operator.image.repository }}:{{ .Values.operator.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.operator.image.pullPolicy }}
+          command: ["/manager"]
+          args:
+            - --health-probe-bind-address=:8081
+            {{- if .Values.operator.leaderElect }}
+            - --leader-elect
+            {{- end }}
+          ports:
+            - name: probes
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probes
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probes
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.operator.resources | nindent 12 }}
+```
+
+**templates/rbac.yaml**（规则需与 Reconciler 上的 RBAC marker 保持一致，可直接参考 `make manifests` 生成的 `config/rbac/role.yaml`）：
+
+```text
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "gin-gateway-operator.fullname" . }}
+  labels:
+    {{- include "gin-gateway-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["gateway.example.com"]
+    resources: ["gatewayconfigs"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["gateway.example.com"]
+    resources: ["gatewayconfigs/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["gateway.example.com"]
+    resources: ["gatewayconfigs/finalizers"]
+    verbs: ["update"]
+  - apiGroups: [""]
+    resources: ["configmaps", "services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "gin-gateway-operator.fullname" . }}
+  labels:
+    {{- include "gin-gateway-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "gin-gateway-operator.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "gin-gateway-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- if .Values.operator.leaderElect }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "gin-gateway-operator.fullname" . }}-leader-election
+  labels:
+    {{- include "gin-gateway-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "gin-gateway-operator.fullname" . }}-leader-election
+  labels:
+    {{- include "gin-gateway-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "gin-gateway-operator.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "gin-gateway-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+```
+
+**templates/gatewayconfig-cr.yaml**：
+
+```text
+{{- if .Values.gatewayConfig.create -}}
+apiVersion: gateway.example.com/v1alpha1
+kind: GatewayConfig
+metadata:
+  name: {{ .Values.gatewayConfig.name }}
+  labels:
+    {{- include "gin-gateway-operator.labels" . | nindent 4 }}
+spec:
+  gateway:
+    {{- toYaml .Values.gatewayConfig.gateway | nindent 4 }}
+  {{- with .Values.gatewayConfig.globalRateLimit }}
+  globalRateLimit:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  routes:
+    {{- toYaml .Values.gatewayConfig.routes | nindent 4 }}
+{{- end }}
+```
+
+### 部署与验证
+
+```bash
+# 1. 同步 CRD 到 Chart（每次修改 types 后都要执行）
+make manifests
+cp config/crd/bases/gateway.example.com_gatewayconfigs.yaml charts/gin-gateway-operator/crds/
+
+# 2. 安装 Operator + 默认 CR
+helm install gw-op ./charts/gin-gateway-operator -n gateway --create-namespace
+
+# 3. 观察 Operator 创建出来的子资源
+kubectl get gatewayconfig -n gateway
+# NAME      ROUTES   READY   HASH               AGE
+# default   2        2       3f9a0c1d2e4b5a6c   1m
+kubectl get deploy,svc,cm -n gateway -l app.kubernetes.io/instance=default
+
+# 4. 修改路由（不经过 Helm），gateway Pod 不会重启，等待 kubelet 同步后热加载
+kubectl edit gatewayconfig default -n gateway
+kubectl logs -n gateway -l app.kubernetes.io/instance=default | grep Reloader
+
+# 5. 提交非法配置，观察 status 中的错误信息
+kubectl get gatewayconfig default -n gateway -o jsonpath='{.status.conditions[?(@.type=="Ready")]}'
+
+# 6. 卸载：CR 被删除后，子资源由 GC 级联清理；CRD 需手动删除
+helm uninstall gw-op -n gateway
+kubectl delete crd gatewayconfigs.gateway.example.com
+```
+
+注意：`helm uninstall` 会同时删除 CR 与 Operator，子资源的清理依赖 OwnerReference 与 GC，不依赖 Operator 是否存活；如果后续为 CR 增加了 finalizer，则需要保证 Operator 晚于 CR 删除，否则 CR 会卡在 Terminating
+
+### 三种方案对比
+
+| 特性 | 方案一：client-go + informer | 方案二：controller-runtime 单进程 | 方案三：Operator + gateway 双二进制 |
+|------|------|------|------|
+| 进程模型 | 网关内嵌 informer | 网关内嵌 controller-manager | Operator 与网关独立部署 |
+| 网关 Pod 的 K8s 权限 | 需要（watch CR） | 需要（watch CR + 写 status） | 不需要 |
+| API Server watch 连接数 | 随网关副本数线性增长 | 随网关副本数线性增长 | 只有 Operator（leader）一份 |
+| 配置生效延迟 | 秒级（watch 事件） | 秒级（watch 事件） | 数十秒到分钟级（kubelet 同步 ConfigMap 卷） |
+| 配置校验 | 网关自行处理 | 网关自行处理 | Operator 前置校验并写入 status |
+| 网关工作负载由谁管理 | Helm | Helm | Operator（Helm 只管 Operator） |
+| 发布解耦 | 否 | 否 | 是，Operator 升级不影响流量 |
+| 复杂度 | 低 | 中 | 较高（两个镜像、两套发布） |
+| 适用场景 | 简单配置监听、sidecar | 中小规模、快速落地 | 生产级、多租户、需要严格权限隔离的网关 |
+
+如果对配置生效延迟敏感，可以在方案三的基础上演进为 Operator 通过 gRPC/xDS 主动推送配置（类似 Istio 控制面与 Envoy 的关系），代价是需要自行实现推送协议、版本对账与断线重连
+
+##  0x0A    Helm Chart 完整实现
+
+本节给出管理方案一、方案二中 Gin 网关服务的完整 Helm Chart（方案三的 Chart 见 0x09）
 
 ### Chart 目录结构
 
@@ -2215,7 +3367,7 @@ kubectl delete crd gatewayconfigs.gateway.example.com
 | 修改 RBAC / Service 配置 | `helm upgrade` | 基础设施变更，需要版本管理和回滚能力 |
 | 添加新的 CRD 字段 | 手动 `kubectl apply` CRD | `crds/` 目录的 CRD 不会被 upgrade 更新 |
 
-##  0x0A    Helm 常用命令速查
+##  0x0B    Helm 常用命令速查
 
 ### 仓库管理
 
@@ -2290,7 +3442,7 @@ helm pull <oci-registry>/<chart>      # 从 OCI Registry 拉取
 helm registry login <registry>        # 登录 OCI Registry
 ```
 
-##  0x0B    参考
+##  0x0C    参考
 -   [Kubernetes 包管理器 - Helm 官方文档](https://helm.sh/zh/)
 -   [Helm Chart Template Guide](https://helm.sh/docs/chart_template_guide/)
 -   [Helm Best Practices](https://helm.sh/docs/chart_best_practices/)
@@ -2302,3 +3454,9 @@ helm registry login <registry>        # 登录 OCI Registry
 -   [Sprig Function Documentation](http://masterminds.github.io/sprig/)
 -   [Helm V3 Migration Guide](https://helm.sh/docs/topics/v2_v3_migration/)
 -   [Custom Resource Definitions - Helm 官方指南](https://helm.sh/docs/chart_best_practices/custom_resource_definitions/)
+-   [The Kubebuilder Book](https://book.kubebuilder.io/)
+-   [Kubebuilder Quick Start](https://book.kubebuilder.io/quick-start)
+-   [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime)
+-   [Mounted ConfigMaps are updated automatically](https://kubernetes.io/docs/concepts/configuration/configmap/#mounted-configmaps-are-updated-automatically)
+
+{% endraw %}
