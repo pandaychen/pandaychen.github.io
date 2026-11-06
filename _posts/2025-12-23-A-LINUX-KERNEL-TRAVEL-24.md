@@ -1054,7 +1054,7 @@ int BPF_PROG(do_page_cache_ra) {
     return 0;
 }
 
-// 页面分配完成：若处于预读窗口内，记录该 page 的“出生时间戳”
+// 页面分配完成：若处于预读窗口内，记录该 page 的"出生时间戳"
 static __always_inline int alloc_done(struct page *page) {
     u32 pid = bpf_get_current_pid_tgid();
     if (!bpf_map_lookup_elem(&in_readahead, &pid))   // 非预读路径的分配不计入
@@ -1077,7 +1077,7 @@ static __always_inline int mark_accessed(struct page *page) {
     u64 slot = log2l(delta / 1000000U);               // 毫秒级 log2 直方图
     if (slot >= MAX_SLOTS) slot = MAX_SLOTS - 1;
     __sync_fetch_and_add(&hist.slots[slot], 1);
-    __sync_fetch_and_add(&hist.unused, -1);           // 被访问了，从“未使用”里扣掉
+    __sync_fetch_and_add(&hist.unused, -1);           // 被访问了，从"未使用"里扣掉
     bpf_map_delete_elem(&birth, &page);
     return 0;
 }
