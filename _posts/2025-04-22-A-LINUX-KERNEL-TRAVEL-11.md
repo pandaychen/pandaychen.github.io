@@ -4852,7 +4852,7 @@ static int do_last(struct nameidata *nd,
 		// 如果这个文件本来就存在
 		// 检查 O_EXCL 和 O_CREAT 这两个标志位
 		// 因为 O_EXCL 标志位要求必须创建成功
-		// 所以这里就会返回File exists”错误
+		// 所以这里就会返回File exists错误
 		path_to_nameidata(&path, nd);
 		return -EEXIST;
 	}
@@ -6534,7 +6534,7 @@ struct saved {
 
 2、`struct nameidata`结构中，如果当前某个路径分量是挂载点时，那么`nameidata`保存的是挂载点这个dentry、inode，还是该挂载点对应的上一级文件系统的dentry、inode?
 
-当路径分量是一个挂载点时，`nd`最终保存的是【新挂载的文件系统（上一级/覆盖层）的根目录的 dentry 和 inode】，而那个原本的、被挂载的底层目录（Mount Point）会被“隐藏”起来，nd 中不再保留它的状态，回到先前的`walk_component`函数进行说明：
+当路径分量是一个挂载点时，`nd`最终保存的是【新挂载的文件系统（上一级/覆盖层）的根目录的 dentry 和 inode】，而那个原本的、被挂载的底层目录（Mount Point）会被"隐藏"起来，nd 中不再保留它的状态，回到先前的`walk_component`函数进行说明：
 
 1、第一步：查找到当前dentry最底层的传送门，通过`lookup_fast` 或 `lookup_slow` 查到的是底层被覆盖（挂载点）的那个目录的 dentry（路径查找是至上而下）
 
@@ -6549,7 +6549,7 @@ err = follow_managed(&path, nd);
 ......
 
 //step3
-inode = d_backing_inode(path.dentry); // 提取的是掉包后的“新 dentry”的 inode
+inode = d_backing_inode(path.dentry); // 提取的是掉包后的"新 dentry"的 inode
 return step_into(nd, &path, flags, inode, seq);
 ```
 
