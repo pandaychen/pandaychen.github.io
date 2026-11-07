@@ -2558,6 +2558,7 @@ flowchart TD
 
 ```cpp
 //file: net/ipv4/tcp.c
+//https://elixir.bootlin.com/linux/v4.11.6/source/net/ipv4/tcp.c#L1643
 int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
                 int nonblock, int flags, int *addr_len)
 {
@@ -2575,6 +2576,9 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
 
     // 确定超时时间
     timeo = sock_rcvtimeo(sk, nonblock);
+    ......
+    // 水位检查：见下文说明
+    target = sock_rcvlowat(sk, flags & MSG_WAITALL, len);
 
     do {
         struct sk_buff *skb;
@@ -2639,6 +2643,17 @@ found_ok_skb:
     // 7. 读取后更新接收窗口
     // 应用层消费了数据 → 释放了缓冲区空间 → 可以通告更大窗口
     tcp_cleanup_rbuf(sk, copied);
+
+    ......
+    if (copied >= target) {
+			/* Do not sleep, just process backlog. */
+			release_sock(sk);
+			lock_sock(sk);
+		} else {
+			sk_wait_data(sk, &timeo, last);
+	}
+
+    .....
 
     release_sock(sk);
     return copied;
