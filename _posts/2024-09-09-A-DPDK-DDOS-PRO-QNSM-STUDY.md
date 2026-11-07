@@ -41,7 +41,7 @@ QNSM 采用 DPDK 流水线（Pipeline）架构，将不同功能分解为独立�
 
 所有组件通过宏定义注册，在`app.h`中统一管理：
 
-```c
+```text
 #define APP_MAP(XX)                         \
   XX(EN_QNSM_SESSM,     "SESSM")            \
   XX(EN_QNSM_SIP_AGG,   "SIP_IN_AGG")       \
