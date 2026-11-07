@@ -48,7 +48,7 @@ setsid /etc/javae -o pool.supportxmr.com:443 -k --tls --cpu-max-threads-hint=60 
 
 
 ##  0x01    脚本整体执行流
-`wakuang.txt` 的执行可归纳为 9 个阶段，整体是一个"**先清场、再驻留、后挖矿、并横向**"的标准挖矿蠕虫流程：
+`mining.sh` 的执行可归纳为 9 个阶段，整体是一个"**先清场、再驻留、后挖矿、并横向**"的标准挖矿蠕虫流程：
 
 ```mermaid
 flowchart TD
@@ -62,7 +62,7 @@ flowchart TD
     H --> I["阶段9 横向移动与清痕迹<br/>ssh known_hosts 传播<br/>history -c / 清空 wtmp secure"]
 ```
 
-本文配套的"攻击 Kill-Chain 与 eBPF 检测分层架构图"以 drawio 形式提供，见仓库 [`blog_img/hids/wakuang/wakuang-arch.drawio`](https://github.com/pandaychen/pandaychen.github.io/blob/master/blog_img/hids/wakuang/wakuang-arch.drawio)（可用 [draw.io](https://app.diagrams.net/) 打开），它把"攻击行为 → 内核 syscall/函数 → edriver 事件 / Tracee 签名"三层的对应关系画在一张图里。
+![wakuang-arch.drawio]()
 
 ##  0x02    攻击手段与原理详解
 
@@ -248,6 +248,7 @@ iptables -A OUTPUT -p tcp --dport 7777 -j DROP   # 阻断竞品回连端口
     -   `T1496` Resource Hijacking：门罗币挖矿
     -   `T1489` Service Stop ： `systemctl stop`/`service stop` 停用云监控与竞品服务
 
+todo
 
 ##  0x08    参考
 -   [MITRE ATT&CK Matrix for Enterprise](https://attack.mitre.org/matrices/enterprise/linux/)
