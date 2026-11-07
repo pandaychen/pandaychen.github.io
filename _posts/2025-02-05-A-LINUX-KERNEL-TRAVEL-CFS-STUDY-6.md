@@ -11,6 +11,8 @@ tags:
     - Kernel
 ---
 
+{% raw %}
+
 ##  0x00    前言
 本文学习下 CFS 调度算法（Completely Fair Scheduler，完全公平调度器）用于 Linux 系统中普通进程的调度，CFS 调度器的目标是让所有普通进程的`vruntime`尽可能接近，实现公平的调度。CFS 的设计理念是在真实硬件上实现理想的、精确的多任务 CPU。CFS 调度器和先前内核版本调度器不同之处在于没有时间片的概念，而是分配 cpu 使用时间的比例，若`2`个相同优先级的进程在一个 CPU 上运行，那么每个进程都将会分配`50%`的 CPU 运行时间
 
@@ -2324,3 +2326,5 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 -	[Linux 进程调度 (4)- min_vruntime (CFS 调度器)](https://zhuanlan.zhihu.com/p/363674137)
 -	[CFS 调度器（2）- 源码解析](http://www.wowotech.net/process_management/448.html)
 -	[linux 调度子系统 7 - se 的 enqueue 和 dequeue](https://zhuanlan.zhihu.com/p/363791956)
+
+{% endraw %}
