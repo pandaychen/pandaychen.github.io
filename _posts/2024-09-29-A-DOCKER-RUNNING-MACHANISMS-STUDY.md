@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      一个极简容器运行时实践
-subtitle:   从一个入门示例窥探Linux 容器底层工作机制
+subtitle:   从一个入门示例窥探 Linux 容器底层工作机制
 date:       2024-09-29
 author:     pandaychen
 header-img:
@@ -21,7 +21,7 @@ tags:
 1.  namespace：内核提供的资源视图**隔离机制**，决定了进程的可见性；例如，pid namespace 限制了进程能看到哪些其他的进程；network namespace 限制了进程能看到哪些网络设备等等
 2.  cgroup：一种限制资源使用量的机制，例如一个进程最多能使用多少内存、磁盘 I/O、CPU 等
 3.  capabilities：拆分 root privilege，精细化用户/进程权限
-4.  seccomp：内核的一种安全计算 （secure computation）机制，例如限制进程只能使用某些特定的系统调用，相对于bpf-lsm等机制安全能力偏弱
+4.  seccomp：内核的一种安全计算（secure computation）机制，例如限制进程只能使用某些特定的系统调用，相对于 bpf-lsm 等机制安全能力偏弱
 
 以上几种机制中，cgroups 是通过文件系统完成的，其他几种都是通过系统调用完成的，先罗列一些基础概念
 
@@ -35,7 +35,7 @@ tags:
 -   cgroup：独立的 cgroup 文件系统和资源管控
 
 
-##  0x02    一个简单容器的c实现（500 lines）
+##  0x02    一个简单容器的 c 实现（500 lines）
 代码参考
 -   [v1](https://github.com/ArthurChiao/arthurchiao.github.io/tree/master/assets/code/linux-container-and-runtime)
 -   [v2](https://blog.lizzie.io/linux-containers-in-500-loc.html)
@@ -96,7 +96,7 @@ int main (int argc, char **argv) {
     config.fd = sockets[1];
 ```
 
-子进程（容器进程）需要发消息给父进程，因此初始化一个 socketpair。容器进程会告诉父进程是否需要设置 uid/gid mappings， 如果需要，就会执行 setgroups/setresgid/setresuid（权限相关）
+子进程（容器进程）需要发消息给父进程，因此初始化一个 socketpair。容器进程会告诉父进程是否需要设置 uid/gid mappings，如果需要，就会执行 setgroups/setresgid/setresuid（权限相关）
 
 ####    3、分配栈空间，供随后 execve() 执行容器启动进程使用
 
@@ -111,7 +111,7 @@ int main (int argc, char **argv) {
 ```
 
 ####    4、创建 cgroup，为容器设置资源限额
-cgroups 用来限制进程和进程组的资源使用量，避免有问题的容器进程影响整个系统，代码使用v1版本
+cgroups 用来限制进程和进程组的资源使用量，避免有问题的容器进程影响整个系统，代码使用 v1 版本
 
 ```c
 struct cgrp_control {
@@ -198,14 +198,14 @@ int setup_cgroups(struct ctn_config *config) {
 }
 ```
 
-设置 cgroups 的逻辑是创建 cgroup 目录， 以及往 cgroups 配置文件写入配置。上述代码配置了以下几个资源限额：
+设置 cgroups 的逻辑是创建 cgroup 目录，以及往 cgroups 配置文件写入配置。上述代码配置了以下几个资源限额：
 
--   /sys/fs/cgroup/memory/$hostname/memory.limit_in_bytes=1GB：容器进程及其子进程使用的总内存不超过 1GB
--   /sys/fs/cgroup/memory/$hostname/memory.kmem.limit_in_bytes=1GB：容器进程及其子进程使用的总内存不超过 1GB
--   /sys/fs/cgroup/cpu/$hostname/cpu.shares=256：CPU 总 slice 是 1024，因此限制进程最多只能占用 1/4 CPU 时间
--   /sys/fs/cgroup/pids/$hostname/pid.max=64：允许容器进程及其子进程最多拥有 64 个 PID
--   /sys/fs/cgroup/blkio/$hostname/weight=50：确保容器进程的 IO 优先级比系统其他进程低
--   降低文件描述符的 hard limit。fd 与 pid 类似，都是 per-user 的。这里设置上限之后， 后面还会 drop CAP_SYS_RESOURCE，因此容器内的用户是改不了的
+-   `/sys/fs/cgroup/memory/$hostname/memory.limit_in_bytes=1GB`：容器进程及其子进程使用的总内存不超过 1GB
+-   `/sys/fs/cgroup/memory/$hostname/memory.kmem.limit_in_bytes=1GB`：容器进程及其子进程使用的总内存不超过 1GB（内核内存硬限制）
+-   `/sys/fs/cgroup/cpu/$hostname/cpu.shares=256`：CPU 总 slice 是 1024，因此限制进程最多只能占用 1/4 CPU 时间
+-   `/sys/fs/cgroup/pids/$hostname/pid.max=64`：允许容器进程及其子进程最多拥有 64 个 PID
+-   `/sys/fs/cgroup/blkio/$hostname/weight=50`：确保容器进程的 IO 优先级比系统其他进程低
+-   降低文件描述符的 hard limit。fd 与 pid 类似，都是 per-user 的。这里设置上限之后，后面还会 drop CAP_SYS_RESOURCE，因此容器内的用户是改不了的
 
 另外，程序还通过 `add_to_tasks` 向 {memory,cpu,blkio,pids}/$hostname/tasks 文件写入 0，即实现下面的效果：
 
@@ -213,10 +213,10 @@ int setup_cgroups(struct ctn_config *config) {
 $ echo 0 > /sys/fs/cgroup/<controller>/<hostname>/tasks
 ```
 
-tasks 里面存放的是受这个 cgroup 管控的进程 ID（PID）列表， 0 是一个特殊值，表示“执行当前写入操作的进程”。
+tasks 里面存放的是受这个 cgroup 管控的进程 ID（PID）列表，0 是一个特殊值，表示"执行当前写入操作的进程"
 
-####    5、 clone() 启动子进程，运行容器
-fork() 是常见的创建子进程的方式，但它背后调用的是 clone()，是创建容器的关键技术。 我们创建的子进程要能 mount 自己的根目录、设置自己的 hostname 以及做其他一些事情， 要实现这个效果，需要向 clone() 传递相应的 flags 参数：
+####    5、clone() 启动子进程，运行容器
+fork() 是常见的创建子进程的方式，但它背后调用的是 clone()，是创建容器的关键技术。我们创建的子进程要能 mount 自己的根目录、设置自己的 hostname 以及做其他一些事情，要实现这个效果，需要向 clone() 传递相应的 flags 参数：
 
 ```c
     int flags = CLONE_NEWNS | CLONE_NEWCGROUP | CLONE_NEWPID | CLONE_NEWIPC | CLONE_NEWNET | CLONE_NEWUTS;
@@ -250,7 +250,7 @@ int child(void *arg) {
 
 **1、sethostname()：感知 UTS namespace**
 
-sethostname/gethostname 系统调用用于设置或获取主机名（hostname），hostname 是 UTS namespace 隔离的， 刚才创建子进程时指定了要有独立的 UTS namespace， 因此在这个子进程内设置 hostname 时，**影响的只是这个 UTS namespace 内（即这个容器内）所有进程 看到的 hostname**
+sethostname/gethostname 系统调用用于设置或获取主机名（hostname），hostname 是 UTS namespace 隔离的，刚才创建子进程时指定了要有独立的 UTS namespace，因此在这个子进程内设置 hostname 时，**影响的只是这个 UTS namespace 内（即这个容器内）所有进程 看到的 hostname**
 
 **2、setup_mounts()：安全考虑，unmount 不需要的目录**
 
@@ -291,7 +291,7 @@ int setup_mounts(struct ctn_config *config) {
 1.  使用 MS_PRIVATE 重新挂载所有内容
 2.  创建一个临时目录，并在其中创建一个子目录
 3.  将用户命令行指定的目录（config->mount_dir）bind mount 到临时目录上
-4.  使用 pivot_root 将 bind mount 作为根目录，并将旧的根目录挂载到内部临时目录上。 pivot_root 系统调用允许交换 / 处的挂载点与另一个挂载点
+4.  使用 pivot_root 将 bind mount 作为根目录，并将旧的根目录挂载到内部临时目录上。pivot_root 系统调用允许交换 / 处的挂载点与另一个挂载点
 5.  卸载旧的根目录，删除内部临时目录
 
 
@@ -318,7 +318,7 @@ int setup_userns(struct ctn_config *config) {
 
 **4、setup_capabilities()：禁用部分 capabilities**
 
-同样，基于最小权限原则drop 所有不需要的 capabilities
+同样，基于最小权限原则 drop 所有不需要的 capabilities
 
 ```c
 int setup_capabilities() {
@@ -368,7 +368,7 @@ int setup_capabilities() {
 
 **5、setup_seccomp()：禁用部分系统调用**
 
-使用seccomp机制，将有安全风险的系统调用都放到了黑名单
+使用 seccomp 机制，将有安全风险的系统调用都放到了黑名单
 
 ```c
 int setup_seccomp() {
@@ -415,7 +415,7 @@ int setup_seccomp() {
     execve(config->argv[0], config->argv, NULL);
 ```
 
-至此，如果一切正常，容器进程就起来了。接下来还要容器进程与主进程的通信， 类似于真实环境中 containerd 处理来自具体容器的消息
+至此，如果一切正常，容器进程就起来了。接下来还要容器进程与主进程的通信，类似于真实环境中 containerd 处理来自具体容器的消息
 
 
 ####    6、处理容器事件：user namespace 相关
@@ -482,14 +482,14 @@ $ mkdir ~/busybox-1.36-rootfs #
 $ tar xvf busybox-1.36/244ed32d6820f8861f94beda2456fa7032a832a4e7ed7e72fa66b802518f9adc/layer.tar -C ~/busybox-1.36-rootfs
 ```
 
-如目录`busybox-1.36-rootfs`（形如Linux node 根目录的文件夹），下面会使用这个目录作为容器根目录来启动容器
+如目录`busybox-1.36-rootfs`（形如 Linux node 根目录的文件夹），下面会使用这个目录作为容器根目录来启动容器
 
 ```bash
 $ ls ~/busybox-1.36-rootfs/
 bin  dev  etc  home  lib  lib64  root  tmp  usr  var
 ```
 
-编译容器demo代码
+编译容器 demo 代码
 
 ```bash
 $ sudo apt install libseccomp-dev libcap-dev -y
@@ -497,7 +497,7 @@ $ gcc -Wl,--no-as-needed -lcap -lseccomp ctn-d.c
 ```
 
 ####    测试
-运行 `/bin/sh`交互式，指定解压之后的 busybox 容器镜像目录作为容器根目录（`-m ~/busybox-rootfs-1.36/`）， 以 root 权限（`-u 0`）运行 shell（`-c /bin/sh`）：
+运行 `/bin/sh`交互式，指定解压之后的 busybox 容器镜像目录作为容器根目录（`-m ~/busybox-rootfs-1.36/`），以 root 权限（`-u 0`）运行 shell（`-c /bin/sh`）：
 
 ```bash
 $ sudo ./a.out -u 0 -m ~/busybox-rootfs-1.36/ -c /bin/sh
@@ -560,11 +560,11 @@ hello from inside container  #   <-- 容器内执行 echo，执行完就退出�
 ```
 
 ##  0x04    对比 containerd+runc
-本文的代码对应容器技术栈中的哪些组件呢？如下图展示了k8s 中容器相关的组件，其中dockerd 是可选的（较新版本的 k8s 中已经去掉了 dockerd），但其实 containerd 是跟 kubelet/docker 一样，都是负责管理工作（container manager）， 真正干活的是更底层的 runc组件。本文的demo其实就是一个简化版的 containerd+runc
+本文的代码对应容器技术栈中的哪些组件呢？如下图展示了 k8s 中容器相关的组件，其中 dockerd 是可选的（较新版本的 k8s 中已经去掉了 dockerd），但其实 containerd 是跟 kubelet/docker 一样，都是负责管理工作（container manager），真正干活的是更底层的 runc 组件。本文的 demo 其实就是一个简化版的 containerd+runc
 
 ![k8s-arch-simple]()
 
-runc 是基于一个 config.json 创建容器的，当k8s 创建容器时，通常是由 containerd 通过 config.json 传给 runc 。一个真实的 k8s pod 对应的 config.json文件配置内容可能如下：
+runc 是基于一个 config.json 创建容器的，当 k8s 创建容器时，通常是由 containerd 通过 config.json 传给 runc。一个真实的 k8s pod 对应的 config.json 文件配置内容可能如下：
 
 ```json
 (node1) $ cat /run/containerd/io.containerd.runtime.v1.linux/moby/eedd6341c/config.json | jq
@@ -630,7 +630,7 @@ runc 是基于一个 config.json 创建容器的，当k8s 创建容器时，通�
 3.  配置 IP/MAC/NAT 规则等，让容器网络能连通
 
 ####   特殊目录
-通常，容器内的目录（就是busybox 镜像解压之后的目录）
+通常，容器内的目录（就是 busybox 镜像解压之后的目录）
 
 ```bash
 # ls /
@@ -649,15 +649,15 @@ $ ls /
 bin  boot  dev  etc  home  lib  lib64  media  mnt  opt  proc  root  run  sbin  srv  sys  tmp  usr  var
 ```
 
-其中，最重要的两个：`/proc`（procfs） 和 `/sys`（sysfs），这两个大部分是内核暴露给用户空间的接口（如/proc是宿主机的相关信息）。需要容器运行时单独处理，在创建容器时挂载进去
+其中，最重要的两个：`/proc`（procfs）和 `/sys`（sysfs），这两个大部分是内核暴露给用户空间的接口（如/proc 是宿主机的相关信息）。需要容器运行时单独处理，在创建容器时挂载进去
 
 ####    容器 /proc 存在的问题以及解决方案
-若 docker/containerd/runc 之类的容器运行时，会发现它是把宿主机 `/proc` 挂载到了容器， 这会导致什么问题呢？ 
+若 docker/containerd/runc 之类的容器运行时，会发现它是把宿主机 `/proc` 挂载到了容器，这会导致什么问题呢？ 
 
 1.  容器内能看到宿主机以及其他容器的进程信息（虽然原则上是只读的），存在安全风险
 2.  容器内读取某些文件，如 /proc/meminfo，本来是希望得到容器自己的内存信息，但实际上拿到的是宿主机的，因此数据不准
 
-那如何解决呢？先看原作者给出的kubernetes的pod例子，查看容器 /proc/cpuinfo 和 /proc/meminfo
+那如何解决呢？先看原作者给出的 kubernetes 的 pod 例子，查看容器 /proc/cpuinfo 和 /proc/meminfo
 
 ```bash
 #容器需要 125m = 125/1000 = 1/8 个 CPU，751 MB 内存； 最多能使用 1 个 CPU，1GB 内存
@@ -672,7 +672,7 @@ $ k get pod -n <ns> <pod> -o yaml
         memory: 1Gi
 ```
 
-在容器里面看 /proc 挂载信息以及cpu、内存等信息。可以看到，Memory 是对的，CPU 不对，实际上是宿主机的 CPU 数量
+在容器里面看 /proc 挂载信息以及 cpu、内存等信息。可以看到，Memory 是对的，CPU 不对，实际上是宿主机的 CPU 数量
 
 ```bash
 (container) # cat /proc/mounts | grep proc
@@ -738,7 +738,7 @@ $ cat /run/containerd/io.containerd.runtime.v1.linux/moby/d32b1bf.config.json | 
     },
 ```
 
-再去k8s 里再看看 pod spec配置，如下：
+再去 k8s 里再看看 pod spec 配置，如下：
 
 ```bash
 $ k get pod xxx -n <ns> <pod> -o yaml
@@ -761,7 +761,7 @@ $ k get pod xxx -n <ns> <pod> -o yaml
     name: diskstats
 ```
 
-####    /proc采集不准的解决方案
+####    /proc 采集不准的解决方案
 
 方案一：从上层解决，应用主动适配 cgroup
 
@@ -770,12 +770,12 @@ $ k get pod xxx -n <ns> <pod> -o yaml
 -   [cadvisor-1](https://github.com/google/cadvisor/blob/v0.48.1/manager/container.go#L652-L654)
 -   [cadvisor-2](https://github.com/google/cadvisor/blob/v0.48.1/utils/cpuload/netlink/example/example.go)
 
-方案二：从底层解决，使用lxcfs等特殊文件系统挂载来模拟部分 /proc 文件
+方案二：从底层解决，使用 lxcfs 等特殊文件系统挂载来模拟部分 /proc 文件
 
 
 ####    lxcfs
 
-本小节简单介绍下lxcfs+fuse 基本工作原理。lxcfs 是一个简单的用户空间文件系统，设计目的就是 workaround 当前的一些 Linux 内核限制
+本小节简单介绍下 lxcfs+fuse 基本工作原理。lxcfs 是一个简单的用户空间文件系统，设计目的就是 workaround 当前的一些 Linux 内核限制
 
 -   一些文件：能 bind-mount 到 /proc，做到 CGroup-aware
 -   一个 cgroupfs-like tree：container aware
@@ -789,11 +789,11 @@ lxcfs /proc/meminfo fuse.lxcfs ro,relatime,user_id=0,group_id=0,allow_other 0 0 
 lxcfs /proc/diskstats fuse.lxcfs ro,relatime,user_id=0,group_id=0,allow_other 0 0 # 只读
 ```
 
-lxcfs 工作原理如下图，**node 上起一个 daemon 进程， 劫持容器内的 /proc 读操作， 通过 fuse 文件系统转到对容器 cgroupfs 的读写，然后将信息返回给请求方**
+lxcfs 工作原理如下图，**node 上起一个 daemon 进程，劫持容器内的 /proc 读操作，通过 fuse 文件系统转到对容器 cgroupfs 的读写，然后将信息返回给请求方**
 
 ![lxcfs-workflow]()
 
-而lxcfs组件只有一个 daemon 进程，运行在每个 node 上（通常以DaemonSet方式部署）
+而 lxcfs 组件只有一个 daemon 进程，运行在每个 node 上（通常以 DaemonSet 方式部署）
 
 ```bash
 (node) $ systemctl status lxcfs
@@ -802,7 +802,7 @@ lxcfs 工作原理如下图，**node 上起一个 daemon 进程， 劫持容器�
    Active: active (running)
 ```
 
-lxcfs提供的目录挂载范围如下，默认 fuse 挂载路径 /var/lib/lxcfs/
+lxcfs 提供的目录挂载范围如下，默认 fuse 挂载路径 /var/lib/lxcfs/
 
 ```bash
 $ tree /var/lib/lxcfs/ -L 2
