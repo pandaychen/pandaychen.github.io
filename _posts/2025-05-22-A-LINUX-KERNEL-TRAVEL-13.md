@@ -1388,7 +1388,7 @@ static int ep_send_events(struct eventpoll *ep,
 	esed.maxevents = maxevents;
 	esed.events = events;
     // 遍历事件就绪列表，发送就绪事件到用户空间
-	return ep_scan_ready_list(ep, ep_send_events_proc/**/, &esed, 0, false);
+	return ep_scan_ready_list(ep, ep_send_events_proc/*非常重要，包含了ET/LT的差异处理*/, &esed, 0, false);
 }
 ```
 
