@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      TLS 1.2 协议核心原理与 Go 标准库实现分析
-subtitle:   从记录层、ECDHE 密钥协商、PRF 密钥派生到 AES-CBC/GCM 加解密，再到 Wireshark 与 eBPF（eCapture）观测实战
+subtitle:   从记录层、ECDHE 密钥协商、PRF 密钥派生到 AES-CBC/GCM 加解密，再到观测实战
 date:       2026-10-16
 author:     pandaychen
 catalog:    true
