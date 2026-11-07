@@ -2644,12 +2644,11 @@ ecapture tls --libssl=/lib/x86_64-linux-gnu/libssl.so.1.1
 -   [RFC 5288: AES Galois Counter Mode (GCM) Cipher Suites for TLS](https://www.rfc-editor.org/rfc/rfc5288)
 -   [RFC 7627: TLS Session Hash and Extended Master Secret Extension](https://www.rfc-editor.org/rfc/rfc7627)
 -   [RFC 8422: Elliptic Curve Cryptography (ECC) Cipher Suites for TLS Versions 1.2 and Earlier](https://www.rfc-editor.org/rfc/rfc8422)
--   [RFC 7748: Elliptic Curves for Security（X25519）](https://www.rfc-editor.org/rfc/rfc7748)
+-   [RFC 7748: Elliptic Curves for Security (X25519)](https://www.rfc-editor.org/rfc/rfc7748)
 -   [RFC 5746: TLS Renegotiation Indication Extension](https://www.rfc-editor.org/rfc/rfc5746)
 -   [NIST SP 800-38D: GCM and GMAC](https://csrc.nist.gov/pubs/sp/800/38/d/final)
--   [Triple Handshakes and Cookie Cutters（3SHAKE）](https://mitls.org/pages/attacks/3SHAKE)
+-   [Triple Handshakes and Cookie Cutters (3SHAKE)](https://mitls.org/pages/attacks/3SHAKE)
 -   [draft-ietf-tls-keylogfile: The SSLKEYLOGFILE Format for TLS](https://datatracker.ietf.org/doc/draft-ietf-tls-keylogfile/)
 -   [Wireshark Wiki: TLS](https://wiki.wireshark.org/TLS)
--   Go 源码实现（go1.27.1）：`src/crypto/tls`、`src/crypto/internal/fips140/tls12`、`src/crypto/internal/fips140/aes/gcm`
--   [gojue/ecapture](https://github.com/gojue/ecapture)（commit `afcc9345`）
+-   [gojue/ecapture项目](https://github.com/gojue/ecapture)（commit `afcc9345`）
 -   [Go internal ABI specification](https://go.dev/s/regabi)

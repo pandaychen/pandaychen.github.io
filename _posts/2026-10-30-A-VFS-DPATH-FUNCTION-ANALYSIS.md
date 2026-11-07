@@ -1,6 +1,6 @@
 ---
 layout:     post
-title:      内核路径解析：d_path 的实现分析
+title:      Linux 内核之旅（三十二）：内核路径解析 d_path 的实现分析
 subtitle:   d_path && bpf_d_path
 date:       2026-10-30
 author:     pandaychen
