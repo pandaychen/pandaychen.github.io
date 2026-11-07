@@ -201,7 +201,7 @@ fi
 ```
 
 ####    8、启动挖矿（Impact: Resource Hijacking）
-`echo 128 > /proc/sys/vm/nr_hugepages` 开启大页内存（XMRig 性能优化），随后 `setsid` 脱离终端后台拉起矿机连接矿池（见 `0x00`）。
+`echo 128 > /proc/sys/vm/nr_hugepages` 开启大页内存（XMRig 性能优化），随后 `setsid` 脱离终端后台拉起矿机连接矿池（见 `0x00`章节）
 
 ####    9、清理痕迹（Defense Evasion: Indicator Removal）
 ```bash
@@ -249,6 +249,296 @@ iptables -A OUTPUT -p tcp --dport 7777 -j DROP   # 阻断竞品回连端口
     -   `T1489` Service Stop ： `systemctl stop`/`service stop` 停用云监控与竞品服务
 
 todo
+
+##  0x04    基于 Tracee 的检测分析
+本章节基于[Tracee](https://github.com/aquasecurity/tracee)项目来分析。该项目自带一套**成品检测器（Detector / Signature）**，直接产出带 ATT&CK 元数据的告警。检测分两层：
+
+-   底层 eBPF 负责采集**原始事件**（`tracee/pkg/ebpf/c/tracee.bpf.c`）
+-   上层 Go Detector（`tracee/detectors/*.go`）消费事件产出结论
+
+```mermaid
+flowchart LR
+    subgraph raw [tracee.bpf.c 原始事件]
+        r1["sched_process_exec<br/>(raw_tp/sys_execve)"]
+        r2["security_socket_connect"]
+        r3["security_file_open / magic_write"]
+        r4["security_inode_rename"]
+        r5["module_load / hooked_syscall"]
+    end
+    subgraph det [detectors 签名]
+        d1["dropped_executable TRC-1022"]
+        d2["hidden_file_created TRC-1015"]
+        d3["scheduled_task_modification TRC-1027"]
+        d4["ld_preload TRC-107"]
+        d5["illegitimate_shell TRC-1016"]
+        d6["docker_abuse TRC-1019"]
+        d7["kernel_module_loading TRC-1017<br/>syscall_table_hooking TRC-1030"]
+    end
+    r3 --> d1 & d2 & d4 & d6
+    r4 --> d3 & d4
+    r1 --> d3 & d5 & d4
+    r2 --> d6
+    r5 --> d7
+```
+
+####    1、底层原始事件（tracee.bpf.c）
+脚本涉及的核心内核行为，Tracee 均有对应 eBPF 程序采集（进程/网络/文件事件）
+
+-   进程执行：`raw_tracepoint/sys_execve`、`sys_execveat`
+-   文件打开/写入：`kprobe/security_file_open`、`kprobe/vfs_write`（`magic_write` 的实现来源）
+-   文件重命名：`kprobe/security_inode_rename`
+-   网络连接：`kprobe/security_socket_connect`
+-   内核模块 / 内核态执行：`kprobe/do_init_module`、`kprobe/call_usermodehelper`
+
+下文，基于 tracee 的实现逐个分析下告警规则
+
+####    2、落地并执行矿机：dropped_executable(TRC-1022)
+Tracee 用 `magic_write` 事件取文件写入的首部字节，判断是否为 ELF，若是"运行期被丢到磁盘的可执行文件"即告警：
+
+```go
+//79:113:tracee/detectors/dropped_executable.go
+func (d *DroppedExecutable) OnEvent(ctx context.Context, event *v1beta1.Event) ([]detection.DetectorOutput, error) {
+        // Extract magic bytes written
+        bytes, ok := v1beta1.GetData[[]byte](event, "bytes")
+        if !ok {
+                d.logger.Debugw("Failed to extract bytes")
+                return nil, nil
+        }
+
+        // Check if it's an ELF file
+        if !elf.IsElf(bytes) {
+                return nil, nil
+        }
+
+        // Extract pathname
+        pathname, err := v1beta1.GetDataSafe[string](event, "pathname")
+        if err != nil {
+                d.logger.Debugw("Failed to extract pathname", "error", err)
+                return nil, nil
+        }
+
+        // Ignore memory paths (e.g., memfd:, /dev/shm/)
+        if parsers.IsMemoryPath(pathname) {
+                return nil, nil
+        }
+        ...
+```
+
+**对应脚本**：`downloads()` 把 `x.rar`（实为 ELF 矿机）写到 `/etc/javae`，这正是"运行期落地可执行文件"。**但要注意**该检测器带 `container=started` 作用域：
+
+```go
+//26:35:tracee/detectors/dropped_executable.go
+        Events: []detection.EventRequirement{
+                {
+                        Name:       "magic_write",
+                        Dependency: detection.DependencyRequired,
+                        // CRITICAL: Use container=started to match old Origin: "container" behavior
+                        // This checks BOTH Container.ID != "" AND ContainerStarted == true
+                        ScopeFilters: []string{"container=started"},
+                        // No DataFilters - need to check ELF magic bytes and path runtime
+                },
+        },
+```
+
+即 **TRC-1022 只在容器内触发**。本样本直接跑在宿主机 root 上时，该签名默认不会命中，这是一个需要注意的部署前提（可以理解，宿主机上的误报可能非常多，但是容器内就是一个比较罕见的行为）
+
+####    3、隐藏可执行文件：hidden_file_created(TRC-1015)
+若矿机被写成隐藏文件（如 `/tmp/.tmpc`、`/root/.tmp/xmrig`，脚本清理列表里出现过大量 `/.` 前缀路径），判断"路径含 `/.` 且内容是 ELF"即告警，且该签名**无容器作用域限制**（宿主机也生效）：
+
+```go
+//74:89:tracee/detectors/hidden_file_created.go
+        // Get pathname and bytes from magic_write event
+        pathname, err := v1beta1.GetDataSafe[string](event, "pathname")
+        if err != nil {
+                return nil, nil
+        }
+
+        bytes, err := v1beta1.GetDataSafe[[]byte](event, "bytes")
+        if err != nil {
+                return nil, nil
+        }
+
+        // Check if this is a hidden file (contains "/.")  AND an ELF executable
+        if strings.Contains(pathname, "/.") && elf.IsElf(bytes) {
+                return detection.Detected(), nil
+        }
+```
+
+映射 ATT&CK `T1564.001 Hidden Files and Directories`（见该文件定义处的 Mitre 元数据）
+
+todo
+
+####    4、Crontab 持久化：scheduled_task_modification(TRC-1027)
+这是覆盖本样本持久化最精准的签名。它同时监听三类事件：写 cron 文件（`security_file_open` 且 write）、把文件 rename 成 cron 路径、以及执行 `crontab`/`at` 命令：
+
+```go
+//28:65:tracee/detectors/scheduled_task_modification.go
+            {
+                    Name:       "security_file_open",
+                    Dependency: detection.DependencyRequired,
+                    DataFilters: []string{
+                            "pathname=/etc/crontab",
+                            "pathname=/etc/anacrontab",
+                            "pathname=/etc/cron.deny",
+                            "pathname=/etc/cron.allow",
+                            "pathname=/etc/cron.hourly/*",
+                            "pathname=/etc/cron.daily/*",
+                            "pathname=/etc/cron.weekly/*",
+                            "pathname=/etc/cron.monthly/*",
+                            "pathname=/etc/cron.d/*",
+                            "pathname=/var/spool/cron/crontabs/*",
+                            "pathname=var/spool/anacron/*",
+                    },
+            },
+            {
+                    Name:       "security_inode_rename",
+                    ...
+            },
+            {
+                    Name:       "sched_process_exec",
+                    Dependency: detection.DependencyRequired,
+            },
+```
+
+运行期逻辑对执行的命令名做 `crontab/at/batch/launchd` 匹配：
+
+```go
+//124:130:tracee/detectors/scheduled_task_modification.go
+        case "sched_process_exec":
+                pathname := v1beta1.GetProcessExecutablePath(event)
+                basename := path.Base(pathname)
+                if d.cronCommands[basename] {
+                        d.logger.Debugw("Scheduled task command execution detected", "command", basename)
+                        return detection.Detected(), nil
+                }
+```
+
+**对应脚本**：`manage_cron()` 写 `/etc/crontab`、`/etc/cron.d/javae`、`/var/spool/cron/$USER`，以及 `crontab -` 命令，**全部命中**，映射 `T1053.003 Cron`（`Persistence`），且为 Origin `*`（宿主机 + 容器均触发）
+
+####    5、ld.so.preload 劫持：ld_preload(TRC-107)
+脚本里有 `rm -f /etc/ld.so.preload`、`chattr -i /etc/ld.so.preload`（清理竞品的预加载 rootkit），而 Tracee 对**任何**针对 `/etc/ld.so.preload` 的写/改名，以及带 `LD_PRELOAD` 环境变量的进程执行都会告警：
+
+```go
+//80:128:tracee/detectors/ld_preload.go
+func (d *LdPreload) OnEvent(ctx context.Context, event *v1beta1.Event) ([]detection.DetectorOutput, error) {
+        eventName := event.Name
+
+        switch eventName {
+        case "sched_process_exec":
+                // Check for LD_PRELOAD or LD_LIBRARY_PATH in environment variables
+                ...
+                for _, envVar := range envVars {
+                        for _, preloadEnv := range d.preloadEnvs {
+                                if strings.HasPrefix(envVar, preloadEnv+"=") {
+                                        ...
+                                        return detection.DetectedWithData(...), nil
+                                }
+                        }
+                }
+
+        case "security_file_open":
+                ...
+                // DataFilter already validated pathname ends with /etc/ld.so.preload
+                pathname, _ := v1beta1.GetDataSafe[string](event, "pathname")
+                d.logger.Debugw("LD_PRELOAD file write detected", "path", pathname)
+                return detection.Detected(), nil
+
+        case "security_inode_rename":
+                // DataFilter already validated new_path ends with /etc/ld.so.preload
+                newPath, _ := v1beta1.GetDataSafe[string](event, "new_path")
+                d.logger.Debugw("LD_PRELOAD file rename detected", "path", newPath)
+                return detection.Detected(), nil
+        }
+```
+
+映射 `T1574 Hijack Execution Flow`。注意本样本是在**清理**该文件（读/删而非写），是否命中取决于删除是否触发受监控的 write flag；但只要后续有写 preload 或带 `LD_PRELOAD` 执行，即会告警
+
+####    6、非法 Shell 派生：illegitimate_shell(TRC-1016)
+若挖矿是通过 Web 应用漏洞（如 Confluence，脚本里清理过 `/opt/atlassian/confluence/bin/*.sh`）投放的，则"Web 服务进程派生 shell"会命中该签名：
+
+```go
+//99:127:tracee/detectors/illegitimate_shell.go
+        // Extract process name (comm/thread name)
+        processName := v1beta1.GetProcessThreadName(event)
+        if processName == "" {
+                return nil, nil
+        }
+
+        // Check if current process is a shell
+        if !d.shellNames[processName] {
+                return nil, nil
+        }
+
+        // Extract parent process name
+        prevComm, err := v1beta1.GetDataSafe[string](event, "prev_comm")
+        ...
+        // Check if parent process is a web server
+        if !d.webServersProcessNames[prevComm] {
+                return nil, nil
+        }
+
+        // Detection: web server spawned a shell
+        ...
+        return detection.Detected(), nil
+```
+
+映射 `T1190 Exploit Public-Facing Application`。适用于**投放阶段**（父进程为 `nginx/httpd/apache/tomcat`），对已在宿主机 root 直接运行的场景不触发
+
+####    7、Docker 滥用：docker_abuse(TRC-1019)
+脚本末尾有大量 `docker ps/kill/rmi`（清理竞品容器矿机、逃逸利用）。Tracee 的 `docker_abuse` 检测容器内对 `docker.sock` 的访问：
+
+```GO
+//28:41:tracee/detectors/docker_abuse.go
+            {
+                    Name:         "security_file_open",
+                    Dependency:   detection.DependencyRequired,
+                    ScopeFilters: []string{"container=started"},
+                    DataFilters: []string{
+                            "pathname=*docker.sock",
+                    },
+            },
+            {
+                    Name:         "security_socket_connect",
+                    Dependency:   detection.DependencyRequired,
+                    ScopeFilters: []string{"container=started"},
+                    // Note: Cannot use DataFilter - path is in nested sockaddr.SunPath structure
+            },
+```
+
+映射 `T1068`。同样是 `container=started` 作用域，针对"容器内访问宿主 docker.sock"，宿主机直接执行 `docker` 命令不由该签名负责。
+
+####    8、内核对抗：kernel_module_loading(TRC-1017) / syscall_table_hooking(TRC-1030)
+若木马升级为 LKM rootkit，Tracee 的 `module_load` 事件即触发 `kernel_module_loading`（`T1547.006`），`hooked_syscall` 事件触发 `syscall_table_hooking`（`T1014`，`HIGH` 级）：
+
+```go
+//57:60:tracee/detectors/syscall_table_hooking.go
+func (d *SyscallTableHooking) OnEvent(ctx context.Context, event *v1beta1.Event) ([]detection.DetectorOutput, error) {
+        // Every hooked_syscall event is a detection
+        d.logger.Debugw("Syscall table hooking detected")
+        return detection.Detected(), nil
+}
+```
+
+本样本未加载 LKM，故不直接命中，但这两个签名是"木马内核化后"的兜底，可以检测内核态恶意行为
+
+####    Tracee 的检测优缺点
+-   **优势**：自带带 ATT&CK 元数据的成品签名（`Threat`/`Mitre` 字段直接给出 tactic/technique），持久化（cron）、隐藏 ELF、ld.so.preload、rootkit 等开箱即用
+-   **盲区**：
+    -   `dropped_executable`、`docker_abuse` 等带 `container=started` 作用域，**宿主机 root 直接投放不触发**；本样本是典型宿主机场景，需注意策略作用域配置。
+    -   Tracee **没有专门的 `chattr` 不可变位语义**、没有针对"清空 `/var/log/wtmp`/`history -c`"的成品签名，这类需自定义规则（基于 `security_file_open`/`sched_process_exec` 命令行）
+    -   矿池连接、DNS 等属于原始事件，需自行叠加恶意情报匹配才能变成"挖矿告警"（社区另有 `crypto_miner`/网络类签名实现可参考）
+
+##  0x07    处置与加固建议
+1.  **止血**：`kill` 矿机进程（真实路径 `/etc/javae`、`/tmp/javae`），注意先 `chattr -ia` 解锁再删文件；恢复被包装的 `/bin/ps`、`/bin/top`、`/bin/pstree`（用 `.original` 还原）与 `wget/curl`
+2.  **清持久化**：删除 `authorized_keys` 中的 `uc1` 公钥；清理 `/etc/crontab`、`/etc/cron.d/javae`、`/var/spool/cron/*` 中的 `cc.txt` 定时项
+3.  **网络隔离**：在边界/主机防火墙封禁 `pool.supportxmr.com`、`accrochezvous.fr`、`51.15.203.72`，阻断门罗币矿池常用端口（`3333/5555/7777/443`+`--tls` 指纹）
+4.  **恢复防御**：重装并重新拉起被卸载的 HIDS/云监控 Agent，恢复 SELinux/AppArmor、`iptables`，检查 `/sys/kernel/debug/tracing/` 是否被清空
+5.  **溯源**：检查 `known_hosts` 中的 IP，排查横向移动是否已扩散到其它主机
+6.  **检测加固**：可补齐针对本样本的规则
+    -   `execve`：`chattr +i` 作用于敏感路径、`echo > /var/log/*`、`history -c`、`base64 -d|bash`、`curl|bash`
+    -   `security_inode_rename`：系统关键二进制被改名（`/bin/ps`、`wget`）
+    -   `security_inode_create`：cron 目录/`authorized_keys`/`/etc/*` 下出现可执行文件
+    -   `security_socket_connect` + 情报：矿池 IP/域名
 
 ##  0x08    参考
 -   [MITRE ATT&CK Matrix for Enterprise](https://attack.mitre.org/matrices/enterprise/linux/)
