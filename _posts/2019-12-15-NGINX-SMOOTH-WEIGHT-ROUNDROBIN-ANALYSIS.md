@@ -12,11 +12,40 @@ tags:
 ---
 
 ##  0x00    前言
-本文总结下笔者在使用Nginx的一些经验总结（主要用于反向代理）
+本文总结下笔者在使用 Nginx 的一些经验总结（主要用于反向代理），内容涵盖以下几个方面：
+
+-   Nginx upstream 负载均衡的配置与多种算法模式
+-   Nginx 反向代理的后端容错机制（`proxy_next_upstream`）
+-   平滑加权轮询算法（SWRR）的原理与实现
+-   Nginx 对 gRPC 反向代理的支持（HTTP/2 场景）
+-   Nginx 在 Kubernetes 中的部署与 DNS resolver 问题
+
+Nginx 作为反向代理的核心请求流转架构如下：
+
+```mermaid
+flowchart LR
+    Client["Client"] -->|"HTTP/HTTPS/gRPC"| Nginx["Nginx Reverse Proxy"]
+
+    subgraph upstreamPool ["upstream pool"]
+        direction TB
+        Backend1["Backend-1 weight=5"]
+        Backend2["Backend-2 weight=3"]
+        Backend3["Backend-3 weight=1"]
+        BackupNode["Backup Node"]
+    end
+
+    Nginx -->|"负载均衡选择"| Backend1
+    Nginx -->|"负载均衡选择"| Backend2
+    Nginx -->|"负载均衡选择"| Backend3
+
+    Backend1 -.->|"失败: proxy_next_upstream"| Backend2
+    Backend2 -.->|"失败: proxy_next_upstream"| Backend3
+    Backend3 -.->|"所有节点失败"| BackupNode
+```
 
 ##	0x01	Nginx 中的负载均衡介绍
 
-2019 下半年，笔者在私有化 Sass 项目，使用 [Nginx C Module](https://github.com/nginx-modules/nginx-c-function) 与[企业微信 OpenAPI](https://work.weixin.qq.com/api/doc/90001/90142/90594)实现了一个 OAuth 认证网关（提供 WebApi 调用鉴权），过程中对 Nginx 的模块开发、负载均衡 upstream、proxy-pass 等一些机制，有了一些深入的了解。这篇博客就来聊聊 Nginx 中的负载均衡机制。项目中的部署架构如下：
+2019 下半年，笔者在私有化 SaaS 项目，使用 [Nginx C Module](https://github.com/nginx-modules/nginx-c-function) 与[企业微信 OpenAPI](https://work.weixin.qq.com/api/doc/90001/90142/90594)实现了一个 OAuth 认证网关（提供 WebApi 调用鉴权），过程中对 Nginx 的模块开发、负载均衡 upstream、proxy-pass 等一些机制，有了一些深入的了解。这篇博客就来聊聊 Nginx 中的负载均衡机制。项目中的部署架构如下：
 
 ![vhosts](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/nginx/nginx-vhosts.png)
 
@@ -65,7 +94,7 @@ server {
 可定义如下参数：
 * `weight`=number：权重
 * `max_fails`=number：设置在 `fail_timeout` 参数设置的时间内最大失败次数，如果在这个时间内，所有针对该服务器的请求都失败了，那么认为该服务器会被认为是停机了，停机时间是 `fail_timeout` 设置的时间。默认情况下，不成功连接数被设置为 `1`，被设置为`0`则表示不进行链接数统计
-* `fail_time`=time：如上
+* `fail_timeout`=time：如上
 * `backup`：标记该服务器为备用服务器。当主服务器停止时，请求会被发送到此
 * `down`：标记服务器永久停机了；与指令 ip_hash 一起使用
 
@@ -75,7 +104,7 @@ server {
 默认方式，每个请求按时间顺序逐一分配到不同的后端服务器，如果超过了最大失败次数后（`max_fails`, 默认 1），在失效时间内 (`fail_timeout`，默认 `10` 秒)，该节点失效权重变为 `0`，超过失效时间后，则恢复正常，或者全部节点都为 down 后，那么将所有节点都恢复为有效继续探测。Nginx 实现了一个非常优秀的 [带权重的负载均衡算法](https://github.com/phusion/nginx/commit/27e94984486058d73157038f7950a0a36ecc6e35)，此算法具备极好的平滑性
 
 包含了Round Robin 或者 Weighted Round Robin
--   普通轮询方式：每个请求按时间顺序（全局 Index）逐一分配到不同的后端服务器，如果后端服务器 down 掉，能自动剔除故障的后端吗？
+-   普通轮询方式：每个请求按时间顺序（全局 Index）逐一分配到不同的后端服务器，如果后端服务器 down 掉，Nginx 会通过 `max_fails` 和 `fail_timeout` 机制被动检测并临时剔除故障后端，当超过 `fail_timeout` 时间后自动恢复探测
 -   加权轮询方式：机器按照权重权限，首先将请求都分配给权重最高的机器，如果该机器成功建立连接将会把权重值减去`1`重排。如果后端某台服务器宕机，故障系统被自动剔除。当所有后端机器都 down 掉时，Nginx 会立即将所有机器的标志位清成初始状态，以避免造成所有的机器都处在 timeout 的状态
 
 ```text
@@ -93,7 +122,7 @@ upstream backendpoint2 {
 2、ip_hash（内置）<br>
 每个请求按访问 ip 的 hash 结果分配，这样每个Client固定访问一个后端服务器，可以解决 session 的问题，但是 ip_hash 会造成负载不均，有的服务请求接受多，有的服务请求接受少，所以不建议采用 ip_hash 模式，session 共享问题可用后端服务的 session 共享代替 nginx 的 ip_hash（比如，后端集群再实现consistent-hash算法的负载均衡）
 
-PS：基于客户端 ip 的负载均衡算法, IPV4 的前 `3` 个八进制位和所有的 IPV6 地址被用作一个 hashkey
+PS：基于客户端 ip 的负载均衡算法, IPV4 的前 `3` 个八位组（octet）和所有的 IPV6 地址被用作一个 hashkey
 
 ```text
 upstream backendpoint3 {
@@ -134,6 +163,47 @@ sticky [name=route] [domain=.foo.bar] [path=/] [expires=1h] [hash=index|md5|sha1
 ```
 
 ####    Nginx 与 Kubernetes 的结合
+
+在 Kubernetes 集群中，Nginx 通常以两种方式承担反向代理角色：
+
+**方式一：Nginx Ingress Controller（推荐）**
+
+[Nginx Ingress Controller](https://kubernetes.github.io/ingress-nginx/) 是 Kubernetes 官方维护的 Ingress 实现，它通过 Watch Kubernetes API 中的 Ingress / Service / Endpoints 资源变化，**自动生成并热加载** Nginx 配置，无需手动维护 upstream 列表。其核心工作流程如下：
+
+```mermaid
+flowchart LR
+    ExternalClient["External Client"] -->|"域名访问"| IngressNginx["Nginx Ingress Controller Pod"]
+
+    subgraph k8sCluster ["Kubernetes Cluster"]
+        direction TB
+        IngressNginx -->|"proxy_pass"| Pod1["Pod-1"]
+        IngressNginx -->|"proxy_pass"| Pod2["Pod-2"]
+        IngressNginx -->|"proxy_pass"| Pod3["Pod-3"]
+
+        KubeAPI["Kube API Server"] -->|"Watch Endpoints"| IngressController["Ingress Controller Process"]
+        IngressController -->|"动态更新 nginx.conf"| IngressNginx
+    end
+```
+
+工作原理：
+1. 用户创建 Ingress 资源，声明域名到 Service 的路由规则
+2. Ingress Controller 通过 Watch 机制监听 Ingress、Service、Endpoints 的变化
+3. 当后端 Pod 发生扩缩容或重启时，Endpoints 列表自动更新，Ingress Controller 据此动态刷新 Nginx 的 upstream 配置（通过 Lua 动态更新，无需 reload）
+4. Nginx Ingress 默认使用 Round-Robin 算法，也支持通过注解配置其他算法（如 `nginx.ingress.kubernetes.io/load-balance: "ewma"`）
+
+**方式二：原生 Nginx + resolver（适用于 Sidecar / 独立部署场景）**
+
+当 Nginx 不是以 Ingress Controller 方式部署，而是作为业务 Pod 中的 Sidecar 或独立 Pod 时，upstream 中引用 Kubernetes ServiceName 会面临 DNS 缓存问题——Nginx 仅在启动时解析域名，后端 Pod 重启后 IP 变化不会被感知。解决方案是通过 `resolver` + `set` 变量强制每次请求重新解析 DNS，详见本文 `0x06` 章节
+
+**两种方式对比**
+
+| 特性 | Nginx Ingress Controller | 原生 Nginx + resolver |
+|------|--------------------------|----------------------|
+| 服务发现 | 自动 Watch Endpoints | 依赖 DNS 解析 |
+| 后端变化感知 | 实时（毫秒级） | 取决于 `valid` 参数 |
+| 负载均衡粒度 | Pod IP 级别 | ClusterIP 级别（单 IP） |
+| 配置方式 | Ingress 资源声明式 | 手动维护 nginx.conf |
+| 适用场景 | 集群统一入口 | Sidecar / 特殊定制需求 |
 
 ## 0x02 Nginx 后端服务器的容错
 先给一个结论，**Nginx 的 upstream 容错（健康检查）机制是有限的**。Nginx 自带是没有针对负载均衡后端节点的健康检查的，但是可以通过默认自带的 `ngx_http_proxy_module` 模块和 `ngx_http_upstream_module` 模块中的相关指令来完成当后端节点出现故障时，自动切换到下一个节点来提供访问
@@ -176,6 +246,26 @@ Nginx 通过 [`proxy_next_upstream`](http://nginx.org/en/docs/http/ngx_http_prox
 
 配置示例：
 
+```text
+upstream backend {
+    server 192.168.1.1:8080 max_fails=3 fail_timeout=30s;
+    server 192.168.1.2:8080 max_fails=3 fail_timeout=30s;
+    server 192.168.1.3:8080 backup;
+}
+
+server {
+    location / {
+        proxy_pass http://backend;
+        proxy_connect_timeout 3s;
+        proxy_read_timeout 10s;
+        proxy_next_upstream error timeout http_502 http_503 http_504;
+        proxy_next_upstream_timeout 10s;
+        proxy_next_upstream_tries 3;
+    }
+}
+```
+
+上面配置的含义：当请求后端出现 `error`（连接错误）、`timeout`（超时）、`502`/`503`/`504` 状态码时，Nginx 会自动将请求转发到下一个可用的后端节点，最多重试 `3` 次，总重试时间不超过 `10s`。`192.168.1.3` 配置为 `backup`，仅在前两台主节点均不可用时才会被选中
 
 ####  proxy_next_upstream 的坑
 回溯上文的描述，采用在`proxy_next_upstream`用于指定在什么情况下Nginx会将请求转移到其他服务器上。其默认值是`proxy_next_upstream error timeout`，**即发生网络错误以及超时，才会重试其他服务器**。默认情况下服务返回`500`状态码是不会重试的，如果想在响应`500`状态码时也进行重试。例如现网针对这个服务的访问，出现了500或者超时的情况，会自动重试到下一个服务器去，有如下配置：
@@ -189,8 +279,8 @@ upstream example_upstream{
 }
 location /example/ {
    proxy_pass http://example_upstream/;
-   proxy_set_header Host: test.example.com;
-   proxy_set_head X-real-ip $remote_addr;
+   proxy_set_header Host test.example.com;
+   proxy_set_header X-Real-IP $remote_addr;
    proxy_next_upstream error timeout http_500;
 }
 ```
@@ -211,9 +301,9 @@ upstream example_upstream{
 }
 location /example/ {
    proxy_pass http://example_upstream/;
-   proxy_set_header Host: test.example.com;
-   proxy_set_head X-real-ip $remote_addr;
-   proxy_next_upstream error timeout http_500 non_idemponent;
+   proxy_set_header Host test.example.com;
+   proxy_set_header X-Real-IP $remote_addr;
+   proxy_next_upstream error timeout http_500 non_idempotent;
 }
 ```
 不过生产环境建议谨慎考虑添加`non_idempotent`选项，由于`POST`类操作非幂等操作，发生`500`错误可能服务器上的业务已经执行了，而重试会导致非幂等方法重复执行，从而导致业务问题
@@ -273,7 +363,32 @@ Nginx 使用的平滑权重轮询算法介绍以及原理分析。
 
 我们可以发现，a, b, c 选择的次数符合 `5:1:1` 这个权重比例，而且权重大的不会被连接选择。7 轮选择后，当前值又回到 `{0, 0, 0}`，以上操作可以一直循环，一样符合平滑和基于权重。不但实现了基于权重的轮询算法，而且还实现了平滑的算法。所谓平滑，就是在一段时间内，不仅服务器被选择的次数的分布和它们的权重一致，而且调度算法还比较均匀的选择服务器，而不会集中一段时间之内只选择某一个权重比较高的服务器。如果使用随机算法选择或者普通的基于权重的轮询算法，就比较容易造成某个服务集中被调用压力过大。
 
-举个例子，比如权重为 {a:5, b:1, c:1) 的一组服务器，Nginx 的平滑的轮询算法选择的序列为 `{ a, a, b, a, c, a, a }`, 这显然要比 `{ c, b, a, a, a, a, a }` 序列更平滑，更合理，不会造成对 a 服务器的集中访问。
+举个例子，比如权重为 `{a:5, b:1, c:1}` 的一组服务器，Nginx 的平滑的轮询算法选择的序列为 `{ a, a, b, a, c, a, a }`，这显然要比 `{ c, b, a, a, a, a, a }` 序列更平滑，更合理，不会造成对 a 服务器的集中访问
+
+####    SWRR 算法流程
+
+每次调用选择函数时，算法按照如下流程执行：
+
+```mermaid
+flowchart TD
+    Start["开始选择"] --> Init["total = 0, best = nil"]
+    Init --> Loop["遍历所有节点 i"]
+    Loop --> AddWeight["CurrentWeight_i += EffectiveWeight_i"]
+    AddWeight --> AccumTotal["total += EffectiveWeight_i"]
+    AccumTotal --> CheckRecover{"EffectiveWeight_i < Weight_i ?"}
+    CheckRecover -->|"是: 故障恢复中"| Recover["EffectiveWeight_i++"]
+    CheckRecover -->|"否: 正常"| CompBest{"CurrentWeight_i > best.CurrentWeight ?"}
+    Recover --> CompBest
+    CompBest -->|"是"| UpdateBest["best = node_i"]
+    CompBest -->|"否"| NextNode["继续下一个节点"]
+    UpdateBest --> NextNode
+    NextNode --> HasMore{"还有更多节点?"}
+    HasMore -->|"是"| Loop
+    HasMore -->|"否"| ReduceBest["best.CurrentWeight -= total"]
+    ReduceBest --> Return["返回 best 节点"]
+```
+
+####    实现示例
 
 ```golang
 type smoothWeighted struct {
@@ -286,7 +401,7 @@ type smoothWeighted struct {
 func nextSmoothWeighted(items []*smoothWeighted) (best *smoothWeighted) {
 	total := 0
 
-	for i := 0; i <len(items); i++ {
+	for i := 0; i < len(items); i++ {
 		w := items[i]
 
 		if w == nil {
@@ -314,52 +429,138 @@ func nextSmoothWeighted(items []*smoothWeighted) (best *smoothWeighted) {
 }
 ```
 
+####    EffectiveWeight 的作用
+
+上述代码中 `smoothWeighted` 结构体有三个权重相关字段，各自的含义如下：
+
+| 字段 | 含义 | 变化规则 |
+|------|------|----------|
+| `Weight` | 配置的原始权重，初始化后不变 | 固定值 |
+| `EffectiveWeight` | 有效权重，初始值等于 `Weight` | 后端通信失败时降低，每轮选择时逐步恢复（+1），直至等于 `Weight` |
+| `CurrentWeight` | 当前动态权重，每轮参与计算 | 每轮加 `EffectiveWeight`，被选中后减去 `total` |
+
+`EffectiveWeight` 的设计目的是实现**故障降权与渐进恢复**：当某个后端节点出现通信失败时，Nginx 会降低该节点的 `EffectiveWeight`（在 C 实现中通过 `peer->effective_weight--` 完成），使得该节点在后续轮次中被选中的概率降低。每次执行选择算法时，如果 `EffectiveWeight < Weight`，则将 `EffectiveWeight` 自增 `1`，逐步恢复到原始权重。这种渐进恢复机制避免了故障恢复后瞬间涌入大量流量
+
+####    平滑性的正确性分析
+
+SWRR 算法的平滑性可以从以下几个性质来理解：
+
+1. **权重守恒**：每轮选择中，所有节点的 `CurrentWeight` 之和保持不变。每轮加上的总量为 `sum(EffectiveWeight)`，减去的总量也是 `sum(EffectiveWeight)`（仅对选中节点执行减操作），因此总和恒定为初始值（`0`）
+
+2. **周期性**：经过 `sum(Weight)` 轮选择后，每个节点恰好被选中 `Weight_i` 次，且所有节点的 `CurrentWeight` 回到初始状态 `{0, 0, ..., 0}`，算法进入下一个完整周期
+
+3. **均匀分布**：在一个完整周期内，权重较高的节点不会被连续集中选择。这是因为每次选中后，该节点的 `CurrentWeight` 会被大幅减去 `total`，使其在紧接着的几轮中不太可能再次成为最大值，从而将选择机会让给其他节点
 
 ##  0x05  Nginx 对 gRPC 负载均衡的支持
-Nginx 从 `1.13.10` 版本 [Introducing gRPC Support with NGINX 1.13.10](http://manguijie.top/2018/09/grpc-name-resolve-loadbalance) 宣布支持 gRPC 负载均衡。
-nginx 配置中增加 `grpc_pass`，使用方式与 `proxy_pass` 基本一致，如下：
-```bash
-worker_processes  1;
-events {
-    worker_connections  1024;
+
+Nginx 从 `1.13.10` 版本开始 [正式支持 gRPC 代理](https://www.nginx.com/blog/nginx-1-13-10-grpc/)，通过新增的 `grpc_pass` 指令实现对 gRPC 服务的反向代理和负载均衡
+
+####    grpc_pass 与 proxy_pass 的区别
+
+| 特性 | `proxy_pass` | `grpc_pass` |
+|------|-------------|-------------|
+| 协议 | HTTP/1.0, HTTP/1.1 | HTTP/2（gRPC 底层协议） |
+| 连接方式 | 默认短连接，可配 keepalive | 默认 HTTP/2 长连接 |
+| 数据格式 | 任意 HTTP body | Protocol Buffers（二进制帧） |
+| 流式支持 | 不支持 | 支持 Unary / Server-Streaming / Client-Streaming / Bidirectional |
+| 指令前缀 | `proxy_*` | `grpc_*`（如 `grpc_read_timeout`、`grpc_send_timeout`） |
+
+####    HTTP/2 长连接对负载均衡的影响
+
+gRPC 基于 HTTP/2，一个 TCP 连接可以承载多个并发 Stream（请求）。这带来一个关键问题：**如果 Nginx 与后端之间只建立了一条 HTTP/2 连接，那么所有请求都会发往同一个后端，负载均衡将失效**
+
+Nginx 的 `grpc_pass` 在这方面的处理方式是：**对每个客户端请求，Nginx 都会从 upstream pool 中独立选择一个后端**，即便底层复用了同一条 HTTP/2 连接。因此 Nginx 的 gRPC 反向代理能够实现**请求级别（per-RPC）的负载均衡**，而非连接级别
+
+```mermaid
+flowchart LR
+    gRPCClient["gRPC Client"] -->|"HTTP/2 Connection"| Nginx["Nginx"]
+
+    subgraph upstreamGrpc ["gRPC upstream pool"]
+        direction TB
+        GrpcBackend1["gRPC Server-1"]
+        GrpcBackend2["gRPC Server-2"]
+        GrpcBackend3["gRPC Server-3"]
+    end
+
+    Nginx -->|"RPC-1"| GrpcBackend1
+    Nginx -->|"RPC-2"| GrpcBackend2
+    Nginx -->|"RPC-3"| GrpcBackend3
+```
+
+####    基本配置示例（明文 gRPC）
+
+```text
+upstream grpc_servers {
+    server 127.0.0.1:10006;
+    server 127.0.0.1:10007;
+    server 127.0.0.1:10008;
 }
 
-http {
-    include       mime.types;
-    default_type  application/octet-stream;
-    log_format  main  '$remote_addr - $remote_user [$time_local]"$request" '
-                      '$status $body_bytes_sent"$http_referer" '
-                      '"$http_user_agent" "$http_x_forwarded_for"';
+server {
+    listen       8080 http2;
+    server_name  localhost;
 
-    error_log   logs/error.log debug;
-    access_log  logs/access.log  main;
-
-    sendfile        on;
-    keepalive_timeout  65;
-
-    upstream grpc_servers {
-        #least_conn;
-        #keepalive 1000;
-        server 127.0.0.1:10006;
+    location / {
+        grpc_pass grpc://grpc_servers;
+        error_page 502 = /error502grpc;
     }
-    server {
-        listen       8080 http2;
-        server_name  localhost;
-        location / {
-            grpc_pass grpc://grpc_servers;
-            error_page 502 = /error502grpc;
-        }
 
-        location = /error502grpc {
-            internal;
-            default_type application/grpc;
-            add_header grpc-status 14;
-            add_header grpc-message "unavailable";
-            return 204;
-        }
+    location = /error502grpc {
+        internal;
+        default_type application/grpc;
+        add_header grpc-status 14;
+        add_header grpc-message "unavailable";
+        return 204;
     }
 }
 ```
+
+####    TLS 终结配置（gRPCS）
+
+生产环境通常需要 TLS 加密。Nginx 可以作为 TLS 终结点，客户端通过 TLS 连接 Nginx，Nginx 以明文方式转发到后端 gRPC 服务：
+
+```text
+upstream grpc_servers {
+    server 127.0.0.1:10006;
+    server 127.0.0.1:10007;
+}
+
+server {
+    listen       443 ssl http2;
+    server_name  grpc.example.com;
+
+    ssl_certificate     /etc/nginx/ssl/server.crt;
+    ssl_certificate_key /etc/nginx/ssl/server.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    location / {
+        grpc_pass grpc://grpc_servers;
+    }
+}
+```
+
+如果后端 gRPC 服务本身也启用了 TLS，则使用 `grpcs://` 协议：
+
+```text
+location / {
+    grpc_pass grpcs://grpc_servers;
+}
+```
+
+####    gRPC 健康检查
+
+Nginx 开源版本不支持主动健康检查，但可通过 `proxy_next_upstream` 的等价机制 `grpc_next_upstream` 实现被动容错：
+
+```text
+location / {
+    grpc_pass grpc://grpc_servers;
+    grpc_next_upstream error timeout;
+    grpc_next_upstream_timeout 5s;
+    grpc_next_upstream_tries 2;
+}
+```
+
+如需主动健康检查，可以考虑 Nginx Plus（商业版）或使用 [gRPC Health Checking Protocol](https://github.com/grpc/grpc/blob/master/doc/health-checking.md) 配合外部脚本实现
 
 ##  0x06  Nginx 配置中的resolver
 
@@ -504,12 +705,17 @@ server {
 
 ##	0x08	参考
 -	[nginx 平滑的基于权重轮询算法分析](https://tenfy.cn/2018/11/12/smooth-weighted-round-robin/)
+-   [Upstream: smooth weighted round-robin balancing（Nginx commit）](https://github.com/phusion/nginx/commit/27e94984486058d73157038f7950a0a36ecc6e35)
 -   [加权轮询策略剖析](http://blog.csdn.net/xiajun07061225/article/details/9318871)
 -   [解析 Nginx 负载均衡策略](http://www.cnblogs.com/wpjamer/articles/6443332.html)
 -   [Nginx 做负载均衡器以及 Proxy 缓存配置](https://mp.weixin.qq.com/s?__biz=MzA3MzYwNjQ3NA==&mid=401736802&idx=1&sn=9508d9a05b725c66a05e05d8dad6dec1#rd)
 -   [nginx的proxy_next_upstream使用中的一个坑](https://zhuanlan.zhihu.com/p/35803906)
+-   [proxy_next_upstream 官方文档](http://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_next_upstream)
 -   [How To Set Up Nginx Load Balancing with SSL Termination](https://www.digitalocean.com/community/tutorials/how-to-set-up-nginx-load-balancing-with-ssl-termination)
-- [nginx中resolver参数配置解释](https://www.rootop.org/pages/4307.html)
-- [Nginx resolver address from /etc/resolv.conf](https://serverfault.com/questions/638822/nginx-resolver-address-from-etc-resolv-conf)
+-   [Introducing gRPC Support with NGINX 1.13.10](https://www.nginx.com/blog/nginx-1-13-10-grpc/)
+-   [gRPC Health Checking Protocol](https://github.com/grpc/grpc/blob/master/doc/health-checking.md)
+-   [Kubernetes Nginx Ingress Controller](https://kubernetes.github.io/ingress-nginx/)
+-   [nginx中resolver参数配置解释](https://www.rootop.org/pages/4307.html)
+-   [Nginx resolver address from /etc/resolv.conf](https://serverfault.com/questions/638822/nginx-resolver-address-from-etc-resolv-conf)
 
 转载请注明出处，本文采用 [CC4.0](http://creativecommons.org/licenses/by-nc-nd/4.0/) 协议授权
