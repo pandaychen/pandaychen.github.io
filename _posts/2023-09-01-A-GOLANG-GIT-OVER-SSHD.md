@@ -24,6 +24,13 @@ git 目前主要支持的网络协议有如下三种：
 
 无论上述哪种协议，拉取实质上都是 `git-fetch-pack`/`git-upload-pack` 的数据交换，推送都是 `git-send-pack`/`git-receive-pack` 的数据交换。更详细的介绍可以参考：[传输协议](https://iissnan.com/progit/html/zh/ch9_6.html)
 
+下面简要介绍下各协议的核心原理：
+
+| 命令方向 | 客户端 | 服务端 | 说明 |
+|---------|--------|--------|------|
+| Fetch/Clone | `git-fetch-pack` | `git-upload-pack` | 服务端将对象打包发给客户端 |
+| Push | `git-send-pack` | `git-receive-pack` | 客户端将对象打包发给服务端 |
+
 #### 1、HTTP（Dump 哑协议）
 Git 哑协议仅需要一个标准的 HTTP 静态文件服务（能够提供文件的下载即可），Git 客户端会自动进行文件的遍历和拉取。无论是哑协议还是智能协议，Git 在使用 HTTP 协议进行 `Fetch` 操作的时候，总是要先获取 `info/refs` 文件（地址为 `.git/info/refs`，可通过 `git update-server-info` 生成）；可以配置 Git 服务端的 `post-receive` 钩子自动执行 `update-server-info` 更新
 
@@ -80,7 +87,8 @@ HTTP 智能协议与 [哑协议](https://xie.infoq.cn/article/ae4a65148cc85dd155
 Git HTTP 协议要求操作前必须先执行引用发现（即需要知道服务端的各个引用的版本信息），这样的话才能让服务端或者客户端知道两方之间的差异以及需要什么样的数据。
 
 1、引用发现 <br>
-智能协议的的服务端是动态服务器，能够根据期望来提供相关的引用信息，通过抓包看到客户端请求的数据以及 git 服务端返回的引用信息格式，如下：
+
+智能协议的服务端是动态服务器，能够根据期望来提供相关的引用信息，通过抓包看到客户端请求的数据以及 git 服务端返回的引用信息格式，如下：
 
 ```TEXT
 # 请求体
@@ -122,12 +130,12 @@ Transfer-Encoding: chunked
 
 `pkt-line` 协议格式定义如下：
 
-1.	客户端需要验证第一首行的 `4` 个字符符合正则 `^[0-9a-f]{4}#`，这里的四个字符是代表后面内容的长度
-2.	客户端需要验证第一行是# `service=$servicename`
+1.	客户端需要验证首行的 `4` 个字符符合正则 `^[0-9a-f]{4}#`，这里的四个字符是代表后面内容的长度
+2.	客户端需要验证第一行是 `# service=$servicename`
 3.	服务端得保证每一行结尾需要包含一个 `LF` 换行符
 4.	服务端需要以 `0000` 标识结束本次请求响应
 
-可以通过 git 命令行 `git upload-pack --stateless-rpc --advertise-refs .` 获取某个 repo 下面的 `info/refs` 的 `pkt-line` 格式 `：
+可以通过 git 命令行 `git upload-pack --stateless-rpc --advertise-refs .` 获取某个 repo 下面的 `info/refs` 的 `pkt-line` 格式：
 
 ```txt
 [root@VM_120_245_centos /tmp/gogs]# git upload-pack --stateless-rpc --advertise-refs .
@@ -142,7 +150,7 @@ Transfer-Encoding: chunked
 004e8c21874c00b6100d46b662f65baeb40647442f42 refs/remotes/origin/release/0.13
 003db3757e424ffc47f7ae07d8fecd9f2ecf98f20679 refs/tags/v0.10
 ......
-0000 vv
+0000
 ```
 
 `upload-pack` 是用来发送对象给客户端的一个远程调用模块，通过此指令，能够快速拿到当前的引用状态并退出，需要在服务端的裸仓库目录执行就可以直接拿到最新的引用信息，模拟实现的代码如下：
@@ -156,7 +164,7 @@ func handleRefs(w http.ResponseWriter, r *http.Request) {
 	service := r.FormValue("service")
 	pFirst := fmt.Sprintf("# service=%s\n", service) // 本示例仅处理 protocol v1
 
-	handleRefsHeader(&amp;w, service) // Headers 处理
+	handleRefsHeader(&w, service) // Headers 处理
 
 	//call git command
 	cmdRefs := exec.Command("git", service[4:], "--stateless-rpc", "--advertise-refs", repoPath)
@@ -213,7 +221,7 @@ func processPack(w http.ResponseWriter, r *http.Request) {
 	repoPath := fmt.Sprintf("%s%s", *repoRoot, repoName)
 	service := vars["service"]
 
-	handlePackHeader(&amp;w, service)
+	handlePackHeader(&w, service)
 
 	// 启动一个进程，通过标准输入输出进行数据交换
 	cmdPack := exec.Command("git", service[4:], "--stateless-rpc", repoPath)
@@ -277,37 +285,67 @@ func exitSession(conn net.Conn, err error) {
 
 SSH 协议的下载地址一般是 `git@xxx.com:username/xxxx-repo.git` 形式，在执行 `clone` 或者 `push` 的时候，会拆解成下面指令：
 
-```BASH
-ssh username@xxx.com "git-upload-pack'/xxxx-repo.git'"
+```bash
+ssh git@xxx.com "git-upload-pack 'username/xxxx-repo.git'"
 ```
 
+需要注意的是，`git-upload-pack` 和仓库路径之间有空格，仓库路径用单引号括起来。SSH 在这里充当的角色是**安全传输通道**，实际的 git 数据交换仍然是通过 `upload-pack` 和 `receive-pack` 完成的
+
 ##	0x01  原理
-Git over SSH 的原理是通过 SSH 协议来进行安全的远程访问和数据传输。git 借用了 ssh 的 Channel 中的 `exec` Request 类型，通过封装自己的核心 `git` 指令，来完成客户端与服务端的 [git 指令](https://github.com/pandaychen/gogs/blob/main/internal/cmd/serv.go#L129) 交互，重点是下面 `3` 个：
+Git over SSH 的原理是通过 SSH 协议来进行安全的远程访问和数据传输。git 借用了 ssh 的 Channel 中的 `exec` Request 类型，通过封装自己的核心 `git` 指令，来完成客户端与服务端的 [git 指令](https://github.com/gogs/gogs/blob/v0.14.2/internal/cmd/serv.go#L129) 交互，重点是下面 `3` 个：
 
-- `git-upload-pack`：https://git-scm.com/docs/git-upload-pack
-- `git-upload-archive`
-- `git-receive-pack`
+- `git-upload-pack`：服务端发送对象给客户端，用于 `clone`/`fetch`/`pull` 操作，参考 [git-upload-pack](https://git-scm.com/docs/git-upload-pack)
+- `git-upload-archive`：服务端发送归档（archive）给客户端，用于 `git archive --remote` 操作
+- `git-receive-pack`：服务端接收客户端推送的对象，用于 `push` 操作，参考 [git-receive-pack](https://git-scm.com/docs/git-receive-pack)
 
-上面这几个是 git 的低级命令（不建议使用），这几个命令封装了 git 工具的权限处理，内部 api 调用，git 上传 / 下载等操作（** 核心 **）
+上面这几个是 git 的低级命令（plumbing commands），这几个命令封装了 git 工具的权限处理，内部 api 调用，git 上传/下载等操作（**核心**）
 
-可以回想，一般 git ssh 支持需要客户端配置 ssh-keys 来辅助身份验证，原理是 git 利用了 ssh 的 `authorized_keys` 配合 `forced_command` 实现机制：
-1.  利用 `authorized_keys` 来验证 git 客户端身份
-2.  建立 ssh 连接后，使用 `forced_command` 机制来限制客户端仅仅调用 git 限制的指令
+可以回想，一般 git ssh 支持需要客户端配置 ssh-keys 来辅助身份验证，原理是**git 利用了 ssh 的 `authorized_keys` 配合 `forced_command` 实现机制**：
+1.  利用 `authorized_keys` 来验证 git 客户端身份（公钥认证）
+2.  建立 ssh 连接后，使用 `forced_command` 机制来限制客户端仅仅调用 git 限定的指令（而非获得一个 shell）
 3.  操作完成后，ssh 连接退出
-``
+
 通常上面的 `forced_command`，在 git 中也称为 `git-shell`
 
+整个 Git over SSH 的交互流程如下：
+
+```mermaid
+sequenceDiagram
+    participant Client as Git Client
+    participant SSH as SSH Layer
+    participant FC as Forced Command
+    participant Git as Git Backend
+
+    Client->>SSH: ssh git@server "git-upload-pack 'user/repo.git'"
+    SSH->>SSH: Public Key Authentication
+    SSH->>FC: Execute forced command with SSH_ORIGINAL_COMMAND
+    FC->>FC: Parse command, verify permissions
+    FC->>Git: exec git-upload-pack /path/to/repo.git
+    Git-->>FC: refs + pack data (stdout)
+    FC-->>SSH: Forward stdout
+    SSH-->>Client: Encrypted data stream
+    Client->>SSH: want/have negotiation (stdin)
+    SSH->>FC: Forward stdin
+    FC->>Git: Forward to git process stdin
+    Git-->>FC: Pack data (stdout)
+    FC-->>SSH: Forward stdout
+    SSH-->>Client: Encrypted pack data
+```
+
 ####  Git with OpenSSH
-在 OpenSSH 的 `sshd_config` 中有一些关键配置项 `AuthorizedKeysFile` 和 `AuthorizedKeysCommand`。Git SSH 的鉴权 / 执行一般过程如下：
+在 OpenSSH 的 `sshd_config` 中有一些关键配置项 `AuthorizedKeysFile` 和 `AuthorizedKeysCommand`。Git SSH 的鉴权/执行一般过程如下：
 
 ```text
 git pull/push over ssh -> gitlab-shell -> API call to gitlab-rails (Authorization) -> accept or decline -> execute git command
 ```
 
+`AuthorizedKeysCommand` 可以配置一个外部命令，在每次 SSH 认证时动态查询公钥（适用于大规模用户场景，避免单一 `authorized_keys` 文件过大），而 `forced_command` 则通过 `authorized_keys` 文件中的 `command=` 前缀来实现
+
 ##  0x02  常用实现的 git-shell
 列举下几款开源 git server 实现中的 `forced_command` 格式，注意，这个 `command` 需要满足如下几点：
-1.  实现对应的 git 指令功能
-2.  对接 ssh 客户端的 input/output
+1.  实现对应的 git 指令功能（`upload-pack`/`receive-pack`/`upload-archive`）
+2.  对接 ssh 客户端的 input/output（stdin/stdout 桥接）
+3.  完成鉴权检查（用户是否有权限操作目标仓库）
 
 ####  gitlab
 
@@ -318,10 +356,10 @@ command="/opt/gitlab/embedded/service/gitlab-shell/bin/gitlab-shell key-<db key 
 ####  gogs
 
 ```BASH
-_TPL_PUBLICK_KEY = `command="%s serv key-%d --config='%s'",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty %s` +"\n"\
+command="%s serv key-%d --config='%s'",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty %s
 ```
 
-上述 command 本质上是 gops 实现的 `serv` 指令：
+上述 command 本质上是 gogs 实现的 `serv` 指令（来源：[`internal/database/ssh_key.go`](https://github.com/gogs/gogs/blob/v0.14.2/internal/database/ssh_key.go#L28)）实现：
 
 ![serv](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/master/blog_img/git/gogs/gogs_client_serv_1.png)
 
@@ -331,13 +369,923 @@ _TPL_PUBLICK_KEY = `command="%s serv key-%d --config='%s'",no-port-forwarding,no
 command="PATH=$PATH:/usr/local/git/bin && /data/www/codefever-community/ssh-gateway/shell/main $SSH_ORIGINAL_COMMAND 00000000000000000000000000000000",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty <ssh public key>
 ```
 
+这些 `authorized_keys` 条目中的 `no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty` 选项是安全加固措施，确保 SSH 连接只能用于 git 操作，不能进行端口转发、X11 转发、agent 转发或申请伪终端
+
 ##  0x03  git over ssh：前置知识
 本小节介绍 Git over SSH Server 技术细节。Git SSH Server 与 SSH Server 的主要区别是，Git SSH Server 只是一个严格的子集，session 阶段只需要实现 `env` 和 `exec` 两种请求即可，不需要完整实现如 `shell`、`pty-req` 等请求。
 
-##  0x03  gogs ：git over sshd 分析
+具体来说，一个 Git SSH Server 需要处理的请求类型：
 
+| 请求类型 | 说明 | 是否必须 |
+|---------|------|---------|
+| `env` | 客户端设置环境变量（如 `GIT_PROTOCOL`），只需 accept 即可 | 是 |
+| `exec` | 客户端发送要执行的命令（如 `git-upload-pack 'user/repo.git'`） | 是 |
+| `shell` | 交互式 shell | 否 |
+| `pty-req` | 请求伪终端 | 否 |
 
-##	0x04	gitlab shell 原理
+SSH Channel 的数据流桥接是实现 Git over SSH 的核心：将 SSH Channel 的 stdin/stdout 与 git 子进程的 stdin/stdout 通过 `io.Copy` 双向连接起来，使得 git 客户端和服务端的 git 进程可以直接通过 SSH 加密通道进行 `pkt-line` 数据交换
+
+##  0x04  Gogs 深入分析：运行架构与 SSH 实现
+
+[Gogs](https://github.com/gogs/gogs)（Go Git Service）是一款用 Go 语言编写的轻量级自托管 Git 服务。本节基于 [Gogs v0.14.2](https://github.com/gogs/gogs/tree/v0.14.2) 源码，深入分析其 SSH Git 通信的实现
+
+####  Gogs 整体架构
+
+Gogs 的入口文件 [`gogs.go`](https://github.com/gogs/gogs/blob/v0.14.2/gogs.go) 注册了多个 CLI 子命令：
+
+```go
+// gogs.go - 入口文件
+func main() {
+	app := cli.NewApp()
+	app.Name = "Gogs"
+	app.Usage = "A painless self-hosted Git service"
+	app.Version = conf.App.Version
+	app.Commands = []cli.Command{
+		cmd.Web,    // Web 服务（HTTP Git + Web UI）
+		cmd.Serv,   // SSH forced command（核心）
+		cmd.Hook,   // Git 钩子回调
+		cmd.Cert,   // 证书管理
+		cmd.Admin,  // 管理命令
+		cmd.Import,
+		cmd.Backup,
+		cmd.Restore,
+	}
+	if err := app.Run(os.Args); err != nil {
+		log.Fatal("Failed to start application: %v", err)
+	}
+}
+```
+
+其中与 Git over SSH 直接相关的是 `cmd.Serv`（forced command）、`cmd.Hook`（git 钩子）以及内置 SSH 服务器模块 `internal/ssh/ssh.go`
+
+```mermaid
+graph TB
+    subgraph GogsProcess ["Gogs 进程"]
+        Web["cmd.Web<br/>HTTP Server + Web UI"]
+        BuiltinSSH["internal/ssh<br/>内置 SSH Server"]
+    end
+
+    subgraph ExternalSSH ["外部 OpenSSH"]
+        SSHD["OpenSSH sshd"]
+        AuthKeys["~/.ssh/authorized_keys"]
+    end
+
+    subgraph ForcedCmd ["Forced Command 子进程"]
+        Serv["cmd.Serv<br/>gogs serv key-{ID}"]
+        Hook["cmd.Hook<br/>gogs hook pre-receive/update/post-receive"]
+    end
+
+    subgraph GitBackend ["Git 后端"]
+        UploadPack["git-upload-pack"]
+        ReceivePack["git-receive-pack"]
+        BareRepo["裸仓库<br/>/data/gogs-repositories/"]
+    end
+
+    Client["Git 客户端"] -->|"ssh git@server"| SSHD
+    Client -->|"ssh git@server"| BuiltinSSH
+    SSHD --> AuthKeys
+    AuthKeys -->|"command=gogs serv"| Serv
+    BuiltinSSH -->|"exec: spawn gogs serv"| Serv
+    Serv -->|"验证权限后 exec"| UploadPack
+    Serv -->|"验证权限后 exec"| ReceivePack
+    UploadPack --> BareRepo
+    ReceivePack --> BareRepo
+    ReceivePack -->|"触发 hooks"| Hook
+```
+
+####  两种 SSH 运行模式
+
+Gogs 支持两种 SSH 运行模式，通过配置项 `START_SSH_SERVER` 切换（定义于 [`internal/conf/static.go`](https://github.com/gogs/gogs/blob/v0.14.2/internal/conf/static.go)）：
+
+```go
+// internal/conf/static.go - SSH 配置结构体
+type SSHOpts struct {
+	Disabled                     bool   `ini:"DISABLE_SSH"`
+	Domain                       string `ini:"SSH_DOMAIN"`
+	Port                         int    `ini:"SSH_PORT"`
+	RootPath                     string `ini:"SSH_ROOT_PATH"`
+	KeygenPath                   string `ini:"SSH_KEYGEN_PATH"`
+	KeyTestPath                  string `ini:"SSH_KEY_TEST_PATH"`
+	MinimumKeySizeCheck          bool
+	MinimumKeySizes              map[string]int `ini:"-"`
+	RewriteAuthorizedKeysAtStart bool
+
+	StartBuiltinServer bool     `ini:"START_SSH_SERVER"`          // 是否启用内置 SSH
+	ListenHost         string   `ini:"SSH_LISTEN_HOST"`
+	ListenPort         int      `ini:"SSH_LISTEN_PORT"`
+	ServerCiphers      []string `ini:"SSH_SERVER_CIPHERS"`
+	ServerMACs         []string `ini:"SSH_SERVER_MACS"`
+	ServerAlgorithms   []string `ini:"SSH_SERVER_ALGORITHMS"`
+}
+```
+
+**模式一：外部 OpenSSH 模式（默认）**
+
+当 `START_SSH_SERVER=false` 时，Gogs 依赖系统的 OpenSSH sshd。用户通过 Gogs Web 界面添加 SSH 公钥后，Gogs 将公钥写入 `~/.ssh/authorized_keys` 文件，每条公钥前附加 `command=` 前缀。关键代码在 [`internal/database/ssh_key.go`](https://github.com/gogs/gogs/blob/v0.14.2/internal/database/ssh_key.go)：
+
+```go
+// internal/database/ssh_key.go - authorized_keys 模板
+const (
+	tplPublicKey = `command="%s serv key-%d --config='%s'",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty %s` + "\n"
+)
+
+// AuthorizedString 生成 authorized_keys 格式的公钥行
+func (k *PublicKey) AuthorizedString() string {
+	return fmt.Sprintf(tplPublicKey, conf.AppPath(), k.ID, conf.CustomConf, k.Content)
+}
+```
+
+生成的 `authorized_keys` 条目示例如下：
+
+```bash
+command="/usr/local/bin/gogs serv key-1 --config='/data/gogs/custom/conf/app.ini'",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ssh-rsa AAAAB3NzaC1yc2EAAAA... user@host
+```
+
+当用户添加或删除公钥时，Gogs 会追加写入或重写整个 `authorized_keys` 文件：
+
+```go
+// internal/database/ssh_key.go - 追加公钥到 authorized_keys
+func appendAuthorizedKeysToFile(keys ...*PublicKey) error {
+	sshOpLocker.Lock()
+	defer sshOpLocker.Unlock()
+
+	fpath := filepath.Join(conf.SSH.RootPath, "authorized_keys")
+	f, err := os.OpenFile(fpath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	// 确保权限不超过 0600
+	if !conf.IsWindowsRuntime() {
+		fi, err := f.Stat()
+		if err != nil {
+			return err
+		}
+		if fi.Mode().Perm() > 0o600 {
+			if err = f.Chmod(0o600); err != nil {
+				return err
+			}
+		}
+	}
+	for _, key := range keys {
+		if _, err = f.WriteString(key.AuthorizedString()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+```
+
+**模式二：内置 SSH 服务器模式**
+
+当 `START_SSH_SERVER=true` 时，Gogs 使用 `golang.org/x/crypto/ssh` 库启动自己的 SSH 服务器，不再依赖外部 OpenSSH。此模式下不需要维护 `authorized_keys` 文件（参见 [`internal/conf/conf.go`](https://github.com/gogs/gogs/blob/v0.14.2/internal/conf/conf.go) 中 `SSH.RewriteAuthorizedKeysAtStart = false`）
+
+核心代码在 [`internal/ssh/ssh.go`](https://github.com/gogs/gogs/blob/v0.14.2/internal/ssh/ssh.go)，以下逐步解析：
+
+**1）SSH 服务器初始化（`Listen` 函数）**
+
+```go
+// internal/ssh/ssh.go - SSH 服务器启动入口
+func Listen(opts conf.SSHOpts, appDataPath string) {
+	config := &ssh.ServerConfig{
+		Config: ssh.Config{
+			Ciphers: opts.ServerCiphers,
+			MACs:    opts.ServerMACs,
+		},
+		// 公钥认证回调：在数据库中查找公钥
+		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			pkey, err := database.SearchPublicKeyByContent(
+				strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))))
+			if err != nil {
+				if !database.IsErrKeyNotExist(err) {
+					log.Error("SearchPublicKeyByContent: %v", err)
+				}
+				return nil, err
+			}
+			// 认证成功，将 key ID 存入 Extensions 供后续使用
+			return &ssh.Permissions{
+				Extensions: map[string]string{"key-id": com.ToStr(pkey.ID)},
+			}, nil
+		},
+	}
+
+	keys, err := setupHostKeys(appDataPath, opts.ServerAlgorithms)
+	if err != nil {
+		log.Fatal("SSH: Failed to setup host keys: %v", err)
+	}
+	for _, key := range keys {
+		config.AddHostKey(key)
+	}
+
+	go listen(config, opts.ListenHost, opts.ListenPort)
+}
+```
+
+`PublicKeyCallback` 是核心认证逻辑：将客户端提供的公钥序列化后在数据库中查找匹配记录，认证成功后将数据库中的 key ID 存入 `ssh.Permissions.Extensions["key-id"]`，供后续的 `handleServerConn` 使用
+
+**2）连接处理（`listen` 函数）**
+
+```go
+// internal/ssh/ssh.go - TCP 监听与 SSH 握手
+func listen(config *ssh.ServerConfig, host string, port int) {
+	listener, err := net.Listen("tcp", host+":"+com.ToStr(port))
+	if err != nil {
+		log.Fatal("Failed to start SSH server: %v", err)
+	}
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Error("SSH: Error accepting incoming connection: %v", err)
+			continue
+		}
+		// 每个连接在独立 goroutine 中处理握手，避免阻塞
+		go func() {
+			log.Trace("SSH: Handshaking for %s", conn.RemoteAddr())
+			sConn, chans, reqs, err := ssh.NewServerConn(conn, config)
+			if err != nil {
+				if err == io.EOF || errors.Is(err, syscall.ECONNRESET) {
+					log.Trace("SSH: Handshaking was terminated: %v", err)
+				} else {
+					log.Error("SSH: Error on handshaking: %v", err)
+				}
+				return
+			}
+			log.Trace("SSH: Connection from %s (%s)", sConn.RemoteAddr(), sConn.ClientVersion())
+			go ssh.DiscardRequests(reqs)
+			// 从 Permissions.Extensions 中取出 key-id，传给 channel 处理函数
+			go handleServerConn(sConn.Permissions.Extensions["key-id"], chans)
+		}()
+	}
+}
+```
+
+**3）Channel 请求处理（`handleServerConn` 函数，核心）**
+
+```go
+// internal/ssh/ssh.go - 处理 SSH Channel 和 Request
+func handleServerConn(keyID string, chans <-chan ssh.NewChannel) {
+	for newChan := range chans {
+		if newChan.ChannelType() != "session" {
+			_ = newChan.Reject(ssh.UnknownChannelType, "unknown channel type")
+			continue
+		}
+		ch, reqs, err := newChan.Accept()
+		if err != nil {
+			log.Error("Error accepting channel: %v", err)
+			continue
+		}
+		go func(in <-chan *ssh.Request) {
+			defer func() { _ = ch.Close() }()
+			for req := range in {
+				payload := cleanCommand(string(req.Payload))
+				switch req.Type {
+				case "env":
+					// Git 客户端可能会设置 GIT_PROTOCOL 等环境变量
+					// 这些不会影响后续命令，只需 accept
+				case "exec":
+					cmdName := strings.TrimLeft(payload, "'()")
+					log.Trace("SSH: Payload: %v", cmdName)
+
+					// 关键：启动 gogs serv 子进程
+					args := []string{"serv", "key-" + keyID, "--config=" + conf.CustomConf}
+					cmd := exec.Command(conf.AppPath(), args...)
+					cmd.Env = append(os.Environ(), "SSH_ORIGINAL_COMMAND="+cmdName)
+
+					stdout, err := cmd.StdoutPipe()
+					if err != nil { return }
+					stderr, err := cmd.StderrPipe()
+					if err != nil { return }
+					input, err := cmd.StdinPipe()
+					if err != nil { return }
+
+					if err = cmd.Start(); err != nil { return }
+					_ = req.Reply(true, nil)
+
+					// IO 桥接：SSH Channel <-> gogs serv 子进程
+					go func() {
+						_, _ = io.Copy(input, ch)  // channel stdin -> serv stdin
+						input.Close()
+					}()
+					_, _ = io.Copy(ch, stdout)          // serv stdout -> channel stdout
+					_, _ = io.Copy(ch.Stderr(), stderr)  // serv stderr -> channel stderr
+
+					if err = cmd.Wait(); err != nil { return }
+					// 发送退出状态
+					_, _ = ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+					return
+				default:
+				}
+			}
+		}(reqs)
+	}
+}
+```
+
+这里有几个关键设计要点：
+
+1. **不直接执行 git 命令**：`handleServerConn` 不直接执行 `git-upload-pack` 等命令，而是启动 `gogs serv` 子进程。这样做的目的是复用 `serv` 命令中的鉴权、日志等逻辑，无论是外部 OpenSSH 还是内置 SSH，都走同一套鉴权流程
+2. **通过环境变量传递命令**：将客户端实际发送的 git 命令通过 `SSH_ORIGINAL_COMMAND` 环境变量传给 `gogs serv`，与外部 OpenSSH 的 `forced_command` 机制保持一致
+3. **IO 桥接**：通过三对 `io.Copy` 将 SSH Channel 的 stdin/stdout/stderr 与 `gogs serv` 子进程的 stdin/stdout/stderr 双向连接
+4. **`cleanCommand` 函数**：从 SSH payload 中提取 git 命令部分（payload 前面可能有长度前缀等元数据）
+
+```go
+// internal/ssh/ssh.go
+func cleanCommand(cmd string) string {
+	i := strings.Index(cmd, "git")
+	if i == -1 {
+		return cmd
+	}
+	return cmd[i:]
+}
+```
+
+####  serv 命令：Gogs 的 Forced Command 实现
+
+`gogs serv` 是整个 Git over SSH 的核心鉴权与调度模块，代码在 [`internal/cmd/serv.go`](https://github.com/gogs/gogs/blob/v0.14.2/internal/cmd/serv.go)。无论使用哪种 SSH 模式，最终都会执行 `gogs serv key-{ID}` 命令
+
+**命令定义**：
+
+```go
+// internal/cmd/serv.go
+var Serv = cli.Command{
+	Name:        "serv",
+	Usage:       "This command should only be called by SSH shell",
+	Description: `Serv provide access auth for repositories`,
+	Action:      runServ,
+	Flags: []cli.Flag{
+		stringFlag("config, c", "", "Custom configuration file path"),
+	},
+}
+```
+
+**`runServ` 核心流程**：
+
+```go
+// internal/cmd/serv.go - 核心鉴权与执行逻辑（关键片段）
+func runServ(c *cli.Context) error {
+	ctx := context.Background()
+	setup(c, "serv.log", true)
+
+	if conf.SSH.Disabled {
+		println("Gogs: SSH has been disabled")
+		return nil
+	}
+
+	if len(c.Args()) < 1 {
+		fail("Not enough arguments", "Not enough arguments")
+	}
+
+	// 步骤 1：从环境变量获取 git 客户端实际发送的命令
+	sshCmd := os.Getenv("SSH_ORIGINAL_COMMAND")
+	if sshCmd == "" {
+		println("Hi there, You've successfully authenticated, but Gogs does not provide shell access.")
+		println("If this is unexpected, please log in with password and setup Gogs under another user.")
+		return nil
+	}
+
+	// 步骤 2：解析命令和仓库路径
+	verb, args := parseSSHCmd(sshCmd)
+	repoFullName := strings.ToLower(strings.Trim(args, "'"))
+	repoFields := strings.SplitN(repoFullName, "/", 2)
+	if len(repoFields) != 2 {
+		fail("Invalid repository path", "Invalid repository path: %v", args)
+	}
+	ownerName := strings.ToLower(repoFields[0])
+	repoName := strings.TrimSuffix(strings.ToLower(repoFields[1]), ".git")
+	repoName = strings.TrimSuffix(repoName, ".wiki")
+
+	// 步骤 3：查询仓库所有者和仓库信息
+	owner, err := database.Handle.Users().GetByUsername(ctx, ownerName)
+	if err != nil { /* 错误处理 */ }
+	repo, err := database.GetRepositoryByName(owner.ID, repoName)
+	if err != nil { /* 错误处理 */ }
+	repo.Owner = owner
+
+	// 步骤 4：根据 git 命令确定所需权限
+	requestMode, ok := allowedCommands[verb]
+	if !ok {
+		fail("Unknown git command", "Unknown git command '%s'", verb)
+	}
+
+	// 步骤 5：权限检查
+	// ...（省略详细鉴权逻辑，见下文）
+
+	// 步骤 6：构造并执行 git 命令
+	var gitCmd *exec.Cmd
+	verbs := strings.Split(verb, " ")
+	if len(verbs) == 2 {
+		gitCmd = exec.Command(verbs[0], verbs[1], repoFullName)
+	} else {
+		gitCmd = exec.Command(verb, repoFullName)
+	}
+	// 写操作需要设置 Hook 环境变量
+	if requestMode == database.AccessModeWrite {
+		gitCmd.Env = append(os.Environ(), database.ComposeHookEnvs(database.ComposeHookEnvsOptions{
+			AuthUser:  user,
+			OwnerName: owner.Name,
+			OwnerSalt: owner.Salt,
+			RepoID:    repo.ID,
+			RepoName:  repo.Name,
+			RepoPath:  repo.RepoPath(),
+		})...)
+	}
+	gitCmd.Dir = conf.Repository.Root
+	gitCmd.Stdout = os.Stdout  // serv 的 stdout -> SSH Channel
+	gitCmd.Stdin = os.Stdin    // SSH Channel -> serv 的 stdin
+	gitCmd.Stderr = os.Stderr  // serv 的 stderr -> SSH Channel
+	if err = gitCmd.Run(); err != nil {
+		fail("Internal error", "Failed to execute git command: %v", err)
+	}
+	return nil
+}
+```
+
+**`allowedCommands` 映射表**决定了哪些 git 命令被允许以及需要什么权限级别：
+
+```go
+// internal/cmd/serv.go
+var allowedCommands = map[string]database.AccessMode{
+	"git-upload-pack":    database.AccessModeRead,   // clone/fetch/pull
+	"git-upload-archive": database.AccessModeRead,   // archive
+	"git-receive-pack":   database.AccessModeWrite,  // push
+}
+```
+
+**`parseSSHCmd` 命令解析**：
+
+```go
+// internal/cmd/serv.go
+func parseSSHCmd(cmd string) (string, string) {
+	ss := strings.SplitN(cmd, " ", 2)
+	if len(ss) != 2 {
+		return "", ""
+	}
+	return ss[0], strings.Replace(ss[1], "'/", "'", 1)
+}
+```
+
+例如输入 `git-upload-pack 'user/repo.git'`，解析结果为 `verb="git-upload-pack"`, `args="user/repo.git"`
+
+**鉴权流程**的核心逻辑如下（简化）：
+
+```go
+// internal/cmd/serv.go - 权限验证（简化版）
+// 从命令行参数获取 key ID
+key, err := database.GetPublicKeyByID(com.StrTo(strings.TrimPrefix(c.Args()[0], "key-")).MustInt64())
+
+if requestMode == database.AccessModeWrite || repo.IsPrivate {
+	if key.IsDeployKey() {
+		// Deploy Key 权限检查
+		if key.Mode < requestMode {
+			fail("Key permission denied", "Cannot push with deployment key: %d", key.ID)
+		}
+		checkDeployKey(key, repo)
+	} else {
+		// 普通用户 Key 权限检查
+		user, err = database.Handle.Users().GetByKeyID(ctx, key.ID)
+		mode := database.Handle.Permissions().AccessMode(ctx, user.ID, repo.ID,
+			database.AccessModeOptions{
+				OwnerID: repo.OwnerID,
+				Private: repo.IsPrivate,
+			},
+		)
+		if mode < requestMode {
+			fail(accessDeniedMessage, "...")
+		}
+	}
+} else {
+	// 公开仓库的读操作允许匿名访问
+	if key.IsDeployKey() && conf.Auth.RequireSigninView {
+		checkDeployKey(key, repo)
+	}
+}
+```
+
+鉴权逻辑的判断顺序：
+1. 写操作或私有仓库 -> 必须验证用户身份和权限
+2. Deploy Key -> 检查该 Key 是否属于目标仓库且权限足够
+3. 用户 Key -> 通过 Key ID 找到用户，检查用户对仓库的访问权限
+4. 公开仓库的读操作 -> 允许匿名访问（除非配置了 `RequireSigninView`）
+5. 镜像仓库 -> 禁止写操作
+
+##  0x05  Gogs 深入分析：git clone / push / pull 全链路解读
+
+本节结合 Gogs 的实现源码，详细追踪 `git clone`、`git push`、`git pull` 命令通过 SSH 通道的完整执行链路
+
+####  git clone 全链路
+
+当用户执行 `git clone git@server:user/repo.git` 时，完整链路如下：
+
+```mermaid
+sequenceDiagram
+    participant C as git client
+    participant SSH as SSH Server
+    participant Serv as gogs serv
+    participant UP as git-upload-pack
+    participant Repo as 裸仓库
+
+    C->>SSH: ssh git@server "git-upload-pack 'user/repo.git'"
+    SSH->>SSH: PublicKeyCallback 认证
+    Note over SSH: Extensions["key-id"] = "42"
+
+    alt 内置 SSH 模式
+        SSH->>Serv: exec.Command("gogs", "serv", "key-42")<br/>env: SSH_ORIGINAL_COMMAND=git-upload-pack 'user/repo.git'
+    else 外部 OpenSSH 模式
+        SSH->>Serv: forced command 触发<br/>env: SSH_ORIGINAL_COMMAND=git-upload-pack 'user/repo.git'
+    end
+
+    Serv->>Serv: parseSSHCmd() -> verb=git-upload-pack
+    Serv->>Serv: allowedCommands -> AccessModeRead
+    Serv->>Serv: 查询 owner/repo, 验证权限
+
+    Serv->>UP: exec.Command("git-upload-pack", "user/repo.git")
+    UP->>Repo: 读取引用和对象
+
+    UP-->>C: refs list (pkt-line)
+    C-->>UP: want/have 协商
+    UP->>Repo: 计算最小 pack
+    UP-->>C: pack 数据流
+
+    Note over C: 解压 pack, checkout 工作目录
+```
+
+**步骤详解**：
+
+1. **Git 客户端**：`git clone` 内部调用 `ssh git@server "git-upload-pack 'user/repo.git'"`
+2. **SSH 认证**：内置模式通过 `PublicKeyCallback` 在数据库查找公钥；外部模式通过 OpenSSH 的 `authorized_keys` 匹配
+3. **启动 serv**：无论哪种模式，都启动 `gogs serv key-{ID}` 子进程，git 命令通过 `SSH_ORIGINAL_COMMAND` 环境变量传入
+4. **命令解析**：`parseSSHCmd` 将 `git-upload-pack 'user/repo.git'` 解析为 verb 和 repo path
+5. **权限校验**：`allowedCommands` 确定 `git-upload-pack` 需要 `AccessModeRead`，对公开仓库允许匿名读取
+6. **执行 git 命令**：`exec.Command("git-upload-pack", "user/repo.git")` 在仓库根目录执行，stdin/stdout 桥接回 SSH 通道
+7. **数据交换**：`git-upload-pack` 先返回 refs 列表，客户端发送 want/have 协商请求，服务端计算并返回 pack 数据
+
+在 `serv.go` 中关键的 IO 桥接代码：
+
+```go
+// internal/cmd/serv.go - git 命令执行与 IO 桥接
+gitCmd.Dir = conf.Repository.Root
+gitCmd.Stdout = os.Stdout  // git-upload-pack stdout -> serv stdout -> SSH Channel -> git client
+gitCmd.Stdin = os.Stdin    // git client -> SSH Channel -> serv stdin -> git-upload-pack stdin
+gitCmd.Stderr = os.Stderr
+if err = gitCmd.Run(); err != nil {
+	fail("Internal error", "Failed to execute git command: %v", err)
+}
+```
+
+由于 `gogs serv` 本身的 stdin/stdout 已经被 SSH Channel 桥接（无论是内置 SSH 模式的 `io.Copy` 还是外部 OpenSSH 的天然 IO 重定向），所以这里直接将 git 命令的 IO 指向 `os.Stdin`/`os.Stdout` 即可形成完整的数据通路
+
+####  git push 全链路
+
+当用户执行 `git push origin master` 时：
+
+```mermaid
+sequenceDiagram
+    participant C as git client
+    participant SSH as SSH Server
+    participant Serv as gogs serv
+    participant RP as git-receive-pack
+    participant Hook as gogs hook
+    participant DB as Database
+    participant Repo as 裸仓库
+
+    C->>SSH: ssh git@server "git-receive-pack 'user/repo.git'"
+    SSH->>Serv: gogs serv key-{ID}<br/>SSH_ORIGINAL_COMMAND=git-receive-pack 'user/repo.git'
+
+    Serv->>Serv: allowedCommands -> AccessModeWrite
+    Serv->>DB: 验证用户写权限
+    Serv->>Serv: ComposeHookEnvs() 设置 Hook 环境变量
+
+    Serv->>RP: exec git-receive-pack (with hook envs)
+    RP-->>C: refs list
+    C-->>RP: pack data (对象流)
+    RP->>Repo: 写入对象
+
+    RP->>Hook: 触发 pre-receive hook
+    Hook->>DB: 检查分支保护规则
+    Hook-->>RP: accept/reject
+
+    RP->>Repo: 更新引用
+    RP->>Hook: 触发 update hook
+    RP->>Hook: 触发 post-receive hook
+    Hook->>DB: PushUpdate (更新活动记录)
+    Hook->>Serv: 触发 Webhook / 邮件通知
+
+    RP-->>C: 推送结果
+```
+
+与 clone 的关键区别在于：
+
+**1）写权限校验更严格**：
+
+```go
+// internal/cmd/serv.go - push 需要 AccessModeWrite
+requestMode, ok := allowedCommands[verb]  // "git-receive-pack" -> AccessModeWrite
+
+// 禁止向镜像仓库推送
+if requestMode > database.AccessModeRead && repo.IsMirror {
+	fail("Mirror repository is read-only", "")
+}
+```
+
+**2）设置 Hook 环境变量**：
+
+Push 操作时，`serv` 会通过 `ComposeHookEnvs` 设置一系列环境变量，供 git hooks 使用：
+
+```go
+// internal/database/repo_editor.go - Hook 环境变量
+const (
+	EnvAuthUserID          = "GOGS_AUTH_USER_ID"
+	EnvAuthUserName        = "GOGS_AUTH_USER_NAME"
+	EnvAuthUserEmail       = "GOGS_AUTH_USER_EMAIL"
+	EnvRepoOwnerName       = "GOGS_REPO_OWNER_NAME"
+	EnvRepoOwnerSaltMd5    = "GOGS_REPO_OWNER_SALT_MD5"
+	EnvRepoID              = "GOGS_REPO_ID"
+	EnvRepoName            = "GOGS_REPO_NAME"
+	EnvRepoCustomHooksPath = "GOGS_REPO_CUSTOM_HOOKS_PATH"
+)
+
+func ComposeHookEnvs(opts ComposeHookEnvsOptions) []string {
+	envs := []string{
+		"SSH_ORIGINAL_COMMAND=1",
+		EnvAuthUserID + "=" + com.ToStr(opts.AuthUser.ID),
+		EnvAuthUserName + "=" + opts.AuthUser.Name,
+		EnvAuthUserEmail + "=" + opts.AuthUser.Email,
+		EnvRepoOwnerName + "=" + opts.OwnerName,
+		EnvRepoOwnerSaltMd5 + "=" + cryptoutil.MD5(opts.OwnerSalt),
+		EnvRepoID + "=" + com.ToStr(opts.RepoID),
+		EnvRepoName + "=" + opts.RepoName,
+		EnvRepoCustomHooksPath + "=" + filepath.Join(opts.RepoPath, "custom_hooks"),
+	}
+	return envs
+}
+```
+
+这些环境变量将传递给 `git-receive-pack` 进程，进而传递给 git hooks（`pre-receive`、`update`、`post-receive`）
+
+**3）Git Hooks 链**：
+
+Push 过程会依次触发三个 hooks，它们都是 `gogs hook` 子命令的不同子命令，代码在 [`internal/cmd/hook.go`](https://github.com/gogs/gogs/blob/v0.14.2/internal/cmd/hook.go)：
+
+**pre-receive hook**（推送前检查）：
+
+```go
+// internal/cmd/hook.go - pre-receive 钩子
+func runHookPreReceive(c *cli.Context) error {
+	if os.Getenv("SSH_ORIGINAL_COMMAND") == "" {
+		return nil  // 非 SSH/Hook 调用，跳过
+	}
+	setup(c, "pre-receive.log", true)
+
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		fields := bytes.Fields(scanner.Bytes())
+		if len(fields) != 3 { continue }
+		oldCommitID := string(fields[0])
+		newCommitID := string(fields[1])
+		branchName := git.RefShortName(string(fields[2]))
+
+		// 分支保护检查
+		repoID := com.StrTo(os.Getenv(database.EnvRepoID)).MustInt64()
+		protectBranch, err := database.GetProtectBranchOfRepoByName(repoID, branchName)
+		if err != nil { /* ... */ }
+
+		if protectBranch.Protected {
+			// 检查白名单
+			userID := com.StrTo(os.Getenv(database.EnvAuthUserID)).MustInt64()
+			if protectBranch.EnableWhitelist {
+				if !database.IsUserInProtectBranchWhitelist(repoID, userID, branchName) {
+					fail(fmt.Sprintf("Branch '%s' is protected and you are not in the push whitelist", branchName), "")
+				}
+			}
+			// 检查是否要求 Pull Request
+			if protectBranch.RequirePullRequest {
+				fail(fmt.Sprintf("Branch '%s' is protected and commits must be merged through pull request", branchName), "")
+			}
+			// 禁止删除受保护分支
+			if newCommitID == git.EmptyID {
+				fail(fmt.Sprintf("Branch '%s' is protected from deletion", branchName), "")
+			}
+			// 禁止 force push
+			output, err := git.NewCommand("rev-list", "--max-count=1", oldCommitID, "^"+newCommitID).
+				RunInDir(database.RepoPath(os.Getenv(database.EnvRepoOwnerName), os.Getenv(database.EnvRepoName)))
+			if len(output) > 0 {
+				fail(fmt.Sprintf("Branch '%s' is protected from force push", branchName), "")
+			}
+		}
+	}
+	// 执行自定义 hooks（如果存在）
+	// ...
+	return nil
+}
+```
+
+**post-receive hook**（推送后处理）：
+
+```go
+// internal/cmd/hook.go - post-receive 钩子（简化）
+func runHookPostReceive(c *cli.Context) error {
+	if os.Getenv("SSH_ORIGINAL_COMMAND") == "" { return nil }
+	setup(c, "post-receive.log", true)
+	email.NewContext()  // 初始化邮件服务
+
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		fields := bytes.Fields(scanner.Bytes())
+		if len(fields) != 3 { continue }
+
+		options := database.PushUpdateOptions{
+			OldCommitID:  string(fields[0]),
+			NewCommitID:  string(fields[1]),
+			FullRefspec:  string(fields[2]),
+			PusherID:     com.StrTo(os.Getenv(database.EnvAuthUserID)).MustInt64(),
+			PusherName:   os.Getenv(database.EnvAuthUserName),
+			RepoUserName: os.Getenv(database.EnvRepoOwnerName),
+			RepoName:     os.Getenv(database.EnvRepoName),
+		}
+		// 更新数据库中的推送记录（新 commits、活动动态等）
+		if err := database.PushUpdate(options); err != nil {
+			log.Error("PushUpdate: %v", err)
+		}
+		// 触发 Webhook 和测试 Pull Request 任务
+		reqURL := fmt.Sprintf("%s%s/%s/tasks/trigger?...",
+			conf.Server.LocalRootURL, options.RepoUserName, options.RepoName)
+		resp, err := httplib.Get(reqURL).SetTLSClientConfig(&tls.Config{
+			InsecureSkipVerify: true,
+		}).Response()
+		// ...
+	}
+	return nil
+}
+```
+
+post-receive hook 的职责包括：更新推送记录（`PushUpdate`）、触发 Webhook 通知、发送邮件通知、创建/更新 Pull Request 等
+
+####  git pull 全链路
+
+`git pull` 本质上是 `git fetch` + `git merge` 的组合命令：
+
+- **`git fetch`** 阶段：等同于 `git clone` 的数据传输过程，通过 `git-upload-pack` 从服务端获取新的对象和引用更新。区别在于 fetch 不是全量拉取，客户端会通过 `have` 行告知服务端已有的对象，服务端只返回差量 pack
+- **`git merge`** 阶段：完全在客户端本地执行，不涉及 SSH 通信
+
+因此从服务端的角度看，`git pull` 与 `git clone` 走的是同一条链路（`git-upload-pack`），权限要求也是 `AccessModeRead`
+
+####  git 命令与 Gogs 实现的映射关系
+
+| 用户命令 | SSH 实际命令 | Gogs 权限 | Gogs Hook 触发 | 说明 |
+|---------|-------------|-----------|---------------|------|
+| `git clone` | `git-upload-pack` | `AccessModeRead` | 无 | 完整克隆 |
+| `git fetch` | `git-upload-pack` | `AccessModeRead` | 无 | 增量拉取 |
+| `git pull` | `git-upload-pack` | `AccessModeRead` | 无 | fetch + 本地 merge |
+| `git push` | `git-receive-pack` | `AccessModeWrite` | pre-receive/update/post-receive | 推送变更 |
+| `git archive --remote` | `git-upload-archive` | `AccessModeRead` | 无 | 远程归档 |
+
+##  0x06  Gogs 的 HTTP Git 协议实现
+
+除了 SSH 协议，Gogs 也支持 HTTP(S) 协议进行 Git 操作。代码在 [`internal/route/repo/http.go`](https://github.com/gogs/gogs/blob/v0.14.2/internal/route/repo/http.go)。本节将其与 SSH 模式做对比分析
+
+####  HTTP Git 路由定义
+
+```go
+// internal/route/repo/http.go - HTTP Git 路由表
+var routes = []struct {
+	re      *lazyregexp.Regexp
+	method  string
+	handler func(serviceHandler)
+}{
+	{lazyregexp.New("(.*?)/git-upload-pack$"), "POST", serviceUploadPack},
+	{lazyregexp.New("(.*?)/git-receive-pack$"), "POST", serviceReceivePack},
+	{lazyregexp.New("(.*?)/info/refs$"), "GET", getInfoRefs},
+	{lazyregexp.New("(.*?)/HEAD$"), "GET", getTextFile},
+	{lazyregexp.New("(.*?)/objects/info/alternates$"), "GET", getTextFile},
+	{lazyregexp.New("(.*?)/objects/info/http-alternates$"), "GET", getTextFile},
+	{lazyregexp.New("(.*?)/objects/info/packs$"), "GET", getInfoPacks},
+	{lazyregexp.New("(.*?)/objects/info/[^/]*$"), "GET", getTextFile},
+	{lazyregexp.New("(.*?)/objects/[0-9a-f]{2}/[0-9a-f]{38}$"), "GET", getLooseObject},
+	{lazyregexp.New("(.*?)/objects/pack/pack-[0-9a-f]{40}\\.pack$"), "GET", getPackFile},
+	{lazyregexp.New("(.*?)/objects/pack/pack-[0-9a-f]{40}\\.idx$"), "GET", getIdxFile},
+}
+```
+
+可以看到 HTTP 模式同时支持智能协议（`git-upload-pack`、`git-receive-pack`）和哑协议（直接的对象文件访问）
+
+####  HTTP 认证中间件
+
+HTTP 模式的认证与 SSH 模式有本质区别——使用 HTTP Basic Auth 而非公钥认证：
+
+```go
+// internal/route/repo/http.go - HTTP 认证中间件（简化）
+func HTTPContexter(store Store) macaron.Handler {
+	return func(c *macaron.Context) {
+		ownerName := c.Params(":username")
+		repoName := strings.TrimSuffix(c.Params(":reponame"), ".git")
+
+		isPull := c.Query("service") == "git-upload-pack" ||
+			strings.HasSuffix(c.Req.URL.Path, "git-upload-pack") ||
+			c.Req.Method == "GET"
+
+		owner, err := store.GetUserByUsername(c.Req.Context(), ownerName)
+		repo, err := store.GetRepositoryByName(c.Req.Context(), owner.ID, repoName)
+
+		// 公开仓库的 Pull 操作不需要认证
+		if isPull && !repo.IsPrivate && !conf.Auth.RequireSigninView {
+			c.Map(&HTTPContext{Context: c})
+			return
+		}
+
+		// 需要认证：HTTP Basic Auth
+		authHead := c.Req.Header.Get("Authorization")
+		if authHead == "" {
+			askCredentials(c, http.StatusUnauthorized, "")
+			return
+		}
+		// 支持用户名/密码和 Access Token 两种认证方式
+		authUsername, authPassword, _ := tool.BasicAuthDecode(auths[1])
+		authUser, err := store.AuthenticateUser(ctx, authUsername, authPassword, -1)
+		if authUser == nil {
+			// 尝试用 Access Token 认证
+			authUser, err = context.AuthenticateByToken(store, ctx, authUsername)
+		}
+		// ...权限检查...
+	}
+}
+```
+
+####  HTTP Git RPC 实现
+
+引用发现（`getInfoRefs`）和数据传输（`serviceRPC`）的处理方式：
+
+```go
+// internal/route/repo/http.go - 引用发现
+func getInfoRefs(h serviceHandler) {
+	h.setHeaderNoCache()
+	service := getServiceType(h.r)
+	if service != "upload-pack" && service != "receive-pack" {
+		// 哑协议回退
+		updateServerInfo(h.dir)
+		h.sendFile("text/plain; charset=utf-8")
+		return
+	}
+	// 智能协议
+	refs := gitCommand(h.dir, service, "--stateless-rpc", "--advertise-refs", ".")
+	h.w.Header().Set("Content-Type", fmt.Sprintf("application/x-git-%s-advertisement", service))
+	h.w.WriteHeader(http.StatusOK)
+	_, _ = h.w.Write(packetWrite("# service=git-" + service + "\n"))
+	_, _ = h.w.Write([]byte("0000"))
+	_, _ = h.w.Write(refs)
+}
+
+// internal/route/repo/http.go - 数据传输 RPC
+func serviceRPC(h serviceHandler, service string) {
+	defer h.r.Body.Close()
+
+	if h.r.Header.Get("Content-Type") != fmt.Sprintf("application/x-git-%s-request", service) {
+		h.w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	h.w.Header().Set("Content-Type", fmt.Sprintf("application/x-git-%s-result", service))
+
+	var reqBody = h.r.Body
+	if h.r.Header.Get("Content-Encoding") == "gzip" {
+		reqBody, _ = gzip.NewReader(reqBody)
+	}
+
+	cmd := exec.Command("git", service, "--stateless-rpc", h.dir)
+	if service == "receive-pack" {
+		cmd.Env = append(os.Environ(), database.ComposeHookEnvs(database.ComposeHookEnvsOptions{
+			AuthUser:  h.authUser,
+			OwnerName: h.ownerName,
+			OwnerSalt: h.ownerSalt,
+			RepoID:    h.repoID,
+			RepoName:  h.repoName,
+			RepoPath:  h.dir,
+		})...)
+	}
+	cmd.Dir = h.dir
+	cmd.Stdout = h.w         // git stdout -> HTTP Response
+	cmd.Stdin = reqBody       // HTTP Request Body -> git stdin
+	cmd.Stderr = &stderr
+	if err = cmd.Run(); err != nil {
+		log.Error("HTTP.serviceRPC: fail to serve RPC '%s': %v", service, err)
+	}
+}
+```
+
+####  SSH vs HTTP 对比
+
+| 维度 | SSH 模式 | HTTP 模式 |
+|------|---------|----------|
+| 认证方式 | 公钥认证（`authorized_keys` 或 `PublicKeyCallback`） | HTTP Basic Auth（用户名/密码或 Access Token） |
+| 传输安全 | SSH 加密 | 依赖 HTTPS（HTTP 不安全） |
+| 协议特点 | 有状态长连接，传输更稳定 | 无状态 HTTP，每次操作需两次请求（引用发现 + 数据传输） |
+| git 命令参数 | 不需要 `--stateless-rpc` | 必须加 `--stateless-rpc` |
+| 鉴权入口 | `gogs serv`（forced command 子进程） | `HTTPContexter` 中间件 |
+| IO 桥接 | SSH Channel stdin/stdout <-> serv stdin/stdout <-> git stdin/stdout | HTTP Request Body -> git stdin, git stdout -> HTTP Response |
+| Hook 环境变量 | `ComposeHookEnvs`（写操作） | `ComposeHookEnvs`（写操作），逻辑完全一致 |
+| 2FA 支持 | 天然支持（公钥不受 2FA 影响） | 开启 2FA 后必须使用 Access Token |
+
+两种模式最终都通过 `exec.Command` 调用相同的 git 后端命令（`git-upload-pack` / `git-receive-pack`），并使用相同的 `ComposeHookEnvs` 设置 hook 环境变量。核心差异在于认证方式和传输层
+
+##  0x07	GitLab Shell 原理
 参考 [GitLab Shell development guidelines](https://docs.gitlab.com/ee/development/gitlab_shell/)
 
 When you access the GitLab server over SSH, GitLab Shell then:
@@ -347,10 +1295,45 @@ When you access the GitLab server over SSH, GitLab Shell then:
 3.	Copies data back and forth between the SSH client and the Gitaly server
 
 ####	git pull over SSH
-![gitlab-pull]()
+
+```mermaid
+sequenceDiagram
+    participant C as Git Client
+    participant SSHD as gitlab-sshd
+    participant Shell as gitlab-shell
+    participant Rails as GitLab Rails API
+    participant Gitaly as Gitaly Server
+
+    C->>SSHD: ssh git@gitlab "git-upload-pack 'group/project.git'"
+    SSHD->>Shell: Execute gitlab-shell
+    Shell->>Rails: POST /api/v4/internal/allowed
+    Rails-->>Shell: {"status": "ok", "gitaly": {...}}
+    Shell->>Gitaly: gRPC SSHUploadPack
+    Gitaly-->>Shell: refs + pack data stream
+    Shell-->>SSHD: Forward data
+    SSHD-->>C: Encrypted response
+```
 
 ####	git push over SSH
-![gitlab-push]()
+
+```mermaid
+sequenceDiagram
+    participant C as Git Client
+    participant SSHD as gitlab-sshd
+    participant Shell as gitlab-shell
+    participant Rails as GitLab Rails API
+    participant Gitaly as Gitaly Server
+
+    C->>SSHD: ssh git@gitlab "git-receive-pack 'group/project.git'"
+    SSHD->>Shell: Execute gitlab-shell
+    Shell->>Rails: POST /api/v4/internal/allowed
+    Rails-->>Shell: {"status": "ok", "gitaly": {...}}
+    Shell->>Gitaly: gRPC SSHReceivePack
+    C-->>Gitaly: pack data (via Shell/SSHD relay)
+    Gitaly->>Gitaly: pre-receive hook -> Rails API
+    Gitaly-->>Shell: Push result
+    Shell-->>C: Push result (via SSHD)
+```
 
 ####	 flow of gitlab-shell
 GitLab SSH 守护程序（gitlab-sshd）的运行流程如下：
@@ -364,6 +1347,17 @@ GitLab SSH 守护程序（gitlab-sshd）的运行流程如下：
 
 ![gitlab-flow]()
 
+```mermaid
+graph LR
+    Client["Git Client"] -->|SSH| SSHD["gitlab-sshd"]
+    SSHD -->|"Auth Check"| Rails["GitLab Rails"]
+    Rails -->|"Repo Location"| SSHD
+    SSHD -->|"gRPC"| Gitaly["Gitaly"]
+    Gitaly -->|"Git Operations"| Repo["Git Repository"]
+    Gitaly -->|"Data Stream"| SSHD
+    SSHD -->|"SSH"| Client
+```
+
 在上图中，包含了两个中间件：
 
 -	Rails：Rails 是一种 Web 应用程序框架，它为 GitLab 提供了一个基础架构，包括用户身份验证、API、Web 界面等。Rails 还提供了一些功能，例如存储库浏览器、问题跟踪器、CI/CD 等
@@ -373,18 +1367,65 @@ GitLab SSH 守护程序（gitlab-sshd）的运行流程如下：
 
 ![gitlab-arch]()
 
+```mermaid
+graph TB
+    subgraph GitLabShell ["GitLab Shell"]
+        SSHDaemon["gitlab-sshd<br/>Go SSH Server"]
+        ShellCmd["gitlab-shell<br/>Command Handler"]
+    end
+
+    subgraph GitLabCore ["GitLab Core"]
+        RailsAPI["GitLab Rails<br/>API + Auth"]
+        Workhorse["GitLab Workhorse<br/>HTTP Proxy"]
+    end
+
+    subgraph Storage ["Storage Layer"]
+        GitalyNode1["Gitaly Node 1"]
+        GitalyNode2["Gitaly Node 2"]
+        Praefect["Praefect<br/>Gitaly Proxy"]
+    end
+
+    GitClient["Git Client"] -->|"SSH"| SSHDaemon
+    GitClient -->|"HTTPS"| Workhorse
+    SSHDaemon --> ShellCmd
+    ShellCmd -->|"REST API"| RailsAPI
+    ShellCmd -->|"gRPC"| Praefect
+    Workhorse -->|"REST API"| RailsAPI
+    Workhorse -->|"gRPC"| Praefect
+    Praefect --> GitalyNode1
+    Praefect --> GitalyNode2
+```
+
 ![gitlab-shell-arch](https://raw.githubusercontent.com/pandaychen/pandaychen.github.io/refs/heads/master/blog_img/git/gitlab/gitlab-shell-arch.png)
 
-##  0x04 补充：git over HTTP
+####  GitLab Shell vs Gogs 架构对比
 
+| 维度 | GitLab Shell | Gogs |
+|------|-------------|------|
+| SSH 实现 | gitlab-sshd（Go SSH 服务器） | 内置 SSH / 外部 OpenSSH |
+| Git 操作执行 | Gitaly（独立的 gRPC 服务） | 直接 exec git 命令 |
+| 权限验证 | Rails API（HTTP 调用） | 直接查询数据库 |
+| Hook 处理 | Gitaly 内部处理，回调 Rails API | gogs hook 子命令，直接查询数据库 |
+| 可扩展性 | 高（Gitaly 集群 + Praefect） | 单机 |
+| 复杂度 | 高（多组件协作） | 低（单二进制） |
 
-##  0x05 总结
-关于 git 的使用 / 经验 / 原理或者更多细节，可以延伸阅读如下文章：
+##  0x08 总结
+
+Git over SSH 的核心机制可以归纳为以下几点：
+
+1. **传输通道**：SSH 提供加密的双向字节流通道，git 的 `upload-pack`/`receive-pack` 通过 stdin/stdout 进行 `pkt-line` 格式的数据交换
+2. **认证与鉴权**：通过 SSH 公钥认证确认用户身份，`forced_command` 机制限制只能执行 git 相关命令，并在 forced command 内部完成仓库级别的权限校验
+3. **Hook 机制**：Push 操作会触发 `pre-receive`/`update`/`post-receive` 钩子，实现分支保护、Webhook 通知等功能
+
+Gogs 的实现精简而优雅：通过 `gogs serv` 统一了两种 SSH 模式的鉴权入口，通过 `ComposeHookEnvs` 在 SSH 和 HTTP 两种协议间共享相同的 Hook 逻辑，通过 `exec.Command` + stdin/stdout 桥接完成 git 后端的数据交换
+
+关于 git 的使用/经验/原理或者更多细节，可以延伸阅读如下文章：
 - [代码托管从业者 Git 指南](https://ipvb.gitee.io/git/2021/01/21/GitGuideForCodeHostingPractitioners/)
 
-##  0x06 参考
+##  0x09 参考
 -	[git 使用与原理剖析及其私服搭建](https://xie.infoq.cn/article/38e92927b2ca83f0d29224e6e)
 - [GOGS：Gogs is a painless self-hosted Git service](https://github.com/gogs/gogs)
+- [Gogs v0.14.2 源码](https://github.com/gogs/gogs/tree/v0.14.2)
 - [几款开源 git server ssh 协议 forced command 参考格式](https://www.cnblogs.com/rongfengliang/p/15924984.html)
 - [10.6 Git 内部原理 - 传输协议](https://git-scm.com/book/zh/v2/Git-%E5%86%85%E9%83%A8%E5%8E%9F%E7%90%86-%E4%BC%A0%E8%BE%93%E5%8D%8F%E8%AE%AE)
 - [SSH access for GitLab](https://gitlab.com/gitlab-org/gitlab-shell)
@@ -396,3 +1437,5 @@ GitLab SSH 守护程序（gitlab-sshd）的运行流程如下：
 -	[Writing an SSH server in Go](https://blog.gopheracademy.com/advent-2015/ssh-server-in-go/)
 -	[自己开发 git 服务器，有哪些开源可以借用？](https://www.zhihu.com/question/283143882)
 -	[GitLab Shell development guidelines](https://docs.gitlab.com/ee/development/gitlab_shell/)
+- [git-upload-pack Documentation](https://git-scm.com/docs/git-upload-pack)
+- [git-receive-pack Documentation](https://git-scm.com/docs/git-receive-pack)
