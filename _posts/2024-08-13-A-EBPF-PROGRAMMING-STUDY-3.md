@@ -45,9 +45,9 @@ Linux 动态追踪：
 SEC("kprobe/vfs_write")
 int kprobe_vfs_write(struct pt_regs *regs)
 {
-    struct file *file
+    struct file *file;
     file = (struct file *)PT_REGS_PARM1(regs);
-    // DO YOU LOGIC
+    // DO YOUR LOGIC
 }
 ```
 
@@ -161,7 +161,12 @@ format:
 ```
 
 ####    raw tracepoint
-Raw Tracepoint 是一种更底层的跟踪机制，它允许开发人员在内核中的任意位置定义自定义的跟踪事件。Raw Tracepoint 提供了更大的灵活性，因为开发人员可以在内核的任意代码路径中插入跟踪点，以捕获感兴趣的事件。与 Tracepoint 不同，Raw Tracepoint 的定义和触发点是在内核编译时生成的，而不是在源代码中静态定义的。开发者可以使用 `tracepoint.h` 头文件中的宏来定义和触发 Raw Tracepoint
+Raw Tracepoint 是一种更底层的跟踪机制，与常规 Tracepoint 一样，它同样在内核源代码中通过 `DECLARE_TRACE` 等宏静态定义。两者的核心区别在于参数传递方式：
+
+-   常规 Tracepoint：内核在触发时会将参数格式化为稳定的 ABI 结构（通过 `TP_STRUCT__entry` 定义），eBPF 程序通过该结构体的字段访问参数，跨内核版本兼容性好
+-   Raw Tracepoint：eBPF 程序直接访问内核传给 tracepoint 的原始参数（通过 `struct bpf_raw_tracepoint_args`），跳过了格式化开销，性能更好，但参数布局依赖具体内核版本，可移植性较差
+
+简单说，Raw Tracepoint 以牺牲稳定性换取更低的开销和更直接的内核数据访问能力
 
 查看 `/sys/kernel/debug/tracing/events/raw_syscalls` 目录，可以获取系统中所有可用的 raw_tracepoint 的列表
 ```BASH
@@ -194,7 +199,70 @@ Tracepoint 也是 Linux 内核中的一个功能，并且也可以实现无感�
 
 ![how-to-pass-params]()
 
-2、TODO
+2、如何获取 kretprobe 的返回值？
+
+通过 `BPF_KRETPROBE` 宏可以直接获取内核函数的返回值，返回值作为宏的第二个参数传入。以 hook `do_unlinkat` 为例：
+
+```c
+SEC("kretprobe/do_unlinkat")
+int BPF_KRETPROBE(do_unlinkat_exit, long ret)
+{
+    pid_t pid;
+    pid = bpf_get_current_pid_tgid() >> 32;
+    bpf_printk("do_unlinkat return value: %ld\n", ret);
+    return 0;
+}
+```
+
+如果不使用 `BPF_KRETPROBE` 宏（即使用原始的 `struct pt_regs *`），则需要通过 `PT_REGS_RC(regs)` 宏获取返回值：
+
+```c
+SEC("kretprobe/do_unlinkat")
+int kretprobe_do_unlinkat(struct pt_regs *regs)
+{
+    long ret = PT_REGS_RC(regs);
+    bpf_printk("do_unlinkat return value: %ld\n", ret);
+    return 0;
+}
+```
+
+3、如何获取进程上下文信息（pid/comm/uid 等）？
+
+eBPF 提供了一组 BPF helper 函数用于获取当前执行上下文的进程信息：
+
+```C
+SEC("kprobe/do_unlinkat")
+int BPF_KPROBE(do_unlinkat, int dfd, struct filename *name)
+{
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    pid_t pid = pid_tgid >> 32;       // 进程 PID（即 tgid）
+    pid_t tid = (u32)pid_tgid;        // 线程 TID
+
+    u64 uid_gid = bpf_get_current_uid_gid();
+    uid_t uid = (u32)uid_gid;         // 用户 UID
+    gid_t gid = uid_gid >> 32;        // 用户 GID
+
+    char comm[TASK_COMM_LEN];
+    bpf_get_current_comm(&comm, sizeof(comm));  // 进程名称
+
+    // 通过 bpf_get_current_task 获取 task_struct，可读取更多字段
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    pid_t ppid = BPF_CORE_READ(task, real_parent, tgid);  // 父进程 PID
+
+    bpf_printk("pid=%d tid=%d uid=%d ppid=%d comm=%s\n", pid, tid, uid, ppid, comm);
+    return 0;
+}
+```
+
+常用的进程上下文 helper 函数汇总：
+
+| Helper 函数 | 返回值 | 说明 |
+|---|---|---|
+| `bpf_get_current_pid_tgid()` | `u64` | 高 32 位为 tgid（即用户态 PID），低 32 位为内核 tid |
+| `bpf_get_current_uid_gid()` | `u64` | 高 32 位为 GID，低 32 位为 UID |
+| `bpf_get_current_comm()` | `int` | 将当前进程名拷贝到指定 buffer |
+| `bpf_get_current_task()` | `struct task_struct *` | 返回当前 `task_struct` 指针，可结合 `BPF_CORE_READ` 读取任意字段 |
+| `bpf_get_current_cgroup_id()` | `u64` | 返回当前进程所在 cgroup v2 的 ID |
 
 ####  开发步骤
 1、准备对应版本的 kernel 内核源码，** 在对系统调用植入探针的过程中，需要了解对应函数的参数和返回值定义 **
@@ -353,7 +421,10 @@ struct event {
 步骤 2：修改内核态代码，定义 map，实现内核 ebpf 存储数据到 ring buffer
 
 ```cpp
-#include <string.h>
+#include "vmlinux.h"
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
+#include <bpf/bpf_core_read.h>
 #include "kprobe.h"
 
 // 定义一个名为 rb 的 ring buffer 类型的 Map
@@ -461,26 +532,530 @@ int main(int argc, char **argv)
 
 ##  0x03  kretprobe 基础实践
 
-TODO
+kretprobe 最经典的使用模式是与 kprobe 配合，通过 hash map 关联函数入参和返回值。典型场景：kprobe 在函数入口记录参数到 map（以 `pid_tgid` 为 key），kretprobe 在函数返回时从 map 取出入参并关联返回值，最终输出完整事件
+
+下面以 hook `tcp_v4_connect` 为例，捕获 TCP IPv4 连接的目标地址、端口及连接结果：
+
+```C
+#include "vmlinux.h"
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
+#include <bpf/bpf_core_read.h>
+
+#define AF_INET 2
+
+struct event {
+    u32 pid;
+    u32 uid;
+    u32 saddr;
+    u32 daddr;
+    u16 dport;
+    int retval;
+    char comm[16];
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, u64);
+    __type(value, struct sock *);
+} sock_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 256 * 1024);
+} rb SEC(".maps");
+
+SEC("kprobe/tcp_v4_connect")
+int BPF_KPROBE(tcp_v4_connect_entry, struct sock *sk)
+{
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    bpf_map_update_elem(&sock_map, &pid_tgid, &sk, BPF_ANY);
+    return 0;
+}
+
+SEC("kretprobe/tcp_v4_connect")
+int BPF_KRETPROBE(tcp_v4_connect_exit, int ret)
+{
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    struct sock **skpp;
+    struct event *e;
+
+    skpp = bpf_map_lookup_elem(&sock_map, &pid_tgid);
+    if (!skpp)
+        return 0;
+
+    if (ret != 0) {
+        bpf_map_delete_elem(&sock_map, &pid_tgid);
+        return 0;
+    }
+
+    struct sock *sk = *skpp;
+    u16 family = BPF_CORE_READ(sk, __sk_common.skc_family);
+    if (family != AF_INET) {
+        bpf_map_delete_elem(&sock_map, &pid_tgid);
+        return 0;
+    }
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) {
+        bpf_map_delete_elem(&sock_map, &pid_tgid);
+        return 0;
+    }
+
+    e->pid = pid_tgid >> 32;
+    e->uid = (u32)bpf_get_current_uid_gid();
+    e->saddr = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
+    e->daddr = BPF_CORE_READ(sk, __sk_common.skc_daddr);
+    e->dport = __bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
+    e->retval = ret;
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+
+    bpf_ringbuf_submit(e, 0);
+    bpf_map_delete_elem(&sock_map, &pid_tgid);
+    return 0;
+}
+
+char LICENSE[] SEC("license") = "Dual BSD/GPL";
+```
+
+要点说明：
+-   kprobe 入口将 `struct sock *` 指针保存到 `BPF_MAP_TYPE_HASH` 中，以 `pid_tgid` 为 key
+-   kretprobe 出口通过相同的 key 从 map 中取回 `sock` 指针，结合返回值 `ret` 输出完整事件
+-   使用完毕后必须调用 `bpf_map_delete_elem` 清理 map 条目，避免内存泄漏
+-   `__sk_common` 是 `struct sock` 中嵌套的通用连接信息结构体，包含源/目的地址和端口
 
 ##  0x04  tracepoint 基础实践
 
-TODO
+与 kprobe 通过 `PT_REGS_PARMx` 或 `BPF_KPROBE` 宏读取函数参数不同，tracepoint 的参数已经被内核格式化为稳定的结构体，可以直接按字段访问。下面以 hook `sys_enter_openat` 为例，捕获文件打开操作：
+
+首先查看 tracepoint 的参数格式：
+
+```BASH
+$ cat /sys/kernel/debug/tracing/events/syscalls/sys_enter_openat/format
+name: sys_enter_openat
+ID: 614
+format:
+    field:unsigned short common_type; offset:0; size:2; signed:0;
+    field:unsigned char common_flags; offset:2; size:1; signed:0;
+    field:unsigned char common_preempt_count; offset:3; size:1; signed:0;
+    field:int common_pid; offset:4; size:4; signed:1;
+
+    field:int __syscall_nr; offset:8; size:4; signed:1;
+    field:int dfd; offset:16; size:8; signed:0;
+    field:const char * filename; offset:24; size:8; signed:0;
+    field:int flags; offset:32; size:8; signed:0;
+    field:umode_t mode; offset:40; size:8; signed:0;
+```
+
+内核态 eBPF 代码：
+
+```c
+#include "vmlinux.h"
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
+#include <bpf/bpf_core_read.h>
+
+#define TASK_COMM_LEN 16
+#define MAX_FILENAME_LEN 256
+
+struct event {
+    u32 pid;
+    u32 uid;
+    int flags;
+    char comm[TASK_COMM_LEN];
+    char filename[MAX_FILENAME_LEN];
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 256 * 1024);
+} rb SEC(".maps");
+
+SEC("tracepoint/syscalls/sys_enter_openat")
+int tracepoint_openat(struct trace_event_raw_sys_enter *ctx)
+{
+    struct event *e;
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = pid_tgid >> 32;
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e)
+        return 0;
+
+    e->pid = pid;
+    e->uid = (u32)bpf_get_current_uid_gid();
+    /* tracepoint 参数通过 ctx->args[] 数组访问，顺序对应 format 中的非 common 字段 */
+    e->flags = (int)ctx->args[2];
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+    bpf_probe_read_user_str(&e->filename, sizeof(e->filename), (const char *)ctx->args[1]);
+
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+char LICENSE[] SEC("license") = "Dual BSD/GPL";
+```
+
+要点说明：
+-   tracepoint 的上下文类型为 `struct trace_event_raw_sys_enter`（由 vmlinux.h 提供），通过 `ctx->args[]` 数组访问系统调用参数
+-   `args[0]` 对应 `dfd`，`args[1]` 对应 `filename`（用户空间指针），`args[2]` 对应 `flags`，`args[3]` 对应 `mode`
+-   读取用户空间字符串指针需使用 `bpf_probe_read_user_str`，而非 `BPF_CORE_READ`（后者用于内核空间指针）
+-   与 kprobe 的区别：tracepoint 参数通过内核预定义的稳定接口访问，不依赖函数签名，跨内核版本兼容性更好，在笔者项目中优先使用tracepoint
 
 ##  0x05  raw tracepoint 基础实践
 
-TODO
+raw tracepoint 通过 `struct bpf_raw_tracepoint_args` 直接访问内核传递的原始参数，省去了常规 tracepoint 的参数格式化开销。下面以 `sched_process_exec` 为例，捕获进程执行事件：
+
+首先确认 raw tracepoint 在内核中的定义，`sched_process_exec` 的触发点位于 `fs/exec.c` 中，原型为：
+
+```C
+// 内核源码中的 tracepoint 定义（参考）
+// trace_sched_process_exec(struct task_struct *p, pid_t old_pid, struct linux_binprm *bprm)
+```
+
+内核态 eBPF 代码：
+
+```C
+#include "vmlinux.h"
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
+#include <bpf/bpf_core_read.h>
+
+#define TASK_COMM_LEN 16
+#define MAX_FILENAME_LEN 256
+
+struct event {
+    u32 pid;
+    u32 old_pid;
+    u32 uid;
+    char comm[TASK_COMM_LEN];
+    char filename[MAX_FILENAME_LEN];
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 256 * 1024);
+} rb SEC(".maps");
+
+/* raw tracepoint 直接访问内核原始参数
+ * sched_process_exec 的参数：
+ *   args[0] = struct task_struct *p
+ *   args[1] = pid_t old_pid
+ *   args[2] = struct linux_binprm *bprm
+ */
+SEC("raw_tracepoint/sched_process_exec")
+int raw_tp_sched_process_exec(struct bpf_raw_tracepoint_args *ctx)
+{
+    struct event *e;
+    struct task_struct *task = (struct task_struct *)ctx->args[0];
+    pid_t old_pid = (pid_t)ctx->args[1];
+    struct linux_binprm *bprm = (struct linux_binprm *)ctx->args[2];
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e)
+        return 0;
+
+    e->pid = BPF_CORE_READ(task, tgid);
+    e->old_pid = old_pid;
+    e->uid = (u32)bpf_get_current_uid_gid();
+    BPF_CORE_READ_STR_INTO(&e->comm, task, comm);
+    /* linux_binprm->filename 是内核空间指针，使用 bpf_probe_read_kernel_str 读取 */
+    const char *filename = BPF_CORE_READ(bprm, filename);
+    bpf_probe_read_kernel_str(&e->filename, sizeof(e->filename), filename);
+
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+char LICENSE[] SEC("license") = "Dual BSD/GPL";
+```
+
+要点说明：
+-   SEC 名称格式为 `raw_tracepoint/<tracepoint_name>`，不含子系统路径（对比常规 tracepoint 的 `tracepoint/sched/sched_process_exec`）
+-   参数通过 `ctx->args[N]` 以 `__u64` 类型访问，需手动转换为对应的内核结构体指针
+-   raw tracepoint 的参数顺序和类型与内核 `DECLARE_TRACE` 宏定义一致，需查阅内核源码确认
+-   由于直接操作内核数据结构，raw tracepoint 的参数布局可能随内核版本变化，建议配合 CO-RE 使用以提升可移植性
+-   `BPF_CORE_READ_STR_INTO` 是 `BPF_CORE_READ` 的字符串版本，专用于读取内核结构体中的字符数组字段
 
 ##  0x06  uprobe 基础实践
 
-TODO，如何获取一个二进制程序的uprobe钩子？
+####    如何获取一个二进制程序可用的 uprobe 钩子
+
+uprobe 是基于 ELF 符号表工作的，因此需要目标二进制导出了符号信息。常用的查找方法：
+
+```BASH
+# 方法 1：使用 nm 查看动态符号表（常用于共享库）
+nm -D /usr/lib/x86_64-linux-gnu/libssl.so | grep -i 'SSL_write\|SSL_read'
+# 输出示例：
+# 0000000000035b00 T SSL_read
+# 0000000000036a00 T SSL_write
+
+# 方法 2：使用 objdump 查看符号
+objdump -T /usr/lib/x86_64-linux-gnu/libssl.so | grep SSL_write
+
+# 方法 3：使用 readelf 查看符号表
+readelf -s --wide /usr/lib/x86_64-linux-gnu/libssl.so | grep SSL_write
+
+# 方法 4：使用 bpftrace 列出 uprobe 可用的 hook 点
+bpftrace -l 'uprobe:/usr/lib/x86_64-linux-gnu/libssl.so:*' | grep SSL
+
+# 对于 Go 二进制，由于 Go 默认静态编译，符号可能在 .gopclntab 段中
+# 使用 objdump 或 nm 查看 Go 二进制的符号：
+nm /path/to/go-binary | grep 'crypto/tls'
+```
+
+注意事项：
+-   strip 过的二进制文件可能丢失符号信息，需要对应的 debug 符号包
+-   对于动态链接库，uprobe 挂载路径应为库文件的实际路径（而非 symlink），可通过 `readlink -f` 确认
+-   Go 二进制的函数名包含 `.`（如 `crypto/tls.(*Conn).Read`），挂载时需注意转义（TODO）
+
+####    实践：使用 uprobe 捕获 OpenSSL 的 SSL_write 明文数据
+先介绍一个 uprobe 最经典的应用场景，在 `SSL_write` 函数入口处捕获明文数据（此时数据尚未加密），实现 HTTPS 流量的明文捕获
+
+`SSL_write` 函数原型为：
+
+```C
+// openssl/ssl.h
+int SSL_write(SSL *ssl, const void *buf, int num);
+// 参数：ssl 连接对象，buf 待写入的明文数据，num 数据长度
+```
+
+内核态 eBPF 代码如下：
+
+```C
+#include "vmlinux.h"
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
+
+#define MAX_BUF_SIZE 4096
+#define TASK_COMM_LEN 16
+
+struct ssl_event {
+    u32 pid;
+    u32 uid;
+    u32 len;
+    u8 buf[MAX_BUF_SIZE];
+    char comm[TASK_COMM_LEN];
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, struct ssl_event);
+} ssl_event_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 256 * 1024);
+} rb SEC(".maps");
+
+/* uprobe hook: 在 SSL_write 入口处捕获明文数据
+ * SSL_write(SSL *ssl, const void *buf, int num)
+ * 参数：arg1=ssl, arg2=buf(明文), arg3=num(长度)
+ */
+SEC("uprobe//usr/lib/x86_64-linux-gnu/libssl.so.3:SSL_write")
+int uprobe_ssl_write(struct pt_regs *ctx)
+{
+    u32 zero = 0;
+    struct ssl_event *e;
+    const void *buf = (const void *)PT_REGS_PARM2(ctx);
+    int num = (int)PT_REGS_PARM3(ctx);
+
+    e = bpf_map_lookup_elem(&ssl_event_map, &zero);
+    if (!e)
+        return 0;
+
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    e->pid = pid_tgid >> 32;
+    e->uid = (u32)bpf_get_current_uid_gid();
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+
+    e->len = num;
+    if (num > MAX_BUF_SIZE)
+        num = MAX_BUF_SIZE;
+
+    bpf_probe_read_user(&e->buf, num & (MAX_BUF_SIZE - 1), buf);
+
+    bpf_ringbuf_output(&rb, e, sizeof(*e), 0);
+    return 0;
+}
+
+/* uretprobe hook: 在 SSL_read 返回时捕获解密后的明文数据
+ * 需配合 uprobe 在入口记录 buf 指针，uretprobe 在返回时读取数据
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, u64);
+    __type(value, u64);
+} ssl_read_args SEC(".maps");
+
+SEC("uprobe//usr/lib/x86_64-linux-gnu/libssl.so.3:SSL_read")
+int uprobe_ssl_read_entry(struct pt_regs *ctx)
+{
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u64 buf_addr = (u64)PT_REGS_PARM2(ctx);
+    bpf_map_update_elem(&ssl_read_args, &pid_tgid, &buf_addr, BPF_ANY);
+    return 0;
+}
+
+SEC("uretprobe//usr/lib/x86_64-linux-gnu/libssl.so.3:SSL_read")
+int uretprobe_ssl_read_exit(struct pt_regs *ctx)
+{
+    u32 zero = 0;
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    int ret = (int)PT_REGS_RC(ctx);
+
+    u64 *buf_addr = bpf_map_lookup_elem(&ssl_read_args, &pid_tgid);
+    if (!buf_addr || ret <= 0) {
+        bpf_map_delete_elem(&ssl_read_args, &pid_tgid);
+        return 0;
+    }
+
+    struct ssl_event *e = bpf_map_lookup_elem(&ssl_event_map, &zero);
+    if (!e) {
+        bpf_map_delete_elem(&ssl_read_args, &pid_tgid);
+        return 0;
+    }
+
+    e->pid = pid_tgid >> 32;
+    e->uid = (u32)bpf_get_current_uid_gid();
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+    e->len = ret;
+    int read_len = ret;
+    if (read_len > MAX_BUF_SIZE)
+        read_len = MAX_BUF_SIZE;
+    bpf_probe_read_user(&e->buf, read_len & (MAX_BUF_SIZE - 1), (void *)*buf_addr);
+
+    bpf_ringbuf_output(&rb, e, sizeof(*e), 0);
+    bpf_map_delete_elem(&ssl_read_args, &pid_tgid);
+    return 0;
+}
+
+char LICENSE[] SEC("license") = "Dual BSD/GPL";
+```
+
+要点说明：
+-   uprobe 的 SEC 名称格式为 `uprobe/<binary_path>:<symbol>`，binary 路径必须是实际路径
+-   uprobe 获取函数参数使用 `PT_REGS_PARMx`（与 kprobe 相同），因为 uprobe 同样通过 `struct pt_regs` 传递上下文
+-   读取用户空间内存需使用 `bpf_probe_read_user`（而非 `bpf_probe_read_kernel`）
+-   `ssl_event` 结构体较大（超过 `512` 字节），不能在栈上分配，因此使用 `BPF_MAP_TYPE_PERCPU_ARRAY` 作为临时缓冲区
+-   SSL_read 的 uretprobe 模式与 kretprobe 中 `tcp_v4_connect` 的模式相似：入口记录参数到 map，返回时取出并关联
 
 ##	0x07	内核态实践（经典示例）
 本小节汇总下笔者在学习中遇到的若干经典内核态代码示例
 
-####    实践 1
-主要介绍如何实现一个 eBPF 工具，捕获进程发送信号的系统调用集合，使用 hash map 保存状态
+####    实践 1：sigsnoop — 捕获进程发送信号的系统调用
+主要介绍如何实现一个 eBPF 工具，捕获进程发送信号的系统调用集合，使用 hash map 保存状态。核心思路：在 `sys_enter_kill` 时记录信号参数到 hash map，在 `sys_exit_kill` 时取出并关联返回值，输出完整事件
 
+查看 `kill` 系统调用的 tracepoint 参数格式：
+
+```BASH
+$ cat /sys/kernel/debug/tracing/events/syscalls/sys_enter_kill/format
+name: sys_enter_kill
+ID: 137
+format:
+    field:int __syscall_nr; offset:8; size:4; signed:1;
+    field:pid_t pid; offset:16; size:8; signed:0;
+    field:int sig; offset:24; size:8; signed:0;
+```
+
+内核态 eBPF 代码（`sigsnoop.bpf.c`）：
+
+```C
+#include "vmlinux.h"
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
+
+#define TASK_COMM_LEN 16
+
+struct event {
+    u32 pid;         // 发送信号的进程
+    u32 tpid;        // 目标进程
+    int sig;         // 信号编号
+    int ret;         // kill 返回值
+    char comm[TASK_COMM_LEN];
+};
+
+struct sig_info {
+    u32 tpid;
+    int sig;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 10240);
+    __type(key, u64);
+    __type(value, struct sig_info);
+} sig_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 256 * 1024);
+} rb SEC(".maps");
+
+/* 可选：过滤特定信号或特定进程 */
+const volatile int target_sig = 0;
+const volatile pid_t filtered_pid = 0;
+
+SEC("tracepoint/syscalls/sys_enter_kill")
+int tracepoint_sys_enter_kill(struct trace_event_raw_sys_enter *ctx)
+{
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    pid_t tpid = (pid_t)ctx->args[0];
+    int sig = (int)ctx->args[1];
+
+    if (target_sig && sig != target_sig)
+        return 0;
+    if (filtered_pid && (pid_tgid >> 32) != filtered_pid)
+        return 0;
+
+    struct sig_info info = {
+        .tpid = tpid,
+        .sig = sig,
+    };
+    bpf_map_update_elem(&sig_map, &pid_tgid, &info, BPF_ANY);
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_exit_kill")
+int tracepoint_sys_exit_kill(struct trace_event_raw_sys_exit *ctx)
+{
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    struct sig_info *info;
+    struct event *e;
+
+    info = bpf_map_lookup_elem(&sig_map, &pid_tgid);
+    if (!info)
+        return 0;
+
+    e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) {
+        bpf_map_delete_elem(&sig_map, &pid_tgid);
+        return 0;
+    }
+
+    e->pid = pid_tgid >> 32;
+    e->tpid = info->tpid;
+    e->sig = info->sig;
+    e->ret = ctx->ret;
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+
+    bpf_ringbuf_submit(e, 0);
+    bpf_map_delete_elem(&sig_map, &pid_tgid);
+    return 0;
+}
+
+char LICENSE[] SEC("license") = "Dual BSD/GPL";
+```
+
+要点说明：
+-   使用 `sys_enter_kill`/`sys_exit_kill` 成对 tracepoint 实现入参与返回值的关联
+-   `BPF_MAP_TYPE_HASH` 以 `pid_tgid` 为 key 暂存入口参数，退出时取出并清理
+-   `const volatile` 声明的全局变量可在用户态加载时通过 `bpf_object__find_map_by_name` 修改，实现运行时过滤
+-   该模式（enter 记录 + exit 关联）是 eBPF tracing 的通用范式，适用于任何需要关联系统调用入参和返回值的场景
 
 ####	实践 2：bootstrap
 [eBPF 入门开发实践教程十一：在 eBPF 中使用 libbpf 开发用户态程序并跟踪 exec() 和 exit() 系统调用](https://eunomia.dev/zh/tutorials/11-bootstrap/#ebpf-bootstrapbpfc)
@@ -489,7 +1064,7 @@ TODO，如何获取一个二进制程序的uprobe钩子？
 使用 uprobe hook 技术捕获 `bash` 的 `readline` 函数调用，从而获取用户在 `bash` 中输入的命令行，代码如下。作用是在 `bash` 的 `readline` 函数返回时执行指定的 `BPF_KRETPROBE` 函数（`printret`）
 
 ```c
-#include <vmlinux.h>
+#include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
@@ -560,12 +1135,18 @@ struct trace_event_raw_sched_process_exec {
 };
 
 #define TASK_COMM_LEN 16
+#define EXEC_CMD_LEN 256
 #define MAX_FILENAME_LEN 512
 
 /* definition of a sample sent to user-space from BPF program */
 struct event {
 	int pid;
-	char comm[TASK_COMM_LEN];
+	int ppid;
+	uid_t uid;
+	int retval;
+	bool is_exit;
+	unsigned long long ns;
+	char cmd[EXEC_CMD_LEN];
 	char filename[MAX_FILENAME_LEN];
 };
 ```
@@ -761,7 +1342,133 @@ int main(int argc, char **argv)
 
 ##	0x09	How to Debug
 
-TODO
+####    bpf_printk + trace_pipe
+
+最基础的调试手段，`bpf_printk` 将信息输出到内核 trace buffer，通过 `trace_pipe` 读取：
+
+```BASH
+# 在一个终端读取 trace_pipe
+sudo cat /sys/kernel/debug/tracing/trace_pipe
+
+# 或使用 bpftool 读取
+sudo bpftool prog tracelog
+```
+
+在内核态代码中使用 `bpf_printk` 打印调试信息：
+
+```C
+bpf_printk("debug: pid=%d, value=%d\n", pid, value);
+```
+
+注意 `bpf_printk` 最多支持 `3` 个格式化参数（内核 5.13 之前），且性能开销较大，生产环境应移除
+
+####    bpftool 命令
+
+`bpftool` 是 eBPF 程序运维调试的核心工具：
+
+```BASH
+# 查看已加载的 BPF 程序
+sudo bpftool prog list
+sudo bpftool prog show id <prog_id>
+
+# 导出 BPF 程序的指令（用于检查编译结果）
+sudo bpftool prog dump xlated id <prog_id>
+# JIT 编译后的机器码
+sudo bpftool prog dump jited id <prog_id>
+
+# 查看所有 BPF map
+sudo bpftool map list
+sudo bpftool map show id <map_id>
+
+# 查看 map 内容（调试数据是否正确写入）
+sudo bpftool map dump id <map_id>
+
+# 查看 map 中特定 key 的值
+sudo bpftool map lookup id <map_id> key <hex_key>
+
+# 查看 BPF 程序的 attach 信息
+sudo bpftool net list
+sudo bpftool perf list
+```
+
+####    verifier 错误日志
+
+eBPF 程序加载失败时，verifier 会输出详细的错误日志。使用 libbpf 时，设置 `libbpf_set_print` 回调函数即可看到 verifier 日志。常见的 verifier 错误及解决方法：
+
+**1、无界循环（unbounded loop）**
+
+```TEXT
+back-edge from insn X to Y
+```
+
+verifier 要求所有循环必须有明确的上界。解决方法：使用 `#pragma unroll` 展开或 `bpf_loop`（5.17+）：
+
+```C
+// 方法 1：编译期展开
+#pragma unroll
+for (int i = 0; i < 10; i++) { ... }
+
+// 方法 2：bpf_loop（内核 5.17+）
+static long callback_fn(u32 index, void *ctx) { ... }
+bpf_loop(10, callback_fn, &ctx, 0);
+```
+
+**2、栈空间超限（stack overflow）**
+
+```TEXT
+combined stack size of N calls exceeds 512 bytes
+```
+
+eBPF 栈空间限制为 512 字节。解决方法：将大结构体移至 `BPF_MAP_TYPE_PERCPU_ARRAY` map 中：
+
+```C
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, struct large_struct);
+} heap SEC(".maps");
+
+// 使用时
+u32 zero = 0;
+struct large_struct *s = bpf_map_lookup_elem(&heap, &zero);
+if (!s) return 0;
+```
+
+**3、指针未判空（null pointer dereference）**
+
+```TEXT
+R1 invalid mem access 'map_value_or_null'
+```
+
+bpf map lookup 返回值可能为 NULL，必须检查：
+
+```C
+struct val *v = bpf_map_lookup_elem(&my_map, &key);
+if (!v)    // 必须判空，否则 verifier 拒绝
+    return 0;
+```
+
+**4、越界访问（out of bounds access）**
+
+```TEXT
+invalid access to map value, value_size=X off=Y size=Z
+```
+
+读取数据时长度超过 map value 或栈缓冲区大小。解决方法：在读取前做边界检查：
+
+```C
+if (data_len > sizeof(buf))
+    data_len = sizeof(buf);
+bpf_probe_read(&buf, data_len & (sizeof(buf) - 1), src);
+```
+
+####    其他调试技巧
+
+-   使用 `bpf_trace_printk` 配合 `grep` 过滤特定进程的输出
+-   使用 `bpftool prog profile` 分析 BPF 程序的性能指标（cpu cycles、instructions 等）
+-   使用 `strace -e bpf` 跟踪用户态加载器的 bpf 系统调用，确认是否正确传参
+-   使用 `dmesg` 查看内核日志中的 BPF 相关错误信息
 
 ##	0x0A	teleport 的 ebpf 应用
 teleport 基于 [ebpf](https://github.com/gravitational/teleport/tree/master/bpf/enhancedrecording) 也实现对 ssh 命令审计的增强功能，预期可以实现下面几种特殊场景的捕获（原始基于键盘输入及屏显输出，有局限性）：
@@ -783,7 +1490,7 @@ Teleport 实现了如下 `3` 个 BPF hooks:
 
 此外，teleport 还实现了会话与 ebf hooks 的捕获结果做了关联，其原理是使用了 `cgroups`（`cgroupv2`）。Teleport 启动 SSH 会话时，它将首先重新启动自身并将其置于 `cgroup` 中，这不仅允许该进程，而且可以使用唯一 ID 跟踪 Teleport 启动的所有将来的进程。Teleport 运行的 BPF 程序已更新，还可以发出执行它们的程序的 cgroup ID，这样就可以将事件与特定的 SSH 会话和身份相关联，参考 [原文](https://goteleport.com/blog/enhanced-session-recording/)
 
-##	0x0B	epbf 开发要点（汇总）
+##	0x0B	ebpf 开发要点（汇总）
 
 ####	再看 CO-RE
 下面三个函数的用途和区别是什么？
@@ -794,7 +1501,94 @@ Teleport 实现了如下 `3` 个 BPF hooks:
 
 ####	how to find hooks
 
-TODO
+在开发 eBPF 程序时，首先需要确定 hook 点。不同类型的 probe 查找方法不同：
+
+**1、kprobe — 查找可 hook 的内核函数**
+
+```BASH
+# 查看所有可 kprobe 的内核函数（含地址）
+cat /proc/kallsyms | grep ' T \| t '
+
+# 检查某个具体函数是否存在
+cat /proc/kallsyms | grep -w tcp_v4_connect
+
+# 使用 bpftrace 列出所有 kprobe 可用的函数
+bpftrace -l 'kprobe:*' | grep tcp
+bpftrace -l 'kretprobe:*' | grep do_unlinkat
+
+# 查看黑名单（不可 kprobe 的函数）
+cat /sys/kernel/debug/kprobes/blacklist
+
+# 对于系统调用，不同内核版本函数名可能不同：
+# 内核 4.17 之前：sys_openat
+# 内核 4.17 之后：__x64_sys_openat（x86_64）
+# 查找实际的系统调用函数名
+cat /proc/kallsyms | grep sys_openat
+```
+
+**2、tracepoint — 查找内核预定义的跟踪点**
+
+```BASH
+# 列出所有 tracepoint
+ls /sys/kernel/debug/tracing/events/
+
+# 列出某个子系统的 tracepoint
+ls /sys/kernel/debug/tracing/events/sched/
+ls /sys/kernel/debug/tracing/events/syscalls/
+
+# 查看 tracepoint 的参数格式
+cat /sys/kernel/debug/tracing/events/sched/sched_process_exec/format
+
+# 使用 bpftrace 列出
+bpftrace -l 'tracepoint:*' | grep sched
+bpftrace -l 'tracepoint:syscalls:*' | grep open
+
+# 使用 perf 列出
+perf list tracepoint
+```
+
+**3、raw tracepoint — 查找可用的 raw tracepoint**
+
+```BASH
+# raw tracepoint 与常规 tracepoint 共享定义，但 SEC 名称不含子系统前缀
+bpftrace -l 'rawtracepoint:*'
+
+# 常用的 raw tracepoint
+bpftrace -l 'rawtracepoint:*' | grep -E 'sched|sys_enter|sys_exit'
+
+# 查看 raw_syscalls（所有系统调用的入口/出口）
+ls /sys/kernel/debug/tracing/events/raw_syscalls/
+```
+
+**4、uprobe — 查找用户态程序的 hook 点**
+
+```BASH
+# 查看动态链接库的导出符号
+nm -D /usr/lib/x86_64-linux-gnu/libssl.so | grep ' T '
+objdump -T /lib/x86_64-linux-gnu/libc.so.6 | grep malloc
+readelf -s --wide /usr/bin/bash | grep readline
+
+# 使用 bpftrace 列出
+bpftrace -l 'uprobe:/bin/bash:*' | head
+bpftrace -l 'uprobe:/usr/lib/x86_64-linux-gnu/libssl.so:SSL*'
+
+# 对于 Go 程序
+nm /path/to/go-binary | grep 'main\.'
+objdump -t /path/to/go-binary | grep 'net/http'
+
+# 查找共享库的实际路径
+ldconfig -p | grep libssl
+readlink -f /usr/lib/x86_64-linux-gnu/libssl.so
+```
+
+**5、实用技巧汇总**
+
+| 探针类型 | 主要查找方式 | 稳定性 | 性能 |
+|---|---|---|---|
+| kprobe | `/proc/kallsyms`、`bpftrace -l 'kprobe:*'` | 低（依赖内核版本） | 中 |
+| tracepoint | `/sys/kernel/debug/tracing/events/` | 高（稳定 ABI） | 高 |
+| raw tracepoint | `bpftrace -l 'rawtracepoint:*'` | 中 | 最高 |
+| uprobe | `nm -D`/`objdump -T`/`readelf -s` | 依赖二进制版本 | 低（上下文切换） |
 
 ##  0x0C BPF-HELPERS
 [bpf-helpers](https://www.man7.org/linux/man-pages/man7/bpf-helpers.7.html)
@@ -881,7 +1675,7 @@ type Data struct {
 
 上面这两个结构体定义会让 Go 程序所得到的 Latency 成员是不正确的值，该问题归根到底的原因是编译器对 c 结构体的字节填充以及 cilium/ebpf-go 将 c 结构体反射为 Go 结构体并不是简单的 memcpy，cilium/ebpf-go使用的是 go-binary 库。为了彻底地避免这个问题，可以使用 cilium/ebpf-go 提供的 `-type` 参数，作用是根据 c 结构体自动地生成一个 Go 结构体，它会负责处理好必要的字节填充问题
 
-```GO
+```C
 struct rtt_event {
 	u16 sport;
 	u16 dport;
@@ -898,8 +1692,7 @@ struct rtt_event *unused_event __attribute__((unused));
 
 参考：
 -   [BPF CO-RE 的探索与落地](https://www.strickland.cloud/post/1)
--   [tcprtt_sockops](https://github.com/cilium/ebpf/blob/v0.9.3/examples/tcprtt_sockops/tcprtt_sockops.c#L43-L50
-)
+-   [tcprtt_sockops](https://github.com/cilium/ebpf/blob/v0.9.3/examples/tcprtt_sockops/tcprtt_sockops.c#L43-L50)
 -   [ringbuffer](https://github.com/cilium/ebpf/blob/main/examples/ringbuffer/ringbuffer.c)
 
 ##  0x0F   参考
